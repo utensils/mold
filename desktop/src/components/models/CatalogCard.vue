@@ -25,7 +25,12 @@ import type { CatalogEntry } from "../../lib/api/types";
  * civitai.com. Install state and the Pull action stay with the parent tab
  * via the `pull` event.
  */
-const props = defineProps<{ entry: CatalogEntry; pulling: boolean }>();
+const props = defineProps<{
+  entry: CatalogEntry;
+  pulling: boolean;
+  /** Labels of hosts that have this model installed (unified-list tags). */
+  hosts?: string[];
+}>();
 const emit = defineEmits<{
   (e: "pull", entry: CatalogEntry): void;
   (e: "open", entry: CatalogEntry): void;
@@ -163,10 +168,28 @@ function onCardKeydown(event: KeyboardEvent): void {
         </span>
       </div>
 
-      <div v-if="entry.author || counts" class="flex items-center gap-2">
+      <div v-if="entry.author || counts || entry.nsfw" class="flex items-center gap-2">
+        <span
+          v-if="entry.nsfw"
+          class="data-mono shrink-0 rounded-control border border-stop/50 px-1 text-caption text-stop"
+          data-test="nsfw-tag"
+        >
+          NSFW
+        </span>
         <span v-if="entry.author" class="truncate text-caption text-ink-3">{{ entry.author }}</span>
         <span v-if="counts" class="data-mono ml-auto shrink-0 text-caption text-ink-3">
           {{ counts }}
+        </span>
+      </div>
+
+      <div v-if="hosts?.length" class="flex flex-wrap items-center gap-1">
+        <span
+          v-for="host in hosts"
+          :key="host"
+          class="border-edge data-mono rounded-full border px-1.5 text-caption text-ink-2"
+          data-test="installed-host"
+        >
+          {{ host }}
         </span>
       </div>
 

@@ -26,9 +26,9 @@ import type { ModelEntry } from "../../lib/api/types";
 type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
 
 const props = defineProps<{
-  query?: string;
-  mediaType?: MediaType;
-  entries?: LibraryModelEntry[];
+  query?: string | undefined;
+  mediaType?: MediaType | undefined;
+  entries?: LibraryModelEntry[] | undefined;
 }>();
 const emit = defineEmits<{ (e: "browse-catalog"): void }>();
 

@@ -118,22 +118,49 @@ beforeEach(() => {
 });
 
 describe("ModelsView unified catalog", () => {
-  it("always stacks Installed and Catalog with no availability toggle", async () => {
+  it("renders ONE list — no Installed shelf; installed models appear tagged in place", async () => {
     const wrapper = await mountView();
     expect(wrapper.find('[aria-label="Model availability"]').exists()).toBe(false);
-    expect(wrapper.find("#installed-models-heading").exists()).toBe(true);
-    expect(wrapper.find("#available-models-heading").exists()).toBe(true);
+    // The old stacked Installed shelf is gone…
+    expect(wrapper.find("#installed-models-heading").exists()).toBe(false);
+    // …but installed models and catalog results share the unified list.
+    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).toContain("FLUX.2 Klein");
   });
 
-  it("pins the downloads tray above the installed and catalog sections", async () => {
+  it("offers an Installed source tab, with All as the default", async () => {
+    const wrapper = await mountView();
+    const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
+    expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai", "Installed"]);
+    expect(chips[0]!.attributes("aria-pressed")).toBe("true");
+
+    await chips[3]!.trigger("click");
+    await flushPromises();
+    // Installed-only: the full-featured installed rows, no live catalog.
+    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).not.toContain("FLUX.2 Klein");
+  });
+
+  it("tags NSFW catalog entries while keeping the include checkbox", async () => {
+    searchCatalog.mockResolvedValue({
+      entries: [{ ...entry("Spicy Model", "sdxl"), nsfw: true }],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const wrapper = await mountView();
+    expect(wrapper.find("[data-test='nsfw-tag']").exists()).toBe(true);
+    expect(wrapper.find("input[type='checkbox']").exists()).toBe(true);
+  });
+
+  it("pins the downloads tray above the unified list", async () => {
     const wrapper = await mountView();
     useDownloadsStore().activeJobs = [job()];
     await flushPromises();
     const html = wrapper.html();
     const downloadsAt = html.indexOf("Downloads");
     expect(downloadsAt).toBeGreaterThan(-1);
-    expect(downloadsAt).toBeLessThan(html.indexOf("installed-models-heading"));
-    expect(downloadsAt).toBeLessThan(html.indexOf("available-models-heading"));
+    expect(downloadsAt).toBeLessThan(html.indexOf("catalog-source-chips"));
   });
 
   it("shows installed models and active downloads from a connected remote host", async () => {
@@ -234,17 +261,24 @@ describe("ModelsView unified catalog", () => {
     expect(all.attributes("aria-pressed")).toBe("true");
   });
 
-  it("scrolls to the catalog section from the empty-shelf CTA", async () => {
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
+  it("routes the empty Installed tab's CTA back to the All list", async () => {
     const wrapper = await mountView();
     useModelStore().all = [];
+    await flushPromises();
+    const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
+    await chips[3]!.trigger("click");
     await flushPromises();
 
     const cta = wrapper.findAll("button").find((b) => b.text() === "Browse the catalog");
     expect(cta).toBeDefined();
     await cta!.trigger("click");
-    expect(scrollIntoView).toHaveBeenCalled();
+    await flushPromises();
+    expect(
+      wrapper
+        .get("[data-test='catalog-source-chips']")
+        .findAll("button")[0]!
+        .attributes("aria-pressed"),
+    ).toBe("true");
   });
 });
 
