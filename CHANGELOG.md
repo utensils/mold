@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-19
+
 ### Added
 
 - **Desktop chains can now start from an image.** The Chains builder gains a chain-level **Start image** well in the header and an attach / replace / clear source-image well on every stage card, both fed by the shared image picker (upload a PNG/JPEG or choose from any connected host's gallery) — making image→video chains possible on desktop. The start image conditions stage 1 (it rides on `stages[0].source_image`; a stage's own image takes precedence), TOML **Export** now inlines images as `source_image_b64` per stage, and **Open** reads them back, so image chains round-trip between the desktop composer and `mold run --script`.
@@ -997,7 +999,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/utensils/mold/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/utensils/mold/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/utensils/mold/compare/v0.15.0...v0.16.0
