@@ -177,9 +177,10 @@ describe("ImagePickerModal", () => {
     const gallery = useGalleryStore();
     vi.spyOn(gallery, "fetchAll").mockResolvedValue();
     gallery.buckets["local"] = loadedBucket([img("a.png", 4)]);
-    const localFetch = vi
-      .fn()
-      .mockResolvedValue({ blob: () => Promise.resolve(new Blob(["z"], { type: "image/png" })) });
+    const localFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      blob: () => Promise.resolve(new Blob(["z"], { type: "image/png" })),
+    });
     vi.stubGlobal("fetch", localFetch);
 
     const wrapper = mount(ImagePickerModal, {
@@ -197,6 +198,53 @@ describe("ImagePickerModal", () => {
     expect(apiFetch).not.toHaveBeenCalled();
     const picked = wrapper.emitted("pick")?.[0]?.[0] as Array<{ base64: string }>;
     expect(picked[0]!.base64).toBe("eg=="); // Blob(["z"])
+    vi.unstubAllGlobals();
+  });
+
+  it("treats a non-OK local-protocol response as a pick error, not image bytes", async () => {
+    const gallery = useGalleryStore();
+    vi.spyOn(gallery, "fetchAll").mockResolvedValue();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 4)]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    await nextTick();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-gallery-item']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.emitted("pick")).toBeFalsy();
+    expect(document.body.textContent).toContain("HTTP 404");
+    vi.unstubAllGlobals();
+  });
+
+  it("clears a stale pick error on the next open", async () => {
+    const gallery = useGalleryStore();
+    vi.spyOn(gallery, "fetchAll").mockResolvedValue();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 4)]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    await nextTick();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-gallery-item']").trigger("click");
+    await flushPromises();
+    expect(document.body.textContent).toContain("HTTP 500");
+
+    await wrapper.setProps({ open: false });
+    await wrapper.setProps({ open: true });
+    await nextTick();
+    expect(document.body.textContent).not.toContain("HTTP 500");
     vi.unstubAllGlobals();
   });
 

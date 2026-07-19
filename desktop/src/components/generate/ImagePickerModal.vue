@@ -30,8 +30,10 @@ const gallery = useGalleryStore();
 
 // Refetch on EVERY open (not once per mount — the modal stays mounted in its
 // panel): a host that connected since the last open gets its first bucket
-// fetch here, and existing buckets pick up prints from other clients.
+// fetch here, and existing buckets pick up prints from other clients. A
+// previous session's pick/upload error is stale by now — clear it.
 function loadGallery() {
+  error.value = null;
   void gallery.fetchAll();
 }
 
@@ -104,6 +106,9 @@ async function pickFromGallery(entry: MergedPrint) {
     let res: Response;
     if (gallery.mediaSourceOf(entry.sourceKey) === "local") {
       res = await fetch(localMediaPath(entry.item.filename));
+      // fetch() resolves on 404/500 — the host branch throws via apiFetchTo,
+      // so match it rather than base64-encoding an error body.
+      if (!res.ok) throw new Error(`Could not read ${entry.item.filename} (HTTP ${res.status})`);
     } else {
       const path = mediaPath(entry.item.filename);
       const target = gallery.targetOf(entry.sourceKey);
