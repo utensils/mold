@@ -211,6 +211,22 @@ export function pickMostCapableHost<T extends CapableHost>(
 }
 
 /**
+ * Normalize the persisted `generateTargetHost` pref the way the Host selector
+ * displays it: `"capable"` and a currently-listed host id pass through; a
+ * ghost id (the host was forgotten or never reconnected) reads as Auto
+ * (null). Every consumer of the pref must read it through this so tag
+ * suppression and picker filtering can't disagree with the selector.
+ */
+export function normalizeTargetHost(
+  sel: string | null | undefined,
+  hosts: ReadonlyArray<{ id: string }>,
+): string | null {
+  if (!sel) return null;
+  if (sel === "capable") return "capable";
+  return hosts.some((h) => h.id === sel) ? sel : null;
+}
+
+/**
  * The model picker's availability tag. Quiet when availability is unknown or
  * the model is on the primary host (the default place a job lands); the
  * host's label when exactly one connected non-primary host has it; a count

@@ -334,11 +334,20 @@ describe("applyModelDefaults — qwen-edit attachment seeding", () => {
     expect(form.imageAttachments).toEqual([]);
   });
 
-  it("clears attachments when switching to a video family (no img2img)", () => {
+  it("promotes the Target to the img2video source when switching to ltx2", () => {
     const form = newGenerateForm();
     applyModelDefaults(form, qwenEditModel());
     form.imageAttachments = ["T"];
     applyModelDefaults(form, ltx2Model());
+    expect(form.imageAttachments).toEqual([]);
+    expect(form.sourceImage).toBe("T");
+  });
+
+  it("clears attachments when switching to ltx-video (no img2img at all)", () => {
+    const form = newGenerateForm();
+    applyModelDefaults(form, qwenEditModel());
+    form.imageAttachments = ["T"];
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
     expect(form.imageAttachments).toEqual([]);
     expect(form.sourceImage).toBeNull();
   });
@@ -607,5 +616,43 @@ describe("applyPrefillToForm", () => {
     expect(form.negativePrompt).toBe("blurry, low quality");
     expect(form.loras).toHaveLength(2);
     expect(form.width).toBe(512);
+  });
+});
+
+describe("LTX-2 img2img (image-to-video)", () => {
+  it("keeps the source image when switching from an image family into ltx2", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    form.maskImage = "MASK";
+    applyModelDefaults(form, ltx2Model());
+    expect(form.sourceImage).toBe("SRC"); // seeds frame-0 conditioning
+    expect(form.maskImage).toBeNull(); // no inpainting on video
+  });
+
+  it("clears the source when switching to plain ltx-video (no img2vid path)", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    applyModelDefaults(form, { ...ltx2Model(), name: "ltx-video:q8", family: "ltx-video" });
+    expect(form.sourceImage).toBeNull();
+  });
+
+  it("coerces a mask-dependent source-fit policy to crop-fill on entry", () => {
+    const form = newGenerateForm();
+    form.sourceImage = "SRC";
+    expect(form.sourceFit).toEqual({ mode: "pad-repaint" });
+    applyModelDefaults(form, ltx2Model());
+    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "center", alignY: "center" });
+  });
+
+  it("ships source_image + strength for ltx2 but never mask_image", () => {
+    const form = ltx2Form();
+    form.prompt = "a cat";
+    form.sourceImage = "SRC";
+    form.strength = 0.6;
+    form.maskImage = "MASK"; // stale value must not leak
+    const req = buildRequest(form);
+    expect(req.source_image).toBe("SRC");
+    expect(req.strength).toBe(0.6);
+    expect(req.mask_image).toBeUndefined();
   });
 });

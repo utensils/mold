@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { describeSourceFit, maskPaddingRectangles, resolveSourceFitTransform } from "./sourceFit";
+import {
+  coerceSourceFitForMaskless,
+  describeSourceFit,
+  maskPaddingRectangles,
+  resolveSourceFitTransform,
+} from "./sourceFit";
 
 describe("source fit policies", () => {
   it("defaults to pad repaint, preserving requested dimensions and repainting added pixels", () => {
@@ -138,5 +143,35 @@ describe("source fit policies", () => {
         fit: { mode: "pad-repaint" },
       }),
     ).toContain("real-esrgan-x2plus:fp16");
+  });
+
+  describe("coerceSourceFitForMaskless (video img2img — no repaint mask possible)", () => {
+    it("maps pad-repaint to centered crop-fill, outer and nested", () => {
+      expect(coerceSourceFitForMaskless({ mode: "pad-repaint" })).toEqual({
+        mode: "crop-fill",
+        alignX: "center",
+        alignY: "center",
+      });
+      expect(
+        coerceSourceFitForMaskless({
+          mode: "upscale-then-fit",
+          upscalerModel: "real-esrgan-x2plus:fp16",
+          fit: { mode: "pad-repaint" },
+        }),
+      ).toEqual({
+        mode: "upscale-then-fit",
+        upscalerModel: "real-esrgan-x2plus:fp16",
+        fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+      });
+    });
+
+    it("passes maskless-safe policies through untouched", () => {
+      const cropFill = { mode: "crop-fill", alignX: "left" } as const;
+      expect(coerceSourceFitForMaskless(cropFill)).toBe(cropFill);
+      const padFit = { mode: "pad-fit" } as const;
+      expect(coerceSourceFitForMaskless(padFit)).toBe(padFit);
+      const lanczos = { mode: "lanczos-resize" } as const;
+      expect(coerceSourceFitForMaskless(lanczos)).toBe(lanczos);
+    });
   });
 });

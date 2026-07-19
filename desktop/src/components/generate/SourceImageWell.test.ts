@@ -158,6 +158,28 @@ describe("SourceImageWell", () => {
       expect(wrapper.find("[data-test='attachment-strip']").exists()).toBe(false);
     });
 
+    it("renders the single well for ltx2 (image-to-video) without mask or pad-repaint", () => {
+      const form = formFor("ltx2");
+      form.sourceImage = "SRC";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      const fitOptions = wrapper
+        .get("[data-test='source-fit-policy']")
+        .findAll("option")
+        .map((o) => o.attributes("value"));
+      // pad-repaint needs a repaint mask the family can't ship — not offered.
+      expect(fitOptions).not.toContain("pad-repaint");
+      expect(fitOptions).toContain("crop-fill");
+      expect(wrapper.find("[data-test='source-edit-mask']").exists()).toBe(false);
+    });
+
+    it("never renders the well for plain ltx-video (engine has no img2vid path)", () => {
+      const form = formFor("ltx-video");
+      form.sourceImage = "SRC";
+      const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+      expect(wrapper.find("[data-test='source-fit-policy']").exists()).toBe(false);
+      expect(wrapper.find("[data-test='source-choose-gallery']").exists()).toBe(false);
+    });
+
     it("labels the first tile Target and the rest Reference, titled Picture N", () => {
       const form = formFor("qwen-image-edit");
       form.imageAttachments = ["T", "R1", "R2"];

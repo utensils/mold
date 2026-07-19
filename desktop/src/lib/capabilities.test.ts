@@ -44,11 +44,19 @@ describe("generationCapabilitiesForFamily", () => {
     expect(generationCapabilitiesForFamily("flux").supportsCfgPlus).toBe(false);
   });
 
-  it("supports img2img on image families but not video families", () => {
+  it("supports img2img on image families and LTX-2, but not plain ltx-video", () => {
     expect(generationCapabilitiesForFamily("flux").supportsImg2img).toBe(true);
     expect(generationCapabilitiesForFamily("sdxl").supportsImg2img).toBe(true);
-    expect(generationCapabilitiesForFamily("ltx2").supportsImg2img).toBe(false);
+    // LTX-2 stages source_image as frame-0 conditioning (image-to-video);
+    // the LtxVideoEngine has no img2vid path so its family stays gated off.
+    expect(generationCapabilitiesForFamily("ltx2").supportsImg2img).toBe(true);
+    expect(generationCapabilitiesForFamily("ltx-2").supportsImg2img).toBe(true);
     expect(generationCapabilitiesForFamily("ltx-video").supportsImg2img).toBe(false);
+  });
+
+  it("keeps masks off video families even with img2img on", () => {
+    expect(generationCapabilitiesForFamily("ltx2").supportsMask).toBe(false);
+    expect(generationCapabilitiesForFamily("ltx-video").supportsMask).toBe(false);
   });
 
   it("puts qwen-image-edit in edit mode with batch locked to 1 and no mask", () => {
@@ -156,11 +164,17 @@ describe("pruneRequestForFamily", () => {
     }
   });
 
-  it("drops img2img + loras for a video family and fixes the format", () => {
+  it("keeps img2img for ltx2 (mask stripped) but drops it for ltx-video", () => {
     const pruned = pruneRequestForFamily(full, "ltx2");
-    expect(pruned.source_image).toBeUndefined();
+    expect(pruned.source_image).toBe(full.source_image);
+    expect(pruned.strength).toBe(full.strength);
+    expect(pruned.mask_image).toBeUndefined(); // no inpainting on video
     expect(pruned.loras).toBe(full.loras); // ltx2 keeps loras
     expect(pruned.output_format).toBe("mp4"); // png isn't valid for video
+
+    const prunedLtxVideo = pruneRequestForFamily(full, "ltx-video");
+    expect(prunedLtxVideo.source_image).toBeUndefined();
+    expect(prunedLtxVideo.strength).toBeUndefined();
   });
 
   it("does not mutate the input", () => {

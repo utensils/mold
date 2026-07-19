@@ -64,13 +64,15 @@ export interface SourceFitResult {
 }
 
 /**
- * The policy actually used for the canvas draw. Mirrors web: a missing
- * policy and the `upscale-then-fit` wrapper both fall back to pad-repaint.
+ * The policy actually used for the canvas draw. A missing policy falls back
+ * to pad-repaint (web parity); `upscale-then-fit` draws its inner `fit` —
+ * the UI defaults that inner fit to pad-repaint for image families, and
+ * maskless (video) img2img coerces it away so no unrepaintable pad bands
+ * are ever drawn.
  */
 export function drawableFitPolicy(policy: SourceFitPolicy | undefined): SourceFitPolicy {
-  if (!policy || policy.mode === "upscale-then-fit") {
-    return { mode: "pad-repaint" };
-  }
+  if (!policy) return { mode: "pad-repaint" };
+  if (policy.mode === "upscale-then-fit") return policy.fit;
   return policy;
 }
 

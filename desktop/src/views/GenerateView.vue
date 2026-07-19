@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
+  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -19,7 +20,7 @@ import HostSelector from "../components/generate/HostSelector.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { modelSource } from "../lib/modelSource";
-import { modelAvailabilityTag } from "../lib/hosts";
+import { modelAvailabilityTag, normalizeTargetHost } from "../lib/hosts";
 import { dragWidth } from "../lib/panelResize";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -43,6 +44,7 @@ import { generationCapabilitiesForFamily } from "../lib/capabilities";
 import { decideChainRouting } from "../lib/chainRouting";
 import { applyPrefillToForm, buildRequest } from "../lib/generateForm";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import type { HostRoute } from "../stores/hosts";
@@ -156,13 +158,36 @@ const estimateTarget = computed(() =>
 );
 
 /**
+ * What the picker renders: the all-host union under Auto / Most capable,
+ * narrowed to the sticky host's installed set when one is picked. The current
+ * `form.model` is left alone — `stickyHostMissingModel` already warns that a
+ * generate there will auto-pull the weights.
+ */
+/** The sticky pick as the Host selector shows it — a ghost host id (removed
+ *  or never reconnected) reads as Auto so filtering and tag suppression can
+ *  never disagree with the selector (Copilot on #436). */
+const stickyTarget = computed<string | null>(() =>
+  normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
+);
+
+const pickerModels = computed<ModelEntry[]>(() => {
+  const target = stickyTarget.value;
+  const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  return filterModelsForTarget(
+    installedModels.value,
+    target,
+    fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
+  );
+});
+
+/**
  * The picker's list: the primary's installed models merged with every model
  * installed on an extra host, grouped by family (primary entries win the
  * dedup so their defaults are used).
  */
 const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
   const byName = new Map<string, ModelEntry>();
-  for (const m of installedModels.value) byName.set(m.name, m);
+  for (const m of pickerModels.value) byName.set(m.name, m);
   const groups = new Map<string, ModelEntry[]>();
   for (const m of byName.values()) {
     const list = groups.get(m.family) ?? [];
@@ -175,6 +200,9 @@ const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
 /** Subtle per-row tag for models that live only on non-primary hosts. */
 function availabilityTag(m: ModelEntry): string | null {
   if (!hosts.multiHost) return null;
+  // With a sticky host every rendered row is on that host — tags are noise.
+  const target = stickyTarget.value;
+  if (target && target !== "capable") return null;
   return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
 }
 
@@ -183,7 +211,7 @@ function availabilityTag(m: ModelEntry): string | null {
  * last availability snapshot) — the job will auto-pull the weights there.
  */
 const stickyHostMissingModel = computed<string | null>(() => {
-  const sel = appPrefs.settings?.generateTargetHost ?? null;
+  const sel = stickyTarget.value;
   if (!sel || sel === "capable" || !form.model) return null;
   const host = hosts.all.find((h) => h.id === sel);
   if (!host) return null;
@@ -346,8 +374,12 @@ async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
     const result = await applySourceFitPreprocess(
       {
         source: form.sourceImage,
-        mask: form.maskImage,
-        policy: form.sourceFit,
+        // Maskless families (LTX-2 img2video) can't ship the repaint mask —
+        // coerce defensively even if a stale pad-repaint policy survived.
+        mask: caps.value.supportsMask ? form.maskImage : null,
+        policy: caps.value.supportsMask
+          ? form.sourceFit
+          : coerceSourceFitForMaskless(form.sourceFit),
         target: { width: form.width, height: form.height },
       },
       {

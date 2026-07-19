@@ -7,6 +7,7 @@ import {
   mergeSavedHostsByInstanceId,
   modelAvailabilityTag,
   normalizeHostUrl,
+  normalizeTargetHost,
   pickAutoHost,
   pickDisplayHost,
   pickMostCapableHost,
@@ -375,5 +376,21 @@ describe("pickDisplayHost", () => {
   it("skips jobs without a routed host (single-host submissions)", () => {
     expect(pickDisplayHost(["hal9000-7680", null], "local")).toBe("hal9000-7680");
     expect(pickDisplayHost([null, null], "local")).toBe("local");
+  });
+});
+
+describe("normalizeTargetHost", () => {
+  const hosts = [{ id: "local" }, { id: "plato-7680" }];
+
+  it("passes through null, capable, and live host ids", () => {
+    expect(normalizeTargetHost(null, hosts)).toBeNull();
+    expect(normalizeTargetHost(undefined, hosts)).toBeNull();
+    expect(normalizeTargetHost("capable", hosts)).toBe("capable");
+    expect(normalizeTargetHost("plato-7680", hosts)).toBe("plato-7680");
+  });
+
+  it("reads a ghost host id as Auto — matching the Host selector's display", () => {
+    expect(normalizeTargetHost("gone-7680", hosts)).toBeNull();
+    expect(normalizeTargetHost("gone-7680", [])).toBeNull();
   });
 });

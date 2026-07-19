@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { normalizeTargetHost } from "../../lib/hosts";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 
 /**
@@ -12,12 +13,10 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
 
-const value = computed(() => {
-  const sel = prefs.settings?.generateTargetHost ?? null;
-  if (sel === "capable") return "capable";
+const value = computed(
   // A persisted pick whose host is gone reads as Auto rather than a ghost.
-  return sel && hosts.all.some((h) => h.id === sel) ? sel : "auto";
-});
+  () => normalizeTargetHost(prefs.settings?.generateTargetHost ?? null, hosts.all) ?? "auto",
+);
 
 function onChange(event: Event) {
   const picked = (event.target as HTMLSelectElement).value;
