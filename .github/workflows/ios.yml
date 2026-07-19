@@ -10,9 +10,12 @@ on:
         "desktop/src/lib/**",
         "desktop/package.json",
         "desktop/bun.lock",
+        "desktop/icon-master.png",
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
         "scripts/ios.sh",
+        "scripts/generate-ios-icons.sh",
+        "scripts/tests/ios-release-assets.sh",
         "scripts/ensure-testflight-tester.rb",
         "scripts/wait-for-testflight.rb",
         "flake.nix",
@@ -27,9 +30,12 @@ on:
         "desktop/src/lib/**",
         "desktop/package.json",
         "desktop/bun.lock",
+        "desktop/icon-master.png",
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
         "scripts/ios.sh",
+        "scripts/generate-ios-icons.sh",
+        "scripts/tests/ios-release-assets.sh",
         "scripts/ensure-testflight-tester.rb",
         "scripts/wait-for-testflight.rb",
         "flake.nix",
@@ -52,7 +58,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun run build:mobile
+      - run: ../scripts/tests/ios-release-assets.sh
       - run: bun run fmt:check
 
   simulator-rust:

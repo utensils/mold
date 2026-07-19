@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Mold for iPhone.** A first-class Tauri iOS companion connects only to remote Mold hosts and focuses the initial release on generation and the merged gallery. It reuses the desktop wire types, capability-aware request builder, and SSE client; supports saved hosts, Keychain-backed API keys, Tailscale MagicDNS names, and native Bonjour discovery of `_mold._tcp`; and ships with simulator CI plus an internal TestFlight nightly pipeline.
 
+### Fixed
+
+- **iPhone builds now launch the bundled mobile UI and show Mold's real icon.** The mobile Vite build emits the `index.html` entry Tauri boots, every Apple icon size is generated from the Mold bowl on an opaque app-theme background, and CI rejects archives with a missing entry point, stale frontend embed, or stock Tauri icon.
+
 ## [0.18.0] - 2026-07-19
 
 ### Added
