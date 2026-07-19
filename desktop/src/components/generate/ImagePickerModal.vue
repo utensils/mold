@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { apiFetch, apiFetchTo } from "../../lib/api/client";
-import { galleryMediaPath, mediaPath } from "../../lib/gallery/media";
+import { galleryMediaPath, localMediaPath, mediaPath } from "../../lib/gallery/media";
 import { blobToBase64, fileToBase64, isStillImageFile } from "../../lib/image";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
@@ -19,7 +19,6 @@ const emit = defineEmits<{
 const tab = ref<"upload" | "gallery">("upload");
 const error = ref<string | null>(null);
 const dragOver = ref(false);
-const fetched = ref(false);
 // Focus the close button on open and restore focus to the opener on close,
 // so the dialog is keyboard-operable and doesn't strand focus (matches Lightbox).
 const closeBtn = ref<HTMLButtonElement | null>(null);
@@ -29,9 +28,10 @@ let restoreFocusEl: HTMLElement | null = null;
 // section: every connected host's bucket, merged and deduped by the store.
 const gallery = useGalleryStore();
 
+// Refetch on EVERY open (not once per mount — the modal stays mounted in its
+// panel): a host that connected since the last open gets its first bucket
+// fetch here, and existing buckets pick up prints from other clients.
 function loadGallery() {
-  if (fetched.value) return;
-  fetched.value = true;
   void gallery.fetchAll();
 }
 
@@ -41,6 +41,11 @@ const entries = computed<MergedPrint[]>(() =>
   gallery.merged.filter((entry) => isStillImageFile(entry.item.filename)),
 );
 const loading = computed(() => entries.value.length === 0 && !gallery.loaded);
+/** Bucket fetch failures, shown only when there is nothing to render —
+ *  partial multi-host data beats an error banner. */
+const galleryError = computed(() =>
+  entries.value.length === 0 && !loading.value ? gallery.firstError : null,
+);
 /** Per-tile origin labels only matter with more than one gallery source. */
 const showHostLabels = computed(() => gallery.sources.length > 1);
 
@@ -92,12 +97,18 @@ function onDrop(event: DragEvent) {
 
 async function pickFromGallery(entry: MergedPrint) {
   try {
-    // Bytes come from the print's own origin (mirrors GalleryView's
-    // fetchItemBase64): a remote print is fetched with that host's auth, the
-    // local/primary bucket through the app's primary connection.
-    const path = mediaPath(entry.item.filename);
-    const target = gallery.targetOf(entry.sourceKey);
-    const res = await (target ? apiFetchTo(target, path) : apiFetch(path));
+    // Bytes come from the print's own origin: a host print is fetched with
+    // that host's auth, and a This-Mac IPC print (local engine down or
+    // mid-restart) over the mold-local:// protocol — the same source its
+    // thumbnail rendered from, so a pick can't fail where a preview worked.
+    let res: Response;
+    if (gallery.mediaSourceOf(entry.sourceKey) === "local") {
+      res = await fetch(localMediaPath(entry.item.filename));
+    } else {
+      const path = mediaPath(entry.item.filename);
+      const target = gallery.targetOf(entry.sourceKey);
+      res = await (target ? apiFetchTo(target, path) : apiFetch(path));
+    }
     const blob = await res.blob();
     emit("pick", [{ filename: entry.item.filename, base64: await blobToBase64(blob) }]);
     emit("close");
@@ -189,6 +200,13 @@ async function pickFromGallery(entry: MergedPrint) {
         <div v-else class="mt-4 flex-1 overflow-y-auto">
           <p v-if="loading" class="text-caption text-ink-3">Loading…</p>
           <p v-else-if="error" class="text-caption text-stop">{{ error }}</p>
+          <p
+            v-else-if="galleryError"
+            class="text-caption text-stop"
+            data-test="picker-gallery-error"
+          >
+            {{ galleryError }}
+          </p>
           <p v-else-if="entries.length === 0" class="text-caption text-ink-3">
             No prints in the gallery yet.
           </p>

@@ -63,8 +63,8 @@ export function allowsNativeSelectAll(el: Element | null): boolean {
  * Whether a right-click target keeps the NATIVE context menu. Only genuine
  * text-editing surfaces qualify (spellcheck / paste); everything else — from
  * range sliders (`<input type="range">` is an input, but chrome) to the
- * canvas — either opens the app's own menu or nothing. The webview's default
- * Back / Reload / Inspect Element menu must never appear.
+ * canvas — either opens the app's own menu or nothing, so the webview's
+ * default Back / Reload / Inspect Element menu never appears on app chrome.
  */
 export function allowsNativeContextMenu(el: Element | null): boolean {
   if (!el) return false;

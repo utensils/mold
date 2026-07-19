@@ -451,8 +451,8 @@ export const useGalleryStore = defineStore("gallery", {
       evictMedia(galleryMediaPath(filename, source, true), sourceKey);
       evictMedia(galleryMediaPath(filename, source), sourceKey);
       // Consumers that render primary-gallery media without a cacheKey
-      // (ImagePickerModal, StageCard) cache under the "primary" default —
-      // a primary-bucket delete must clear those slots too.
+      // (StageCard) cache under the "primary" default — a primary-bucket
+      // delete must clear those slots too.
       if (sourceKey === (useHostsStore().primaryHost?.id ?? null)) {
         evictMedia(galleryMediaPath(filename, source, true));
         evictMedia(galleryMediaPath(filename, source));

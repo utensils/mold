@@ -171,6 +171,68 @@ describe("ImagePickerModal", () => {
     expect(document.body.querySelector("[data-test='picker-item-host']")).toBeNull();
   });
 
+  it("picks a This-Mac print over the local protocol when the engine is down", async () => {
+    // No connection info: the "local" bucket is IPC-backed, targetOf is null,
+    // and bytes must come from mold-local:// — not the (dead) primary API.
+    const gallery = useGalleryStore();
+    vi.spyOn(gallery, "fetchAll").mockResolvedValue();
+    gallery.buckets["local"] = loadedBucket([img("a.png", 4)]);
+    const localFetch = vi
+      .fn()
+      .mockResolvedValue({ blob: () => Promise.resolve(new Blob(["z"], { type: "image/png" })) });
+    vi.stubGlobal("fetch", localFetch);
+
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    await nextTick();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-gallery-item']").trigger("click");
+    await vi.waitFor(() => expect(wrapper.emitted("pick")).toBeTruthy());
+
+    expect(localFetch).toHaveBeenCalledWith("mold-local://localhost/a.png");
+    expect(apiFetch).not.toHaveBeenCalled();
+    const picked = wrapper.emitted("pick")?.[0]?.[0] as Array<{ base64: string }>;
+    expect(picked[0]!.base64).toBe("eg=="); // Blob(["z"])
+    vi.unstubAllGlobals();
+  });
+
+  it("surfaces bucket fetch errors instead of claiming an empty gallery", async () => {
+    const gallery = seedTwoHostGallery();
+    gallery.buckets["local"] = { items: [], loading: false, error: "HTTP 500", loaded: false };
+    gallery.buckets["hal9000-7680"] = { items: [], loading: false, error: null, loaded: true };
+    mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await bodyGet<HTMLButtonElement>("[data-test='picker-tab-gallery']").trigger("click");
+    await nextTick();
+
+    const err = bodyGet<HTMLElement>("[data-test='picker-gallery-error']");
+    expect(err.text()).toContain("HTTP 500");
+  });
+
+  it("refetches the gallery on every open so late-connecting hosts appear", async () => {
+    const gallery = seedTwoHostGallery();
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    expect(gallery.fetchAll).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ open: false });
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    expect(gallery.fetchAll).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects non-PNG/JPEG uploads with an error instead of emitting", async () => {
     const gallery = useGalleryStore();
     vi.spyOn(gallery, "fetchAll").mockResolvedValue();
