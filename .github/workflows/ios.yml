@@ -30,6 +30,8 @@ on:
         "desktop/vite.mobile.config.ts",
         "desktop/index.mobile.html",
         "scripts/ios.sh",
+        "scripts/ensure-testflight-tester.rb",
+        "scripts/wait-for-testflight.rb",
         "flake.nix",
         ".github/workflows/ios.yml",
         ".github/workflows/testflight-ios.yml",

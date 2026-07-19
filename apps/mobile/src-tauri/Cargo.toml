@@ -22,6 +22,7 @@ tauri = { version = "2", features = [] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 security-framework = "3"
+security-framework-sys = "2"
 
 [features]
 default = []

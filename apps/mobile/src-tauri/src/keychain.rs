@@ -12,7 +12,8 @@ pub fn keychain_get_api_key(host_id: String) -> Result<Option<String>, String> {
         Ok(bytes) => String::from_utf8(bytes)
             .map(Some)
             .map_err(|_| "saved API key is not valid UTF-8".to_string()),
-        Err(_) => Ok(None),
+        Err(error) if error.code() == security_framework_sys::base::errSecItemNotFound => Ok(None),
+        Err(error) => Err(format!("could not read API key: {error}")),
     }
 }
 

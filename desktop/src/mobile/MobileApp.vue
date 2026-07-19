@@ -221,7 +221,8 @@ async function generate(): Promise<void> {
   const target = selectedTarget.value;
   if (!target || !form.prompt.trim() || !form.model) return;
   generationAbort?.abort();
-  generationAbort = new AbortController();
+  const controller = new AbortController();
+  generationAbort = controller;
   generating.value = true;
   progress.value = "Submitting";
   if (resultUrl.value) revokeObjectUrl(resultUrl.value);
@@ -230,10 +231,13 @@ async function generate(): Promise<void> {
     target,
     method: "POST",
     body: buildRequest(form),
-    signal: generationAbort.signal,
+    signal: controller.signal,
     retry: false,
-    onOpen: () => (progress.value = "Queued"),
+    onOpen: () => {
+      if (generationAbort === controller) progress.value = "Queued";
+    },
     onEvent: (event, data) => {
+      if (generationAbort !== controller) return;
       try {
         if (event === "progress") {
           const update = JSON.parse(data) as ProgressEvent;
@@ -253,20 +257,23 @@ async function generate(): Promise<void> {
           generating.value = false;
         }
       } catch {
-        generationAbort?.abort();
+        controller.abort();
         progress.value = "The host returned an invalid generation update.";
         generating.value = false;
       }
     },
     onClose: (error) => {
+      if (generationAbort !== controller) return;
       if (error) progress.value = error.message;
       generating.value = false;
+      generationAbort = null;
     },
   });
 }
 
 function stopGeneration(): void {
   generationAbort?.abort();
+  generationAbort = null;
   generating.value = false;
   progress.value = "Cancelled";
 }
