@@ -78,10 +78,12 @@ const print: GalleryImage = {
 let wrapper: VueWrapper | null = null;
 let objectUrlSequence = 0;
 const openStreams: Array<{
+  path: string;
   options: {
     body: Record<string, unknown>;
     headers?: Record<string, string>;
     signal: AbortSignal;
+    onOpen?: () => void;
     onEvent: (event: string, data: string) => void;
   };
   resolve: () => void;
@@ -134,16 +136,17 @@ beforeEach(() => {
   openStreams.length = 0;
   sseStream.mockReset().mockImplementation(
     (
-      _path: string,
+      path: string,
       options: {
         body: Record<string, unknown>;
         headers?: Record<string, string>;
         signal: AbortSignal;
+        onOpen?: () => void;
         onEvent: (event: string, data: string) => void;
       },
     ) =>
       new Promise<void>((resolve) => {
-        openStreams.push({ options, resolve });
+        openStreams.push({ path, options, resolve });
       }),
   );
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full-video");
@@ -165,6 +168,41 @@ describe("MobileApp generation queue", () => {
     await wrapper?.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
   }
+
+  it("applies model defaults to the resolution picker and snapshots those dimensions", async () => {
+    const imageModel: ModelEntry = {
+      ...model,
+      name: "flux:image",
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 24,
+      default_guidance: 3.5,
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel, model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("1024 × 1024");
+
+    await fieldControl("Model").setValue(model.name);
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("768 × 512");
+    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("Landscape");
+
+    await submitPrompt("use the video defaults");
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body).toMatchObject({
+      model: model.name,
+      width: 768,
+      height: 512,
+    });
+  });
 
   it("snapshots multiple prompts, shows their live queue, and cancels only one", async () => {
     wrapper = mountMobileApp();
@@ -846,9 +884,7 @@ describe("MobileApp gallery", () => {
     await tile.trigger("click");
     await flushPromises();
 
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-selected")).toBe(
-      "true",
-    );
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
     expect(wrapper.find("[data-test='gallery-viewer-video']").exists()).toBe(true);
     expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/storm%20clip.mp4", {
       target,
@@ -858,9 +894,7 @@ describe("MobileApp gallery", () => {
 
     await wrapper.get("[data-test='gallery-viewer-close']").trigger("click");
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-selected")).toBe(
-      "true",
-    );
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
 
     await wrapper.get("[data-test='gallery-item']").trigger("click");
     await flushPromises();
@@ -868,13 +902,12 @@ describe("MobileApp gallery", () => {
     await flushPromises();
 
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(false);
-    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-selected")).toBe(
-      "true",
+    expect(wrapper.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+      "page",
     );
     expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", print.metadata.prompt);
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
-    expect(fieldControl("Width").element).toHaveProperty("value", "768");
-    expect(fieldControl("Height").element).toHaveProperty("value", "512");
+    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("768 × 512");
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
@@ -925,9 +958,7 @@ describe("MobileApp gallery", () => {
 
     expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
     expect(wrapper.get("[role='alert']").text()).toContain("Couldn’t load models from Remote");
-    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-selected")).toBe(
-      "true",
-    );
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
   });
 
   it("reloads model ownership after removing the active host before reuse", async () => {
@@ -991,7 +1022,11 @@ describe("MobileApp gallery", () => {
       .findAll(".host-row")
       .find((row) => row.find(".host-name").text() === "Studio");
     if (!studioRow) throw new Error("Missing Studio host row");
-    await studioRow.get("button.danger-button").trigger("click");
+    await studioRow.get("[data-test='mobile-host-row']").trigger("click");
+    const forget = wrapper.get("[data-test='host-detail-forget']");
+    await forget.trigger("click");
+    expect(forget.text()).toContain("Forget Studio?");
+    await forget.trigger("click");
     await vi.waitFor(() => expect(apiJsonTo).toHaveBeenCalledWith(remoteTarget, "/api/models"));
 
     await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
@@ -1007,5 +1042,172 @@ describe("MobileApp gallery", () => {
       .findAll("button")
       .find((button) => button.text() === "Develop print");
     expect(developButton?.attributes("disabled")).toBeUndefined();
+  });
+});
+
+describe("MobileApp host and catalog coordination", () => {
+  const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+
+  function installTwoHosts(): void {
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "render-id",
+          name: "Render Box",
+          baseUrl: remoteTarget.baseUrl,
+          hostname: "render",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+  }
+
+  it("keeps newer host probe results and aborts superseded and unmounted probes", async () => {
+    vi.useFakeTimers();
+    try {
+      installTwoHosts();
+      const remoteProbes: Array<{
+        resolve: (value: ServerStatus) => void;
+        reject: (reason: Error) => void;
+        signal: AbortSignal | undefined;
+      }> = [];
+      apiJsonTo.mockImplementation(
+        (requestTarget: unknown, path: string, init?: { signal?: AbortSignal }) => {
+          const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+          if (path === "/api/models") return Promise.resolve([model]);
+          if (path === "/api/status" && baseUrl === target.baseUrl) return Promise.resolve(status);
+          if (path === "/api/status") {
+            return new Promise<ServerStatus>((resolve, reject) => {
+              remoteProbes.push({ resolve, reject, signal: init?.signal });
+            });
+          }
+          return Promise.reject(new Error(`Unexpected API path: ${path}`));
+        },
+      );
+
+      wrapper = mountMobileApp();
+      await flushPromises();
+      expect(remoteProbes).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(remoteProbes).toHaveLength(2);
+      expect(remoteProbes[0]?.signal?.aborted).toBe(true);
+
+      remoteProbes[1]?.resolve({ ...status, version: "0.19.0", hostname: "render" });
+      await flushPromises();
+      remoteProbes[0]?.reject(new Error("stale timeout"));
+      await flushPromises();
+
+      await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+      const remoteRow = wrapper
+        .findAll(".host-row")
+        .find((row) => row.find(".host-name").text() === "Render Box");
+      expect(remoteRow?.text()).toContain("v0.19.0");
+      expect(remoteRow?.text()).not.toContain("offline");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(remoteProbes).toHaveLength(3);
+      const unmountedSignal = remoteProbes[2]?.signal;
+      wrapper.unmount();
+      wrapper = null;
+      expect(unmountedSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens Catalog on the viewed host without changing the generation host", async () => {
+    installTwoHosts();
+    apiJsonTo.mockImplementation((requestTarget: unknown, path: string) => {
+      const baseUrl = (requestTarget as { baseUrl: string }).baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: baseUrl === remoteTarget.baseUrl ? "render" : "studio",
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
+      if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve({ json: () => Promise.resolve([model]) } as Response);
+      }
+      return Promise.resolve({ blob: () => Promise.resolve(new Blob()) } as Response);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    const remoteRow = wrapper
+      .findAll(".host-row")
+      .find((row) => row.find(".host-name").text() === "Render Box");
+    if (!remoteRow) throw new Error("Missing Render Box host row");
+    await remoteRow.get("[data-test='mobile-host-row']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='host-detail-catalog']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("select[aria-label='Catalog host']").element).toHaveProperty(
+      "value",
+      "render-id",
+    );
+    expect(wrapper.get(".mobile-header .host-chip").text()).toBe("Studio");
+    expect(wrapper.get("[data-test='mobile-tab-catalog']").attributes("aria-current")).toBe("page");
+  });
+
+  it("keeps the catalog download stream alive off-tab and refreshes Generate models", async () => {
+    const pulledModel = { ...model, name: "ltx2:new-download" };
+    let downloadFinished = false;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") {
+        return Promise.resolve(downloadFinished ? [model, pulledModel] : [model]);
+      }
+      if (path === "/api/catalog/families") return Promise.resolve({ families: [] });
+      if (path.startsWith("/api/catalog/search")) return Promise.resolve({ entries: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve({ json: () => Promise.resolve([model]) } as Response);
+      }
+      return Promise.resolve({ blob: () => Promise.resolve(new Blob()) } as Response);
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream");
+    if (!downloadStream) throw new Error("Catalog download stream did not open");
+    downloadStream.options.onOpen?.();
+
+    await wrapper.get("[data-test='mobile-tab-generate']").trigger("click");
+    expect(downloadStream.options.signal.aborted).toBe(false);
+    downloadFinished = true;
+    downloadStream.options.onEvent(
+      "message",
+      JSON.stringify({ type: "job_done", id: "download-1", model: pulledModel.name }),
+    );
+    await flushPromises();
+
+    const options = fieldControl("Model")
+      .findAll("option")
+      .map((option) => option.text());
+    expect(options).toContain(pulledModel.name);
   });
 });
