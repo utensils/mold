@@ -84,7 +84,7 @@ const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
-// Multi-host gallery — source-image restore looks prints up across hosts.
+// Multi-host gallery — source-image restore looks up prints across hosts.
 const hostGallery = useGalleryStore();
 const downloads = useDownloadsStore();
 const pullResume = usePullResumeStore();
