@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
+  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -156,13 +157,29 @@ const estimateTarget = computed(() =>
 );
 
 /**
+ * What the picker renders: the all-host union under Auto / Most capable,
+ * narrowed to the sticky host's installed set when one is picked. The current
+ * `form.model` is left alone — `stickyHostMissingModel` already warns that a
+ * generate there will auto-pull the weights.
+ */
+const pickerModels = computed<ModelEntry[]>(() => {
+  const target = appPrefs.settings?.generateTargetHost ?? null;
+  const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
+  return filterModelsForTarget(
+    installedModels.value,
+    target,
+    fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
+  );
+});
+
+/**
  * The picker's list: the primary's installed models merged with every model
  * installed on an extra host, grouped by family (primary entries win the
  * dedup so their defaults are used).
  */
 const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
   const byName = new Map<string, ModelEntry>();
-  for (const m of installedModels.value) byName.set(m.name, m);
+  for (const m of pickerModels.value) byName.set(m.name, m);
   const groups = new Map<string, ModelEntry[]>();
   for (const m of byName.values()) {
     const list = groups.get(m.family) ?? [];
@@ -175,6 +192,9 @@ const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
 /** Subtle per-row tag for models that live only on non-primary hosts. */
 function availabilityTag(m: ModelEntry): string | null {
   if (!hosts.multiHost) return null;
+  // With a sticky host every rendered row is on that host — tags are noise.
+  const target = appPrefs.settings?.generateTargetHost ?? null;
+  if (target && target !== "capable") return null;
   return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ModelEntry } from "./api/types";
 import {
+  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
@@ -49,6 +50,23 @@ describe("Generate model availability", () => {
     expect(shouldShowStarterCards({ ...base, hostModelsLoading: true })).toBe(false);
     expect(shouldShowStarterCards({ ...base, allReadyHostsFetched: false })).toBe(false);
     expect(shouldShowStarterCards({ ...base, installed: [model("flux-dev:q8")] })).toBe(false);
+  });
+
+  it("filters the picker to the sticky host's models, unions otherwise", () => {
+    const installed = [model("flux-dev:q8"), model("z-image:q8", "zimage")];
+    const onPlato = new Set(["flux-dev:q8"]);
+
+    // Auto / Most capable keep the all-host union.
+    expect(filterModelsForTarget(installed, null, onPlato)).toEqual(installed);
+    expect(filterModelsForTarget(installed, "capable", onPlato)).toEqual(installed);
+
+    // A specific host only renders what that host has.
+    expect(filterModelsForTarget(installed, "plato-7680", onPlato).map((m) => m.name)).toEqual([
+      "flux-dev:q8",
+    ]);
+
+    // Availability unknown (host list never fetched) — don't blank the picker.
+    expect(filterModelsForTarget(installed, "plato-7680", null)).toEqual(installed);
   });
 
   it("selects and resolves models that exist only on a remote host", () => {

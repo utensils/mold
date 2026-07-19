@@ -14,6 +14,21 @@ export function mergeInstalledModels(
   return [...byName.values()];
 }
 
+/**
+ * Narrow the model picker to the sticky target host's installed set. Auto
+ * (`null`) and the "capable" sentinel route per-job, so they keep the all-host union;
+ * `availableNames === null` means that host's list was never fetched — show
+ * the union rather than an empty picker built from missing data.
+ */
+export function filterModelsForTarget(
+  installed: ModelEntry[],
+  target: string | null,
+  availableNames: ReadonlySet<string> | null,
+): ModelEntry[] {
+  if (!target || target === "capable" || availableNames === null) return installed;
+  return installed.filter((entry) => availableNames.has(entry.name));
+}
+
 export function findInstalledModel(installed: ModelEntry[], name: string): ModelEntry | null {
   return installed.find((entry) => entry.name === name) ?? null;
 }
