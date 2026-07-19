@@ -20,7 +20,7 @@ import HostSelector from "../components/generate/HostSelector.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { modelSource } from "../lib/modelSource";
-import { modelAvailabilityTag } from "../lib/hosts";
+import { modelAvailabilityTag, normalizeTargetHost } from "../lib/hosts";
 import { dragWidth } from "../lib/panelResize";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -163,8 +163,15 @@ const estimateTarget = computed(() =>
  * `form.model` is left alone — `stickyHostMissingModel` already warns that a
  * generate there will auto-pull the weights.
  */
+/** The sticky pick as the Host selector shows it — a ghost host id (removed
+ *  or never reconnected) reads as Auto so filtering and tag suppression can
+ *  never disagree with the selector (Copilot on #436). */
+const stickyTarget = computed<string | null>(() =>
+  normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
+);
+
 const pickerModels = computed<ModelEntry[]>(() => {
-  const target = appPrefs.settings?.generateTargetHost ?? null;
+  const target = stickyTarget.value;
   const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
   return filterModelsForTarget(
     installedModels.value,
@@ -194,7 +201,7 @@ const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
 function availabilityTag(m: ModelEntry): string | null {
   if (!hosts.multiHost) return null;
   // With a sticky host every rendered row is on that host — tags are noise.
-  const target = appPrefs.settings?.generateTargetHost ?? null;
+  const target = stickyTarget.value;
   if (target && target !== "capable") return null;
   return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
 }
@@ -204,7 +211,7 @@ function availabilityTag(m: ModelEntry): string | null {
  * last availability snapshot) — the job will auto-pull the weights there.
  */
 const stickyHostMissingModel = computed<string | null>(() => {
-  const sel = appPrefs.settings?.generateTargetHost ?? null;
+  const sel = stickyTarget.value;
   if (!sel || sel === "capable" || !form.model) return null;
   const host = hosts.all.find((h) => h.id === sel);
   if (!host) return null;
