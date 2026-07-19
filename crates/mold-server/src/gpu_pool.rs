@@ -409,7 +409,9 @@ impl GpuPool {
             return idle_empty.last().map(|w| (*w).clone());
         }
 
-        // 5. All GPUs busy with other models — most headroom first (evict LRU there).
+        // 5. Everything left — busy with other models, or idle with a
+        //    different model loaded (evicting a warm sibling has its own
+        //    cost). Most headroom first; the LRU cache evicts there.
         let mut busy = other;
         busy.sort_by(|a, b| {
             let a_headroom = a.gpu.total_vram_bytes.saturating_sub(estimated_vram);
