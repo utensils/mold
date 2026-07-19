@@ -17,6 +17,10 @@ import type { DownloadJob, GenerateRequest } from "../lib/api/types";
 
 export interface PendingResume {
   model: string;
+  /** The enqueued pull's job id — the precise thing to watch. Null when the
+   *  server didn't report one (older server, already-queued 409): fall back
+   *  to matching new terminal jobs by model name. */
+  jobId?: string | null;
   /** Downloads-store bucket to watch: a host id, or null for the primary. */
   hostId: string | null;
   hostLabel: string;
@@ -64,13 +68,28 @@ export const usePullResumeStore = defineStore("pullResume", {
       if (!pending) return;
       const fresh = this.jobsFor(pending.hostId)
         .filter(isTerminal)
-        .filter((job) => job.model === pending.model && !this.seenTerminal.includes(job.id));
+        .filter((job) =>
+          pending.jobId
+            ? job.id === pending.jobId
+            : job.model === pending.model && !this.seenTerminal.includes(job.id),
+        );
       const done = fresh.find((job) => job.status === "completed");
       if (done) {
         this.pending = null;
         useToastStore().push(`${pending.model} is ready on ${pending.hostLabel} — generating`);
-        void useGenerationStore().submitBatch(pending.request, pending.batch, pending.route)
-          .settled;
+        // The resumed submit must not fail silently — the last thing the
+        // user saw was a promise that it would generate.
+        void useGenerationStore()
+          .submitBatch(pending.request, pending.batch, pending.route)
+          .settled.then((jobs) => {
+            const failed = jobs.find((job) => job.status === "error");
+            if (failed?.error && failed.error !== "Cancelled") {
+              useToastStore().push(
+                `Resumed generation of ${pending.model} failed — ${failed.error}`,
+                "error",
+              );
+            }
+          });
         return;
       }
       const failed = fresh.find((job) => job.status !== "completed");

@@ -47,24 +47,31 @@ fn stash_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Remove oldest-by-mtime entries until at most `keep` remain.
+/// Remove oldest-by-mtime entries until at most `keep` remain. A concurrent
+/// put's mid-write `.tmp` must neither count toward the cap (it isn't an
+/// entry yet) nor be deleted out from under the writer; crash-orphaned tmps
+/// are reaped separately once they're clearly abandoned.
 fn prune_oldest(dir: &Path, keep: usize) {
+    const ORPHANED_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let meta = entry.metadata().ok()?;
-            if !meta.is_file() {
-                return None;
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tmp") {
+            if mtime.elapsed().is_ok_and(|age| age > ORPHANED_TMP_AGE) {
+                let _ = std::fs::remove_file(&path);
             }
-            Some((
-                meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                entry.path(),
-            ))
-        })
-        .collect();
+            continue;
+        }
+        files.push((mtime, path));
+    }
     if files.len() <= keep {
         return;
     }
@@ -88,10 +95,14 @@ fn stash_write(dir: &Path, sha256: &str, bytes: &[u8]) -> Result<(), String> {
     }
     let tmp = dir.join(format!("{sha256}.tmp"));
     std::fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|error| {
+    if let Err(error) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
-        error.to_string()
-    })?;
+        // Two concurrent puts of the same content race the rename; if the
+        // destination exists, the OTHER writer won and the store succeeded.
+        if !path.exists() {
+            return Err(error.to_string());
+        }
+    }
     Ok(())
 }
 
@@ -210,6 +221,32 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec![format!("{:064}", 3), format!("{:064}", 4)]);
+    }
+
+    #[test]
+    fn prune_ignores_in_flight_tmp_files_but_reaps_abandoned_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..2 {
+            let path = dir.path().join(format!("{i:064}"));
+            std::fs::write(&path, b"x").unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_000 + i, 0))
+                .unwrap();
+        }
+        // A fresh mid-write tmp: not counted toward the cap, never deleted.
+        let live_tmp = dir.path().join(format!("{}.tmp", "b".repeat(64)));
+        std::fs::write(&live_tmp, b"partial").unwrap();
+        // A crash orphan from days ago: reaped.
+        let orphan = dir.path().join(format!("{}.tmp", "c".repeat(64)));
+        std::fs::write(&orphan, b"partial").unwrap();
+        filetime::set_file_mtime(&orphan, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+
+        prune_oldest(dir.path(), 2);
+
+        assert!(live_tmp.exists(), "an in-flight tmp must survive pruning");
+        assert!(!orphan.exists(), "an abandoned tmp must be reaped");
+        // Both real entries kept — the tmps never counted toward the cap.
+        assert!(dir.path().join(format!("{:064}", 0)).exists());
+        assert!(dir.path().join(format!("{:064}", 1)).exists());
     }
 
     #[test]

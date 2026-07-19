@@ -127,3 +127,61 @@ describe("pullResume store", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 });
+
+describe("pullResume id matching (arm-race hardening)", () => {
+  const request2: GenerateRequest = { ...request };
+
+  it("matches the exact enqueued job id, immune to stale same-model history", () => {
+    setActivePinia(createPinia());
+    const downloads = useDownloadsStore();
+    // A pull of the same model completed earlier this session…
+    downloads.history = [job("old", "jibmix-flux:fp8", "completed")];
+    const store = usePullResumeStore();
+    store.arm({
+      model: "jibmix-flux:fp8",
+      jobId: "fresh-pull",
+      hostId: null,
+      hostLabel: "plato",
+      request: request2,
+      batch: 1,
+      route: null,
+    });
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) } as never);
+
+    // …its snapshot applying late must NOT trigger the resume…
+    store.check();
+    expect(submit).not.toHaveBeenCalled();
+
+    // …only the armed job id does.
+    downloads.history = [...downloads.history, job("fresh-pull", "jibmix-flux:fp8", "completed")];
+    store.check();
+    expect(submit).toHaveBeenCalledWith(request2, 1, null);
+  });
+
+  it("toasts when the RESUMED generation itself fails", async () => {
+    setActivePinia(createPinia());
+    const store = usePullResumeStore();
+    store.arm({
+      model: "jibmix-flux:fp8",
+      jobId: "j",
+      hostId: null,
+      hostLabel: "plato",
+      request: request2,
+      batch: 1,
+      route: null,
+    });
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([{ status: "error", error: "SSE request failed with HTTP 404" }]),
+    } as never);
+    useDownloadsStore().history = [job("j", "jibmix-flux:fp8", "completed")];
+    store.check();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      useToastStore().items.some((t) => t.kind === "error" && /Resumed generation/.test(t.message)),
+    ).toBe(true);
+  });
+});

@@ -66,7 +66,7 @@ import { startCatalogDownload } from "../lib/api/catalog";
 import { useDownloadsStore } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { localMediaPath, mediaPath } from "../lib/gallery/media";
-import { apiFetch, apiFetchTo } from "../lib/api/client";
+import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
 import { useGalleryStore } from "../stores/gallery";
@@ -116,23 +116,48 @@ async function pullMissingModel() {
   const route = info.route;
   const host = route ? (hosts.all.find((h) => h.id === route.hostId) ?? null) : null;
   const label = route?.label ?? hosts.primaryHost?.label ?? "this host";
+  // The primary's downloads live in the top-level bucket, not hostStates.
+  const bucketId = route && route.hostId !== "local" ? route.hostId : null;
+  const armed = {
+    model: info.model,
+    hostId: bucketId,
+    hostLabel: label,
+    request: info.request,
+    batch: info.batch,
+    route,
+  };
+  // The resume watcher is fed by this stream — a dead stream means the
+  // promise "generation starts when it's ready" could never be kept, so
+  // fail loudly instead of arming a resume that can't fire.
   try {
-    // Attach the download stream first so a near-instant cached pull still
-    // produces the terminal event the resume watcher needs.
-    await downloads.subscribe(host ?? undefined).catch(() => {});
-    await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
-    pullResume.arm({
-      model: info.model,
-      // The primary's downloads live in the top-level bucket, not hostStates.
-      hostId: route && route.hostId !== "local" ? route.hostId : null,
-      hostLabel: label,
-      request: info.request,
-      batch: info.batch,
-      route,
-    });
+    await downloads.subscribe(host ?? undefined);
+  } catch {
+    toasts.push(
+      `Couldn't watch downloads on ${label} — pull ${info.model} from the Catalog instead.`,
+      "error",
+    );
+    return;
+  }
+  try {
+    // Watch the EXACT job the server enqueues; a stale completed pull of the
+    // same model in history can then never trigger a premature resume.
+    const jobId = await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
+    pullResume.arm({ ...armed, jobId });
     toasts.push(`Pulling ${info.model} on ${label} — generation starts when it's ready`);
   } catch (err) {
-    toasts.push(String(err), "error");
+    if (err instanceof ApiError && err.status === 409) {
+      // Already downloading (another client or an earlier click) — watch by
+      // model; the running job is live, not terminal, so it can't be stale.
+      pullResume.arm({ ...armed, jobId: null });
+      toasts.push(`${info.model} is already downloading on ${label} — will generate when ready`);
+    } else if (/unknown model/i.test(String(err))) {
+      toasts.push(
+        `${label} can't pull ${info.model} by name — pull it from the Catalog there, then generate again.`,
+        "error",
+      );
+    } else {
+      toasts.push(String(err), "error");
+    }
   }
 }
 
@@ -513,7 +538,14 @@ async function generate() {
     // Gallery refresh is handled by the generation store's complete hook
     // (per-origin bucket) plus the SSE / fallback-poll paths.
   } else if (failed?.error && failed.error !== "Cancelled") {
-    if (isMissingModelError(failed.error)) {
+    // A 404 also fires on proxy/base-URL mismatches — only offer the pull
+    // when the availability snapshot doesn't CONTRADICT "model missing"
+    // (unknown availability still offers; the pull endpoint will say no).
+    const routedId = route?.hostId ?? "local";
+    const hostSaysInstalled =
+      (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
+      hostModels.installedOn(routedId).some((m) => m.name === request.model);
+    if (isMissingModelError(failed.error) && !hostSaysInstalled) {
       // The routed host doesn't have the model — offer pull-and-resume
       // instead of the raw HTTP error.
       missingModel.value = { model: request.model, route, request, batch };

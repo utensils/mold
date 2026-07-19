@@ -4,6 +4,8 @@
  * have the model: offer to pull it there and auto-resume the generation
  * (pullResume store) instead of surfacing a raw HTTP error.
  */
+import { onMounted, ref } from "vue";
+
 defineProps<{
   model: string;
   hostLabel: string;
@@ -11,6 +13,11 @@ defineProps<{
   sizeGb?: number | null;
 }>();
 const emit = defineEmits<{ (e: "confirm"): void; (e: "close"): void }>();
+
+// Move focus into the teleported overlay so Esc works immediately
+// (house pattern — matches ImagePickerModal).
+const cancelBtn = ref<HTMLButtonElement | null>(null);
+onMounted(() => cancelBtn.value?.focus());
 </script>
 
 <template>
@@ -36,6 +43,7 @@ const emit = defineEmits<{ (e: "confirm"): void; (e: "close"): void }>();
         </p>
         <div class="mt-4 flex justify-end gap-2">
           <button
+            ref="cancelBtn"
             type="button"
             class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
             data-test="missing-model-cancel"
