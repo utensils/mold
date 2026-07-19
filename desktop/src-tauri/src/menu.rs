@@ -167,6 +167,18 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
                 .build(app)?,
         )
         .separator()
+        // The webview's own context menu (the usual devtools entry point) is
+        // suppressed app-wide; this is the sanctioned way in for debugging.
+        .item(
+            &MenuItemBuilder::with_id("devtools", "Developer Tools")
+                .accelerator(if cfg!(target_os = "macos") {
+                    "Cmd+Alt+I"
+                } else {
+                    "Ctrl+Shift+I"
+                })
+                .build(app)?,
+        )
+        .separator()
         .fullscreen()
         .build()?;
 
@@ -190,6 +202,16 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
     app.on_menu_event(move |app, event| {
         let id = event.id().0.clone();
         match id.as_str() {
+            "devtools" => {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_devtools_open() {
+                        window.close_devtools();
+                    } else {
+                        window.open_devtools();
+                    }
+                }
+            }
             "help:logs" => {
                 use tauri_plugin_opener::OpenerExt;
                 let dir = mold_core::Config::load_or_default().resolved_log_dir();

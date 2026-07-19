@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   NAV_ROUTES,
+  allowsNativeContextMenu,
   allowsNativeSelectAll,
   isSelectAllChord,
   resolveShellShortcut,
@@ -139,5 +140,27 @@ describe("allowsNativeSelectAll", () => {
     region.appendChild(child);
     document.body.appendChild(region);
     expect(allowsNativeSelectAll(child)).toBe(true);
+  });
+});
+
+describe("allowsNativeContextMenu", () => {
+  it("allows only text-editing surfaces (spellcheck / paste menus)", () => {
+    expect(allowsNativeContextMenu(document.createElement("textarea"))).toBe(true);
+    for (const type of ["text", "search", "url", "tel", "email", "password", "number"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(allowsNativeContextMenu(input), type).toBe(true);
+    }
+  });
+
+  it("suppresses everywhere else — a range slider is chrome, not text", () => {
+    expect(allowsNativeContextMenu(null)).toBe(false);
+    expect(allowsNativeContextMenu(document.body)).toBe(false);
+    expect(allowsNativeContextMenu(document.createElement("div"))).toBe(false);
+    for (const type of ["checkbox", "radio", "range", "file", "button", "submit", "color"]) {
+      const input = document.createElement("input");
+      input.type = type;
+      expect(allowsNativeContextMenu(input), type).toBe(false);
+    }
   });
 });

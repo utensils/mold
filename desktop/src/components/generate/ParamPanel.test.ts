@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
 import ParamPanel from "./ParamPanel.vue";
 import ImagePickerModal from "./ImagePickerModal.vue";
@@ -7,8 +8,20 @@ import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 
 vi.mock("../../lib/api/client", () => ({
   apiJson: vi.fn(() => Promise.resolve([])),
+  apiJsonTo: vi.fn(() => Promise.resolve([])),
   apiFetch: vi.fn(),
+  apiFetchTo: vi.fn(),
 }));
+
+vi.mock("../../lib/ipc", () => ({
+  ipc: {
+    localGalleryList: vi.fn(() => Promise.resolve([])),
+    localGalleryDelete: vi.fn(),
+  },
+}));
+
+// The embedded ImagePickerModal reads the multi-host gallery store.
+beforeEach(() => setActivePinia(createPinia()));
 
 function formFor(family: string): GenerateForm {
   return reactive({ ...newGenerateForm(), family });
