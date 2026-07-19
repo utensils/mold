@@ -2197,6 +2197,75 @@ mod tests {
         );
     }
 
+    /// Plato regression: qwen-image:bf16 (≈41 GB sharded transformer) on an
+    /// idle 46 GB L40S was rejected — generic sequential peak (~44 GB with
+    /// the 2 GB flat headroom + activation) exceeded the 90% cap (~41.4 GB)
+    /// even though the denoise phase only co-resides transformer +
+    /// activations (~5 GB of real slack). The BF16 runtime drops the text
+    /// encoder before the transformer loads exactly like the GGUF one, so it
+    /// gets the same fits-in-free bypass.
+    #[test]
+    fn preflight_accepts_bf16_qwen_image_that_fits_free_vram() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mk = |name: &str, sz: u64| {
+            let p = dir.path().join(name);
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(sz * GB).unwrap();
+            p
+        };
+        let shard_a = mk("qwen-image-bf16-00001.safetensors", 21);
+        let shard_b = mk("qwen-image-bf16-00002.safetensors", 20);
+        let paths = ModelPaths {
+            transformer: shard_a.clone(),
+            transformer_shards: vec![shard_a, shard_b],
+            vae: mk("qwen-image-vae.safetensors", 1),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![mk("qwen2.5-vl.safetensors", 16)],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let hint = ActivationHint {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            dtype_bytes: 2,
+            family: ActivationFamily::QwenImageDit,
+        };
+
+        let result = preflight_memory_guard_with_available(
+            "qwen-image:bf16",
+            &paths,
+            0,
+            46 * GB,
+            Some(hint),
+        );
+        assert!(
+            result.is_ok(),
+            "BF16 Qwen-Image whose estimated peak fits free VRAM must be \
+             admitted — its runtime is phase-sequential like the GGUF path, \
+             got {result:?}"
+        );
+
+        // The bypass is a fits check, not a blank check: the same model on a
+        // 24 GB card still rejects.
+        let too_small = preflight_memory_guard_with_available(
+            "qwen-image:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+        );
+        assert!(too_small.is_err(), "24 GB must still reject a ~44 GB peak");
+    }
+
     #[test]
     fn server_load_strategy_uses_sequential_for_zimage_requests() {
         let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
@@ -2786,6 +2855,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 1.0,
             mask_image: None,
