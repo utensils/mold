@@ -1,13 +1,13 @@
-# Desktop App <Badge type="warning" text="experimental" />
+# Desktop App
 
-mold ships an experimental native macOS and Linux desktop app — a Tauri 2 shell around a
+mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
 Vue 3 + TypeScript frontend with its own **Safelight** design language, a warm,
 matte "digital darkroom" that treats every generation as a print being
 developed.
 
-::: warning Experimental
-The desktop app lives in `desktop/` and is under active development. Local
-generation uses Metal on Apple Silicon and CUDA on x86_64 Linux.
+::: info
+The desktop app lives in `desktop/`. Local generation uses Metal on Apple
+Silicon and CUDA on x86_64 Linux.
 :::
 
 ## Download
