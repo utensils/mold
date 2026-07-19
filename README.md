@@ -108,13 +108,15 @@ remain on that remote Mold server. Host details expose live resources, queue,
 downloads, and installed models, while Catalog can browse one host and send a
 pull to another without silently changing the host selected for generation.
 The app uses the same HTTP, SSE, model defaults, resolution presets, and
-generation request contract as the desktop app. Prompts can be submitted while
-other work is queued or developing, with independent status and cancellation
-for every job. Saved results stream from the host instead of crossing the
-iPhone WebView as encoded media; full-screen images swipe between prints and
-videos retain native playback controls. Internal TestFlight builds are produced
-from relevant `main` changes, with release checks that verify Tauri's embedded
-`index.html` and the opaque Mold-branded Apple icon catalog before upload.
+generation request contract as the desktop app. Generate shows the physical
+shape of every aspect-ratio choice and provides explicit Random and Fixed seed
+modes for repeatable prints. Prompts can be submitted while other work is queued
+or developing, with independent status and cancellation for every job. Saved
+results stream from the host instead of crossing the iPhone WebView as encoded
+media; full-screen images swipe between prints and videos retain native playback
+controls. Internal TestFlight builds are produced from relevant `main` changes,
+with release checks that verify Tauri's embedded `index.html` and the opaque
+Mold-branded Apple icon catalog before upload.
 
 On macOS, `nix develop` exposes `ios-dev`, `ios-run`, `ios-check`, and
 `ios-build`. Xcode, CocoaPods, and Apple signing are required for device and App

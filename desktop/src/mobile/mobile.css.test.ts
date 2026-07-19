@@ -61,9 +61,23 @@ describe("mobile safe areas", () => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const rules = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "gs"))];
       expect(
-        rules.some((rule) => /min-height:\s*44px\s*;/.test(rule[1] ?? "")),
+        rules.some((rule) => {
+          const height = rule[1]?.match(/min-height:\s*(\d+)px\s*;/)?.[1];
+          return height !== undefined && Number(height) >= 44;
+        }),
         selector,
       ).toBe(true);
     }
+  });
+
+  it("gives aspect choices a proportional visual frame inside a uniform touch tile", () => {
+    const aspects = css.match(/\.mobile-resolution-aspects\s*\{([^}]*)\}/s);
+    const choice = css.match(/\.mobile-resolution-aspect\s*\{([^}]*)\}/s);
+    const shape = css.match(/\.mobile-resolution-aspect-shape\s*\{([^}]*)\}/s);
+
+    expect(aspects?.[1]).toMatch(/display:\s*grid\s*;/);
+    expect(aspects?.[1]).toMatch(/minmax\(64px,\s*84px\)/);
+    expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
+    expect(shape?.[1]).toMatch(/border:\s*1px solid currentColor\s*;/);
   });
 });
