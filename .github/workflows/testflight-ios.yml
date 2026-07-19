@@ -22,6 +22,8 @@ env:
   APP_NAME: Mold
   APP_BUNDLE_ID: com.utensils.mold
   DEVELOPMENT_TEAM: 28X9H69QGE
+  TESTFLIGHT_GROUP_NAME: Mold Internal
+  TESTFLIGHT_TESTER_EMAIL: brink.james@gmail.com
 
 jobs:
   upload:
@@ -110,3 +112,8 @@ jobs:
           PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
           export PRIVATE_KEY
           ruby scripts/wait-for-testflight.rb "$APP_BUNDLE_ID" "$MARKETING_VERSION" "$BUNDLE_VERSION"
+      - name: Ensure internal TestFlight access
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/ensure-testflight-tester.rb
