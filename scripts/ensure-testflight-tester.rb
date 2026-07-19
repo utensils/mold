@@ -38,11 +38,10 @@ def request(method, path, body: nil)
   end
 end
 
-def json_request(method, path, body: nil, allow_conflict: false)
+def json_request(method, path, body: nil)
   response = request(method, path, body: body)
   return JSON.parse(response.body) if response.is_a?(Net::HTTPSuccess) && !response.body.empty?
   return {} if response.is_a?(Net::HTTPSuccess)
-  return {} if allow_conflict && response.code.to_i == 409
 
   raise "App Store Connect #{response.code}: #{response.body}"
 end
@@ -100,7 +99,7 @@ else
       data: {
         type: "betaGroups",
         id: group.fetch("id"),
-        attributes: { hasAccessToAllBuilds: true, feedbackEnabled: true }
+        attributes: { feedbackEnabled: true }
       }
     }
   ).fetch("data")
@@ -110,15 +109,28 @@ testers = json_request(
   Net::HTTP::Get,
   query("/v1/betaTesters", { "filter[email]" => email, "fields[betaTesters]" => "email,state", "limit" => "20" })
 ).fetch("data")
-tester = testers.find { |candidate| candidate.dig("attributes", "email")&.casecmp?(email) }
+tester = testers.find do |candidate|
+  next false unless candidate.dig("attributes", "email")&.casecmp?(email)
+
+  tester_apps = json_request(
+    Net::HTTP::Get,
+    query("/v1/betaTesters/#{candidate.fetch('id')}/relationships/apps", { "limit" => "200" })
+  ).fetch("data")
+  tester_apps.any? { |tester_app| tester_app.fetch("id") == app.fetch("id") }
+end
 
 if tester
-  json_request(
-    Net::HTTP::Post,
-    "/v1/betaGroups/#{group.fetch('id')}/relationships/betaTesters",
-    body: { data: [{ type: "betaTesters", id: tester.fetch("id") }] },
-    allow_conflict: true
-  )
+  tester_groups = json_request(
+    Net::HTTP::Get,
+    query("/v1/betaTesters/#{tester.fetch('id')}/relationships/betaGroups", { "limit" => "200" })
+  ).fetch("data")
+  unless tester_groups.any? { |tester_group| tester_group.fetch("id") == group.fetch("id") }
+    json_request(
+      Net::HTTP::Post,
+      "/v1/betaGroups/#{group.fetch('id')}/relationships/betaTesters",
+      body: { data: [{ type: "betaTesters", id: tester.fetch("id") }] }
+    )
+  end
 else
   tester = json_request(
     Net::HTTP::Post,
@@ -135,14 +147,20 @@ else
   ).fetch("data")
 end
 
-members = json_request(
-  Net::HTTP::Get,
-  query(
-    "/v1/betaGroups/#{group.fetch('id')}/betaTesters",
-    { "fields[betaTesters]" => "email,state", "limit" => "200" }
-  )
-).fetch("data")
-member = members.find { |candidate| candidate.dig("attributes", "email")&.casecmp?(email) }
+member = nil
+10.times do |attempt|
+  members = json_request(
+    Net::HTTP::Get,
+    query(
+      "/v1/betaGroups/#{group.fetch('id')}/betaTesters",
+      { "fields[betaTesters]" => "email,state", "limit" => "200" }
+    )
+  ).fetch("data")
+  member = members.find { |candidate| candidate.dig("attributes", "email")&.casecmp?(email) }
+  break if member
+
+  sleep 3 unless attempt == 9
+end
 abort "TestFlight tester #{email} was not present in #{group_name} after assignment" unless member
 
 state = member.dig("attributes", "state") || tester.dig("attributes", "state") || "assigned"
