@@ -17,6 +17,7 @@ import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
+import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
 import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
 import { modelSource } from "../lib/modelSource";
@@ -54,12 +55,16 @@ import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCy
 import { fetchHistory } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
-import type { ModelEntry, OutputMetadata } from "../lib/api/types";
+import type { GenerateRequest, ModelEntry, OutputMetadata } from "../lib/api/types";
 import {
   metadataReferencesSource,
   restoreSourceImage,
   sha256HexOfBase64,
 } from "../lib/sourceRestore";
+import { isMissingModelError } from "../lib/generateErrors";
+import { startCatalogDownload } from "../lib/api/catalog";
+import { useDownloadsStore } from "../stores/downloads";
+import { usePullResumeStore } from "../stores/pullResume";
 import { localMediaPath, mediaPath } from "../lib/gallery/media";
 import { apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
@@ -81,6 +86,55 @@ const ui = useUiStore();
 const contextMenu = useContextMenuStore();
 // Multi-host gallery — source-image restore looks prints up across hosts.
 const hostGallery = useGalleryStore();
+const downloads = useDownloadsStore();
+const pullResume = usePullResumeStore();
+
+/** A generate that 404'd (model not on the routed host) awaiting the user's
+ *  pull-and-resume decision. */
+const missingModel = ref<{
+  model: string;
+  route: HostRoute | null;
+  request: GenerateRequest;
+  batch: number;
+} | null>(null);
+
+const missingModelHostLabel = computed(
+  () => missingModel.value?.route?.label ?? hosts.primaryHost?.label ?? "this host",
+);
+/** Known weights size when the model is installed on another host. */
+const missingModelSizeGb = computed(() => {
+  const name = missingModel.value?.model;
+  if (!name) return null;
+  return installedModels.value.find((m) => m.name === name)?.size_gb ?? null;
+});
+
+/** Start the pull on the routed host and arm the auto-resume. */
+async function pullMissingModel() {
+  const info = missingModel.value;
+  if (!info) return;
+  missingModel.value = null;
+  const route = info.route;
+  const host = route ? (hosts.all.find((h) => h.id === route.hostId) ?? null) : null;
+  const label = route?.label ?? hosts.primaryHost?.label ?? "this host";
+  try {
+    // Attach the download stream first so a near-instant cached pull still
+    // produces the terminal event the resume watcher needs.
+    await downloads.subscribe(host ?? undefined).catch(() => {});
+    await startCatalogDownload(info.model, route?.target, route?.kind === "remote");
+    pullResume.arm({
+      model: info.model,
+      // The primary's downloads live in the top-level bucket, not hostStates.
+      hostId: route && route.hostId !== "local" ? route.hostId : null,
+      hostLabel: label,
+      request: info.request,
+      batch: info.batch,
+      route,
+    });
+    toasts.push(`Pulling ${info.model} on ${label} — generation starts when it's ready`);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
 
 // Store-backed so the model, prompt, and params survive navigating away and
 // back — this view unmounts on every route change.
@@ -459,7 +513,13 @@ async function generate() {
     // Gallery refresh is handled by the generation store's complete hook
     // (per-origin bucket) plus the SSE / fallback-poll paths.
   } else if (failed?.error && failed.error !== "Cancelled") {
-    toasts.push(failed.error, "error");
+    if (isMissingModelError(failed.error)) {
+      // The routed host doesn't have the model — offer pull-and-resume
+      // instead of the raw HTTP error.
+      missingModel.value = { model: request.model, route, request, batch };
+    } else {
+      toasts.push(failed.error, "error");
+    }
   }
 }
 
@@ -926,6 +986,15 @@ onBeforeUnmount(() => {
       @resize="onAsideResize"
       @commit="onAsideCommit"
       @reset="onAsideReset"
+    />
+
+    <MissingModelDialog
+      v-if="missingModel"
+      :model="missingModel.model"
+      :host-label="missingModelHostLabel"
+      :size-gb="missingModelSizeGb"
+      @confirm="pullMissingModel"
+      @close="missingModel = null"
     />
   </div>
 </template>
