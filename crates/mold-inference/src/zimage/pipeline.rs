@@ -2709,6 +2709,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 1.0,
             mask_image: None,

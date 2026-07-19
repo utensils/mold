@@ -480,6 +480,13 @@ fn build_request(
         cfg_plus: None,
         edit_images,
         source_image,
+        // Provenance label: the picked file's name, so clients (and the
+        // desktop's Reuse settings) can attempt to restore the input image.
+        source_image_name: params.source_image_path.as_ref().and_then(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+        }),
         strength,
         mask_image,
         control_image,

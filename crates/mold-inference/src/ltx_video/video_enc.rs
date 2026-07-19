@@ -33,6 +33,8 @@ impl VideoMetadata {
             generation_width: Some(self.width),
             generation_height: Some(self.height),
             strength: None,
+            source_image_name: None,
+            source_image_sha256: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Apng),
             cfg_plus: None,

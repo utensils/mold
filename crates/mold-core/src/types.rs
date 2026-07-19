@@ -295,6 +295,12 @@ pub struct GenerateRequest {
     /// Source image for img2img generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
     pub source_image: Option<Vec<u8>>,
+    /// Client-supplied provenance label for `source_image` — the gallery
+    /// filename or upload name it was picked from. Recorded into
+    /// `OutputMetadata::source_image_name` so clients can attempt to restore
+    /// the input image when reusing settings; the engine never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_image_name: Option<String>,
     /// Source images for Qwen-Image-Edit generation (raw PNG/JPEG bytes, base64-encoded in JSON).
     /// The first image is the primary edit target; additional images are reference images.
     #[serde(
@@ -615,6 +621,15 @@ pub struct OutputMetadata {
     pub generation_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strength: Option<f64>,
+    /// Provenance label of the img2img source (client-supplied filename) —
+    /// present only when the request carried a source image and a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_image_name: Option<String>,
+    /// SHA-256 (hex) of the exact `source_image` bytes used. Lets clients
+    /// look the source back up in a local stash when reusing settings —
+    /// names and hashes only, never image payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_image_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<Scheduler>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -690,6 +705,16 @@ impl OutputMetadata {
             generation_width: Some(req.width),
             generation_height: Some(req.height),
             strength: req.source_image.as_ref().map(|_| req.strength),
+            source_image_name: req
+                .source_image
+                .as_ref()
+                .and_then(|_| req.source_image_name.clone()),
+            source_image_sha256: req.source_image.as_ref().map(|bytes| {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                format!("{:x}", hasher.finalize())
+            }),
             scheduler,
             output_format: req.output_format,
             cfg_plus: req.cfg_plus,
@@ -1370,6 +1395,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -1552,6 +1578,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -1602,6 +1629,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -1649,6 +1677,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -1679,6 +1708,96 @@ mod tests {
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
         assert_eq!(metadata.version, "0.1.0");
+        // No source image → no provenance fields (and the label alone never
+        // rides without the image).
+        assert_eq!(metadata.source_image_name, None);
+        assert_eq!(metadata.source_image_sha256, None);
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(!json.contains("source_image_name"));
+        assert!(!json.contains("source_image_sha256"));
+    }
+
+    /// Reuse-settings source restore: the metadata records the client's
+    /// provenance label and the SHA-256 of the exact source bytes — names
+    /// and hashes only, never the image payload.
+    #[test]
+    fn output_metadata_records_source_image_provenance() {
+        let mut req = GenerateRequest {
+            prompt: "test".to_string(),
+            negative_prompt: None,
+            model: "flux-dev:q8".to_string(),
+            width: 1024,
+            height: 1024,
+            steps: 4,
+            guidance: 3.5,
+            seed: Some(7),
+            batch_size: 1,
+            output_format: Some(OutputFormat::Png),
+            embed_metadata: Some(true),
+            scheduler: None,
+            cfg_plus: None,
+            source_image: Some(b"fake-png-bytes".to_vec()),
+            source_image_name: Some("mold-flux-123-456.png".to_string()),
+            edit_images: None,
+            strength: 0.6,
+            mask_image: None,
+            control_image: None,
+            control_model: None,
+            control_scale: 1.0,
+            expand: None,
+            original_prompt: None,
+            lora: None,
+            frames: None,
+            fps: None,
+            upscale_model: None,
+            gif_preview: false,
+            enable_audio: None,
+            audio_file: None,
+            audio_file_path: None,
+            source_video: None,
+            source_video_path: None,
+            keyframes: None,
+            pipeline: None,
+            loras: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            placement: None,
+        };
+
+        let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(
+            metadata.source_image_name.as_deref(),
+            Some("mold-flux-123-456.png")
+        );
+        // sha256("fake-png-bytes")
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"fake-png-bytes");
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(metadata.source_image_sha256.as_deref(), Some(&expected[..]));
+        // The sha never depends on the label...
+        req.source_image_name = None;
+        let unlabeled = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
+        assert_eq!(unlabeled.source_image_name, None);
+        assert_eq!(
+            unlabeled.source_image_sha256.as_deref(),
+            Some(&expected[..])
+        );
+        // ...and both fields are additive: older metadata blobs without them
+        // still deserialize.
+        let legacy: OutputMetadata = serde_json::from_str(&{
+            let mut v: serde_json::Value = serde_json::to_value(&metadata).unwrap();
+            let obj = v.as_object_mut().unwrap();
+            obj.remove("source_image_name");
+            obj.remove("source_image_sha256");
+            serde_json::to_string(&v).unwrap()
+        })
+        .unwrap();
+        assert_eq!(legacy.source_image_name, None);
+        assert_eq!(legacy.source_image_sha256, None);
     }
 
     #[test]
@@ -1698,6 +1817,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -1745,6 +1865,7 @@ mod tests {
             scheduler: Some(Scheduler::UniPc),
             cfg_plus: None,
             source_image: Some(vec![1, 2, 3]),
+            source_image_name: None,
             edit_images: None,
             strength: 0.5,
             mask_image: None,
@@ -1795,6 +1916,7 @@ mod tests {
             scheduler: None,
             cfg_plus: Some(true),
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -2185,6 +2307,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: Some(image_bytes.clone()),
+            source_image_name: None,
             edit_images: None,
             strength: 0.5,
             mask_image: None,
@@ -2238,6 +2361,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: Some(vec![image_a.clone(), image_b.clone()]),
             strength: 0.75,
             mask_image: None,
@@ -2304,6 +2428,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -2355,6 +2480,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: None,
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: None,
@@ -2427,6 +2553,7 @@ mod tests {
             scheduler: None,
             cfg_plus: None,
             source_image: Some(source_bytes),
+            source_image_name: None,
             edit_images: None,
             strength: 0.75,
             mask_image: Some(mask_bytes.clone()),

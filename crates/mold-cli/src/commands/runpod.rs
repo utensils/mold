@@ -1587,6 +1587,7 @@ pub async fn run_run(opts: RunOptions) -> Result<()> {
         scheduler: None,
         cfg_plus: None,
         source_image: None,
+        source_image_name: None,
         edit_images: None,
         strength: 0.75,
         mask_image: None,

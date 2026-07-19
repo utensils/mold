@@ -108,6 +108,8 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         generation_width: None,
         generation_height: None,
         strength: None,
+        source_image_name: None,
+        source_image_sha256: None,
         scheduler: None,
         output_format: None,
         cfg_plus: None,

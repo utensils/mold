@@ -442,6 +442,8 @@ mod tests {
             generation_width: Some(width),
             generation_height: Some(height),
             strength: None,
+            source_image_name: None,
+            source_image_sha256: None,
             scheduler: None,
             output_format: Some(mold_core::OutputFormat::Png),
             cfg_plus: None,
