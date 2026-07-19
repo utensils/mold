@@ -17,7 +17,10 @@ import {
   newGenerateForm,
   type GenerateForm,
 } from "../lib/generateForm";
+import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
 import { normalizeRemoteAddress, remoteHostId } from "./hosts";
+import { applyMobileGalleryMetadata } from "./reuse";
+import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 
 type Tab = "generate" | "gallery" | "hosts";
 
@@ -40,7 +43,8 @@ interface DiscoveredHost {
 interface GalleryPrint extends GalleryImage {
   hostId: string;
   hostName: string;
-  mediaUrl: string;
+  target: ApiTarget;
+  thumbnailUrl: string;
 }
 
 interface PendingGalleryPrint extends GalleryImage {
@@ -59,6 +63,7 @@ const discovered = ref<DiscoveredHost[]>([]);
 const discovering = ref(false);
 const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
+const modelsHostId = ref("");
 const loadingModels = ref(false);
 const form = reactive<GenerateForm>(newGenerateForm());
 const generating = ref(false);
@@ -70,9 +75,13 @@ const galleryLoading = ref(false);
 const galleryLoadingMore = ref(false);
 const galleryError = ref("");
 const galleryRemaining = ref(0);
+const selectedPrint = ref<GalleryPrint | null>(null);
+const reusingPrint = ref(false);
+const reusePrintError = ref("");
 let generationAbort: AbortController | null = null;
 const objectUrls = new Set<string>();
 let pendingGallery: PendingGalleryPrint[] = [];
+let modelLoadEpoch = 0;
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const selectedTarget = computed<ApiTarget | null>(() => {
@@ -81,6 +90,11 @@ const selectedTarget = computed<ApiTarget | null>(() => {
 });
 const resultIsVideo = computed(() => resultFormat.value === "mp4");
 const outputFormats = computed(() => outputFormatsForFamily(form.family));
+const selectedModelAvailable = computed(
+  () =>
+    modelsHostId.value === selectedHostId.value &&
+    models.value.some((model) => model.name === form.model),
+);
 
 function loadHosts(): SavedHost[] {
   try {
@@ -161,36 +175,54 @@ async function selectHost(id: string): Promise<void> {
 }
 
 function removeHost(id: string): void {
+  const removedSelectedHost = selectedHostId.value === id;
   hosts.value = hosts.value.filter((host) => host.id !== id);
-  if (selectedHostId.value === id) selectedHostId.value = hosts.value[0]?.id ?? "";
+  if (removedSelectedHost) {
+    selectedHostId.value = hosts.value[0]?.id ?? "";
+    models.value = [];
+    modelsHostId.value = "";
+    void refreshModels();
+  }
   persistHosts();
   void invoke("keychain_delete_api_key", { hostId: id });
 }
 
-async function refreshModels(): Promise<void> {
-  const target = selectedTarget.value;
-  if (!target) return;
+async function refreshModels(): Promise<boolean> {
+  const epoch = ++modelLoadEpoch;
+  const host = selectedHost.value;
+  if (!host) {
+    models.value = [];
+    modelsHostId.value = "";
+    loadingModels.value = false;
+    return false;
+  }
+  const hostId = host.id;
+  const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
   loadingModels.value = true;
+  models.value = [];
+  modelsHostId.value = "";
   try {
     const [status, entries] = await Promise.all([
       apiJsonTo<ServerStatus>(target, "/api/status"),
       apiJsonTo<ModelEntry[]>(target, "/api/models"),
     ]);
-    const host = selectedHost.value;
-    if (host) {
-      host.online = true;
-      host.version = status.version;
-      host.hostname = status.hostname ?? undefined;
-    }
+    if (epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    host.online = true;
+    host.version = status.version;
+    host.hostname = status.hostname ?? undefined;
     models.value = entries.filter((model) => model.downloaded);
+    modelsHostId.value = hostId;
     if (!models.value.some((model) => model.name === form.model) && models.value[0]) {
       applyModelDefaults(form, models.value[0]);
     }
+    return true;
   } catch (error) {
-    if (selectedHost.value) selectedHost.value.online = false;
+    if (epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    host.online = false;
     progress.value = error instanceof Error ? error.message : String(error);
+    return false;
   } finally {
-    loadingModels.value = false;
+    if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
   }
 }
 
@@ -219,7 +251,7 @@ function revokeObjectUrl(url: string): void {
 
 async function generate(): Promise<void> {
   const target = selectedTarget.value;
-  if (!target || !form.prompt.trim() || !form.model) return;
+  if (!target || !form.prompt.trim() || !selectedModelAvailable.value) return;
   generationAbort?.abort();
   const controller = new AbortController();
   generationAbort = controller;
@@ -278,11 +310,8 @@ function stopGeneration(): void {
   progress.value = "Cancelled";
 }
 
-async function mediaUrl(target: ApiTarget, filename: string): Promise<string> {
-  const response = await apiFetchTo(
-    target,
-    `/api/gallery/thumbnail/${encodeURIComponent(filename)}`,
-  );
+async function thumbnailUrl(target: ApiTarget, filename: string): Promise<string> {
+  const response = await apiFetchTo(target, galleryMediaPath(filename, "host", true));
   const url = URL.createObjectURL(await response.blob());
   objectUrls.add(url);
   return url;
@@ -293,7 +322,7 @@ async function refreshGallery(): Promise<void> {
   galleryError.value = "";
   const prior = gallery.value;
   gallery.value = [];
-  for (const item of prior) revokeObjectUrl(item.mediaUrl);
+  for (const item of prior) revokeObjectUrl(item.thumbnailUrl);
   const results = await Promise.allSettled(
     hosts.value.map(async (host) => {
       const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
@@ -322,7 +351,8 @@ async function loadMoreGallery(): Promise<void> {
     const batch = await Promise.allSettled(
       page.slice(offset, offset + 4).map(async ({ target, ...print }) => ({
         ...print,
-        mediaUrl: await mediaUrl(target, print.filename),
+        target,
+        thumbnailUrl: await thumbnailUrl(target, print.filename),
       })),
     );
     gallery.value.push(
@@ -334,22 +364,49 @@ async function loadMoreGallery(): Promise<void> {
 }
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
-  if (selectedHostId.value !== print.hostId) {
-    selectedHostId.value = print.hostId;
-    await refreshModels();
+  if (reusingPrint.value || print.metadata_synthetic || !print.metadata.prompt?.trim()) return;
+  reusingPrint.value = true;
+  reusePrintError.value = "";
+  try {
+    if (selectedHostId.value !== print.hostId) {
+      selectedHostId.value = print.hostId;
+    }
+    if (modelsHostId.value !== print.hostId) {
+      if (!(await refreshModels())) {
+        reusePrintError.value = `Couldn’t load models from ${print.hostName}. Check the host and try again.`;
+        return;
+      }
+    }
+    if (models.value.length === 0) {
+      reusePrintError.value = `${print.hostName} has no downloaded models available.`;
+      return;
+    }
+    const reuse = applyMobileGalleryMetadata(form, print.metadata, models.value);
+    progress.value = reuse.substitutedModel
+      ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
+      : "Prompt settings restored";
+    selectedPrint.value = null;
+    tab.value = "generate";
+    void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+  } finally {
+    reusingPrint.value = false;
   }
-  const meta = print.metadata;
-  const model = models.value.find((entry) => entry.name === meta.model);
-  if (model) applyModelDefaults(form, model);
-  form.prompt = meta.prompt;
-  form.negativePrompt = meta.negative_prompt ?? "";
-  form.width = meta.generation_width ?? meta.width;
-  form.height = meta.generation_height ?? meta.height;
-  form.steps = meta.steps;
-  form.guidance = meta.guidance;
-  form.seed = String(meta.seed);
-  tab.value = "generate";
-  void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+}
+
+function openPrint(print: GalleryPrint): void {
+  reusePrintError.value = "";
+  selectedPrint.value = print;
+}
+
+function closePrint(): void {
+  if (reusingPrint.value) return;
+  reusePrintError.value = "";
+  selectedPrint.value = null;
+}
+
+function reuseSelectedPrint(): void {
+  const print = selectedPrint.value;
+  if (print) void reusePrint(print);
 }
 
 watch(selectedHostId, (id) => {
@@ -477,7 +534,7 @@ onBeforeUnmount(() => {
             v-if="!generating"
             class="primary-button"
             type="button"
-            :disabled="!form.prompt.trim() || !form.model"
+            :disabled="!form.prompt.trim() || !selectedModelAvailable"
             @click="generate"
           >
             Develop print
@@ -513,14 +570,16 @@ onBeforeUnmount(() => {
             :key="`${print.hostId}:${print.filename}`"
             class="gallery-item"
             type="button"
-            :aria-label="`Reuse settings from ${print.filename} on ${print.hostName}`"
-            @click="reusePrint(print)"
+            :aria-label="`Open ${print.filename} from ${print.hostName}`"
+            data-test="gallery-item"
+            @click="openPrint(print)"
           >
             <img
-              :src="print.mediaUrl"
+              :src="print.thumbnailUrl"
               :alt="print.metadata.prompt || print.filename"
               loading="lazy"
             />
+            <span v-if="isVideoItem(print)" class="gallery-video-badge" aria-hidden="true">▶</span>
           </button>
         </div>
         <div v-else class="empty-state">No prints found.</div>
@@ -616,11 +675,26 @@ onBeforeUnmount(() => {
       </template>
     </section>
 
+    <MobileGalleryViewer
+      v-if="selectedPrint"
+      :key="`${selectedPrint.hostId}:${selectedPrint.filename}`"
+      :item="selectedPrint"
+      :target="selectedPrint.target"
+      :cache-key="selectedPrint.hostId"
+      :host-name="selectedPrint.hostName"
+      :thumbnail-url="selectedPrint.thumbnailUrl"
+      :reusing="reusingPrint"
+      :reuse-error="reusePrintError"
+      @close="closePrint"
+      @reuse="reuseSelectedPrint"
+    />
+
     <nav class="mobile-tabs" aria-label="Primary">
       <button
         class="mobile-tab"
         type="button"
         :aria-selected="tab === 'generate'"
+        data-test="mobile-tab-generate"
         @click="tab = 'generate'"
       >
         Generate
@@ -629,6 +703,7 @@ onBeforeUnmount(() => {
         class="mobile-tab"
         type="button"
         :aria-selected="tab === 'gallery'"
+        data-test="mobile-tab-gallery"
         @click="tab = 'gallery'"
       >
         Gallery

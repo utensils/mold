@@ -3817,6 +3817,298 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gallery_media_token_endpoint_issues_scoped_streaming_credential() {
+        const MEDIA_ROUTE: &str = "/api/gallery/image/clip.mp4";
+        const TOKEN_REQUEST: &str = r#"{"path":"/api/gallery/image/clip.mp4"}"#;
+        let output_dir = tempfile::tempdir().unwrap();
+        let media_path = output_dir.path().join("clip.mp4");
+        std::fs::write(&media_path, b"0123456789").unwrap();
+        std::fs::write(output_dir.path().join("other.mp4"), b"abcdefghij").unwrap();
+
+        let config = mold_core::Config {
+            output_dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let key_set = std::sync::Arc::new(crate::auth::ApiKeySet::new_with_gallery_signing_secret(
+            keys, [0x42; 32],
+        ));
+        let auth = Some(key_set.clone());
+        let app = create_router(state)
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::auth::inject_auth_state,
+            ));
+
+        // The issuing endpoint itself still requires the normal API key.
+        let missing_key = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gallery/media-token")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(TOKEN_REQUEST))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_key.status(), StatusCode::UNAUTHORIZED);
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gallery/media-token")
+                    .header("x-api-key", "test-key")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(TOKEN_REQUEST))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let ticket = json_body(response).await;
+        assert_eq!(ticket["auth_required"], true);
+        let token = ticket["token"].as_str().unwrap();
+        let expires_at = ticket["expires_at"].as_u64().unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((before + crate::auth::GALLERY_MEDIA_TOKEN_TTL_SECS
+            ..=after + crate::auth::GALLERY_MEDIA_TOKEN_TTL_SECS)
+            .contains(&expires_at));
+        assert!(!token.contains("test-key"));
+
+        let full_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/gallery/image/clip.mp4?media_token={token}&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(full_response.status(), StatusCode::OK);
+        assert_eq!(
+            full_response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        let body = axum::body::to_bytes(full_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"0123456789");
+
+        // A browser-style Range request succeeds without X-Api-Key and keeps
+        // the existing video streaming semantics intact.
+        let range_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/gallery/image/clip.mp4?media_token={token}&expires={expires_at}"
+                    ))
+                    .header(axum::http::header::RANGE, "bytes=2-5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(range_response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            range_response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        assert_eq!(
+            range_response
+                .headers()
+                .get(axum::http::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes 2-5/10")
+        );
+        let body = axum::body::to_bytes(range_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"2345");
+
+        // Media stacks may probe with HEAD before opening a Range stream. It
+        // uses the same read-only ticket but never broadens it to other verbs.
+        let head_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri(format!(
+                        "{MEDIA_ROUTE}?media_token={token}&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head_response.status(), StatusCode::OK);
+        assert_eq!(
+            head_response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, no-store")
+        );
+        let head_body = axum::body::to_bytes(head_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(head_body.is_empty());
+
+        // Tampered and correctly signed-but-expired tickets both remain 401.
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/gallery/image/clip.mp4?media_token=invalid&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_filename = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/gallery/image/other.mp4?media_token={token}&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_filename.status(), StatusCode::UNAUTHORIZED);
+
+        let expired_at = before.saturating_sub(1);
+        let expired_token = key_set.sign_gallery_media_token_for_tests(MEDIA_ROUTE, expired_at);
+        let expired = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/gallery/image/clip.mp4?media_token={expired_token}&expires={expired_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+
+        // The ticket is scoped to GET /api/gallery/image/:filename. It cannot
+        // authenticate another API route or a destructive gallery method.
+        let wrong_path = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/status?media_token={token}&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_path.status(), StatusCode::UNAUTHORIZED);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!(
+                        "/api/gallery/image/clip.mp4?media_token={token}&expires={expires_at}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::UNAUTHORIZED);
+        assert!(media_path.is_file());
+
+        let invalid_issue_path = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gallery/media-token")
+                    .header("x-api-key", "test-key")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":"/api/status"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_issue_path.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn gallery_media_token_endpoint_reports_when_auth_is_disabled() {
+        let app = app_with_auth(None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/gallery/media-token")
+                    // Simulate a stale key retained for a host that disabled auth.
+                    .header("x-api-key", "stale-key")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"path":"/api/gallery/image/clip.mp4"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["auth_required"], false);
+        assert!(body["token"].is_null());
+        assert!(body["expires_at"].is_null());
+    }
+
+    #[tokio::test]
     async fn request_id_generated() {
         let app = app_empty().layer(axum::middleware::from_fn(
             crate::request_id::request_id_middleware,

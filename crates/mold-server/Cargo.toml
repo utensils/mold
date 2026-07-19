@@ -60,6 +60,8 @@ dirs = "5"
 futures = "0.3"
 utoipa = { version = "5", features = ["preserve_order"] }
 sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
 walkdir = "2"
 image = "0.25"
 governor = { version = "0.8", features = ["std"] }

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Extension, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -182,6 +182,7 @@ use crate::queue::clean_error_message;
         pull_model_endpoint,
         unload_model,
         delete_model,
+        create_gallery_media_token,
         server_status,
         list_queue,
         patch_queue_job,
@@ -265,6 +266,8 @@ use crate::queue::clean_error_message;
         crate::job_registry::JobEntry,
         crate::job_registry::QueueListing,
         crate::chain_limits::ChainLimits,
+        GalleryMediaTokenRequest,
+        GalleryMediaTokenResponse,
     )),
     tags(
         (name = "generation", description = "Image generation"),
@@ -338,6 +341,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/pull", post(pull_model_endpoint))
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
+        .route("/api/gallery/media-token", post(create_gallery_media_token))
         .route(
             "/api/gallery/image/:filename",
             get(get_gallery_image).delete(delete_gallery_image),
@@ -2640,6 +2644,78 @@ async fn shutdown_server(State(state): State<AppState>, request: Request) -> imp
 
 // ── /api/gallery ──────────────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GalleryMediaTokenRequest {
+    path: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GalleryMediaTokenResponse {
+    token: Option<String>,
+    expires_at: Option<u64>,
+    auth_required: bool,
+}
+
+/// Issue a short-lived credential for a browser media element.
+///
+/// The endpoint itself always uses normal `X-Api-Key` authentication. The
+/// auth middleware records only an authenticated marker in request extensions;
+/// this handler signs with an independent random per-process secret. The
+/// resulting ticket can authenticate GET, HEAD, and Range requests to
+/// `/api/gallery/image/:filename` until `expires_at` without exposing the
+/// long-lived API key in the URL or making the URL an offline API-key verifier.
+#[utoipa::path(
+    post,
+    path = "/api/gallery/media-token",
+    tag = "server",
+    request_body = GalleryMediaTokenRequest,
+    responses(
+        (status = 200, description = "Short-lived gallery media ticket", body = GalleryMediaTokenResponse),
+        (status = 401, description = "API key authentication is required"),
+        (status = 422, description = "Requested path is not a gallery media path"),
+    )
+)]
+async fn create_gallery_media_token(
+    auth_state: Option<Extension<crate::auth::AuthState>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(request): Json<GalleryMediaTokenRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !crate::auth::is_gallery_image_path(&request.path) {
+        return Err(ApiError::validation(
+            "media token path must match /api/gallery/image/:filename",
+        ));
+    }
+
+    let key_set = auth_state.and_then(|Extension(state)| state);
+    let (token, expires_at, auth_required) = match key_set {
+        Some(key_set) => {
+            let _authenticated = authenticated.ok_or_else(|| {
+                ApiError::with_code(
+                    "API key authentication is required to issue a media token",
+                    "UNAUTHORIZED",
+                    StatusCode::UNAUTHORIZED,
+                )
+            })?;
+            let (token, expires_at) = key_set.issue_gallery_media_token(&request.path);
+            (Some(token), Some(expires_at), true)
+        }
+        // Headerless servers need no ticket. Returning an explicit response
+        // lets clients with a stale saved key use the ordinary direct URL.
+        None => (None, None, false),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((
+        headers,
+        Json(GalleryMediaTokenResponse {
+            token,
+            expires_at,
+            auth_required,
+        }),
+    ))
+}
+
 /// List gallery images from the server's output directory.
 ///
 /// Prefers the SQLite metadata DB when available so listings stay fast on
@@ -2762,7 +2838,7 @@ async fn get_gallery_image(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, total_len)
-        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .header(header::CACHE_CONTROL, "private, no-store")
         .body(body)
         .unwrap())
 }
@@ -2841,7 +2917,7 @@ async fn serve_range(
         )
         // Partial content is less cacheable at intermediaries than a plain
         // 200; keep a short TTL so the client's own cache still helps.
-        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .header(header::CACHE_CONTROL, "private, no-store")
         .body(body)
         .unwrap())
 }

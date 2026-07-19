@@ -46,11 +46,14 @@ case "$ACTION" in
     ;;
   simulator)
     prepare_build
-    cargo tauri ios build --debug --target aarch64-sim --no-sign --ci "$@"
+    # Keep Tauri/Xcode's local simulator signature. A --no-sign build is only
+    # linker-signed and cannot read or write the iOS Keychain.
+    cargo tauri ios build --debug --target aarch64-sim --ci "$@"
     test -x gen/apple/build/arm64-sim/Mold.app/Mold || {
       echo "iOS simulator build did not produce Mold.app" >&2
       exit 1
     }
+    codesign --verify --deep --strict gen/apple/build/arm64-sim/Mold.app
     ;;
   build)
     prepare_build

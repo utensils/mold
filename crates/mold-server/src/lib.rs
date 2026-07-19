@@ -53,6 +53,12 @@ use state::QueueHandle;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+fn trace_request_path<B>(request: &axum::http::Request<B>) -> &str {
+    // Deliberately omit the query string: gallery media tickets are bearer
+    // credentials and must never be copied into request spans or logs.
+    request.uri().path()
+}
+
 pub async fn run_server(
     bind: &str,
     port: u16,
@@ -514,7 +520,16 @@ pub async fn run_server(
 
     let app = app
         .layer(middleware::from_fn(request_id::request_id_middleware))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::debug_span!(
+                    "http-request",
+                    method = %request.method(),
+                    path = %trace_request_path(request),
+                    version = ?request.version(),
+                )
+            },
+        ))
         .layer(cors);
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
@@ -695,6 +710,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                 .allow_origin(origin)
                 .allow_methods([
                     axum::http::Method::GET,
+                    axum::http::Method::HEAD,
                     axum::http::Method::POST,
                     axum::http::Method::DELETE,
                 ])
@@ -721,7 +737,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_cors_layer;
+    use super::{build_cors_layer, trace_request_path};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -742,5 +758,17 @@ mod tests {
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trace_path_omits_gallery_bearer_ticket_query() {
+        let request = axum::http::Request::builder()
+            .uri("/api/gallery/image/clip.mp4?media_token=secret-ticket&expires=1900")
+            .body(())
+            .unwrap();
+
+        let path = trace_request_path(&request);
+        assert_eq!(path, "/api/gallery/image/clip.mp4");
+        assert!(!path.contains("secret-ticket"));
     }
 }

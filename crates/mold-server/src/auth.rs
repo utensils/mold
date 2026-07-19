@@ -1,15 +1,25 @@
 use axum::{
     extract::Request,
-    http::{HeaderValue, StatusCode},
+    http::{HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use hmac::{Hmac, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tracing::warn;
+
+const GALLERY_MEDIA_TOKEN_CONTEXT: &[u8] = b"mold-gallery-media-v2\nGET\n";
+pub(crate) const GALLERY_MEDIA_TOKEN_TTL_SECS: u64 = 15 * 60;
+const GALLERY_SIGNING_SECRET_BYTES: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Shared auth state — `None` means authentication is disabled.
 pub type AuthState = Option<Arc<ApiKeySet>>;
@@ -17,11 +27,32 @@ pub type AuthState = Option<Arc<ApiKeySet>>;
 /// Set of valid API keys loaded from `MOLD_API_KEY`.
 pub struct ApiKeySet {
     keys: HashSet<String>,
+    gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
 }
 
 impl ApiKeySet {
     pub fn new(keys: HashSet<String>) -> Self {
-        Self { keys }
+        Self::try_new(keys).expect("OS randomness is required for gallery media authentication")
+    }
+
+    fn try_new(keys: HashSet<String>) -> Result<Self, getrandom::Error> {
+        let mut gallery_signing_secret = [0_u8; GALLERY_SIGNING_SECRET_BYTES];
+        getrandom::fill(&mut gallery_signing_secret)?;
+        Ok(Self {
+            keys,
+            gallery_signing_secret,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_gallery_signing_secret(
+        keys: HashSet<String>,
+        gallery_signing_secret: [u8; GALLERY_SIGNING_SECRET_BYTES],
+    ) -> Self {
+        Self {
+            keys,
+            gallery_signing_secret,
+        }
     }
 
     pub fn contains(&self, candidate: &str) -> bool {
@@ -34,7 +65,51 @@ impl ApiKeySet {
         }
         found.into()
     }
+
+    fn validates_gallery_media_token(
+        &self,
+        token: &str,
+        media_path: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> bool {
+        if now >= expires_at {
+            return false;
+        }
+
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(token) else {
+            return false;
+        };
+        if signature.len() != 32 {
+            return false;
+        }
+
+        let mac = gallery_media_mac(&self.gallery_signing_secret, media_path, expires_at);
+        mac.verify_slice(&signature).is_ok()
+    }
+
+    pub(crate) fn issue_gallery_media_token(&self, media_path: &str) -> (String, u64) {
+        let expires_at = unix_timestamp().saturating_add(GALLERY_MEDIA_TOKEN_TTL_SECS);
+        (
+            sign_gallery_media_token(&self.gallery_signing_secret, media_path, expires_at),
+            expires_at,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sign_gallery_media_token_for_tests(
+        &self,
+        media_path: &str,
+        expires_at: u64,
+    ) -> String {
+        sign_gallery_media_token(&self.gallery_signing_secret, media_path, expires_at)
+    }
 }
+
+/// Marker proving normal API-key authentication succeeded for this request.
+/// The matched API key itself deliberately never leaves the middleware.
+#[derive(Clone, Copy)]
+pub(crate) struct ApiKeyAuthenticated;
 
 #[derive(Debug, Serialize)]
 struct AuthError {
@@ -78,7 +153,9 @@ pub fn load_api_keys() -> anyhow::Result<AuthState> {
     }
 
     tracing::info!(num_keys = keys.len(), "API key authentication enabled");
-    Ok(Some(Arc::new(ApiKeySet { keys })))
+    let key_set = ApiKeySet::try_new(keys)
+        .map_err(|error| anyhow::anyhow!("failed to generate gallery signing secret: {error}"))?;
+    Ok(Some(Arc::new(key_set)))
 }
 
 /// Paths that are exempt from API key authentication.
@@ -86,6 +163,8 @@ const EXEMPT_PATHS: &[&str] = &["/health", "/api/docs", "/api/openapi.json"];
 
 /// Axum middleware that enforces API key authentication.
 pub async fn require_api_key(request: Request, next: Next) -> Response {
+    let mut request = request;
+
     // Auth state is stored as an extension by the layer setup in lib.rs.
     let auth_state = request.extensions().get::<AuthState>().cloned();
 
@@ -100,11 +179,29 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
 
+    // Browser media elements cannot attach an X-Api-Key header to their own
+    // streaming and Range requests. Accept a short-lived signed ticket only
+    // for GET/HEAD reads of the full-size gallery media route; all other paths and
+    // methods continue through normal API-key authentication below.
+    if is_gallery_image_read(&request) {
+        if let Some((token, expires_at)) = gallery_media_ticket_query(&request) {
+            let now = unix_timestamp();
+            if key_set.validates_gallery_media_token(token, path, expires_at, now) {
+                return next.run(request).await;
+            }
+            if request.headers().get("x-api-key").is_none() {
+                warn!(path = %path, "rejected request with invalid or expired gallery media token");
+                return unauthorized("invalid or expired gallery media token");
+            }
+        }
+    }
+
     // Check the X-Api-Key header.
     match request.headers().get("x-api-key") {
         Some(value) => {
             let candidate = value.to_str().unwrap_or("");
             if key_set.contains(candidate) {
+                request.extensions_mut().insert(ApiKeyAuthenticated);
                 next.run(request).await
             } else {
                 warn!("rejected request with invalid API key");
@@ -116,6 +213,66 @@ pub async fn require_api_key(request: Request, next: Next) -> Response {
             unauthorized("missing X-Api-Key header")
         }
     }
+}
+
+fn is_gallery_image_read(request: &Request) -> bool {
+    if request.method() != Method::GET && request.method() != Method::HEAD {
+        return false;
+    }
+
+    is_gallery_image_path(request.uri().path())
+}
+
+pub(crate) fn is_gallery_image_path(path: &str) -> bool {
+    if path.contains('?') || path.contains('#') {
+        return false;
+    }
+
+    path.strip_prefix("/api/gallery/image/")
+        .is_some_and(|filename| !filename.is_empty() && !filename.contains('/'))
+}
+
+fn gallery_media_ticket_query(request: &Request) -> Option<(&str, u64)> {
+    let mut token = None;
+    let mut expires_at = None;
+
+    for pair in request.uri().query()?.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match name {
+            "media_token" if token.is_none() => token = Some(value),
+            "expires" if expires_at.is_none() => expires_at = value.parse::<u64>().ok(),
+            // Reject duplicate credential fields instead of letting a proxy
+            // and the application disagree about which one is authoritative.
+            "media_token" | "expires" => return None,
+            _ => {}
+        }
+    }
+
+    Some((token?, expires_at?))
+}
+
+fn gallery_media_mac(signing_secret: &[u8], media_path: &str, expires_at: u64) -> HmacSha256 {
+    let mut mac =
+        HmacSha256::new_from_slice(signing_secret).expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(GALLERY_MEDIA_TOKEN_CONTEXT);
+    mac.update(media_path.as_bytes());
+    mac.update(b"\n");
+    mac.update(expires_at.to_string().as_bytes());
+    mac
+}
+
+fn sign_gallery_media_token(signing_secret: &[u8], media_path: &str, expires_at: u64) -> String {
+    let signature = gallery_media_mac(signing_secret, media_path, expires_at)
+        .finalize()
+        .into_bytes();
+    URL_SAFE_NO_PAD.encode(signature)
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn unauthorized(msg: &str) -> Response {
@@ -218,5 +375,69 @@ mod tests {
         assert!(ks.contains("correct-key"));
         assert!(!ks.contains("wrong-key"));
         assert!(!ks.contains(""));
+    }
+
+    #[test]
+    fn gallery_media_token_is_url_safe_and_valid_until_expiry() {
+        const MEDIA_PATH: &str = "/api/gallery/image/clip.mp4";
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from(["correct-key".to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let token = ks.sign_gallery_media_token_for_tests(MEDIA_PATH, 1_900);
+
+        assert_eq!(token.len(), 43);
+        assert!(token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
+        assert!(ks.validates_gallery_media_token(&token, MEDIA_PATH, 1_900, 1_000));
+        assert!(!ks.validates_gallery_media_token(&token, MEDIA_PATH, 1_900, 1_900));
+    }
+
+    #[test]
+    fn gallery_media_token_rejects_tampering_and_other_signing_secrets() {
+        const MEDIA_PATH: &str = "/api/gallery/image/clip.mp4";
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from(["correct-key".to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let token = ks.sign_gallery_media_token_for_tests(MEDIA_PATH, 1_900);
+        let mut tampered = token.clone();
+        tampered.replace_range(..1, if token.starts_with('A') { "B" } else { "A" });
+
+        assert!(!ks.validates_gallery_media_token(&tampered, MEDIA_PATH, 1_900, 1_000));
+        assert!(!ks.validates_gallery_media_token(
+            &sign_gallery_media_token(&[0x24; GALLERY_SIGNING_SECRET_BYTES], MEDIA_PATH, 1_900,),
+            MEDIA_PATH,
+            1_900,
+            1_000,
+        ));
+        assert!(!ks.validates_gallery_media_token("not+url/safe", MEDIA_PATH, 1_900, 1_000,));
+        assert!(!ks.validates_gallery_media_token(
+            &token,
+            "/api/gallery/image/other.mp4",
+            1_900,
+            1_000,
+        ));
+    }
+
+    #[test]
+    fn gallery_media_token_cannot_be_reproduced_from_a_weak_api_key() {
+        const WEAK_API_KEY: &str = "password";
+        const MEDIA_PATH: &str = "/api/gallery/image/clip.mp4";
+        let ks = ApiKeySet::new_with_gallery_signing_secret(
+            HashSet::from([WEAK_API_KEY.to_string()]),
+            [0x42; GALLERY_SIGNING_SECRET_BYTES],
+        );
+        let token = ks.sign_gallery_media_token_for_tests(MEDIA_PATH, 1_900);
+        let api_key_derived = sign_gallery_media_token(WEAK_API_KEY.as_bytes(), MEDIA_PATH, 1_900);
+        let other_process =
+            sign_gallery_media_token(&[0x24; GALLERY_SIGNING_SECRET_BYTES], MEDIA_PATH, 1_900);
+
+        assert_ne!(token, api_key_derived);
+        assert_ne!(token, other_process);
+        assert!(!ks.validates_gallery_media_token(&api_key_derived, MEDIA_PATH, 1_900, 1_000,));
+        assert!(!ks.validates_gallery_media_token(&other_process, MEDIA_PATH, 1_900, 1_000,));
+        assert!(ks.contains(WEAK_API_KEY));
     }
 }
