@@ -2915,8 +2915,8 @@ async fn serve_range(
             header::CONTENT_RANGE,
             format!("bytes {start}-{end}/{total_len}"),
         )
-        // Partial content is less cacheable at intermediaries than a plain
-        // 200; keep a short TTL so the client's own cache still helps.
+        // Gallery media may be authorized by a short-lived bearer ticket, so
+        // neither browsers nor intermediaries should retain partial responses.
         .header(header::CACHE_CONTROL, "private, no-store")
         .body(body)
         .unwrap())
