@@ -2,13 +2,34 @@ import { reactive } from "vue";
 import { defineStore } from "pinia";
 import { apiFetchTo, currentTarget, ApiError, type ApiTarget } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
+import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { useAppPrefsStore } from "./appPrefs";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
 import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
-import type { DevelopPhase } from "../lib/develop/grain";
+import {
+  applyProgress,
+  base64ToBlobUrl,
+  isCancelledError,
+  metadataOnlyResult,
+  newJob,
+  type Job,
+} from "../lib/generationJob";
+
+export {
+  applyProgress,
+  base64ToBlobUrl,
+  isCancelledError,
+  jobPhase,
+  jobProgress,
+  jobStatusCode,
+  metadataOnlyResult,
+  newJob,
+  type Job,
+  type JobStatus,
+} from "../lib/generationJob";
 
 /** Where a batch runs — mirrors `HostRoute` from the hosts store. */
 export interface JobRoute {
@@ -16,6 +37,12 @@ export interface JobRoute {
   label: string;
   kind: "local" | "remote";
   target: ApiTarget;
+  /** iPhone is remote-only and has no desktop filesystem gallery to mirror into. */
+  mirrorRemoteOutput?: boolean;
+  /** iPhone releases large base64 image/video payloads after decoding them. */
+  retainEncodedResult?: boolean;
+  /** iPhone asks the host for saved-file metadata instead of encoded media bytes. */
+  metadataOnlyCompletion?: boolean;
 }
 
 /** Filesystem-safe local filename for a saved output. */
@@ -31,153 +58,6 @@ export function suggestOutputFilename(
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return `mold-${slug}-${seed}-${nowMs}${role ? `-${role}` : ""}.${format}`;
-}
-
-export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
-
-export interface Job {
-  /** Client-side identity — stable across the job's life; keys cancel/menus. */
-  clientId: number;
-  /** Groups sibling jobs submitted together as one batch. */
-  batchId: number;
-  /** Server-assigned id from the Queued event (empty until it arrives). */
-  id: string;
-  prompt: string;
-  model: string;
-  width: number;
-  height: number;
-  /** Guidance the job was submitted with — reuse must not rewrite it. */
-  guidance: number;
-  /** Seed driving the Develop grain — requested seed or a stand-in until seed_used arrives. */
-  visualSeed: string;
-  status: JobStatus;
-  queuePosition: number | null;
-  step: number;
-  total: number;
-  stage: string | null;
-  error: string | null;
-  /** Object URL of the decoded result. */
-  resultUrl: string | null;
-  /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */
-  previewUrl: string | null;
-  result: CompleteEvent | null;
-  /** Host this job queued on; null = the primary connection. */
-  hostId: string | null;
-  hostLabel: string | null;
-  /** True when the job runs on a remote host (drives the auto local-save). */
-  remote: boolean;
-}
-
-export function newJob(req: GenerateRequest): Job {
-  return {
-    clientId: 0,
-    batchId: 0,
-    id: "",
-    prompt: req.prompt,
-    model: req.model,
-    width: req.width,
-    height: req.height,
-    guidance: req.guidance ?? 1.0,
-    visualSeed: req.seed !== undefined ? String(req.seed) : `${req.model}·${req.prompt}`,
-    status: "queued",
-    queuePosition: null,
-    step: 0,
-    total: req.steps,
-    stage: null,
-    error: null,
-    resultUrl: null,
-    previewUrl: null,
-    result: null,
-    hostId: null,
-    hostLabel: null,
-    remote: false,
-  };
-}
-
-/** Pure SSE reducer — exported for tests. Mutates and returns the job. */
-export function applyProgress(job: Job, event: ProgressEvent): Job {
-  switch (event.type) {
-    case "queued":
-      job.status = "queued";
-      job.queuePosition = event.position;
-      if (event.id) job.id = event.id;
-      break;
-    case "weight_load":
-    case "stage_start":
-      // Stages after the denoise loop (transformer drop, VAE decode, encode)
-      // are the fixer bath: the steps read N/N but the print isn't done.
-      if (job.status === "denoising" || job.status === "finishing") {
-        if (event.type === "stage_start") {
-          job.status = "finishing";
-          job.stage = event.name;
-        }
-      } else {
-        job.status = "loading";
-        job.stage = event.type === "stage_start" ? event.name : "Loading weights";
-      }
-      break;
-    case "denoise_step":
-      job.status = "denoising";
-      job.queuePosition = null;
-      job.step = event.step;
-      job.total = event.total;
-      break;
-    case "preview": {
-      job.status = "denoising";
-      job.queuePosition = null;
-      const previous = job.previewUrl;
-      job.previewUrl = base64ToBlobUrl(event.image, "image/png");
-      if (previous) URL.revokeObjectURL(previous);
-      break;
-    }
-    default:
-      break;
-  }
-  return job;
-}
-
-export function jobPhase(job: Job): DevelopPhase {
-  switch (job.status) {
-    case "complete":
-      return "fixed";
-    case "error":
-      return "stopped";
-    case "denoising":
-    case "finishing":
-      return "developing";
-    default:
-      return "latent";
-  }
-}
-
-export function jobProgress(job: Job): number {
-  if (job.status === "complete" || job.status === "finishing") return 1;
-  if (job.total <= 0) return 0;
-  return job.step / job.total;
-}
-
-/** Compact, plain-language status shared by every jobs surface. */
-export function jobStatusCode(job: Job): string {
-  switch (job.status) {
-    case "denoising":
-      return `${job.step}/${job.total}`;
-    case "finishing":
-      return "FINALIZING";
-    case "loading":
-      return "LOADING";
-    case "queued":
-      return job.queuePosition && job.queuePosition > 0 ? `QUEUED #${job.queuePosition}` : "QUEUED";
-    case "complete":
-      return "DONE";
-    case "error":
-      return job.error === "Cancelled" ? "CANCELLED" : "FAILED";
-  }
-  return "UNKNOWN";
-}
-
-export function base64ToBlobUrl(b64: string, mime: string): string {
-  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
 }
 
 /** Random 32-bit seed — small enough to stay an exact integer after `+ i`. */
@@ -284,17 +164,107 @@ const MIME: Record<string, string> = {
   mp4: "video/mp4",
 };
 
+/**
+ * Held generation SSE requests share the browser's per-origin HTTP pool with
+ * gallery reads and queue cancellation. Keep two slots per host globally —
+ * not merely per batch — so repeated Generate taps cannot starve those other
+ * requests. Later jobs remain visible as locally queued until a slot opens.
+ */
+const MAX_STREAMS_PER_TARGET = 2;
+
+interface StreamSlotWaiter {
+  signal: AbortSignal;
+  resolve: (release: (() => void) | null) => void;
+  onAbort?: () => void;
+}
+
+interface StreamSlotPool {
+  active: number;
+  waiters: StreamSlotWaiter[];
+}
+
+const streamSlotPools = new Map<string, StreamSlotPool>();
+
+function cleanStreamSlotPool(key: string, pool: StreamSlotPool): void {
+  if (pool.active === 0 && pool.waiters.length === 0) streamSlotPools.delete(key);
+}
+
+function drainStreamSlotPool(key: string, pool: StreamSlotPool): void {
+  while (pool.active < MAX_STREAMS_PER_TARGET && pool.waiters.length > 0) {
+    const waiter = pool.waiters.shift()!;
+    if (waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+    if (waiter.signal.aborted) {
+      waiter.resolve(null);
+      continue;
+    }
+
+    pool.active += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      waiter.signal.removeEventListener("abort", release);
+      pool.active -= 1;
+      drainStreamSlotPool(key, pool);
+      cleanStreamSlotPool(key, pool);
+    };
+    waiter.signal.addEventListener("abort", release, { once: true });
+    waiter.resolve(release);
+    if (waiter.signal.aborted) release();
+  }
+  cleanStreamSlotPool(key, pool);
+}
+
+function acquireStreamSlot(key: string, signal: AbortSignal): Promise<(() => void) | null> {
+  if (signal.aborted) return Promise.resolve(null);
+  let pool = streamSlotPools.get(key);
+  if (!pool) {
+    pool = { active: 0, waiters: [] };
+    streamSlotPools.set(key, pool);
+  }
+  return new Promise((resolve) => {
+    const waiter: StreamSlotWaiter = { signal, resolve };
+    waiter.onAbort = () => {
+      const index = pool.waiters.indexOf(waiter);
+      if (index >= 0) pool.waiters.splice(index, 1);
+      signal.removeEventListener("abort", waiter.onAbort!);
+      resolve(null);
+      cleanStreamSlotPool(key, pool);
+    };
+    signal.addEventListener("abort", waiter.onAbort, { once: true });
+    pool.waiters.push(waiter);
+    drainStreamSlotPool(key, pool);
+  });
+}
+
+function jobHasSettled(job: Job): boolean {
+  return job.status === "complete" || job.status === "error";
+}
+
+function resultUrlExpiry(url: string): number | null {
+  try {
+    const expires = new URL(url).searchParams.get("expires");
+    if (!expires) return null;
+    const seconds = Number(expires);
+    return Number.isSafeInteger(seconds) ? seconds * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 export const useGenerationStore = defineStore("generation", {
   state: () => ({
     /**
      * Every job of this session, submission order. The server queue is the
-     * scheduler — each job holds its own SSE stream, so submitting while
-     * another develops simply queues behind it (each job snapshots its own
-     * model + params at submit time).
+     * scheduler for submitted jobs. A small per-host stream pool keeps later
+     * jobs local until a connection slot opens, so queue/cancel/gallery HTTP
+     * requests stay responsive. Every job snapshots its model + params.
      */
     jobs: [] as Job[],
     nextClientId: 1,
     nextBatchId: 1,
+    /** Batches whose settled consumers have not yet had a microtask turn. */
+    pendingConsumerBatchIds: [] as number[],
   }),
   getters: {
     /**
@@ -355,6 +325,7 @@ export const useGenerationStore = defineStore("generation", {
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed);
       const batchId = this.nextBatchId++;
+      this.pendingConsumerBatchIds.push(batchId);
       const jobs = plans.map((plan) => {
         const job = this.startJob(plan);
         job.batchId = batchId;
@@ -362,6 +333,9 @@ export const useGenerationStore = defineStore("generation", {
           job.hostId = route.hostId;
           job.hostLabel = route.label;
           job.remote = route.kind === "remote";
+          job.mirrorRemoteOutput = route.mirrorRemoteOutput ?? true;
+          job.retainEncodedResult = route.retainEncodedResult ?? true;
+          job.metadataOnlyCompletion = route.metadataOnlyCompletion ?? false;
           targets.set(job.clientId, route.target);
         } else {
           // Unrouted = the local primary engine — its prints are already in
@@ -404,10 +378,24 @@ export const useGenerationStore = defineStore("generation", {
         // Background notification (the view toasts in the foreground).
         const failed = jobs.find((s) => s.status === "error");
         if (jobs.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
-        else if (failed?.error && failed.error !== "Cancelled") {
+        else if (failed?.error && !isCancelledError(failed.error)) {
           notifyGenerationFailed(failed.error);
         }
-        this.prune();
+        // Consumers such as the iPhone UI promote the returned result in
+        // their own promise callback. Defer housekeeping until that callback
+        // has run and protect this batch if older jobs happened to settle
+        // after newer ones.
+        setTimeout(() => {
+          this.pendingConsumerBatchIds = this.pendingConsumerBatchIds.filter(
+            (pendingBatchId) => pendingBatchId !== batchId,
+          );
+          const pendingBatches = new Set(this.pendingConsumerBatchIds);
+          this.prune(
+            12,
+            jobs.map((job) => job.clientId),
+            this.jobs.filter((job) => !pendingBatches.has(job.batchId)).map((job) => job.clientId),
+          );
+        }, 0);
         return jobs;
       });
       return { jobs, settled };
@@ -428,6 +416,7 @@ export const useGenerationStore = defineStore("generation", {
           ? (this.jobs.find((j) => j.clientId === clientId) ?? null)
           : this.active;
       if (!job || job.status === "complete" || job.status === "error") return;
+      let cancellationError: unknown = null;
       if (job.id) {
         try {
           await apiFetchTo(
@@ -436,17 +425,28 @@ export const useGenerationStore = defineStore("generation", {
             { method: "DELETE" },
           );
         } catch (err) {
-          if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) throw err;
+          if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) {
+            cancellationError = err;
+          }
         }
+      } else if (job.streamStarted) {
+        cancellationError = new Error(
+          "Remote cancellation was not confirmed before the queue ID arrived.",
+        );
       }
+      // A terminal SSE frame may win while DELETE is in flight. Preserve that
+      // authoritative outcome, even if the DELETE request itself then fails.
+      if (jobHasSettled(job)) return;
       aborts.get(job.clientId)?.abort();
       aborts.delete(job.clientId);
-      // The await above may have let the stream finish; only stamp live jobs.
-      const status = job.status as JobStatus;
-      if (status !== "complete" && status !== "error") {
-        job.status = "error";
-        job.error = "Cancelled";
+      job.status = "error";
+      if (cancellationError) {
+        // Release the local stream permit even when the host did not confirm
+        // cancellation. The server may still finish the queued work.
+        job.error = "Cancelled locally; remote cancellation was not confirmed.";
+        throw cancellationError;
       }
+      job.error = "Cancelled";
     },
     /** Single generation — a batch of one. */
     async generate(req: GenerateRequest): Promise<Job> {
@@ -454,28 +454,119 @@ export const useGenerationStore = defineStore("generation", {
       return job!;
     },
     /** Drop finished jobs beyond the most recent few, releasing their URLs. */
-    prune(keep = 12) {
-      const finished = this.jobs.filter((j) => j.status === "complete" || j.status === "error");
+    prune(
+      keep = 12,
+      preserveClientIds: number | Iterable<number> | null = null,
+      eligibleClientIds: Iterable<number> | null = null,
+    ) {
+      const preserve = new Set<number>(
+        preserveClientIds === null
+          ? []
+          : typeof preserveClientIds === "number"
+            ? [preserveClientIds]
+            : preserveClientIds,
+      );
+      const eligible = eligibleClientIds === null ? null : new Set(eligibleClientIds);
+      const finished = this.jobs.filter(
+        (job) =>
+          (job.status === "complete" || job.status === "error") &&
+          (!eligible || eligible.has(job.clientId)),
+      );
       const excess = finished.length - keep;
       if (excess <= 0) return;
-      const drop = new Set(finished.slice(0, excess).map((j) => j.clientId));
+      const drop = new Set(
+        finished
+          .filter((job) => !preserve.has(job.clientId))
+          .slice(0, excess)
+          .map((job) => job.clientId),
+      );
       for (const job of this.jobs) {
         if (!drop.has(job.clientId)) continue;
-        if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+        if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
         targets.delete(job.clientId);
       }
       this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
     },
+    /** Acquire or renew the filename-backed URL for an opted-in mobile result. */
+    async refreshRemoteResultUrl(clientId: number, force = false): Promise<void> {
+      const job = this.jobs.find((candidate) => candidate.clientId === clientId);
+      if (!job || job.status !== "complete" || !job.result) return;
+      if (job.resultUrlLoading) return;
+      if (
+        !force &&
+        job.resultUrl &&
+        (job.resultUrlExpiresAt === null || job.resultUrlExpiresAt > Date.now() + 60_000)
+      ) {
+        return;
+      }
+
+      const filename = job.result.filename;
+      const target = targets.get(job.clientId);
+      if (!filename || !target) {
+        job.resultUrl = null;
+        job.resultUrlExpiresAt = null;
+        job.resultError = !filename
+          ? "This host did not provide a saved result URL. Update the host and try again."
+          : "The result host is no longer available.";
+        throw new Error(job.resultError);
+      }
+
+      const path = galleryMediaPath(filename, "host");
+      const cacheKey = job.hostId ?? `job-${job.clientId}`;
+      // Older authenticated hosts fall back to a cached Blob URL for images.
+      // A forced retry must discard that entry first; otherwise a revoked or
+      // failed Blob is returned forever and the manual retry cannot recover.
+      if (force) evictMedia(path, cacheKey);
+
+      job.resultUrlLoading = true;
+      job.resultError = null;
+      try {
+        const url = await streamableMediaUrl(path, {
+          target,
+          cacheKey,
+          allowLegacyBlob: job.result.format !== "mp4",
+        });
+        if (
+          job.status === "complete" &&
+          this.jobs.some((candidate) => candidate.clientId === job.clientId)
+        ) {
+          const previousUrl = job.resultUrl;
+          const previousWasObjectUrl = job.resultUrlIsObjectUrl;
+          job.resultUrl = url;
+          job.resultUrlIsObjectUrl = url.startsWith("blob:");
+          job.resultUrlExpiresAt = resultUrlExpiry(url);
+          if (previousUrl && previousWasObjectUrl && previousUrl !== url) {
+            URL.revokeObjectURL(previousUrl);
+          }
+        }
+      } catch (error) {
+        if (this.jobs.some((candidate) => candidate.clientId === job.clientId)) {
+          if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
+          job.resultUrl = null;
+          job.resultUrlIsObjectUrl = false;
+          job.resultUrlExpiresAt = null;
+          job.resultError = error instanceof Error ? error.message : String(error);
+        }
+        throw error;
+      } finally {
+        job.resultUrlLoading = false;
+      }
+    },
     /** Revoke every held object URL and clear all jobs (teardown/tests). */
     resetJobs() {
       for (const job of this.jobs) {
+        if (!jobHasSettled(job)) {
+          job.status = "error";
+          job.error = "Cancelled";
+        }
         aborts.get(job.clientId)?.abort();
-        if (job.resultUrl) URL.revokeObjectURL(job.resultUrl);
+        if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
       }
       aborts.clear();
       targets.clear();
+      this.pendingConsumerBatchIds = [];
       this.jobs = [];
     },
     startJob(req: GenerateRequest): Job {
@@ -492,26 +583,57 @@ export const useGenerationStore = defineStore("generation", {
       const abort = new AbortController();
       aborts.set(job.clientId, abort);
       const target = targets.get(job.clientId);
+      const releaseStreamSlot = await acquireStreamSlot(
+        target?.baseUrl ?? "__primary__",
+        abort.signal,
+      );
+      if (!releaseStreamSlot || abort.signal.aborted || job.status === "error") {
+        releaseStreamSlot?.();
+        aborts.delete(job.clientId);
+        return;
+      }
+
+      let streamError: unknown = null;
+      job.streamStarted = true;
       await sseStream("/api/generate/stream", {
         method: "POST",
         body: req,
         signal: abort.signal,
         retry: false,
+        ...(job.metadataOnlyCompletion
+          ? { headers: { "X-Mold-SSE-Payload": "metadata-only" } }
+          : {}),
         ...(target ? { target } : {}),
         onEvent: (event, data) => {
           const current = job;
+          // Abort/reset/cancel and terminal frames are final. Some SSE
+          // implementations can still deliver already-buffered callbacks;
+          // ignoring them prevents a cancelled job from being resurrected.
+          if (abort.signal.aborted || jobHasSettled(current)) return;
           try {
             if (event === "progress") {
               applyProgress(current, JSON.parse(data) as ProgressEvent);
             } else if (event === "complete") {
               const complete = JSON.parse(data) as CompleteEvent;
-              current.result = complete;
-              current.resultUrl = base64ToBlobUrl(
-                complete.image,
-                MIME[complete.format] ?? "application/octet-stream",
-              );
+              const useSavedResult =
+                current.metadataOnlyCompletion && (!complete.image || complete.format === "mp4");
+              if (!useSavedResult) {
+                current.resultUrl = base64ToBlobUrl(
+                  complete.image,
+                  MIME[complete.format] ?? "application/octet-stream",
+                );
+                current.resultUrlIsObjectUrl = true;
+              }
+              current.result = current.retainEncodedResult
+                ? complete
+                : metadataOnlyResult(complete);
               current.visualSeed = String(complete.seed_used);
               current.status = "complete";
+              if (useSavedResult) {
+                void this.refreshRemoteResultUrl(current.clientId).catch(() => {
+                  // The reactive job carries the directed, user-visible error.
+                });
+              }
               if (current.previewUrl) {
                 URL.revokeObjectURL(current.previewUrl);
                 current.previewUrl = null;
@@ -523,7 +645,11 @@ export const useGenerationStore = defineStore("generation", {
               // makes the copy and the original one logical print in the
               // merged gallery, and the metadata gives video copies (which
               // embed nothing) their true dimensions and provenance.
-              if (current.remote && (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)) {
+              if (
+                current.remote &&
+                current.mirrorRemoteOutput &&
+                (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)
+              ) {
                 const now = Date.now();
                 const meta = complete.metadata ?? null;
                 const originalMeta =
@@ -591,26 +717,44 @@ export const useGenerationStore = defineStore("generation", {
               // bucket the user never opened.
               const originHostId = current.hostId ?? useHostsStore().primaryHost?.id ?? null;
               if (originHostId) void useGalleryStore().refreshHost(originHostId);
+              abort.abort();
             } else if (event === "error") {
               current.status = "error";
               try {
                 const parsed = JSON.parse(data) as { error?: string; message?: string };
-                current.error = parsed.error ?? parsed.message ?? data;
+                const message = parsed.error ?? parsed.message ?? data;
+                current.error = isCancelledError(message) ? "Cancelled" : message;
               } catch {
-                current.error = data;
+                current.error = isCancelledError(data) ? "Cancelled" : data;
               }
+              abort.abort();
             }
           } catch {
-            /* skip malformed frame */
+            if (current.status !== "complete" && current.status !== "error") {
+              current.status = "error";
+              current.error = "The host returned an invalid generation update.";
+              abort.abort();
+            }
           }
         },
         onClose: (err) => {
-          if (err && job.status !== "complete" && job.status !== "error") {
+          if (err && !abort.signal.aborted && !jobHasSettled(job)) {
             job.status = "error";
             job.error = err.message;
           }
         },
+      }).catch((error: unknown) => {
+        streamError = error;
       });
+      if (!abort.signal.aborted && !jobHasSettled(job)) {
+        job.status = "error";
+        job.error = streamError
+          ? streamError instanceof Error
+            ? streamError.message
+            : String(streamError)
+          : "The generation stream closed before completion.";
+      }
+      releaseStreamSlot();
       aborts.delete(job.clientId);
     },
   },

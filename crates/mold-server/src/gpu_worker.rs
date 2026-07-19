@@ -1,7 +1,7 @@
 use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
-    apply_upscale_response_to_image_generation, build_sse_complete_event, clean_error_message,
+    apply_upscale_response_to_image_generation, build_sse_completion_message, clean_error_message,
     save_generated_image_outputs, save_video_to_dir, settle_post_generation_upscale,
 };
 use crate::state::{GenerationJobResult, SseMessage};
@@ -553,14 +553,15 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
             // Discord bot silently degraded every LTX-Video / LTX-2 response
             // into an image attachment (the synthesized thumbnail PNG).
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(
+                let message = build_sse_completion_message(
                     &response,
                     &img,
                     original_img.as_ref(),
                     Some(&metadata),
                     &saved_names,
+                    job.completion_payload,
                 );
-                let _ = tx.send(SseMessage::Complete(Box::new(event)));
+                let _ = tx.send(message);
             }
 
             // Send result through oneshot.
@@ -1231,6 +1232,7 @@ mod tests {
             id: "job-upscale-test".to_string(),
             model: request.model.clone(),
             request,
+            completion_payload: crate::state::SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,

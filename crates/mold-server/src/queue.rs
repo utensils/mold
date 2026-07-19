@@ -14,7 +14,8 @@ use tokio::sync::Notify;
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
-    ActiveGenerationSnapshot, AppState, GenerationJob, GenerationJobResult, SseMessage,
+    ActiveGenerationSnapshot, AppState, GenerationJob, GenerationJobResult, SseCompletionPayload,
+    SseMessage,
 };
 
 /// Convert an inference-crate progress event to an SSE wire event.
@@ -598,8 +599,10 @@ pub(crate) fn build_sse_complete_event(
     original: Option<&mold_core::ImageData>,
     metadata: Option<&OutputMetadata>,
     saved: &SavedOutputNames,
+    payload: SseCompletionPayload,
 ) -> SseCompleteEvent {
     let b64 = base64::engine::general_purpose::STANDARD;
+    let include_media = payload == SseCompletionPayload::Full;
     // Mirror exactly what the save path records: video metadata is used
     // as-built, image metadata gets the payload's actual dimensions.
     let event_metadata = metadata.map(|meta| {
@@ -611,7 +614,11 @@ pub(crate) fn build_sse_complete_event(
     });
     if let Some(ref video) = response.video {
         SseCompleteEvent {
-            image: b64.encode(&video.data),
+            image: if include_media {
+                b64.encode(&video.data)
+            } else {
+                String::new()
+            },
             format: video.format,
             width: video.width,
             height: video.height,
@@ -623,8 +630,8 @@ pub(crate) fn build_sse_complete_event(
             model: response.model.clone(),
             video_frames: Some(video.frames),
             video_fps: Some(video.fps),
-            video_thumbnail: Some(b64.encode(&video.thumbnail)),
-            video_gif_preview: if video.gif_preview.is_empty() {
+            video_thumbnail: include_media.then(|| b64.encode(&video.thumbnail)),
+            video_gif_preview: if !include_media || video.gif_preview.is_empty() {
                 None
             } else {
                 Some(b64.encode(&video.gif_preview))
@@ -640,11 +647,17 @@ pub(crate) fn build_sse_complete_event(
         }
     } else {
         SseCompleteEvent {
-            image: b64.encode(&img.data),
+            image: if include_media {
+                b64.encode(&img.data)
+            } else {
+                String::new()
+            },
             format: img.format,
             width: img.width,
             height: img.height,
-            original_image: original.map(|image| b64.encode(&image.data)),
+            original_image: include_media
+                .then(|| original.map(|image| b64.encode(&image.data)))
+                .flatten(),
             original_width: original.map(|image| image.width),
             original_height: original.map(|image| image.height),
             seed_used: response.seed_used,
@@ -664,6 +677,25 @@ pub(crate) fn build_sse_complete_event(
             metadata: event_metadata,
         }
     }
+}
+
+pub(crate) fn build_sse_completion_message(
+    response: &mold_core::GenerateResponse,
+    img: &mold_core::ImageData,
+    original: Option<&mold_core::ImageData>,
+    metadata: Option<&OutputMetadata>,
+    saved: &SavedOutputNames,
+    payload: SseCompletionPayload,
+) -> SseMessage {
+    if payload == SseCompletionPayload::MetadataOnly && saved.output.is_none() {
+        return SseMessage::Error(SseErrorEvent {
+            message: "generation completed but the output could not be saved for streaming"
+                .to_string(),
+        });
+    }
+    SseMessage::Complete(Box::new(build_sse_complete_event(
+        response, img, original, metadata, saved, payload,
+    )))
 }
 
 /// Dispatch gate shared through `AppState`, toggled by `POST /api/queue/pause`
@@ -1225,14 +1257,15 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 
             // Send SSE complete event
             if let Some(ref tx) = job.progress_tx {
-                let event = build_sse_complete_event(
+                let message = build_sse_completion_message(
                     &response,
                     &img,
                     original_img.as_ref(),
                     Some(&metadata),
                     &saved_names,
+                    job.completion_payload,
                 );
-                let _ = tx.send(SseMessage::Complete(Box::new(event)));
+                let _ = tx.send(message);
             }
 
             // Send result through oneshot
@@ -1426,6 +1459,7 @@ async fn run_queue_dispatcher_with_tuning(
             id: job.id.clone(),
             model: model_name.clone(),
             request: job.request,
+            completion_payload: job.completion_payload,
             progress_tx: job.progress_tx,
             result_tx: job.result_tx,
             output_dir: job.output_dir,
@@ -2160,8 +2194,14 @@ mod tests {
             index: 0,
         };
 
-        let event =
-            build_sse_complete_event(&resp, &thumb_img, None, None, &SavedOutputNames::default());
+        let event = build_sse_complete_event(
+            &resp,
+            &thumb_img,
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
+        );
 
         let b64 = base64::engine::general_purpose::STANDARD;
         assert_eq!(event.image, b64.encode(&video.data));
@@ -2176,6 +2216,27 @@ mod tests {
         assert!(event.video_has_audio);
         assert_eq!(event.video_duration_ms, Some(1040));
         assert_eq!(event.gpu, Some(0));
+
+        let saved = SavedOutputNames {
+            output: Some("generated-video.mp4".to_string()),
+            original: None,
+        };
+        let metadata_only = build_sse_complete_event(
+            &resp,
+            &thumb_img,
+            None,
+            None,
+            &saved,
+            SseCompletionPayload::MetadataOnly,
+        );
+        assert!(metadata_only.image.is_empty());
+        assert!(metadata_only.video_thumbnail.is_none());
+        assert!(metadata_only.video_gif_preview.is_none());
+        assert_eq!(metadata_only.video_frames, Some(25));
+        assert_eq!(
+            metadata_only.filename.as_deref(),
+            Some("generated-video.mp4")
+        );
     }
 
     #[test]
@@ -2208,6 +2269,7 @@ mod tests {
             None,
             None,
             &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
         );
         assert!(event.video_gif_preview.is_none());
         assert!(!event.video_has_audio);
@@ -2229,6 +2291,7 @@ mod tests {
             None,
             None,
             &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
         );
         assert_eq!(event.format, OutputFormat::Png);
         assert!(event.video_frames.is_none());
@@ -2256,7 +2319,14 @@ mod tests {
             output: Some("flux-dev-q4-123.png".to_string()),
             original: Some("flux-dev-q4-123-original.png".to_string()),
         };
-        let event = build_sse_complete_event(&resp, &fake_image(), None, Some(&metadata), &saved);
+        let event = build_sse_complete_event(
+            &resp,
+            &fake_image(),
+            None,
+            Some(&metadata),
+            &saved,
+            SseCompletionPayload::Full,
+        );
         assert_eq!(event.filename.as_deref(), Some("flux-dev-q4-123.png"));
         assert_eq!(
             event.original_filename.as_deref(),
@@ -2268,6 +2338,46 @@ mod tests {
         assert_eq!(meta.seed, 5);
         assert_eq!(meta.width, fake_image().width);
         assert_eq!(meta.height, fake_image().height);
+
+        let metadata_only = build_sse_complete_event(
+            &resp,
+            &fake_image(),
+            Some(&fake_image()),
+            Some(&metadata),
+            &saved,
+            SseCompletionPayload::MetadataOnly,
+        );
+        assert!(metadata_only.image.is_empty());
+        assert!(metadata_only.original_image.is_none());
+        assert_eq!(
+            metadata_only.filename.as_deref(),
+            Some("flux-dev-q4-123.png")
+        );
+        assert!(metadata_only.metadata.is_some());
+    }
+
+    #[test]
+    fn metadata_only_completion_fails_when_the_output_was_not_saved() {
+        let response = mold_core::GenerateResponse {
+            images: vec![fake_image()],
+            video: None,
+            generation_time_ms: 100,
+            model: "flux-dev:q4".to_string(),
+            seed_used: 5,
+            gpu: None,
+        };
+        let message = build_sse_completion_message(
+            &response,
+            &fake_image(),
+            None,
+            None,
+            &SavedOutputNames::default(),
+            SseCompletionPayload::MetadataOnly,
+        );
+        match message {
+            SseMessage::Error(error) => assert!(error.message.contains("could not be saved")),
+            _ => panic!("metadata-only completion without a file must be an SSE error"),
+        }
     }
 
     #[test]
@@ -2306,6 +2416,7 @@ mod tests {
             Some(&fake_image()),
             None,
             &SavedOutputNames::default(),
+            SseCompletionPayload::Full,
         );
         assert!(event.original_image.is_some());
         assert_eq!(event.original_width, Some(512));
@@ -2489,6 +2600,7 @@ mod tests {
             id: String::new(),
             model: "busy-model".to_string(),
             request: fake_request("busy-model"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: filler_result_tx,
             output_dir: None,
@@ -2511,6 +2623,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
@@ -2558,6 +2671,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request: fake_request("flux-dev:q4"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
@@ -2636,6 +2750,7 @@ mod tests {
         BufferedJob::new(crate::state::GenerationJob {
             id: String::new(),
             request: fake_request(model),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx: tx,
             output_dir: None,
@@ -2819,6 +2934,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(model),
+                completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
@@ -2869,6 +2985,7 @@ mod tests {
             let job = GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
@@ -2970,6 +3087,7 @@ mod tests {
             let job = crate::state::GenerationJob {
                 id: String::new(),
                 request: fake_request(&format!("model-{i}")),
+                completion_payload: SseCompletionPayload::Full,
                 progress_tx: None,
                 result_tx: tx,
                 output_dir: None,
@@ -3100,6 +3218,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: String::new(),
             request,
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
@@ -3138,6 +3257,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "auto-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
@@ -3184,6 +3304,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "paused-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,
@@ -3236,6 +3357,7 @@ mod tests {
         let job = crate::state::GenerationJob {
             id: "parked-job".to_string(),
             request: fake_request("flux-dev:q4"),
+            completion_payload: SseCompletionPayload::Full,
             progress_tx: None,
             result_tx,
             output_dir: None,

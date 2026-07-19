@@ -137,6 +137,7 @@ pub struct GpuJob {
     pub id: String,
     pub model: String,
     pub request: mold_core::GenerateRequest,
+    pub completion_payload: crate::state::SseCompletionPayload,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<crate::state::GenerationJobResult, String>>,
     pub output_dir: Option<std::path::PathBuf>,

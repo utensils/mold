@@ -88,6 +88,7 @@ describe("job status labels", () => {
     expect(jobStatusCode(withStatus("complete"))).toBe("DONE");
     expect(jobStatusCode(withStatus("error", "out of memory"))).toBe("FAILED");
     expect(jobStatusCode(withStatus("error", "Cancelled"))).toBe("CANCELLED");
+    expect(jobStatusCode(withStatus("error", "generation cancelled"))).toBe("CANCELLED");
   });
 
   it("preserves queue, loading, and progress detail", () => {

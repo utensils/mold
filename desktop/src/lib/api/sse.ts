@@ -18,13 +18,16 @@ export interface StreamOptions {
   onClose?: (error: Error | null) => void;
   /** Retry transient drops (default true for GET snapshots-first streams). */
   retry?: boolean;
+  /** Additional request headers, merged with authentication and SSE defaults. */
+  headers?: HeadersInit;
   /** Explicit host; defaults to the primary connection. */
   target?: ApiTarget;
 }
 
 export async function sseStream(path: string, options: StreamOptions): Promise<void> {
   const target = options.target ?? currentTarget();
-  const headers = apiHeaders(target, { Accept: "text/event-stream" });
+  const headers = apiHeaders(target, options.headers);
+  headers.set("Accept", "text/event-stream");
   const method = options.method ?? "GET";
   let body: string | undefined;
   if (options.body !== undefined) {

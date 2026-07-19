@@ -11,6 +11,32 @@ beforeEach(() => {
 });
 
 describe("sseStream", () => {
+  it("merges caller headers with SSE defaults and host authentication", async () => {
+    fetchEventSource.mockResolvedValue(undefined);
+
+    await sseStream("/api/generate/stream", {
+      method: "POST",
+      body: { prompt: "queued print" },
+      signal: new AbortController().signal,
+      onEvent: vi.fn(),
+      headers: { "X-Mold-SSE-Payload": "metadata-only" },
+      target: { baseUrl: "http://studio:7680", apiKey: "secret" },
+    });
+
+    expect(fetchEventSource).toHaveBeenCalledWith(
+      "http://studio:7680/api/generate/stream",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Accept: "text/event-stream",
+          "Content-Type": "application/json",
+          "X-Api-Key": "secret",
+          "X-Mold-SSE-Payload": "metadata-only",
+        }),
+      }),
+    );
+  });
+
   it("reports the first successful connection only once across reconnects", async () => {
     const onOpen = vi.fn();
     fetchEventSource.mockImplementation(async (_url: string, options: { onopen: Function }) => {
