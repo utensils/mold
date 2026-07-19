@@ -10,7 +10,12 @@ import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
-import { allowsNativeSelectAll, isSelectAllChord, resolveShellShortcut } from "./lib/shortcuts";
+import {
+  allowsNativeContextMenu,
+  allowsNativeSelectAll,
+  isSelectAllChord,
+  resolveShellShortcut,
+} from "./lib/shortcuts";
 import { useAppPrefsStore } from "./stores/appPrefs";
 import { useConnectionStore } from "./stores/connection";
 import { useContextMenuStore } from "./stores/contextMenu";
@@ -145,15 +150,15 @@ async function listenForMenu() {
 }
 
 /**
- * Replace WebKit's default context menu app-wide. Editable fields keep the
- * native menu (spellcheck, paste); components open the custom menu by
- * calling useContextMenuStore().open() in their own contextmenu handlers,
- * which stops propagation before this suppressor runs.
+ * Replace WebKit's default context menu app-wide. Only text-editing fields
+ * keep the native menu (spellcheck, paste) — `allowsNativeContextMenu`
+ * excludes non-text inputs like range sliders, which previously leaked the
+ * webview's Back / Reload / Inspect Element menu. Components open the custom
+ * menu by calling useContextMenuStore().open() in their own contextmenu
+ * handlers; devtools stay reachable via View → Developer Tools.
  */
 function suppressNativeContextMenu(e: Event) {
-  const target = e.target as HTMLElement | null;
-  if (target?.closest("input, textarea, [contenteditable='true']")) return;
-  e.preventDefault();
+  if (!allowsNativeContextMenu(e.target as Element | null)) e.preventDefault();
 }
 
 /**

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import AuthedMedia from "../gallery/AuthedMedia.vue";
-import { apiFetch, apiJson } from "../../lib/api/client";
-import { mediaPath, thumbnailPath } from "../../lib/gallery/media";
+import { apiFetch, apiFetchTo } from "../../lib/api/client";
+import { galleryMediaPath, mediaPath } from "../../lib/gallery/media";
 import { blobToBase64, fileToBase64, isStillImageFile } from "../../lib/image";
 import type { PickedImage } from "../../lib/generateForm";
-import type { GalleryImage } from "../../lib/api/types";
+import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 
 const props = withDefaults(defineProps<{ open: boolean; title?: string; multiple?: boolean }>(), {
   title: "Source image",
@@ -17,8 +17,6 @@ const emit = defineEmits<{
 }>();
 
 const tab = ref<"upload" | "gallery">("upload");
-const entries = ref<GalleryImage[]>([]);
-const loading = ref(false);
 const error = ref<string | null>(null);
 const dragOver = ref(false);
 const fetched = ref(false);
@@ -27,24 +25,24 @@ const fetched = ref(false);
 const closeBtn = ref<HTMLButtonElement | null>(null);
 let restoreFocusEl: HTMLElement | null = null;
 
-async function loadGallery() {
+// The gallery tab is the same unified multi-host view as the Gallery's All
+// section: every connected host's bucket, merged and deduped by the store.
+const gallery = useGalleryStore();
+
+function loadGallery() {
   if (fetched.value) return;
   fetched.value = true;
-  loading.value = true;
-  error.value = null;
-  try {
-    const items = await apiJson<GalleryImage[]>("/api/gallery");
-    // Only PNG/JPEG are valid as source_image / mask / keyframe conditioning;
-    // hide video and animated outputs so a pick can't fail at generation time.
-    entries.value = items
-      .filter((item) => isStillImageFile(item.filename))
-      .sort((a, b) => b.timestamp - a.timestamp);
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
+  void gallery.fetchAll();
 }
+
+// Only PNG/JPEG are valid as source_image / mask / keyframe conditioning;
+// hide video and animated outputs so a pick can't fail at generation time.
+const entries = computed<MergedPrint[]>(() =>
+  gallery.merged.filter((entry) => isStillImageFile(entry.item.filename)),
+);
+const loading = computed(() => entries.value.length === 0 && !gallery.loaded);
+/** Per-tile origin labels only matter with more than one gallery source. */
+const showHostLabels = computed(() => gallery.sources.length > 1);
 
 onMounted(() => {
   if (props.open) void loadGallery();
@@ -92,11 +90,16 @@ function onDrop(event: DragEvent) {
   void ingestFiles(Array.from(event.dataTransfer?.files ?? []));
 }
 
-async function pickFromGallery(item: GalleryImage) {
+async function pickFromGallery(entry: MergedPrint) {
   try {
-    const res = await apiFetch(mediaPath(item.filename));
+    // Bytes come from the print's own origin (mirrors GalleryView's
+    // fetchItemBase64): a remote print is fetched with that host's auth, the
+    // local/primary bucket through the app's primary connection.
+    const path = mediaPath(entry.item.filename);
+    const target = gallery.targetOf(entry.sourceKey);
+    const res = await (target ? apiFetchTo(target, path) : apiFetch(path));
     const blob = await res.blob();
-    emit("pick", [{ filename: item.filename, base64: await blobToBase64(blob) }]);
+    emit("pick", [{ filename: entry.item.filename, base64: await blobToBase64(blob) }]);
     emit("close");
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -190,15 +193,33 @@ async function pickFromGallery(item: GalleryImage) {
             No prints in the gallery yet.
           </p>
           <ul v-else class="grid grid-cols-3 gap-2 sm:grid-cols-5">
-            <li v-for="item in entries" :key="item.filename">
+            <li v-for="entry in entries" :key="`${entry.sourceKey}:${entry.item.filename}`">
               <button
                 type="button"
-                class="border-edge aspect-square w-full overflow-hidden rounded-media border transition hover:brightness-110"
+                class="border-edge relative aspect-square w-full overflow-hidden rounded-media border transition hover:brightness-110"
                 data-test="picker-gallery-item"
-                :aria-label="item.filename"
-                @click="pickFromGallery(item)"
+                :aria-label="entry.item.filename"
+                @click="pickFromGallery(entry)"
               >
-                <AuthedMedia :path="thumbnailPath(item.filename)" :alt="item.filename" />
+                <AuthedMedia
+                  :path="
+                    galleryMediaPath(
+                      entry.item.filename,
+                      gallery.mediaSourceOf(entry.sourceKey),
+                      true,
+                    )
+                  "
+                  :target="gallery.targetOf(entry.sourceKey)"
+                  :cache-key="entry.sourceKey"
+                  :alt="entry.item.filename"
+                />
+                <span
+                  v-if="showHostLabels"
+                  class="edge-code absolute bottom-1 left-1 rounded-control bg-black/60 px-1 text-on-media"
+                  data-test="picker-item-host"
+                >
+                  {{ entry.hostLabel }}
+                </span>
               </button>
             </li>
           </ul>

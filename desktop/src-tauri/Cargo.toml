@@ -24,7 +24,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `devtools` keeps Inspect available in release builds — but only through the
+# explicit View → Developer Tools menu item; the webview's own context menu
+# (its usual entry point) is suppressed app-wide in App.vue.
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

@@ -60,6 +60,21 @@ export function allowsNativeSelectAll(el: Element | null): boolean {
 }
 
 /**
+ * Whether a right-click target keeps the NATIVE context menu. Only genuine
+ * text-editing surfaces qualify (spellcheck / paste); everything else — from
+ * range sliders (`<input type="range">` is an input, but chrome) to the
+ * canvas — either opens the app's own menu or nothing. The webview's default
+ * Back / Reload / Inspect Element menu must never appear.
+ */
+export function allowsNativeContextMenu(el: Element | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName?.toLowerCase();
+  if (tag === "input") return TEXT_INPUT_TYPES.has((el as HTMLInputElement).type || "text");
+  if (tag === "textarea") return true;
+  return (el as HTMLElement).isContentEditable === true;
+}
+
+/**
  * Resolve a keydown into a shell-level action, or null if unhandled. Requires
  * the platform primary modifier and no Alt. Route-scoped actions (such as
  * randomize seed) are resolved here but gated by the current route in the shell.
