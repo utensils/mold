@@ -38,10 +38,11 @@ def request(method, path, body: nil)
   end
 end
 
-def json_request(method, path, body: nil)
+def json_request(method, path, body: nil, allow_conflict: false)
   response = request(method, path, body: body)
   return JSON.parse(response.body) if response.is_a?(Net::HTTPSuccess) && !response.body.empty?
   return {} if response.is_a?(Net::HTTPSuccess)
+  return {} if allow_conflict && response.code.to_i == 409
 
   raise "App Store Connect #{response.code}: #{response.body}"
 end
@@ -128,7 +129,8 @@ if tester
     json_request(
       Net::HTTP::Post,
       "/v1/betaGroups/#{group.fetch('id')}/relationships/betaTesters",
-      body: { data: [{ type: "betaTesters", id: tester.fetch("id") }] }
+      body: { data: [{ type: "betaTesters", id: tester.fetch("id") }] },
+      allow_conflict: true
     )
   end
 else
