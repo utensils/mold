@@ -1,37 +1,10 @@
 import { defineStore } from "pinia";
-import {
-  ipc,
-  type AppSettings,
-  type Theme,
-  type ThemeFamily,
-  type UpdateChannel,
-} from "../lib/ipc";
+import { ipc, type AppSettings, type UpdateChannel } from "../lib/ipc";
 import { applyUiScale, nextUiScale, type UiScaleDirection } from "../lib/uiScale";
 import { normalizePanelWidth } from "../lib/panelResize";
+import { applyTheme, type Theme, type ThemeFamily } from "../lib/theme";
 
-/**
- * Resolve what `data-theme` should be on the root element. Pure — exported
- * for tests. `null` means "remove the attribute and let the system media
- * query drive the palette".
- */
-export function resolveThemeAttributes(
-  theme: Theme,
-  family: ThemeFamily,
-): { appearance: "light" | "dark" | null; family: ThemeFamily } {
-  return {
-    appearance: theme === "system" ? null : theme,
-    family,
-  };
-}
-
-function applyTheme(theme: Theme, family: ThemeFamily) {
-  const attrs = resolveThemeAttributes(theme, family);
-  const root = document.documentElement;
-  if (attrs.appearance === null) delete root.dataset.theme;
-  else root.dataset.theme = attrs.appearance;
-  root.dataset.themeFamily = attrs.family;
-}
-
+export { resolveThemeAttributes } from "../lib/theme";
 /**
  * App-side preferences (settings.json via IPC): theme, notifications, dock
  * badge, engine env knobs. Loaded once at boot; every update persists and

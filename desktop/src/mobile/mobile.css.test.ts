@@ -2,6 +2,19 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const css = readFileSync("src/mobile/mobile.css", "utf8");
+const mobileHtml = readFileSync("index.mobile.html", "utf8");
+
+describe("mobile viewport scaling", () => {
+  it("disables iPhone page and double-tap zoom without document gesture handlers", () => {
+    expect(mobileHtml).toMatch(/maximum-scale=1/);
+    expect(mobileHtml).toMatch(/user-scalable=no/);
+
+    const root = css.match(/html,\s*body,\s*#app\s*\{([^}]*)\}/s);
+    const content = css.match(/\.mobile-content\s*\{([^}]*)\}/s);
+    expect(root?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(content?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+  });
+});
 
 describe("mobile editable controls", () => {
   it("keeps every editable control at the iOS no-focus-zoom size", () => {
@@ -32,6 +45,17 @@ describe("mobile navigation", () => {
   it("visually marks the tab exposed as the current page", () => {
     expect(css).toMatch(/\.mobile-tab\[aria-current="page"\]\s*\{/);
     expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);
+  });
+
+  it("keeps four primary tabs and gives Settings a full-size header control", () => {
+    const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
+    const settingsControls = css.match(
+      /\.mobile-settings-button,\s*\.mobile-settings-back\s*\{([^}]*)\}/s,
+    );
+
+    expect(tabs?.[1]).toMatch(/grid-template-columns:\s*repeat\(4,\s*1fr\)\s*;/);
+    expect(settingsControls?.[1]).toMatch(/min-width:\s*44px\s*;/);
+    expect(settingsControls?.[1]).toMatch(/min-height:\s*44px\s*;/);
   });
 });
 

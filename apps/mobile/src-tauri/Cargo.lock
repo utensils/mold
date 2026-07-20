@@ -1726,6 +1726,7 @@ name = "mold-mobile"
 version = "0.18.0"
 dependencies = [
  "libc",
+ "objc2-ui-kit",
  "security-framework",
  "security-framework-sys",
  "serde",

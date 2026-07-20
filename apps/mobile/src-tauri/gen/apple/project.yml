@@ -42,6 +42,7 @@ targets:
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64]
+        UIViewControllerBasedStatusBarAppearance: true
         NSLocalNetworkUsageDescription: Mold discovers and connects to generation hosts on your local network.
         NSBonjourServices:
           - _mold._tcp

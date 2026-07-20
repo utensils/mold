@@ -137,6 +137,13 @@ function jsonResponse<T>(value: T): Response {
   return { json: () => Promise.resolve(value) } as Response;
 }
 
+function emptyDownloadSnapshot(): DownloadEvent {
+  return {
+    type: "snapshot",
+    listing: { active_jobs: [], queued: [], history: [] },
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -204,6 +211,7 @@ beforeEach(() => {
     ) => {
       streams.push(options);
       options.onOpen?.();
+      options.onEvent("download", JSON.stringify(emptyDownloadSnapshot()));
       return Promise.resolve();
     },
   );
@@ -404,7 +412,7 @@ describe("MobileCatalogView", () => {
     expect(catalog.hasAttribute("inert")).toBe(true);
   });
 
-  it("waits for the download stream to open before posting a pull", async () => {
+  it("waits for the opening download snapshot before posting a pull", async () => {
     sseStream.mockImplementation(
       (
         _path: string,
@@ -437,10 +445,274 @@ describe("MobileCatalogView", () => {
 
     streams[0]!.onOpen?.();
     await flushPromises();
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(wrapper.get("[data-test='mobile-catalog-action-status']").text()).toContain(
+      "Connecting to downloads on Studio",
+    );
+
+    streams[0]!.onEvent("download", JSON.stringify(emptyDownloadSnapshot()));
+    await flushPromises();
     expect(startCatalogDownload).toHaveBeenCalledWith("hf:Catalog model", targets.studio, false);
     expect(wrapper.get("[data-test='mobile-catalog-action-status']").text()).toContain(
       "Pulling Catalog model on Studio",
     );
+  });
+
+  it("keeps a pull button busy until SSE adopts the job and then shows live progress", async () => {
+    const start = deferred<string | null>();
+    startCatalogDownload.mockReturnValue(start.promise);
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("repo", {
+          id: "hf:owner/repo",
+          source_id: "owner/repo",
+        }),
+      ]),
+    );
+    sseStream.mockImplementation(
+      (
+        _path: string,
+        options: {
+          target: ApiTarget;
+          signal: AbortSignal;
+          onOpen?: () => void;
+          onOpenError?: (error: Error) => void;
+          onClose?: (error: Error | null) => void;
+          onEvent: (event: string, data: string) => void;
+        },
+      ) => {
+        streams.push(options);
+        return Promise.resolve();
+      },
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const catalogCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("repo"))!;
+    const pullButton = catalogCard.get(".mobile-catalog-pull");
+    await pullButton.trigger("click");
+    expect(pullButton.text()).toBe("Connecting…");
+    expect((pullButton.element as HTMLButtonElement).disabled).toBe(true);
+
+    streams[0]!.onOpen?.();
+    await flushPromises();
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(pullButton.text()).toBe("Connecting…");
+
+    streams[0]!.onEvent("download", JSON.stringify(emptyDownloadSnapshot()));
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+    expect(pullButton.text()).toBe("Starting…");
+
+    // Even a programmatic second action is ignored while the POST is in flight.
+    (pullButton.element as HTMLButtonElement).click();
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+
+    start.resolve("download-1");
+    await flushPromises();
+    expect(pullButton.text()).toBe("Starting…");
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "download-1",
+        model: "owner/repo",
+        position: 0,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(pullButton.text()).toBe("Queued");
+    expect(wrapper.findAll("[data-test='mobile-catalog-download']")).toHaveLength(1);
+
+    // Duplicate stream deltas must not add another download row or action.
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "download-1",
+        model: "owner/repo",
+        position: 0,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(wrapper.findAll("[data-test='mobile-catalog-download']")).toHaveLength(1);
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({ type: "started", id: "download-1", files_total: 2, bytes_total: 3 }),
+    );
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "download-1",
+        files_done: 0,
+        bytes_done: 1,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(pullButton.text()).toBe("Pulling 33%");
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "download-1",
+        files_done: 2,
+        bytes_done: 4,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(pullButton.text()).toBe("Pulling 100%");
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({ type: "job_failed", id: "download-1", error: "disk full" }),
+    );
+    await flushPromises();
+    expect(pullButton.text()).toContain("Pull");
+    expect((pullButton.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("does not POST when an asynchronous opening snapshot adopts an existing pull", async () => {
+    sseStream.mockImplementation(
+      (
+        _path: string,
+        options: {
+          target: ApiTarget;
+          signal: AbortSignal;
+          onOpen?: () => void;
+          onOpenError?: (error: Error) => void;
+          onClose?: (error: Error | null) => void;
+          onEvent: (event: string, data: string) => void;
+        },
+      ) => {
+        streams.push(options);
+        return Promise.resolve();
+      },
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const pullButton = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Catalog model"))!
+      .get(".mobile-catalog-pull");
+    await pullButton.trigger("click");
+    streams[0]!.onOpen?.();
+    // Drain the transport-open continuation before delivering the opening
+    // snapshot. Resolving readiness from `onOpen` would POST at this point.
+    await flushPromises();
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(pullButton.text()).toBe("Connecting…");
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: {
+          active_jobs: [
+            {
+              id: "existing-pull",
+              model: "Catalog model",
+              catalog_id: "hf:Catalog model",
+              status: "active",
+              files_done: 0,
+              files_total: 1,
+              bytes_done: 20,
+              bytes_total: 100,
+            },
+          ],
+          queued: [],
+          history: [],
+        },
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+
+    expect(startCatalogDownload).not.toHaveBeenCalled();
+    expect(pullButton.text()).toBe("Pulling 20%");
+    expect(wrapper.findAll("[data-test='mobile-catalog-download']")).toHaveLength(1);
+  });
+
+  it("shows per-host pull state in the card, detail, and host picker", async () => {
+    const start = deferred<string | null>();
+    startCatalogDownload.mockReturnValue(start.promise);
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const catalogCard = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Catalog model"))!;
+    await catalogCard.get(".mobile-catalog-pull").trigger("click");
+    await flushPromises();
+    let targetButtons = document.querySelectorAll<HTMLButtonElement>(
+      ".mobile-catalog-target-list button",
+    );
+    targetButtons[1]!.click();
+    await flushPromises();
+
+    expect(catalogCard.get(".mobile-catalog-pull").text()).toBe("Starting…");
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+
+    // Reopening the picker makes the chosen host's duplicate-safe state explicit.
+    await catalogCard.get(".mobile-catalog-pull").trigger("click");
+    await flushPromises();
+    targetButtons = document.querySelectorAll<HTMLButtonElement>(
+      ".mobile-catalog-target-list button",
+    );
+    expect(targetButtons[0]!.disabled).toBe(false);
+    expect(targetButtons[1]!.disabled).toBe(true);
+    expect(targetButtons[1]!.textContent).toContain("Starting…");
+    targetButtons[1]!.click();
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+
+    start.resolve("download-render");
+    await flushPromises();
+    streams[1]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "download-render",
+        model: "Catalog model",
+        position: 0,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(targetButtons[1]!.textContent).toContain("Queued");
+
+    document.querySelector<HTMLButtonElement>("[aria-label='Close host picker']")!.click();
+    await catalogCard.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    const detailAction = document.querySelector<HTMLButtonElement>(
+      ".mobile-catalog-detail-action button",
+    )!;
+    expect(detailAction.textContent).toContain("Queued");
+
+    streams[1]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "started",
+        id: "download-render",
+        files_total: 2,
+        bytes_total: 100,
+      } satisfies DownloadEvent),
+    );
+    streams[1]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "download-render",
+        files_done: 1,
+        bytes_done: 60,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+    expect(detailAction.textContent).toContain("Pulling 60%");
+    expect(catalogCard.get(".mobile-catalog-pull").text()).toBe("Pulling 60%");
   });
 
   it("shows a visible error and does not POST when the download stream cannot open", async () => {

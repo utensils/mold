@@ -7,6 +7,9 @@ import type {
   RunPodPod,
 } from "./runpod";
 import type { GalleryImage, OutputMetadata } from "./api/types";
+import type { Theme, ThemeFamily } from "./theme";
+
+export type { Theme, ThemeFamily } from "./theme";
 
 /**
  * Typed wrappers around Tauri IPC. In a plain browser (`bun run dev` /
@@ -27,8 +30,6 @@ export interface LocalServerInfo {
   port: number;
 }
 
-export type Theme = "system" | "dark" | "light";
-export type ThemeFamily = "safelight" | "mold";
 export type UpdateChannel = "stable" | "nightly";
 
 export interface UpdateCandidate {
