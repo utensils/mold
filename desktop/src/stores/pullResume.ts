@@ -14,6 +14,7 @@ import { useGenerationStore } from "./generation";
 import { useToastStore } from "./toasts";
 import type { HostRoute } from "./hosts";
 import type { DownloadJob, GenerateRequest } from "../lib/api/types";
+import type { ChainRoutingDecision } from "../lib/chainRouting";
 
 export interface PendingResume {
   model: string;
@@ -27,6 +28,8 @@ export interface PendingResume {
   request: GenerateRequest;
   batch: number;
   route: HostRoute | null;
+  /** Preserve automatic long-video endpoint selection across the pull. */
+  chainRouting?: ChainRoutingDecision | null;
 }
 
 const isTerminal = (job: DownloadJob) =>
@@ -80,7 +83,7 @@ export const usePullResumeStore = defineStore("pullResume", {
         // The resumed submit must not fail silently — the last thing the
         // user saw was a promise that it would generate.
         void useGenerationStore()
-          .submitBatch(pending.request, pending.batch, pending.route)
+          .submitBatch(pending.request, pending.batch, pending.route, pending.chainRouting ?? null)
           .settled.then((jobs) => {
             const failed = jobs.find((job) => job.status === "error");
             if (failed?.error && failed.error !== "Cancelled") {

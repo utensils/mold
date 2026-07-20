@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MOTION_TAIL,
   LTX2_DISTILLED_CLIP_CAP,
+  MAX_CHAIN_STAGES,
   decideChainRouting,
+  decideGenerateRequestRouting,
 } from "./chainRouting";
 
 describe("decideChainRouting", () => {
@@ -107,6 +109,38 @@ describe("decideChainRouting", () => {
   it("rejects when motion tail is >= clip frames (only relevant for ltx2 chains)", () => {
     const d = decideChainRouting(200, "ltx2", "ltx-2.3-22b-distilled:fp8", 97);
     expect(d.kind).toBe("reject");
+  });
+
+  it("enforces the server's sixteen-stage chain ceiling", () => {
+    expect(
+      decideChainRouting(1297, "ltx2", "ltx-2-19b-distilled:fp8"),
+    ).toMatchObject({
+      kind: "chain",
+      stageCount: MAX_CHAIN_STAGES,
+    });
+    expect(
+      decideChainRouting(1305, "ltx2", "ltx-2-19b-distilled:fp8"),
+    ).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("at most 1297 frames"),
+    });
+  });
+
+  it("keeps temporal x2 on ordinary generation through its 257-frame limit", () => {
+    const request = {
+      model: "ltx-2-19b:fp8",
+      frames: 257,
+      temporal_upscale: "x2" as const,
+    };
+    expect(decideGenerateRequestRouting(request, "ltx2")).toEqual({
+      kind: "single",
+    });
+    expect(
+      decideGenerateRequestRouting({ ...request, frames: 265 }, "ltx2"),
+    ).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("at most 257 frames"),
+    });
   });
 
   it("returns single when family is missing", () => {

@@ -8,6 +8,7 @@
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::sse::{Event as SseEvent, KeepAlive, Sse},
     Json,
 };
@@ -17,15 +18,15 @@ use mold_core::chain::{
     SseChainCompleteEvent,
 };
 use mold_core::chain_job::{settled, ChainJobEvent, ChainJobState};
-use mold_core::{OutputFormat, VideoData};
+use mold_core::{OutputFormat, OutputMetadata, VideoData};
 use mold_db::MetadataDb;
 use std::convert::Infallible;
 use tokio_stream::StreamExt as _;
 
 use crate::chain_job_runner::{ChainJobRunnerHandle, EphemeralClaimGuard};
 use crate::queue::save_video_to_dir;
-use crate::routes::ApiError;
-use crate::state::AppState;
+use crate::routes::{requested_sse_completion_payload, ApiError};
+use crate::state::{AppState, SseCompletionPayload};
 
 /// Internal wire event used by the chain SSE stream before per-event
 /// serialization. Separate from [`crate::state::SseMessage`] because chain
@@ -112,6 +113,15 @@ struct ShimJob {
     job_id: String,
     original_format: OutputFormat,
     guard: EphemeralClaimGuard,
+}
+
+/// Internal result from assembling a legacy shim response. `response` keeps
+/// the synchronous endpoint's historical wire shape, while the additive
+/// gallery provenance is available to the SSE completion builder.
+struct ShimBuildResult {
+    response: ChainResponse,
+    filename: Option<String>,
+    metadata: Option<OutputMetadata>,
 }
 
 /// Subscribe FIRST (subscribe requires &MetadataDb — R2 signature), then
@@ -207,7 +217,7 @@ fn shim_chain_failure(
 fn shim_build_response_and_cleanup(
     state: &AppState,
     shim: ShimJob,
-) -> Result<ChainResponse, ApiError> {
+) -> Result<ShimBuildResult, ApiError> {
     let handle = state.chain_jobs.as_ref().ok_or_else(|| {
         ApiError::with_code(
             "durable chain jobs are unavailable because the metadata DB is disabled",
@@ -292,9 +302,9 @@ fn shim_build_response_and_cleanup(
             Some(config.effective_output_dir())
         }
     };
-    if let Some(dir) = output_dir {
+    let (filename, output_metadata) = if let Some(dir) = output_dir {
         let metadata = req.stitched_output_metadata(actual_format, frame_count);
-        save_video_to_dir(
+        let filename = save_video_to_dir(
             &dir,
             &bytes,
             &gif_preview,
@@ -305,7 +315,10 @@ fn shim_build_response_and_cleanup(
             Some(db),
             Some(&state.events),
         );
-    }
+        (filename, Some(metadata))
+    } else {
+        (None, None)
+    };
 
     let video = VideoData {
         data: bytes,
@@ -348,7 +361,11 @@ fn shim_build_response_and_cleanup(
     })?;
     handle.cleanup_deleted(&shim.job_id);
     handle.remove_job_lock(&shim.job_id);
-    Ok(response)
+    Ok(ShimBuildResult {
+        response,
+        filename,
+        metadata: output_metadata,
+    })
 }
 
 /// Legacy event mapping for the streaming shim: ChainJobEvent → Option of
@@ -448,24 +465,31 @@ fn chain_thumbnail(frames: &[image::RgbImage]) -> Vec<u8> {
 /// chain-specific payload can evolve independently from the single-shot
 /// one.
 fn build_sse_chain_complete_event(
-    resp: &ChainResponse,
+    result: &ShimBuildResult,
     generation_time_ms: u64,
+    payload: SseCompletionPayload,
 ) -> SseChainCompleteEvent {
     let b64 = base64::engine::general_purpose::STANDARD;
+    let resp = &result.response;
     let video = &resp.video;
+    let include_media = payload == SseCompletionPayload::Full;
     SseChainCompleteEvent {
-        video: b64.encode(&video.data),
+        video: if include_media {
+            b64.encode(&video.data)
+        } else {
+            String::new()
+        },
         format: video.format,
         width: video.width,
         height: video.height,
         frames: video.frames,
         fps: video.fps,
-        thumbnail: if video.thumbnail.is_empty() {
+        thumbnail: if !include_media || video.thumbnail.is_empty() {
             None
         } else {
             Some(b64.encode(&video.thumbnail))
         },
-        gif_preview: if video.gif_preview.is_empty() {
+        gif_preview: if !include_media || video.gif_preview.is_empty() {
             None
         } else {
             Some(b64.encode(&video.gif_preview))
@@ -479,6 +503,8 @@ fn build_sse_chain_complete_event(
         generation_time_ms: Some(generation_time_ms),
         script: resp.script.clone(),
         vram_estimate: resp.vram_estimate.clone(),
+        filename: result.filename.clone(),
+        metadata: result.metadata.clone().map(Box::new),
     }
 }
 
@@ -613,7 +639,7 @@ pub async fn generate_chain(
     })
     .await
     {
-        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Ok(result)) => Json(result.response).into_response(),
         Ok(Err(api_err)) => api_err.into_response(),
         Err(err) => ApiError::internal(format!("legacy chain shim response task failed: {err}"))
             .into_response(),
@@ -630,6 +656,11 @@ pub async fn generate_chain(
     path = "/api/generate/chain/stream",
     tag = "generation",
     request_body = mold_core::ChainRequest,
+    params((
+        "X-Mold-SSE-Payload" = Option<String>,
+        Header,
+        description = "Set to metadata-only to omit encoded media and return the saved gallery filename"
+    )),
     responses(
         (status = 200, description = "SSE event stream with chain progress and completion"),
         (status = 422, description = "Invalid request or unsupported model"),
@@ -638,8 +669,17 @@ pub async fn generate_chain(
 )]
 pub async fn generate_chain_stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    let completion_payload = requested_sse_completion_payload(&headers)?;
+    if completion_payload == SseCompletionPayload::MetadataOnly
+        && state.config.read().await.is_output_disabled()
+    {
+        return Err(ApiError::validation(
+            "metadata-only SSE completions require server gallery output to be enabled",
+        ));
+    }
     let shim = shim_start_job(&state, req).await?;
     tracing::info!(job_id = %shim.job_id, "generate/chain/stream legacy shim request");
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChainSseMessage>();
@@ -782,9 +822,22 @@ pub async fn generate_chain_stream(
         })
         .await
         {
-            Ok(Ok(response)) => {
-                let complete = build_sse_chain_complete_event(&response, generation_time_ms);
-                let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
+            Ok(Ok(result)) => {
+                if completion_payload == SseCompletionPayload::MetadataOnly
+                    && result.filename.is_none()
+                {
+                    let _ = tx_for_task.send(ChainSseMessage::Error(
+                        "chain generation completed but the output could not be saved for streaming"
+                            .to_string(),
+                    ));
+                } else {
+                    let complete = build_sse_chain_complete_event(
+                        &result,
+                        generation_time_ms,
+                        completion_payload,
+                    );
+                    let _ = tx_for_task.send(ChainSseMessage::Complete(Box::new(complete)));
+                }
             }
             Ok(Err(api_err)) => {
                 let _ = tx_for_task.send(ChainSseMessage::Error(api_err.error));
@@ -931,6 +984,34 @@ mod tests {
             match &self.previous {
                 Some(value) => std::env::set_var("MOLD_HOME", value),
                 None => std::env::remove_var("MOLD_HOME"),
+            }
+        }
+    }
+
+    struct OutputDirEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl OutputDirEnvGuard {
+        fn disable() -> Self {
+            let lock = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os("MOLD_OUTPUT_DIR");
+            std::env::set_var("MOLD_OUTPUT_DIR", "");
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for OutputDirEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("MOLD_OUTPUT_DIR", value),
+                None => std::env::remove_var("MOLD_OUTPUT_DIR"),
             }
         }
     }
@@ -1164,7 +1245,7 @@ mod tests {
         let guard = handle.claim_ephemeral(&row.id);
         let state = state_with_db_and_handle(db, handle, &output_dir);
 
-        let response = shim_build_response_and_cleanup(
+        let result = shim_build_response_and_cleanup(
             &state,
             ShimJob {
                 job_id: row.id.clone(),
@@ -1173,6 +1254,7 @@ mod tests {
             },
         )
         .unwrap();
+        let response = &result.response;
 
         assert_eq!(response.video.format, OutputFormat::Mp4);
         assert_eq!(response.video.data, expected_final_bytes);
@@ -1186,7 +1268,7 @@ mod tests {
             serde_json::to_value(&response.script).unwrap(),
             serde_json::to_value(ChainScript::from(&request)).unwrap()
         );
-        let complete = build_sse_chain_complete_event(&response, 33);
+        let complete = build_sse_chain_complete_event(&result, 33, SseCompletionPayload::Full);
         assert_eq!(complete.generation_time_ms, Some(33));
         let db = state.metadata_db.as_ref().as_ref().unwrap();
         let rows = db.list(Some(&output_dir)).unwrap();
@@ -1220,7 +1302,7 @@ mod tests {
         let guard = handle.claim_ephemeral(&row.id);
         let state = state_with_db_and_handle(db, handle, &output_dir);
 
-        let response = shim_build_response_and_cleanup(
+        let result = shim_build_response_and_cleanup(
             &state,
             ShimJob {
                 job_id: row.id.clone(),
@@ -1229,6 +1311,7 @@ mod tests {
             },
         )
         .unwrap();
+        let response = &result.response;
 
         assert_eq!(response.video.format, OutputFormat::Apng);
         assert_decodable_apng(&response.video.data);
@@ -1315,6 +1398,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_chain_stream_rejects_invalid_completion_payload_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mold-sse-payload", "compact".parse().unwrap());
+
+        let result = generate_chain_stream(
+            State(AppState::for_tests()),
+            headers,
+            Json(req(OutputFormat::Mp4)),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("invalid completion payload header must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "VALIDATION_ERROR");
+        assert_eq!(
+            error.error,
+            "X-Mold-SSE-Payload must be 'metadata-only' when provided"
+        );
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_only_chain_stream_rejects_disabled_gallery_before_job_creation() {
+        let _output_guard = OutputDirEnvGuard::disable();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let mut state = AppState::for_tests();
+        state.config = Arc::new(tokio::sync::RwLock::new(mold_core::Config {
+            output_dir: Some(String::new()),
+            ..Default::default()
+        }));
+        state.metadata_db = Arc::new(Some(db));
+        state.chain_jobs = Some(handle);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mold-sse-payload", "metadata-only".parse().unwrap());
+
+        let result =
+            generate_chain_stream(State(state.clone()), headers, Json(req(OutputFormat::Mp4)))
+                .await;
+        let error = match result {
+            Ok(_) => panic!("metadata-only completion requires gallery output"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "VALIDATION_ERROR");
+        assert_eq!(
+            error.error,
+            "metadata-only SSE completions require server gallery output to be enabled"
+        );
+        assert!(
+            chain_jobs::list_jobs(state.metadata_db.as_ref().as_ref().unwrap())
+                .unwrap()
+                .is_empty(),
+            "rejection must happen before the shim creates or schedules a job"
+        );
+    }
+
+    #[tokio::test]
     async fn generate_chain_stream_task_emits_snapshot_progress_then_complete() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("mold-home");
@@ -1324,9 +1470,13 @@ mod tests {
         let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
         let state = state_with_db_and_handle(db, handle.clone(), &output_dir);
 
-        let sse = generate_chain_stream(State(state.clone()), Json(req(OutputFormat::Mp4)))
-            .await
-            .unwrap();
+        let sse = generate_chain_stream(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(req(OutputFormat::Mp4)),
+        )
+        .await
+        .unwrap();
         let body_task = tokio::spawn(async move {
             let response = sse.into_response();
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -1415,6 +1565,71 @@ mod tests {
         assert!(complete["gif_preview"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
+        assert!(complete["filename"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(".mp4")));
+        assert!(complete["metadata"].is_object());
+    }
+
+    #[tokio::test]
+    async fn metadata_only_chain_stream_returns_saved_filename_and_exact_metadata_without_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("mold-home");
+        let _home_guard = MoldHomeGuard::set(&home);
+        let db = MetadataDb::open_in_memory().unwrap();
+        let output_dir = dir.path().join("gallery");
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        let state = state_with_db_and_handle(db, handle.clone(), &output_dir);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-mold-sse-payload", "metadata-only".parse().unwrap());
+
+        let sse =
+            generate_chain_stream(State(state.clone()), headers, Json(req(OutputFormat::Mp4)))
+                .await
+                .unwrap();
+        let body_task = tokio::spawn(async move {
+            let response = sse.into_response();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        });
+
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        let row = wait_for_single_chain_job(db).await;
+        wait_for_bus_subscription(&handle, &row.id).await;
+        let request = ChainJobManifest::read_from_dir(&row.job_dir)
+            .unwrap()
+            .request()
+            .unwrap();
+        let final_bytes = audio_muxed_mp4_fixture();
+        mark_ephemeral_job_completed(db, &row, &request, &[11, 22], &final_bytes);
+        handle.publish_settled_state(&row.id, ChainJobState::Completed, None);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), body_task)
+            .await
+            .expect("stream should close after complete")
+            .unwrap();
+        let events = parse_sse_json_events(&body);
+        let complete = &events
+            .iter()
+            .find(|(name, _)| name == "complete")
+            .expect("metadata-only stream should complete")
+            .1;
+
+        assert_eq!(complete["video"], "");
+        assert!(complete.get("thumbnail").is_none());
+        assert!(complete.get("gif_preview").is_none());
+        let filename = complete["filename"]
+            .as_str()
+            .expect("metadata-only completion should name saved gallery video");
+        assert!(output_dir.join(filename).is_file());
+        let rows = db.list(Some(&output_dir)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, filename);
+        assert_eq!(
+            complete["metadata"],
+            serde_json::to_value(&rows[0].metadata).unwrap(),
+            "completion metadata must exactly match the gallery record"
+        );
     }
 
     #[tokio::test]

@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { apiJson } from "./client";
+import { apiJson, apiJsonTo } from "./client";
 import { expandPrompt } from "./expand";
 
 vi.mock("./client", () => ({
   apiJson: vi.fn(),
+  apiJsonTo: vi.fn(),
 }));
 
 const apiJsonMock = vi.mocked(apiJson);
+const apiJsonToMock = vi.mocked(apiJsonTo);
 
 function sentBody(): Record<string, unknown> {
   const [, init] = apiJsonMock.mock.calls.at(-1)!;
@@ -17,6 +19,8 @@ describe("expandPrompt", () => {
   beforeEach(() => {
     apiJsonMock.mockReset();
     apiJsonMock.mockResolvedValue({ original: "a cat", expanded: ["a detailed cat"] });
+    apiJsonToMock.mockReset();
+    apiJsonToMock.mockResolvedValue({ original: "a cat", expanded: ["a detailed cat"] });
   });
 
   it("defaults to a single variation and omits model_family", async () => {
@@ -49,5 +53,20 @@ describe("expandPrompt", () => {
   it("trims surrounding whitespace from the family override", async () => {
     await expandPrompt("a cat", { modelFamily: "  sdxl  " });
     expect(sentBody()).toEqual({ prompt: "a cat", model_family: "sdxl", variations: 1 });
+  });
+
+  it("directs expansion to the selected remote host", async () => {
+    const target = { baseUrl: "https://studio.tailnet.ts.net", apiKey: "secret" };
+
+    await expandPrompt("a cat", { modelFamily: "flux" }, target);
+
+    expect(apiJsonToMock).toHaveBeenCalledWith(target, "/api/expand", expect.anything());
+    expect(apiJsonMock).not.toHaveBeenCalled();
+    const [, , init] = apiJsonToMock.mock.calls.at(-1)!;
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      prompt: "a cat",
+      model_family: "flux",
+      variations: 1,
+    });
   });
 });

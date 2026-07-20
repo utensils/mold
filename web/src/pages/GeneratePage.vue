@@ -29,7 +29,7 @@ import { isQwenImageEditFamily } from "../composables/useGenerateForm";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
-import { decideChainRouting } from "../lib/chainRouting";
+import { decideGenerateRequestRouting } from "../lib/chainRouting";
 import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
   maskPaddingRectangles,
@@ -284,10 +284,13 @@ const topBarCounts = computed(() => ({
 }));
 
 const chainDecision = computed(() =>
-  decideChainRouting(
-    form.state.value.frames,
+  decideGenerateRequestRouting(
+    {
+      frames: form.state.value.frames,
+      model: form.state.value.model,
+      temporal_upscale: form.state.value.temporalUpscale,
+    },
     currentModel.value?.family ?? null,
-    form.state.value.model,
   ),
 );
 

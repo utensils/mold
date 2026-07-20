@@ -11,7 +11,11 @@
  * asserts `LTX2_DISTILLED_CLIP_CAP % 8 == 1`.
  */
 
+import type { GenerateRequestWire } from "../types";
+
 export const LTX2_DISTILLED_CLIP_CAP = 97;
+export const MAX_CHAIN_STAGES = 16;
+export const LTX2_TEMPORAL_UPSCALE_MAX_FRAMES = 257;
 // 17 pixel frames → 3 LTX-2 latent frames of carryover under the VAE's 8×
 // causal temporal compression (causal-first slot + two continuation slots).
 // The prior 9-frame default only pinned one continuation slot (≈0.4 s at
@@ -46,6 +50,34 @@ const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set([
  * level) because there's no overlap region to trim. */
 const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
 
+function canonicalizeFamily(family: string | null | undefined): string {
+  const normalized = (family ?? "").trim().toLowerCase();
+  return normalized === "ltx-2" ? "ltx2" : normalized;
+}
+
+/** Keep LTX-2 temporal x2 on the ordinary endpoint: it expands one latent
+ * render and is not a multi-clip chain. */
+export function decideGenerateRequestRouting(
+  req: Pick<GenerateRequestWire, "frames" | "model" | "temporal_upscale">,
+  family: string | null | undefined,
+  motionTail: number = DEFAULT_MOTION_TAIL,
+): ChainRoutingDecision {
+  const frames = req.frames;
+  if (
+    canonicalizeFamily(family) === "ltx2" &&
+    req.temporal_upscale === "x2" &&
+    frames
+  ) {
+    return frames <= LTX2_TEMPORAL_UPSCALE_MAX_FRAMES
+      ? { kind: "single" }
+      : {
+          kind: "reject",
+          reason: `Temporal x2 supports at most ${LTX2_TEMPORAL_UPSCALE_MAX_FRAMES} frames. Reduce the frame count.`,
+        };
+  }
+  return decideChainRouting(frames, family, req.model, motionTail);
+}
+
 export function decideChainRouting(
   frames: number | null | undefined,
   family: string | null | undefined,
@@ -54,7 +86,7 @@ export function decideChainRouting(
 ): ChainRoutingDecision {
   if (!frames || frames <= 0) return { kind: "single" };
 
-  const fam = family ?? "";
+  const fam = canonicalizeFamily(family);
   const isChainCapable =
     CHAIN_CAPABLE_FAMILIES.has(fam) &&
     // ltx2 still requires a distilled checkpoint — only the distilled path
@@ -95,6 +127,14 @@ export function decideChainRouting(
   const effective = clipFrames - effectiveMotionTail;
   const remainder = frames - clipFrames;
   const stageCount = 1 + Math.ceil(remainder / effective);
+
+  if (stageCount > MAX_CHAIN_STAGES) {
+    const maxFrames = clipFrames + (MAX_CHAIN_STAGES - 1) * effective;
+    return {
+      kind: "reject",
+      reason: `Chained video supports at most ${maxFrames} frames (${MAX_CHAIN_STAGES} clips) for this model. Reduce the frame count.`,
+    };
+  }
 
   return {
     kind: "chain",

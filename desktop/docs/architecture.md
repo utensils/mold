@@ -9,8 +9,11 @@ its Vue entry at `desktop/src/mobile`. It never embeds an engine: every request
 targets a saved remote host, so the typed HTTP/SSE client and pure generation
 form builder are shared while desktop stores that assume **This device** remain
 desktop-only. Native DNS-SD browses `_mold._tcp`; manual host entry also accepts
-Tailscale MagicDNS and HTTPS names. The initial navigation is Generate,
-Gallery, and Hosts, laid out for iPhone safe areas and touch targets.
+Tailscale MagicDNS and HTTPS names. Navigation covers Generate,
+Gallery, Catalog, and Hosts, laid out for iPhone safe areas and touch targets.
+Generate reuses the capability matrix and request builder for prompt tools,
+templates, batch jobs, source/edit/mask/ControlNet inputs, LoRA, advanced image
+parameters, target-host estimates, and video/LTX-2 controls.
 
 ---
 
@@ -132,7 +135,7 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 **IPC vs HTTP split (the rule):** _HTTP+SSE for anything the remote server can also answer; IPC only for what must run in the app process._
 
-- **IPC commands:** `get_connection() -> {base_url, api_key, mode}`, `start_local_engine`, `stop_local_engine`, `test_remote_host` (probe returning version/auth plus `instance_id` + `hostname` from `/api/status`), `engine_status` (thread alive, port, models_dir), `pick_files{kind}` + `read_file_b64{path}` (feeding `source_image`/`edit_images`/`mask_image`/`control_image`/keyframes/audio as base64 into `GenerateRequest`), `save_bytes_as{path}` (export), `reveal_in_finder{path}`, local-gallery list/delete/read commands, `clipboard_write_image` (decode PNG/JPEG/GIF/WebP to RGBA before native clipboard write), `send_native_notification` (macOS notification identity image; returns false for the plugin fallback elsewhere), RunPod credential/account/inventory/pod/network-volume commands, `check_for_updates` / `install_pending_update`, and `app_settings_get/set` (window prefs, RunPod selections, update channel, UI scale, last mode — stored in a small `settings.json` under `app_data_dir`, _not_ in mold's config.toml, which stays engine-owned).
+- **IPC commands:** `get_connection() -> {base_url, api_key, mode}`, `start_local_engine`, `stop_local_engine`, `test_remote_host` (probe returning version/auth plus `instance_id` + `hostname` from `/api/status`), `engine_status` (thread alive, port, `models_dir`), `pick_files{kind}` + `read_file_b64{path}` (feeding `source_image`/`edit_images`/`mask_image`/`control_image`/keyframes/audio as base64 into `GenerateRequest`), `save_bytes_as{path}` (export), `reveal_in_finder{path}`, local-gallery list/delete/read commands, `clipboard_write_image` (decode PNG/JPEG/GIF/WebP to RGBA before native clipboard write), `send_native_notification` (macOS notification identity image; returns false for the plugin fallback elsewhere), RunPod credential/account/inventory/pod/network-volume commands, `check_for_updates` / `install_pending_update`, and `app_settings_get/set` (window prefs, RunPod selections, update channel, UI scale, last mode — stored in a small `settings.json` under `app_data_dir`, **not** in mold's config.toml, which stays engine-owned).
 - **HTTP (webview → server):** literally everything else — generate/stream, estimate, expand, upscale, gallery CRUD + thumbnails + Range video, models list/pull/rm/load/unload/components, loras, catalog families/search/installed/download, downloads queue + stream, chain-jobs full surface + events + stage previews, queue list/patch, resources stream, status, capabilities, chain-limits, placement PUT/DELETE.
 
 **Capabilities file** (`capabilities/default.json`): main window; permissions: `core:default` plus `core:webview:allow-set-webview-zoom`, `dialog:default`, `opener:default` (+ `opener:allow-reveal-item-in-dir`), `notification:default`, `clipboard-manager:allow-write-text`, `clipboard-manager:allow-write-image`, `window-state:default`, `process:allow-restart`. No updater or fs scope is exposed to JavaScript: Mold's Rust commands own the trusted updater object, channel allowlist, and file IO.

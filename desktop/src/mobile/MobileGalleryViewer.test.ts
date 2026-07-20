@@ -89,6 +89,21 @@ describe("MobileGalleryViewer", () => {
     expect(view.emitted("reuse")).toHaveLength(1);
   });
 
+  it("offers a still print as a generation source when the selected model supports it", async () => {
+    const view = mountViewer();
+    await view.setProps({ canUseAsSource: true });
+    await flushPromises();
+
+    const source = view.get("[data-test='gallery-viewer-use-source']");
+    expect(source.text()).toBe("Use as source");
+    await source.trigger("click");
+    expect(view.emitted("use-source")).toHaveLength(1);
+
+    await view.setProps({ item: { ...image, filename: "clip.mp4", format: "mp4" } });
+    await flushPromises();
+    expect(view.find("[data-test='gallery-viewer-use-source']").exists()).toBe(false);
+  });
+
   it("renders MP4 gallery items with native inline playback controls", async () => {
     const view = mountViewer({
       ...image,

@@ -63,6 +63,13 @@ const halRoute = {
   target: { baseUrl: "http://hal9000:7680", apiKey: "hk" },
 };
 
+const chainDecision = {
+  kind: "chain" as const,
+  clipFrames: 97,
+  motionTail: 17,
+  stageCount: 3,
+};
+
 function completeFrame() {
   return JSON.stringify({
     image: "aGVsbG8=",
@@ -551,6 +558,317 @@ describe("generation store multi-host routing", () => {
     expect(target.baseUrl).toBe("http://hal9000:7680");
     expect(path).toBe("/api/queue/srv-1");
     expect(init.method).toBe("DELETE");
+  });
+
+  it("posts only the supported auto-expand body and maps chain progress/completion", async () => {
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
+    const chainRequest: GenerateRequest = {
+      ...request(),
+      model: "ltx-2.3-22b-distilled:fp8",
+      prompt: "a lighthouse through a storm",
+      negative_prompt: "text",
+      width: 1536,
+      height: 640,
+      guidance: 3.5,
+      seed: 42,
+      output_format: "mp4",
+      source_image: "source-b64",
+      source_image_name: "source.png",
+      strength: 0.7,
+      frames: 241,
+      fps: 24,
+      enable_audio: true,
+      loras: [{ path: "camera-control:dolly-in", scale: 1 }],
+      pipeline: "distilled",
+    };
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "progress",
+          JSON.stringify({
+            type: "chain_start",
+            stage_count: 3,
+            estimated_total_frames: 241,
+            job_id: "chain-1",
+          }),
+        );
+        opts.onEvent(
+          "progress",
+          JSON.stringify({
+            type: "denoise_step",
+            stage_idx: 1,
+            step: 2,
+            total: 4,
+            job_id: "chain-1",
+          }),
+        );
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            video: "aGVsbG8=",
+            format: "mp4",
+            width: 1536,
+            height: 640,
+            frames: 241,
+            fps: 24,
+            thumbnail: "thumb-b64",
+            gif_preview: "gif-b64",
+            has_audio: true,
+            duration_ms: 10_042,
+            stage_count: 3,
+            generation_time_ms: 12_345,
+            filename: "chain-42.mp4",
+            metadata: {
+              prompt: chainRequest.prompt,
+              model: chainRequest.model,
+              seed: 42,
+              steps: 4,
+              guidance: 3.5,
+              width: 1536,
+              height: 640,
+            },
+            script: {},
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+
+    const { jobs, settled } = useGenerationStore().submitBatch(
+      chainRequest,
+      1,
+      { ...halRoute, mirrorRemoteOutput: false },
+      chainDecision,
+    );
+    await settled;
+
+    const [path, options] = sseStream.mock.calls[0] as [
+      string,
+      { body: Record<string, unknown>; headers?: Record<string, string> },
+    ];
+    expect(path).toBe("/api/generate/chain/stream");
+    expect(options.body).toEqual({
+      model: chainRequest.model,
+      prompt: chainRequest.prompt,
+      total_frames: 241,
+      clip_frames: 97,
+      motion_tail_frames: 17,
+      width: 1536,
+      height: 640,
+      fps: 24,
+      seed: 42,
+      steps: 4,
+      guidance: 3.5,
+      strength: 0.7,
+      output_format: "mp4",
+      source_image: "source-b64",
+      enable_audio: true,
+    });
+    expect(options.body).not.toHaveProperty("negative_prompt");
+    expect(options.body).not.toHaveProperty("loras");
+    expect(options.body).not.toHaveProperty("pipeline");
+    expect(options.headers).toBeUndefined();
+    expect(jobs[0]).toMatchObject({
+      id: "chain-1",
+      status: "complete",
+      chainStageCount: 3,
+      resultUrlIsObjectUrl: true,
+      result: {
+        image: "aGVsbG8=",
+        filename: "chain-42.mp4",
+        seed_used: 42,
+        video_frames: 241,
+        video_fps: 24,
+        video_has_audio: true,
+      },
+    });
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a metadata-only chain filename without creating a media Blob", async () => {
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
+    streamableMediaUrl.mockResolvedValueOnce("https://hal9000/media/chain-video");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "progress",
+          JSON.stringify({
+            type: "chain_start",
+            stage_count: 3,
+            estimated_total_frames: 241,
+            job_id: "chain-metadata",
+          }),
+        );
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            video: "",
+            format: "mp4",
+            width: 1536,
+            height: 640,
+            frames: 241,
+            fps: 24,
+            stage_count: 3,
+            generation_time_ms: 12_345,
+            filename: "metadata chain.mp4",
+            metadata: {
+              prompt: "a lighthouse",
+              model: "ltx-2.3-22b-distilled:fp8",
+              seed: 77,
+              steps: 4,
+              guidance: 3.5,
+              width: 1536,
+              height: 640,
+            },
+            script: {},
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const chainRequest: GenerateRequest = {
+      ...request(),
+      model: "ltx-2.3-22b-distilled:fp8",
+      width: 1536,
+      height: 640,
+      guidance: 3.5,
+      frames: 241,
+      fps: 24,
+      output_format: "mp4",
+    };
+
+    const { jobs, settled } = useGenerationStore().submitBatch(
+      chainRequest,
+      1,
+      {
+        ...halRoute,
+        mirrorRemoteOutput: false,
+        retainEncodedResult: false,
+        metadataOnlyCompletion: true,
+      },
+      chainDecision,
+    );
+    await settled;
+    await vi.waitFor(() => expect(jobs[0]!.resultUrl).toBe("https://hal9000/media/chain-video"));
+
+    expect(sseStream.mock.calls[0]?.[0]).toBe("/api/generate/chain/stream");
+    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
+      headers: { "X-Mold-SSE-Payload": "metadata-only" },
+    });
+    expect(streamableMediaUrl).toHaveBeenCalledWith("/api/gallery/image/metadata%20chain.mp4", {
+      target: halRoute.target,
+      cacheKey: halRoute.hostId,
+      allowLegacyBlob: false,
+    });
+    expect(createObjectUrl).not.toHaveBeenCalled();
+    expect(jobs[0]!.result).toMatchObject({
+      image: "",
+      filename: "metadata chain.mp4",
+      seed_used: 77,
+      video_frames: 241,
+    });
+  });
+
+  it("falls back to the encoded chain video when an older host ignores metadata-only", async () => {
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL");
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            video: "aGVsbG8=",
+            format: "mp4",
+            width: 1536,
+            height: 640,
+            frames: 241,
+            fps: 24,
+            stage_count: 3,
+            generation_time_ms: 12_345,
+            script: {},
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+    const chainRequest: GenerateRequest = {
+      ...request(),
+      model: "ltx-2.3-22b-distilled:fp8",
+      width: 1536,
+      height: 640,
+      frames: 241,
+      fps: 24,
+      output_format: "mp4",
+    };
+
+    const { jobs, settled } = useGenerationStore().submitBatch(
+      chainRequest,
+      1,
+      {
+        ...halRoute,
+        mirrorRemoteOutput: false,
+        retainEncodedResult: false,
+        metadataOnlyCompletion: true,
+      },
+      chainDecision,
+    );
+    await settled;
+
+    expect(sseStream.mock.calls[0]?.[1]).toMatchObject({
+      headers: { "X-Mold-SSE-Payload": "metadata-only" },
+    });
+    expect(streamableMediaUrl).not.toHaveBeenCalled();
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(jobs[0]).toMatchObject({
+      status: "complete",
+      resultUrlIsObjectUrl: true,
+      result: { image: "", format: "mp4", video_frames: 241 },
+    });
+  });
+
+  it("cancels an automatic chain through the durable chain-job endpoint", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { signal: AbortSignal; onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "progress",
+          JSON.stringify({
+            type: "chain_start",
+            stage_count: 3,
+            estimated_total_frames: 241,
+            job_id: "chain/job-1",
+          }),
+        );
+        return new Promise<void>((resolve) => {
+          opts.signal.addEventListener("abort", () => resolve());
+        });
+      },
+    );
+    const store = useGenerationStore();
+    const { jobs } = store.submitBatch(
+      { ...request(), model: "ltx-2.3-22b-distilled:fp8", frames: 241, fps: 24 },
+      1,
+      halRoute,
+      chainDecision,
+    );
+    await Promise.resolve();
+    await store.cancel(jobs[0]!.clientId);
+
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      halRoute.target,
+      "/api/chain-jobs/chain%2Fjob-1/cancel",
+      { method: "POST" },
+    );
+    expect(jobs[0]).toMatchObject({ status: "error", error: "Cancelled" });
+  });
+
+  it("rejects a defensive reject decision before creating jobs", () => {
+    const store = useGenerationStore();
+    expect(() =>
+      store.submitBatch(request(), 1, halRoute, {
+        kind: "reject",
+        reason: "This model cannot chain.",
+      }),
+    ).toThrow("This model cannot chain.");
+    expect(store.jobs).toHaveLength(0);
   });
 });
 

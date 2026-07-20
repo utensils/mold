@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { resolutionValidationError } from "../lib/generateValidation";
 import {
   aspectRatioLabel,
   matchPreset,
@@ -28,6 +29,7 @@ const props = withDefaults(
 
 const width = defineModel<number>("width", { required: true });
 const height = defineModel<number>("height", { required: true });
+const emit = defineEmits<{ "validity-change": [valid: boolean] }>();
 
 const manualOpen = ref(false);
 const presets = computed(() => presetsForFamily(props.family));
@@ -35,13 +37,14 @@ const currentPreset = computed(() => matchPreset(width.value, height.value, prop
 const currentOrientation = computed(() => orientationLabel(width.value, height.value));
 const currentAspect = computed(() => aspectRatioLabel(width.value, height.value, props.family));
 const customVisible = computed(() => manualOpen.value || !currentPreset.value);
+const resolutionError = computed(() => resolutionValidationError(width.value, height.value));
+watch(resolutionError, (next) => emit("validity-change", !next), { immediate: true });
 const aspectOptions = computed(() =>
   aspectsForOrientation(presets.value, currentOrientation.value),
 );
 const tierOptions = computed(() =>
   currentPreset.value ? sortedResolutionTiers(presets.value, currentPreset.value.aspect) : [],
 );
-const aspectShapeStyle = computed(() => proportionalShapeStyle(width.value, height.value, 34, 30));
 
 function proportionalShapeStyle(
   shapeWidth: number,
@@ -140,21 +143,15 @@ function swapDimensions(): void {
   <fieldset class="mobile-resolution-picker" :disabled="disabled">
     <legend class="mobile-resolution-legend">Resolution</legend>
 
-    <div
-      class="mobile-resolution-summary"
-      data-test="mobile-resolution-summary"
-      role="status"
+    <p
+      class="sr-only"
+      data-test="mobile-resolution-announcement"
       aria-live="polite"
+      aria-atomic="true"
     >
-      <div class="mobile-resolution-preview" aria-hidden="true">
-        <span data-test="mobile-resolution-shape" :style="aspectShapeStyle" />
-      </div>
-      <div class="mobile-resolution-copy">
-        <strong>{{ width }} × {{ height }}</strong>
-        <span>{{ currentAspect }} · {{ currentOrientation }}</span>
-      </div>
-      <span v-if="!currentPreset" class="mobile-resolution-custom-badge">Custom</span>
-    </div>
+      Selected resolution: {{ width }} by {{ height }} pixels, {{ currentAspect }},
+      {{ currentOrientation }}.
+    </p>
 
     <div class="mobile-resolution-group">
       <span class="mobile-resolution-label">Orientation</span>
@@ -265,6 +262,14 @@ function swapDimensions(): void {
     </div>
     <p v-if="customVisible" class="mobile-resolution-note">
       Custom dimensions snap to multiples of 16 for model compatibility.
+    </p>
+    <p
+      v-if="resolutionError"
+      class="mobile-generate-validation"
+      role="alert"
+      data-test="mobile-resolution-error"
+    >
+      {{ resolutionError }}
     </p>
   </fieldset>
 </template>

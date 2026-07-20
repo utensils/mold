@@ -3,17 +3,25 @@ import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
+import type { GenerateForm } from "../lib/generateForm";
 
-const { invoke, apiFetchTo, apiJsonTo, sseStream, streamableMediaUrl, evictMedia } = vi.hoisted(
-  () => ({
-    invoke: vi.fn(),
-    apiFetchTo: vi.fn(),
-    apiJsonTo: vi.fn(),
-    sseStream: vi.fn(),
-    streamableMediaUrl: vi.fn(),
-    evictMedia: vi.fn(),
-  }),
-);
+const {
+  invoke,
+  apiFetchTo,
+  apiJsonTo,
+  sseStream,
+  streamableMediaUrl,
+  evictMedia,
+  applySourceFitPreprocess,
+} = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  apiFetchTo: vi.fn(),
+  apiJsonTo: vi.fn(),
+  sseStream: vi.fn(),
+  streamableMediaUrl: vi.fn(),
+  evictMedia: vi.fn(),
+  applySourceFitPreprocess: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
@@ -22,6 +30,7 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
   apiJsonTo,
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream }));
+vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess }));
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
   streamableMediaUrl,
@@ -29,6 +38,8 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
 }));
 
 import MobileApp from "./MobileApp.vue";
+import MobileLoraControls from "./MobileLoraControls.vue";
+import MobileTemplates from "./MobileTemplates.vue";
 
 installMemoryLocalStorage();
 
@@ -85,6 +96,7 @@ const openStreams: Array<{
     signal: AbortSignal;
     onOpen?: () => void;
     onEvent: (event: string, data: string) => void;
+    target?: { baseUrl: string; apiKey: string | null };
   };
   resolve: () => void;
 }> = [];
@@ -151,6 +163,13 @@ beforeEach(() => {
   );
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full-video");
   evictMedia.mockReset();
+  applySourceFitPreprocess.mockReset().mockImplementation((input) =>
+    Promise.resolve({
+      source: input.source,
+      mask: input.mask,
+      changed: false,
+    }),
+  );
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -168,6 +187,24 @@ describe("MobileApp generation queue", () => {
     await wrapper?.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
   }
+
+  it("shows a useful retry state when the selected host cannot load models", async () => {
+    apiJsonTo.mockRejectedValue(new Error("Connection refused"));
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(fieldControl("Model").attributes("disabled")).toBeDefined();
+    expect(fieldControl("Model").text()).toContain("No generation models available");
+    expect(wrapper.get("[data-test='mobile-model-error']").text()).toContain(
+      "Couldn’t load generation models",
+    );
+    expect(wrapper.get("[data-test='mobile-model-retry']").text()).toBe("Retry");
+    expect(
+      wrapper.findAll("label.field").some((field) => field.text().includes("Negative prompt")),
+    ).toBe(false);
+    expect(wrapper.find("[data-test='mobile-source-disclosure']").exists()).toBe(false);
+  });
 
   it("applies model defaults to the resolution picker and snapshots those dimensions", async () => {
     const imageModel: ModelEntry = {
@@ -188,12 +225,19 @@ describe("MobileApp generation queue", () => {
 
     wrapper = mountMobileApp();
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("1024 × 1024");
+    expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
+    expect(
+      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
+    ).toBe("1:1 · 1024×1024");
 
     await fieldControl("Model").setValue(model.name);
     await flushPromises();
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("768 × 512");
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("Landscape");
+    expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
+    expect(
+      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
+    ).toBe("3:2 · 768×512");
 
     await submitPrompt("use the video defaults");
     expect(openStreams).toHaveLength(1);
@@ -202,6 +246,367 @@ describe("MobileApp generation queue", () => {
       width: 768,
       height: 512,
     });
+  });
+
+  it("snapshots form and host before asynchronous source preprocessing", async () => {
+    const studioModel: ModelEntry = {
+      ...model,
+      name: "flux:studio",
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+    };
+    const renderModel: ModelEntry = { ...studioModel, name: "flux:render" };
+    const renderTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          hostname: "studio",
+          version: "0.18.0",
+          online: false,
+        },
+        {
+          id: "render-id",
+          name: "Render",
+          baseUrl: renderTarget.baseUrl,
+          hostname: "render",
+          version: "0.18.0",
+          online: false,
+        },
+      ]),
+    );
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      const remote = apiTarget.baseUrl === renderTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: remote ? "render" : "studio",
+          instance_id: remote ? "render-id" : "studio-id",
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([remote ? renderModel : studioModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementationOnce(
+      (input: { source: string | null; mask: string | null }) =>
+        new Promise((resolve) => {
+          finishPreprocess = () =>
+            resolve({ source: `fitted:${input.source}`, mask: input.mask, changed: true });
+        }),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const sourceInput = wrapper.get("[data-test='mobile-source-input']");
+    Object.defineProperty(sourceInput.element, "files", {
+      configurable: true,
+      value: [new File(["source"], "source.png", { type: "image/png" })],
+    });
+    await sourceInput.trigger("change");
+    await flushPromises();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flushPromises();
+    await vi.waitFor(() =>
+      expect(wrapper?.find("[data-test='mobile-source-preview']").exists()).toBe(true),
+    );
+    await fieldControl("Prompt").setValue("first prompt");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("next prompt");
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+    expect(fieldControl("Model").element).toHaveProperty("value", renderModel.name);
+
+    finishPreprocess();
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.target).toEqual(target);
+    expect(openStreams[0]?.options.body).toMatchObject({
+      prompt: "first prompt",
+      model: studioModel.name,
+    });
+    expect(openStreams[0]?.options.body.source_image).toMatch(/^fitted:/);
+  });
+
+  it("rechecks the iPhone media budget after source preprocessing", async () => {
+    const oversizedBase64 = {
+      length: 61 * 1024 * 1024,
+      endsWith: () => false,
+    } as unknown as string;
+    applySourceFitPreprocess.mockResolvedValueOnce({
+      source: oversizedBase64,
+      mask: null,
+      changed: true,
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("small source");
+    liveForm.sourceImageName = "small.jpg";
+    await fieldControl("Prompt").setValue("fit this source safely");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "Combined generation media must be 45 MiB or smaller on iPhone",
+    );
+  });
+
+  it("clears host-local model artifacts and syncs same-name model capabilities", async () => {
+    const remoteTarget = { baseUrl: "http://render.tailnet.ts.net:7680", apiKey: "secret" };
+    const remoteModel: ModelEntry = {
+      ...model,
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+    };
+    localStorage.setItem(
+      "mold.mobile.hosts.v1",
+      JSON.stringify([
+        { id: "studio-id", name: "Studio", baseUrl: target.baseUrl, online: false },
+        { id: "render-id", name: "Render", baseUrl: remoteTarget.baseUrl, online: false },
+      ]),
+    );
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      const remote = apiTarget.baseUrl === remoteTarget.baseUrl;
+      if (path === "/api/status") {
+        return Promise.resolve({
+          ...status,
+          hostname: remote ? "render" : "studio",
+          instance_id: remote ? "render-id" : "studio-id",
+        });
+      }
+      if (path === "/api/models") return Promise.resolve([remote ? remoteModel : model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      if (path.startsWith("/api/catalog/installed")) return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.loras = [
+      { path: "/studio/style.safetensors", name: "Style", scale: 1, trainedWords: [] },
+    ];
+    liveForm.upscaleModel = "studio-upscaler";
+    liveForm.controlModel = "/studio/control.safetensors";
+    liveForm.cameraControl = "/studio/camera.safetensors";
+    liveForm.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: "studio-source-upscaler",
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    };
+    const studioTemplateForm = JSON.parse(JSON.stringify(liveForm)) as GenerateForm;
+
+    await wrapper.get("[data-test='mobile-generate-host']").setValue("render-id");
+    await flushPromises();
+
+    expect(liveForm.family).toBe("flux");
+    expect(liveForm.loras).toEqual([]);
+    expect(liveForm.upscaleModel).toBe("");
+    expect(liveForm.controlModel).toBe("");
+    expect(liveForm.cameraControl).toBeNull();
+    expect(liveForm.sourceFit).toMatchObject({ mode: "upscale-then-fit", upscalerModel: "" });
+
+    // Templates remain portable between hosts, but loading one from its
+    // origin host must not resurrect paths that only exist there. A same-name
+    // model on the active host also owns the capability family.
+    wrapper.getComponent(MobileTemplates).vm.$emit("load", {
+      id: "studio-template",
+      name: "Studio setup",
+      createdAt: 1,
+      updatedAt: 1,
+      scopeId: "studio-id",
+      form: studioTemplateForm,
+      mediaReferences: [],
+    });
+    await flushPromises();
+
+    expect(liveForm.family).toBe("flux");
+    expect(liveForm.loras).toEqual([]);
+    expect(liveForm.upscaleModel).toBe("");
+    expect(liveForm.controlModel).toBe("");
+    expect(liveForm.cameraControl).toBeNull();
+    expect(liveForm.sourceFit).toMatchObject({ mode: "upscale-then-fit", upscalerModel: "" });
+  });
+
+  it("routes long distilled video through chain SSE with metadata-only completion", async () => {
+    const chainModel: ModelEntry = {
+      ...model,
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([chainModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a continuous flight through clouds");
+    await wrapper.get("[data-test='mobile-frames']").setValue("177");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-chain-cue']").text()).toContain("2 chained clips");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.path).toBe("/api/generate/chain/stream");
+    expect(openStreams[0]?.options.headers).toEqual({
+      "X-Mold-SSE-Payload": "metadata-only",
+    });
+    expect(openStreams[0]?.options.body).toMatchObject({
+      model: chainModel.name,
+      prompt: "a continuous flight through clouds",
+      total_frames: 177,
+      clip_frames: 97,
+      motion_tail_frames: 17,
+    });
+    expect(openStreams[0]?.options.body).not.toHaveProperty("frames");
+
+    openStreams[0]?.resolve();
+    await flushPromises();
+  });
+
+  it("does not retain Qwen Target validation after switching to text-to-video", async () => {
+    const qwen: ModelEntry = {
+      ...model,
+      name: "qwen-image-edit:bf16",
+      family: "qwen-image-edit",
+      default_width: 1024,
+      default_height: 1024,
+    };
+    const video: ModelEntry = {
+      ...model,
+      name: "ltx-video-0.9.8-13b-dev:bf16",
+      family: "ltx-video",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([qwen, video]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a clean product orbit");
+    expect(fieldControl("Model").element).toHaveProperty("value", qwen.name);
+    expect(wrapper.get("[data-test='mobile-source-validation']").text()).toContain("Target photo");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+
+    await fieldControl("Model").setValue(video.name);
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-source-controls']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).not.toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("blocks invalid numeric parameters and oversized custom resolutions", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a precise studio portrait");
+
+    await fieldControl("Steps").setValue("0");
+    expect(wrapper.get("[data-test='mobile-basic-parameter-error']").text()).toContain("1 to 100");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+    await fieldControl("Steps").setValue("20");
+    await fieldControl("Guidance").setValue("101");
+    expect(wrapper.get("[data-test='mobile-basic-parameter-error']").text()).toContain("0 to 100");
+    await fieldControl("Guidance").setValue("3");
+
+    await wrapper.get("[data-test='mobile-resolution-custom-toggle']").trigger("click");
+    await wrapper.get("input[aria-label='Custom width']").setValue("2000");
+    await wrapper.get("input[aria-label='Custom height']").setValue("2000");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-resolution-error']").text()).toContain("1.8 MP");
+    expect(wrapper.get("[data-test='mobile-develop-button']").attributes()).toHaveProperty(
+      "disabled",
+    );
+  });
+
+  it("keeps auxiliary models out of the Model picker while exposing their tools", async () => {
+    const imageModel: ModelEntry = {
+      ...model,
+      name: "flux:image",
+      family: "flux",
+      default_width: 1024,
+      default_height: 1024,
+    };
+    const upscaler: ModelEntry = {
+      ...model,
+      name: "real-esrgan-x4plus:fp16",
+      family: "upscaler",
+      downloaded: false,
+    };
+    const controlNet: ModelEntry = {
+      ...model,
+      name: "controlnet-canny-sd15",
+      family: "controlnet",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([upscaler, controlNet, imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(
+      fieldControl("Model")
+        .findAll("option")
+        .map((option) => option.text()),
+    ).toEqual([imageModel.name]);
+    expect(wrapper.get("[data-test='mobile-upscale']").text()).toContain(upscaler.name);
+    expect(
+      wrapper.findAll("label.field").some((field) => field.text().includes("Negative prompt")),
+    ).toBe(false);
+  });
+
+  it("expands Batch into separately queued and cancellable requests", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three variations of a storm");
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe("Develop 3 prints");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
+    expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
+      "Develop 3 prints (+3 queued)",
+    );
+    expect(openStreams).toHaveLength(2);
+    const firstSeed = openStreams[0]?.options.body.seed as number;
+    expect(openStreams.map((stream) => stream.options.body.batch_size)).toEqual([1, 1]);
+    expect(openStreams.map((stream) => stream.options.body.seed)).toEqual([
+      firstSeed,
+      firstSeed + 1,
+    ]);
   });
 
   it("uses an explicit mobile seed mode and submits the fixed value", async () => {
@@ -293,6 +698,30 @@ describe("MobileApp generation queue", () => {
     wrapper.unmount();
     wrapper = null;
     expect(firstSignal?.aborted).toBe(true);
+  });
+
+  it("keeps an unconfirmed remote-cancellation warning after the stream settles", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("cancel before the remote queue id arrives");
+
+    await wrapper.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toMatch(
+      /remote cancellation was not confirmed/i,
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Cancellation failed",
+    );
+
+    openStreams[0]?.resolve();
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toMatch(
+      /remote cancellation was not confirmed/i,
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Cancellation failed",
+    );
   });
 
   it("keeps a completed result visible while a queued sibling settles independently", async () => {
@@ -934,10 +1363,81 @@ describe("MobileApp gallery", () => {
     );
     expect(wrapper.get("#mobile-prompt").element).toHaveProperty("value", print.metadata.prompt);
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("768 × 512");
+    expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
+    expect(
+      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
+    ).toBe("3:2 · 768×512");
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
+  });
+
+  it("uses a still gallery print as the selected model's source image", async () => {
+    const still = { ...print, filename: "source print.png", format: "png" as const };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([still]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    apiFetchTo.mockResolvedValue({
+      blob: () => Promise.resolve(new Blob(["source bytes"], { type: "image/png" })),
+    } as Response);
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper?.get("[data-test='mobile-tab-generate']").attributes("aria-current")).toBe(
+        "page",
+      ),
+    );
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/source%20print.png");
+    expect(wrapper.get("[data-test='mobile-source-preview']").attributes("alt")).toBe(
+      "source print.png",
+    );
+  });
+
+  it("rejects an oversized gallery source before reading or base64 expansion", async () => {
+    const still = { ...print, filename: "huge source.png", format: "png" as const };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([still]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    const readBlob = vi.fn(() => Promise.resolve(new Blob(["should not be read"])));
+    apiFetchTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(
+        path.includes("/api/gallery/image/")
+          ? ({
+              headers: new Headers({ "content-length": String(46 * 1024 * 1024) }),
+              blob: readBlob,
+            } as unknown as Response)
+          : ({ blob: () => Promise.resolve(new Blob(["thumbnail"])) } as Response),
+      ),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-item']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='gallery-viewer-use-source']").trigger("click");
+    await flushPromises();
+
+    expect(readBlob).not.toHaveBeenCalled();
+    expect(wrapper.get(".gallery-viewer-reuse-error").text()).toContain(
+      "Combined generation media must be 45 MiB or smaller on iPhone",
+    );
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
   });
 
   it("keeps the viewer open when the print host's models cannot be loaded", async () => {
@@ -1030,7 +1530,11 @@ describe("MobileApp gallery", () => {
         return Promise.resolve(baseUrl === remoteTarget.baseUrl ? [model] : [studioModel]);
       }
       if (path === "/api/gallery") {
-        return Promise.resolve(baseUrl === remoteTarget.baseUrl ? [print] : []);
+        return Promise.resolve(
+          baseUrl === remoteTarget.baseUrl
+            ? [{ ...print, metadata: { ...print.metadata, frames: 97 } }]
+            : [],
+        );
       }
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });

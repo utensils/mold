@@ -43,7 +43,7 @@ const metadata: OutputMetadata = {
 };
 
 describe("applyMobileGalleryMetadata", () => {
-  it("restores visible prompt controls without retaining invisible advanced settings", () => {
+  it("restores the desktop's full-fidelity metadata for mobile generation", () => {
     const form = newGenerateForm();
     const result = applyMobileGalleryMetadata(form, metadata, [model]);
 
@@ -51,6 +51,7 @@ describe("applyMobileGalleryMetadata", () => {
 
     expect(form).toMatchObject({
       prompt: metadata.prompt,
+      originalPrompt: metadata.original_prompt,
       negativePrompt: metadata.negative_prompt,
       model: model.name,
       width: 768,
@@ -61,23 +62,36 @@ describe("applyMobileGalleryMetadata", () => {
       outputFormat: "mp4",
       frames: 121,
       fps: 30,
-      scheduler: "default",
-      cfgPlus: false,
-      loras: [],
-      upscaleModel: "",
-      enableAudio: false,
-      pipeline: null,
-      spatialUpscale: null,
-      temporalUpscale: null,
+      scheduler: "ddim",
+      cfgPlus: true,
+      loras: [
+        {
+          path: "hidden.safetensors",
+          name: "hidden",
+          scale: 0.8,
+          trainedWords: [],
+        },
+      ],
+      upscaleModel: "hidden-upscaler",
+      enableAudio: true,
+      pipeline: "two-stage-hq",
+      spatialUpscale: "x2",
+      temporalUpscale: "x2",
     });
 
-    expect(buildRequest(form)).not.toMatchObject({
-      loras: expect.anything(),
-      enable_audio: expect.anything(),
-      pipeline: expect.anything(),
-      spatial_upscale: expect.anything(),
-      temporal_upscale: expect.anything(),
+    const request = buildRequest(form);
+    expect(request).toMatchObject({
+      original_prompt: "a ship",
+      negative_prompt: "calm water",
+      loras: [{ path: "hidden.safetensors", scale: 0.8 }],
+      enable_audio: true,
+      pipeline: "two-stage-hq",
+      spatial_upscale: "x2",
+      temporal_upscale: "x2",
     });
+    expect(request.scheduler).toBeUndefined();
+    expect(request.cfg_plus).toBeUndefined();
+    expect(request.upscale_model).toBeUndefined();
   });
 
   it("keeps generation valid when the print's original model is no longer installed", () => {
@@ -96,6 +110,12 @@ describe("applyMobileGalleryMetadata", () => {
     expect(form.model).toBe(replacement.name);
     expect(form.family).toBe(replacement.family);
     expect(form.outputFormat).toBe("png");
-    expect(buildRequest(form).model).toBe(replacement.name);
+    expect(form.loras).toEqual([]);
+    expect(form.upscaleModel).toBe("");
+    expect(form.controlModel).toBe("");
+    expect(form.cameraControl).toBeNull();
+    expect(buildRequest(form)).toMatchObject({ model: replacement.name });
+    expect(buildRequest(form).loras).toBeUndefined();
+    expect(buildRequest(form).upscale_model).toBeUndefined();
   });
 });

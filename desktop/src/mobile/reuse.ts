@@ -8,10 +8,10 @@ export interface MobileGalleryReuseResult {
 }
 
 /**
- * Restore the gallery fields the iPhone composer actually exposes. Start from
- * the desktop's canonical metadata mapper so model defaults and legacy fields
- * stay consistent, then neutralize advanced controls that mobile cannot show
- * or clear yet. A reused prompt must never submit invisible settings.
+ * Restore gallery settings through the desktop's canonical metadata mapper so
+ * iPhone and desktop keep the same model defaults, legacy normalization, and
+ * capability-aware request behavior. Binary media still clears in the shared
+ * mapper because output metadata cannot carry those bytes.
  */
 export function applyMobileGalleryMetadata(
   form: GenerateForm,
@@ -27,28 +27,22 @@ export function applyMobileGalleryMetadata(
 
   applyMetadataToForm(form, mobileMetadata, models);
 
+  if (!originalModelInstalled && fallbackModel) {
+    // Adapters and auxiliary models are host/model artifacts, not portable
+    // print settings. Replaying them against a fallback can fail outright or,
+    // worse, produce a result with unrelated weights.
+    form.loras = [];
+    form.upscaleModel = "";
+    form.controlModel = "";
+    form.cameraControl = null;
+  }
+
   // A substituted model can belong to a different family. Keep the original
   // canvas/settings where they remain portable, but never leave an impossible
   // output format selected (for example MP4 on an image-only model).
   if (!outputFormatsForFamily(form.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(form.family);
   }
-
-  form.originalPrompt = null;
-  form.scheduler = "default";
-  form.cfgPlus = false;
-  form.batchSize = 1;
-  form.upscaleModel = "";
-  form.strength = 0.75;
-  form.controlModel = "";
-  form.controlScale = 1;
-  form.loras = [];
-  form.enableAudio = false;
-  form.pipeline = null;
-  form.retakeRange = null;
-  form.spatialUpscale = null;
-  form.temporalUpscale = null;
-  form.cameraControl = null;
 
   return {
     modelName: form.model,

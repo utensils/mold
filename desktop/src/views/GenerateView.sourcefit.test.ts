@@ -175,6 +175,75 @@ describe("GenerateView source-fit submit path", () => {
     expect(form.maskImage).toBeNull();
   });
 
+  it("submits the tapped form snapshot when preprocessing is still running", async () => {
+    setupMultiHost();
+    const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPreprocess = () => resolve({ source: "FIT", mask: null, changed: true });
+        }),
+    );
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = primeForm();
+    form.batchSize = 3;
+    useUiStore().generateTick++;
+    await flushPromises();
+    expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1);
+
+    form.prompt = "a different live prompt";
+    form.batchSize = 1;
+    finishPreprocess();
+    await flushPromises();
+
+    expect(submitBatch).toHaveBeenCalledTimes(1);
+    const [request, batch] = submitBatch.mock.calls[0]!;
+    expect(request).toMatchObject({ prompt: "a lighthouse", source_image: "FIT" });
+    expect(batch).toBe(3);
+  });
+
+  it("does not overwrite a mask or fit policy edited while preprocessing", async () => {
+    setupMultiHost();
+    const submitBatch = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPreprocess = () => resolve({ source: "FIT", mask: "OLD-PAD-MASK", changed: true });
+        }),
+    );
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    const form = primeForm();
+    form.maskImage = "OLD-MASK";
+    useUiStore().generateTick++;
+    await flushPromises();
+
+    form.maskImage = "NEW-MASK";
+    form.sourceFit = { mode: "crop-fill", alignX: "right", alignY: "bottom" };
+    finishPreprocess();
+    await flushPromises();
+
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.maskImage).toBe("NEW-MASK");
+    expect(form.sourceFit).toEqual({ mode: "crop-fill", alignX: "right", alignY: "bottom" });
+    expect(submitBatch).toHaveBeenCalledTimes(1);
+    expect(submitBatch.mock.calls[0]?.[0]).toMatchObject({
+      source_image: "FIT",
+      mask_image: "OLD-PAD-MASK",
+    });
+  });
+
   it("skips preprocessing when no source image is attached", async () => {
     setupMultiHost();
     const generation = useGenerationStore();

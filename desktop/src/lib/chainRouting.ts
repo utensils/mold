@@ -20,7 +20,11 @@
  * asserts `LTX2_DISTILLED_CLIP_CAP % 8 == 1`.
  */
 
+import type { AutoChainRequest, GenerateRequest } from "./api/types";
+
 export const LTX2_DISTILLED_CLIP_CAP = 97;
+export const MAX_CHAIN_STAGES = 16;
+export const LTX2_TEMPORAL_UPSCALE_MAX_FRAMES = 257;
 // 17 pixel frames → 3 LTX-2 latent frames of carryover under the VAE's 8×
 // causal temporal compression (causal-first slot + two continuation slots).
 // The prior 9-frame default only pinned one continuation slot (≈0.4 s at
@@ -40,6 +44,67 @@ export type ChainRoutingDecision =
     }
   | { kind: "reject"; reason: string };
 
+export type AutoChainRoutingDecision = Extract<ChainRoutingDecision, { kind: "chain" }>;
+
+/** GenerateRequest features the server's auto-expand chain form cannot carry. */
+export type AutoChainUnsupportedField =
+  | "negative_prompt"
+  | "loras"
+  | "audio_file"
+  | "source_video"
+  | "keyframes"
+  | "pipeline"
+  | "retake_range"
+  | "spatial_upscale"
+  | "temporal_upscale";
+
+/**
+ * Report meaningful fields that would be lost when a normal generation is
+ * routed through the auto-expand chain endpoint. Camera control rides the
+ * LoRA wire fields, so it is intentionally reported as `loras` too.
+ */
+export function unsupportedAutoChainFields(req: GenerateRequest): AutoChainUnsupportedField[] {
+  const unsupported: AutoChainUnsupportedField[] = [];
+  if (req.negative_prompt?.trim()) unsupported.push("negative_prompt");
+  if ((req.loras?.length ?? 0) > 0 || req.lora) unsupported.push("loras");
+  if (req.audio_file) unsupported.push("audio_file");
+  if (req.source_video) unsupported.push("source_video");
+  if ((req.keyframes?.length ?? 0) > 0) unsupported.push("keyframes");
+  if (req.pipeline) unsupported.push("pipeline");
+  if (req.retake_range) unsupported.push("retake_range");
+  if (req.spatial_upscale) unsupported.push("spatial_upscale");
+  if (req.temporal_upscale) unsupported.push("temporal_upscale");
+  return unsupported;
+}
+
+/**
+ * Project a normal GenerateRequest onto the chain endpoint's auto-expand
+ * wire contract. Call `unsupportedAutoChainFields` before this helper so the
+ * UI can reject an incompatible request instead of silently dropping it.
+ */
+export function buildAutoChainRequest(
+  req: GenerateRequest,
+  decision: AutoChainRoutingDecision,
+): AutoChainRequest {
+  return {
+    model: req.model,
+    prompt: req.prompt,
+    total_frames: req.frames!,
+    clip_frames: decision.clipFrames,
+    motion_tail_frames: decision.motionTail,
+    width: req.width,
+    height: req.height,
+    ...(req.fps !== undefined ? { fps: req.fps } : {}),
+    ...(req.seed !== undefined ? { seed: req.seed } : {}),
+    steps: req.steps,
+    guidance: req.guidance ?? 1,
+    ...(req.strength !== undefined ? { strength: req.strength } : {}),
+    ...(req.output_format !== undefined ? { output_format: req.output_format } : {}),
+    ...(req.source_image !== undefined ? { source_image: req.source_image } : {}),
+    ...(req.enable_audio !== undefined ? { enable_audio: req.enable_audio } : {}),
+  };
+}
+
 /** Families that support chain rendering. Mirrors the server-side
  * `chain_limits::family_cap` whitelist. `ltx2` has true latent-handoff chain
  * support; `ltx-video` uses an img2vid-less fallback (independent clips
@@ -58,6 +123,55 @@ const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
 function canonicalizeFamily(family: string | null | undefined): string {
   const fam = (family ?? "").trim().toLowerCase();
   return fam === "ltx-2" ? "ltx2" : fam;
+}
+
+/**
+ * Request-aware routing for Generate surfaces. Temporal x2 is itself the
+ * server's supported way to render an LTX-2 result above one clip: stage 1
+ * denoises half as many frames, then the temporal upscaler expands to the
+ * requested total. It must stay on the ordinary endpoint instead of being
+ * mistaken for a multi-clip chain.
+ */
+export function decideGenerateRequestRouting(
+  req: Pick<GenerateRequest, "frames" | "model" | "temporal_upscale">,
+  family: string | null | undefined,
+  motionTail: number = DEFAULT_MOTION_TAIL,
+): ChainRoutingDecision {
+  const frames = req.frames;
+  if (canonicalizeFamily(family) === "ltx2" && req.temporal_upscale === "x2" && frames) {
+    return frames <= LTX2_TEMPORAL_UPSCALE_MAX_FRAMES
+      ? { kind: "single" }
+      : {
+          kind: "reject",
+          reason: `Temporal x2 supports at most ${LTX2_TEMPORAL_UPSCALE_MAX_FRAMES} frames. Reduce the frame count.`,
+        };
+  }
+  return decideChainRouting(frames, family, req.model, motionTail);
+}
+
+/** Match the one concrete server render the estimator should size. */
+export function buildGenerationEstimateRequest(
+  req: GenerateRequest,
+  family: string | null | undefined,
+): GenerateRequest {
+  const decision = decideGenerateRequestRouting(req, family);
+  const estimate = { ...req };
+  // Optional properties must be absent, not merely `undefined`: aside from
+  // satisfying the exact wire type, omission guarantees JSON serializers do
+  // not grow an accidental media payload in a future transport change.
+  delete estimate.source_image;
+  delete estimate.source_image_name;
+  delete estimate.mask_image;
+  delete estimate.control_image;
+  delete estimate.edit_images;
+  delete estimate.source_video;
+  delete estimate.keyframes;
+  delete estimate.audio_file;
+  return {
+    ...estimate,
+    batch_size: 1,
+    ...(decision.kind === "chain" ? { frames: decision.clipFrames } : {}),
+  };
 }
 
 export function decideChainRouting(
@@ -107,6 +221,14 @@ export function decideChainRouting(
   const effective = clipFrames - effectiveMotionTail;
   const remainder = frames - clipFrames;
   const stageCount = 1 + Math.ceil(remainder / effective);
+
+  if (stageCount > MAX_CHAIN_STAGES) {
+    const maxFrames = clipFrames + (MAX_CHAIN_STAGES - 1) * effective;
+    return {
+      kind: "reject",
+      reason: `Chained video supports at most ${maxFrames} frames (${MAX_CHAIN_STAGES} clips) for this model. Reduce the frame count.`,
+    };
+  }
 
   return {
     kind: "chain",

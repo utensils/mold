@@ -219,6 +219,8 @@ async fn generate_chain_stream_parses_progress_and_complete_events() {
         generation_time_ms: Some(45_000),
         script: script.clone(),
         vram_estimate: None,
+        filename: Some("mold-ltx2-test.mp4".into()),
+        metadata: None,
     };
     let progress = ChainProgressEvent::DenoiseStep {
         stage_idx: 0,

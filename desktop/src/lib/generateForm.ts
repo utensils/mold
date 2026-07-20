@@ -156,19 +156,55 @@ export function newGenerateForm(): GenerateForm {
 }
 
 /**
+ * Take a submission-safe snapshot of the mutable composer state. Source-fit
+ * preprocessing is asynchronous and may run for minutes; callers must never
+ * read the live reactive form again after a user taps Generate.
+ */
+export function cloneGenerateForm(form: GenerateForm): GenerateForm {
+  const sourceFit: SourceFitPolicy =
+    form.sourceFit.mode === "upscale-then-fit"
+      ? { ...form.sourceFit, fit: { ...form.sourceFit.fit } }
+      : { ...form.sourceFit };
+  return {
+    ...form,
+    imageAttachments: [...form.imageAttachments],
+    sourceFit,
+    loras: form.loras.map((lora) => ({
+      ...lora,
+      trainedWords: [...lora.trainedWords],
+    })),
+    sourceVideo: form.sourceVideo ? { ...form.sourceVideo } : null,
+    keyframes: form.keyframes.map((keyframe) => ({
+      ...keyframe,
+      image: { ...keyframe.image },
+    })),
+    retakeRange: form.retakeRange ? { ...form.retakeRange } : null,
+    audioFile: form.audioFile ? { ...form.audioFile } : null,
+  };
+}
+
+/**
  * Apply a model's defaults and prune anything the new family can't use. LoRAs
  * clear on every model change — even FLUX→FLUX — because an adapter may not
  * target the new variant's tensor layout.
  */
 export function applyModelDefaults(form: GenerateForm, m: ModelEntry): void {
-  form.model = m.name;
-  form.family = m.family;
   form.width = m.default_width;
   form.height = m.default_height;
   form.steps = m.default_steps;
   form.guidance = m.default_guidance;
   form.loras = [];
+  reconcileModelCapabilities(form, m);
+}
 
+/**
+ * Refresh family/capability metadata for the same named model on a different
+ * host without discarding portable user parameters. Host manifests are the
+ * authority; two remotes may advertise corrected or aliased family metadata.
+ */
+export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): void {
+  form.model = m.name;
+  form.family = m.family;
   const caps = generationCapabilitiesForFamily(m.family);
   if (!outputFormatsForFamily(m.family).includes(form.outputFormat)) {
     form.outputFormat = defaultOutputFormat(m.family);
@@ -294,12 +330,16 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     if (form.sourceImageName) req.source_image_name = form.sourceImageName;
     req.strength = form.strength;
     if (caps.supportsMask && form.maskImage) req.mask_image = form.maskImage;
-    if (caps.supportsControlNet && form.controlImage) {
-      req.control_image = form.controlImage;
-      if (form.controlModel.trim()) {
-        req.control_model = form.controlModel.trim();
-        req.control_scale = form.controlScale;
-      }
+  }
+
+  // ControlNet is independent conditioning, not an img2img derivative. An
+  // SD1.5 request may carry a control image without a source image; nesting it
+  // under source_image silently discarded that valid text-to-image workflow.
+  if (caps.supportsControlNet && form.controlImage) {
+    req.control_image = form.controlImage;
+    if (form.controlModel.trim()) {
+      req.control_model = form.controlModel.trim();
+      req.control_scale = form.controlScale;
     }
   }
 
@@ -371,6 +411,10 @@ export function applyMetadataToForm(
   metadata: OutputMetadata,
   models: ModelEntry[] = [],
 ): void {
+  // Camera motion serializes as an ordinary LoRA. The metadata mapper below
+  // restores that stack directly, so a separate live camera selection would
+  // duplicate or contaminate the reused print.
+  form.cameraControl = null;
   const model = findInstalledModel(models, metadata.model);
   if (model) {
     applyModelDefaults(form, model);

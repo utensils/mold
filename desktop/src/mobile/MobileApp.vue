@@ -1,16 +1,39 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
-import { outputFormatsForFamily } from "../lib/capabilities";
-import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
+import { upscaleImage } from "../lib/api/upscale";
+import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
+import type { GalleryImage, GenerateRequest, ModelEntry, ServerStatus } from "../lib/api/types";
+import {
+  buildGenerationEstimateRequest,
+  decideGenerateRequestRouting,
+  unsupportedAutoChainFields,
+} from "../lib/chainRouting";
 import {
   applyModelDefaults,
   buildRequest,
+  cloneGenerateForm,
   newGenerateForm,
+  reconcileModelCapabilities,
   type GenerateForm,
 } from "../lib/generateForm";
+import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import {
+  guidanceValidationError,
+  inlineGenerationMediaBytes,
+  MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES,
+  MOBILE_MEDIA_BUDGET_ERROR,
+  mobileMediaBudgetValidationError,
+  stepsValidationError,
+} from "../lib/generateValidation";
+import { blobToBase64, isStillImageFile } from "../lib/image";
+import { isGenerationModel } from "../stores/models";
+import { domCanvasOps } from "../lib/sourceFitCanvas";
+import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
+import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import {
   isCancelledError,
   jobStatusCode,
@@ -22,9 +45,14 @@ import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost
 import { applyMobileGalleryMetadata } from "./reuse";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
+import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
+import MobileLoraControls from "./MobileLoraControls.vue";
+import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
+import MobileSourceControls from "./MobileSourceControls.vue";
+import MobileTemplates from "./MobileTemplates.vue";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -62,8 +90,13 @@ const hostError = ref("");
 const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
 const loadingModels = ref(false);
+const modelLoadError = ref("");
 const form = reactive<GenerateForm>(newGenerateForm());
 const seedValid = ref(true);
+const parameterValid = ref(true);
+const sourceValid = ref(true);
+const resolutionValid = ref(true);
+const preparingGeneration = ref(false);
 const progress = ref("Ready");
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
@@ -73,6 +106,7 @@ const galleryError = ref("");
 const galleryRemaining = ref(0);
 const selectedPrint = ref<GalleryPrint | null>(null);
 const reusingPrint = ref(false);
+const usingPrintAsSource = ref(false);
 const reusePrintError = ref("");
 const latestResultClientId = ref<number | null>(null);
 const resultMediaLoadKey = ref(0);
@@ -103,16 +137,50 @@ const selectedPrintIndex = computed(() => {
     (print) => print.hostId === selected.hostId && print.filename === selected.filename,
   );
 });
+const canUseSelectedPrintAsSource = computed(
+  () =>
+    !!selectedPrint.value &&
+    isStillImageFile(selectedPrint.value.filename) &&
+    caps.value.supportsImg2img,
+);
 const selectedTarget = computed<ApiTarget | null>(() => {
   const host = selectedHost.value;
   return host ? mobileHostTarget(host) : null;
+});
+const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const generationModels = computed(() =>
+  models.value.filter((model) => model.downloaded && isGenerationModel(model)),
+);
+const upscalers = computed(() =>
+  models.value.filter((model) => model.family === "upscaler" || model.family === "real-esrgan"),
+);
+const controlModels = computed(() => models.value.filter((model) => model.family === "controlnet"));
+const sourceSectionTitle = computed(() =>
+  caps.value.sourceImageMode === "qwen-edit" ? "Pictures" : "Source image",
+);
+const sourceSectionSummary = computed(() => {
+  if (caps.value.sourceImageMode === "qwen-edit") {
+    const count = form.imageAttachments.length;
+    return count === 0 ? "Target required" : `${count} photo${count === 1 ? "" : "s"}`;
+  }
+  if (form.sourceImage) return form.sourceImageName || "Selected";
+  return form.controlImage ? "Control photo selected" : "Optional";
 });
 const outputFormats = computed(() => outputFormatsForFamily(form.family));
 const selectedModelAvailable = computed(
   () =>
     modelsHostId.value === selectedHostId.value &&
-    models.value.some((model) => model.name === form.model),
+    generationModels.value.some((model) => model.name === form.model),
 );
+const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
+const stepsError = computed(() => stepsValidationError(form.steps));
+const guidanceError = computed(() => guidanceValidationError(form.guidance));
+const basicParametersValid = computed(() => !stepsError.value && !guidanceError.value);
+const mobileMediaBudgetError = computed(() => mobileMediaBudgetValidationError(form));
+const estimateRequest = computed(() => {
+  if (!form.model) return null;
+  return buildGenerationEstimateRequest(buildRequest(form), form.family);
+});
 const queuedJobs = computed(() => railOrder(generation.pending));
 const activeGeneration = computed(() => {
   const active = generation.active;
@@ -135,9 +203,11 @@ const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
 const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
 const resultPreviewError = computed(() => latestResultJob.value?.resultError ?? "");
 const developButtonLabel = computed(() =>
-  queuedJobs.value.length > 0
-    ? `Develop print (+${queuedJobs.value.length} queued)`
-    : "Develop print",
+  preparingGeneration.value
+    ? "Preparing source…"
+    : `${form.batchSize > 1 ? `Develop ${form.batchSize} prints` : "Develop print"}${
+        queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
+      }`,
 );
 const queueAnnouncement = computed(() => {
   const count = queuedJobs.value.length;
@@ -350,11 +420,13 @@ async function refreshModels(): Promise<boolean> {
     models.value = [];
     modelsHostId.value = "";
     loadingModels.value = false;
+    modelLoadError.value = "";
     return false;
   }
   const hostId = host.id;
   const target = { baseUrl: host.baseUrl, apiKey: host.apiKey || null };
   loadingModels.value = true;
+  modelLoadError.value = "";
   models.value = [];
   modelsHostId.value = "";
   try {
@@ -366,16 +438,24 @@ async function refreshModels(): Promise<boolean> {
     host.online = true;
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
-    models.value = entries.filter((model) => model.downloaded);
+    // Keep auxiliary entries for the Upscale and ControlNet pickers, while
+    // the main Model select uses `generationModels` so those tools can never
+    // become the active generation model.
+    models.value = entries;
     modelsHostId.value = hostId;
-    if (!models.value.some((model) => model.name === form.model) && models.value[0]) {
-      applyModelDefaults(form, models.value[0]);
+    const selectedEntry = generationModels.value.find((model) => model.name === form.model);
+    if (selectedEntry) {
+      reconcileModelCapabilities(form, selectedEntry);
+    } else if (generationModels.value[0]) {
+      applyModelDefaults(form, generationModels.value[0]);
     }
     return true;
   } catch (error) {
     if (epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     host.online = false;
-    progress.value = error instanceof Error ? error.message : String(error);
+    const detail = error instanceof Error ? error.message : String(error);
+    modelLoadError.value = `Couldn’t load generation models from ${host.name}. ${detail}`;
+    progress.value = detail;
     return false;
   } finally {
     if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
@@ -383,8 +463,42 @@ async function refreshModels(): Promise<boolean> {
 }
 
 function changeModel(): void {
-  const model = models.value.find((entry) => entry.name === form.model);
+  const model = generationModels.value.find((entry) => entry.name === form.model);
   if (model) applyModelDefaults(form, model);
+}
+
+function clearHostScopedGenerationSelections(): void {
+  form.loras = [];
+  form.upscaleModel = "";
+  form.controlModel = "";
+  form.cameraControl = null;
+  if (form.sourceFit.mode === "upscale-then-fit") {
+    form.sourceFit = { ...form.sourceFit, upscalerModel: "" };
+  }
+}
+
+function appendPromptWord(word: string): void {
+  const trimmed = word.trim();
+  if (!trimmed) return;
+  form.prompt = form.prompt.trim() ? `${form.prompt.trimEnd()}, ${trimmed}` : trimmed;
+}
+
+function loadTemplate(template: GenerationTemplate): void {
+  Object.assign(form, template.form);
+  const sameHost = !!template.scopeId && template.scopeId === selectedHostId.value;
+  if (!sameHost) clearHostScopedGenerationSelections();
+  const selectedEntry = generationModels.value.find((model) => model.name === form.model);
+  if (selectedEntry) reconcileModelCapabilities(form, selectedEntry);
+  const available = generationModels.value.some((model) => model.name === form.model);
+  progress.value = available
+    ? `Loaded ${template.name}`
+    : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`;
+  const mediaMessage = template.mediaReferences.length
+    ? ` Re-add ${formatTemplateMediaReferences(template.mediaReferences)}.`
+    : "";
+  generationAnnouncement.value = sameHost
+    ? `Template loaded.${mediaMessage}`
+    : `Template loaded. Re-add host-specific LoRAs and auxiliary models.${mediaMessage}`;
 }
 
 function revokeObjectUrl(url: string): void {
@@ -392,48 +506,148 @@ function revokeObjectUrl(url: string): void {
   objectUrls.delete(url);
 }
 
-function generate(): void {
+async function prepareGenerationRequest(target: ApiTarget, draft: GenerateForm) {
+  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
+    const result = await applySourceFitPreprocess(
+      {
+        source: draft.sourceImage,
+        mask: draftCaps.supportsMask ? draft.maskImage : null,
+        policy: draftCaps.supportsMask
+          ? draft.sourceFit
+          : coerceSourceFitForMaskless(draft.sourceFit),
+        target: { width: draft.width, height: draft.height },
+      },
+      {
+        ops: domCanvasOps,
+        upscale: (image, model) =>
+          upscaleImage({
+            image,
+            model,
+            target,
+            onProgress: (message) => (progress.value = message),
+          }),
+        onStatus: (message) => (progress.value = message),
+      },
+    );
+    draft.sourceImage = result.source;
+    draft.maskImage = result.mask;
+  }
+  const mediaBudgetError = mobileMediaBudgetValidationError(draft);
+  if (mediaBudgetError) throw new Error(mediaBudgetError);
+  return buildRequest(draft);
+}
+
+async function generate(): Promise<void> {
   const host = selectedHost.value;
   const target = selectedTarget.value;
-  if (!host || !target || !form.prompt.trim() || !selectedModelAvailable.value || !seedValid.value)
+  if (
+    !host ||
+    !target ||
+    !form.prompt.trim() ||
+    !selectedModelAvailable.value ||
+    !seedValid.value ||
+    !parameterValid.value ||
+    !sourceControlsValid.value ||
+    !resolutionValid.value ||
+    !basicParametersValid.value ||
+    !!mobileMediaBudgetError.value ||
+    preparingGeneration.value
+  )
     return;
 
-  // Exactly like desktop: snapshot the request and host for this tap, open a
-  // separate SSE stream immediately, and let the remote engine schedule it.
-  const { settled } = generation.submitBatch(buildRequest(form), 1, {
-    hostId: host.id,
-    label: host.name,
-    kind: "remote",
-    target: { ...target },
-    mirrorRemoteOutput: false,
-    retainEncodedResult: false,
-    metadataOnlyCompletion: true,
-  });
+  const draft = cloneGenerateForm(form);
+  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const batchSize = draftCaps.forcesBatchSizeOne ? 1 : draft.batchSize;
+  let request: GenerateRequest;
+  preparingGeneration.value = true;
+  try {
+    request = await prepareGenerationRequest(target, draft);
+  } catch (error) {
+    progress.value = error instanceof Error ? error.message : String(error);
+    generationAnnouncement.value = `Couldn’t prepare the source image. ${progress.value}`;
+    return;
+  } finally {
+    preparingGeneration.value = false;
+  }
+
+  const chainRouting = decideGenerateRequestRouting(request, draft.family);
+  if (chainRouting.kind === "reject") {
+    progress.value = chainRouting.reason;
+    generationAnnouncement.value = chainRouting.reason;
+    return;
+  }
+  if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
+    progress.value = "These options can’t be preserved during long-video chaining.";
+    generationAnnouncement.value = `${progress.value} Remove the highlighted options or reduce Frames to 97 or fewer.`;
+    return;
+  }
+
+  // Exactly like desktop: snapshot the request and host for this tap. The
+  // shared store expands Batch into individually queued, cancellable jobs.
+  const { settled } = generation.submitBatch(
+    request,
+    batchSize,
+    {
+      hostId: host.id,
+      label: host.name,
+      kind: "remote",
+      target: { ...target },
+      mirrorRemoteOutput: false,
+      retainEncodedResult: false,
+      metadataOnlyCompletion: true,
+    },
+    chainRouting,
+  );
   progress.value = "Queued";
   generationAnnouncement.value = "";
   void settled.then((jobs) => {
-    const job = jobs[0];
-    if (!job) return;
-    handledGenerationClientIds.add(job.clientId);
-    if (job.status === "complete" && job.result) {
-      latestResultClientId.value = job.clientId;
-      if (job.resultError) {
-        progress.value = job.resultError;
-        generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${job.resultError}`;
+    if (jobs.length === 0) return;
+    for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
+    const completed = jobs.filter(
+      (candidate) => candidate.status === "complete" && candidate.result,
+    );
+    const latestCompleted = completed.at(-1);
+    const unconfirmedCancellation = jobs.find((candidate) =>
+      candidate.error?.includes("remote cancellation was not confirmed"),
+    );
+    const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
+    const cancelled = jobs.find((candidate) => isCancelledError(candidate.error));
+
+    if (latestCompleted?.result) {
+      latestResultClientId.value = latestCompleted.clientId;
+      if (latestCompleted.resultError) {
+        progress.value = latestCompleted.resultError;
+        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${latestCompleted.resultError}`;
       } else {
-        progress.value = `${(job.result.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result.seed_used}`;
-        generationAnnouncement.value = "Generation completed.";
+        progress.value = `${completed.length > 1 ? `${completed.length} prints · ` : ""}${(
+          latestCompleted.result.generation_time_ms / 1000
+        ).toFixed(1)}s · seed ${latestCompleted.result.seed_used}`;
+        generationAnnouncement.value =
+          completed.length === 1 && jobs.length === 1
+            ? "Generation completed."
+            : `${completed.length} of ${jobs.length} generations completed.`;
+      }
+      if (unconfirmedCancellation?.error) {
+        progress.value = `${completed.length} of ${jobs.length} completed · ${unconfirmedCancellation.error}`;
+        generationAnnouncement.value = `${completed.length} generations completed; cancellation failed. ${unconfirmedCancellation.error}`;
+      } else if (failed?.error) {
+        const failedCount = jobs.filter(
+          (candidate) => candidate.error && !isCancelledError(candidate.error),
+        ).length;
+        progress.value = `${completed.length} of ${jobs.length} completed · ${failed.error}`;
+        generationAnnouncement.value = `${completed.length} generations completed; ${failedCount} failed. ${failed.error}`;
       }
       if (tab.value === "gallery") void refreshGallery();
-    } else if (job.error?.includes("remote cancellation was not confirmed")) {
-      progress.value = job.error;
-      generationAnnouncement.value = `Cancellation failed. ${job.error}`;
-    } else if (job.error && !isCancelledError(job.error)) {
-      progress.value = job.error;
-      generationAnnouncement.value = `Generation failed. ${job.error}`;
-    } else if (isCancelledError(job.error)) {
+    } else if (unconfirmedCancellation?.error) {
+      progress.value = unconfirmedCancellation.error;
+      generationAnnouncement.value = `Cancellation failed. ${unconfirmedCancellation.error}`;
+    } else if (failed?.error) {
+      progress.value = failed.error;
+      generationAnnouncement.value = `Generation failed. ${failed.error}`;
+    } else if (cancelled) {
       progress.value = "Cancelled";
-      generationAnnouncement.value = "Generation cancelled.";
+      generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
     }
     // Only terminal jobs whose callbacks have run are eligible: multiple
     // completion microtasks cannot prune one another before they promote the
@@ -632,11 +846,11 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
         return;
       }
     }
-    if (models.value.length === 0) {
+    if (generationModels.value.length === 0) {
       reusePrintError.value = `${print.hostName} has no downloaded models available.`;
       return;
     }
-    const reuse = applyMobileGalleryMetadata(form, print.metadata, models.value);
+    const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
     progress.value = reuse.substitutedModel
       ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
       : "Prompt settings restored";
@@ -651,6 +865,46 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
   }
 }
 
+async function useSelectedPrintAsSource(): Promise<void> {
+  const print = selectedPrint.value;
+  if (!print || !canUseSelectedPrintAsSource.value || usingPrintAsSource.value) return;
+  usingPrintAsSource.value = true;
+  reusePrintError.value = "";
+  try {
+    const response = await apiFetchTo(print.target, galleryMediaPath(print.filename, "host"));
+    const qwenEdit = caps.value.sourceImageMode === "qwen-edit";
+    const existingBytes = inlineGenerationMediaBytes(form, qwenEdit ? null : "sourceImage");
+    const exceedsBudget = (incomingBytes: number) =>
+      existingBytes + incomingBytes > MAX_MOBILE_GENERATION_REQUEST_MEDIA_BYTES;
+    // Reject from Content-Length before materialising the response Blob when
+    // the host provides it; then verify the actual Blob size for older hosts
+    // and chunked responses before the ~4/3 base64 expansion.
+    const declaredBytes = Number(response.headers?.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declaredBytes) && declaredBytes >= 0 && exceedsBudget(declaredBytes)) {
+      throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
+    }
+    const blob = await response.blob();
+    if (blob.size === 0) throw new Error("That gallery image is empty.");
+    if (exceedsBudget(blob.size)) throw new Error(MOBILE_MEDIA_BUDGET_ERROR);
+    const base64 = await blobToBase64(blob);
+    if (qwenEdit) {
+      form.imageAttachments = [base64, ...form.imageAttachments];
+      progress.value = "Added gallery print as the edit target";
+    } else {
+      form.sourceImage = base64;
+      form.sourceImageName = print.filename;
+      progress.value = "Gallery print selected as source";
+    }
+    selectedPrint.value = null;
+    galleryRefreshDeferred = false;
+    tab.value = "generate";
+  } catch (error) {
+    reusePrintError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    usingPrintAsSource.value = false;
+  }
+}
+
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
@@ -658,13 +912,13 @@ function openPrint(print: GalleryPrint): void {
 
 function navigateSelectedPrint(delta: -1 | 1): void {
   const next = gallery.value[selectedPrintIndex.value + delta];
-  if (!next || reusingPrint.value) return;
+  if (!next || reusingPrint.value || usingPrintAsSource.value) return;
   reusePrintError.value = "";
   selectedPrint.value = next;
 }
 
 function closePrint(): void {
-  if (reusingPrint.value) return;
+  if (reusingPrint.value || usingPrintAsSource.value) return;
   reusePrintError.value = "";
   selectedPrint.value = null;
   if (galleryRefreshDeferred || galleryRefreshRequested) {
@@ -684,7 +938,8 @@ function reuseSelectedPrint(): void {
   if (print) void reusePrint(print);
 }
 
-watch(selectedHostId, (id) => {
+watch(selectedHostId, (id, previousId) => {
+  if (id !== previousId) clearHostScopedGenerationSelections();
   if (id) localStorage.setItem(SELECTED_KEY, id);
   else localStorage.removeItem(SELECTED_KEY);
 });
@@ -752,19 +1007,64 @@ onBeforeUnmount(() => {
         <template v-else>
           <h1 class="section-title">Generate</h1>
           <p class="section-note">Develop on {{ selectedHost.name }}</p>
+          <label v-if="hosts.length > 1" class="field">
+            <span>Host</span>
+            <select
+              class="control"
+              :value="selectedHostId"
+              data-test="mobile-generate-host"
+              @change="selectHost(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="host in hosts" :key="host.id" :value="host.id">
+                {{ host.name }}{{ host.online ? "" : " · offline" }}
+              </option>
+            </select>
+          </label>
           <label class="field">
             <span>Model</span>
             <select
               v-model="form.model"
               class="control"
-              :disabled="loadingModels"
+              :disabled="loadingModels || generationModels.length === 0"
               @change="changeModel"
             >
-              <option v-for="model in models" :key="model.name" :value="model.name">
+              <option v-if="!form.model" value="" disabled>
+                {{ loadingModels ? "Loading models…" : "No generation models available" }}
+              </option>
+              <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
+                {{ form.model }} · not installed
+              </option>
+              <option v-for="model in generationModels" :key="model.name" :value="model.name">
                 {{ model.name }}
               </option>
             </select>
           </label>
+          <div
+            v-if="modelLoadError"
+            class="mobile-model-state is-error"
+            role="alert"
+            data-test="mobile-model-error"
+          >
+            <p>{{ modelLoadError }}</p>
+            <button
+              class="secondary-button"
+              type="button"
+              data-test="mobile-model-retry"
+              @click="refreshModels"
+            >
+              Retry
+            </button>
+          </div>
+          <div
+            v-else-if="!loadingModels && generationModels.length === 0"
+            class="mobile-model-state"
+            data-test="mobile-model-empty"
+          >
+            <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
+            <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
+              Open Catalog
+            </button>
+          </div>
           <label class="field">
             <span>Prompt</span>
             <textarea
@@ -774,21 +1074,63 @@ onBeforeUnmount(() => {
               placeholder="Describe the print…"
             />
           </label>
-          <label class="field">
+          <MobilePromptTools v-if="selectedTarget" :form="form" :target="selectedTarget" />
+          <label v-if="form.model && caps.supportsNegativePrompt" class="field">
             <span>Negative prompt</span>
             <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
           </label>
+
+          <details
+            v-if="form.model && caps.supportsImg2img"
+            class="mobile-native-disclosure"
+            :open="
+              !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
+              caps.sourceImageMode === 'qwen-edit'
+            "
+            data-test="mobile-source-disclosure"
+          >
+            <summary>
+              <span>{{ sourceSectionTitle }}</span>
+              <small>{{ sourceSectionSummary }}</small>
+            </summary>
+            <MobileSourceControls
+              :form="form"
+              :target="selectedTarget"
+              :control-models="controlModels"
+              :upscalers="upscalers"
+              @validity-change="sourceValid = $event"
+            />
+          </details>
+
+          <p
+            v-if="mobileMediaBudgetError"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-media-budget-error"
+          >
+            {{ mobileMediaBudgetError }}
+          </p>
+
           <MobileResolutionPicker
             v-model:width="form.width"
             v-model:height="form.height"
             :family="form.family"
             :disabled="loadingModels"
+            @validity-change="resolutionValid = $event"
           />
           <div class="field-grid">
-            <label class="field"
-              ><span>Steps</span
-              ><input v-model.number="form.steps" class="control" type="number" inputmode="numeric"
-            /></label>
+            <label class="field">
+              <span>Steps</span>
+              <input
+                v-model.number="form.steps"
+                class="control"
+                type="number"
+                inputmode="numeric"
+                min="1"
+                max="100"
+                :aria-invalid="stepsError ? 'true' : undefined"
+              />
+            </label>
             <label class="field"
               ><span>Guidance</span
               ><input
@@ -797,8 +1139,19 @@ onBeforeUnmount(() => {
                 type="number"
                 inputmode="decimal"
                 step="0.1"
+                min="0"
+                max="100"
+                :aria-invalid="guidanceError ? 'true' : undefined"
             /></label>
           </div>
+          <p
+            v-if="stepsError || guidanceError"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-basic-parameter-error"
+          >
+            {{ stepsError || guidanceError }}
+          </p>
           <MobileSeedPicker
             v-model="form.seed"
             :last-seed="generation.lastSeedUsed"
@@ -812,26 +1165,37 @@ onBeforeUnmount(() => {
               </option>
             </select></label
           >
-          <template v-if="form.family.includes('video') || form.family.includes('ltx2')">
-            <div class="field-grid">
-              <label class="field"
-                ><span>Frames</span
-                ><input
-                  v-model.number="form.frames"
-                  class="control"
-                  type="number"
-                  inputmode="numeric"
-              /></label>
-              <label class="field"
-                ><span>FPS</span
-                ><input v-model.number="form.fps" class="control" type="number" inputmode="numeric"
-              /></label>
-            </div>
-          </template>
+
+          <MobileGenerateParameters
+            :form="form"
+            :upscalers="upscalers"
+            @validity-change="parameterValid = $event"
+          />
+          <MobileLoraControls
+            v-if="selectedTarget"
+            :form="form"
+            :target="selectedTarget"
+            @append-word="appendPromptWord"
+          />
+          <MobileTemplates :form="form" :host-id="selectedHost.id" @load="loadTemplate" />
+
+          <div class="mobile-estimate">
+            <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
+          </div>
           <button
             class="primary-button"
             type="button"
-            :disabled="!form.prompt.trim() || !selectedModelAvailable || !seedValid"
+            :disabled="
+              !form.prompt.trim() ||
+              !selectedModelAvailable ||
+              !seedValid ||
+              !parameterValid ||
+              !sourceControlsValid ||
+              !resolutionValid ||
+              !basicParametersValid ||
+              !!mobileMediaBudgetError ||
+              preparingGeneration
+            "
             data-test="mobile-develop-button"
             @click="generate"
           >
@@ -1068,6 +1432,8 @@ onBeforeUnmount(() => {
       :host-name="selectedPrint.hostName"
       :thumbnail-url="selectedPrint.thumbnailUrl"
       :reusing="reusingPrint"
+      :can-use-as-source="canUseSelectedPrintAsSource"
+      :using-source="usingPrintAsSource"
       :reuse-error="reusePrintError"
       :generation-announcement="generationAnnouncement"
       :position="selectedPrintIndex + 1"
@@ -1076,6 +1442,7 @@ onBeforeUnmount(() => {
       :has-next="selectedPrintIndex >= 0 && selectedPrintIndex < gallery.length - 1"
       @close="closePrint"
       @reuse="reuseSelectedPrint"
+      @use-source="useSelectedPrintAsSource"
       @previous="navigateSelectedPrint(-1)"
       @next="navigateSelectedPrint(1)"
     />

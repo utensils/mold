@@ -1403,7 +1403,9 @@ async fn upscale_stream(
 
 const SSE_PAYLOAD_HEADER: &str = "x-mold-sse-payload";
 
-fn requested_sse_completion_payload(headers: &HeaderMap) -> Result<SseCompletionPayload, ApiError> {
+pub(crate) fn requested_sse_completion_payload(
+    headers: &HeaderMap,
+) -> Result<SseCompletionPayload, ApiError> {
     let Some(value) = headers.get(SSE_PAYLOAD_HEADER) else {
         return Ok(SseCompletionPayload::Full);
     };

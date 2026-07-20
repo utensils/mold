@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { seedMode, type GenerateForm, type PickedImage } from "../../lib/generateForm";
+import {
+  buildRequest,
+  seedMode,
+  type GenerateForm,
+  type PickedImage,
+} from "../../lib/generateForm";
 import type {
   Ltx2PipelineMode,
   Ltx2SpatialUpscale,
@@ -9,8 +14,21 @@ import type {
 } from "../../lib/api/types";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../../lib/capabilities";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
-import { decideChainRouting, type ChainRoutingDecision } from "../../lib/chainRouting";
+import {
+  decideGenerateRequestRouting,
+  unsupportedAutoChainFields,
+  type ChainRoutingDecision,
+} from "../../lib/chainRouting";
 import { fileToBase64 } from "../../lib/image";
+import {
+  advancedVideoValidationError,
+  audioOutputValidationError,
+  cameraControlValidationError,
+  fpsValidationError,
+  guidanceValidationError,
+  resolutionValidationError,
+  stepsValidationError,
+} from "../../lib/generateValidation";
 import {
   aspectRatioLabel,
   matchPreset,
@@ -34,15 +52,34 @@ const props = withDefaults(
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const framesError = computed(() => frames8n1Error(props.form.frames));
+const generationRequest = computed(() => buildRequest(props.form));
 
 // Long-video routing cue: when the frame count exceeds one clip the server
 // auto-chains chain-capable models; non-chainable models would fail, so show
 // the reject reason instead (GenerateView also blocks submit on it).
 const chainDecision = computed<ChainRoutingDecision>(() =>
   caps.value.supportsVideo
-    ? decideChainRouting(props.form.frames, props.form.family, props.form.model)
+    ? decideGenerateRequestRouting(generationRequest.value, props.form.family)
     : { kind: "single" },
 );
+const chainCompatibilityError = computed(() => {
+  if (chainDecision.value.kind !== "chain") return null;
+  const unsupported = unsupportedAutoChainFields(generationRequest.value);
+  return unsupported.length > 0
+    ? "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer."
+    : null;
+});
+const resolutionError = computed(() =>
+  resolutionValidationError(props.form.width, props.form.height),
+);
+const stepsError = computed(() => stepsValidationError(props.form.steps));
+const guidanceError = computed(() => guidanceValidationError(props.form.guidance));
+const fpsError = computed(() =>
+  caps.value.supportsVideo ? fpsValidationError(props.form.fps) : null,
+);
+const cameraError = computed(() => cameraControlValidationError(props.form));
+const audioFormatError = computed(() => audioOutputValidationError(props.form));
+const advancedVideoError = computed(() => advancedVideoValidationError(props.form));
 
 // ── Size presets ────────────────────────────────────────────────────────────
 const presets = computed(() => presetsForFamily(props.form.family));
@@ -316,6 +353,9 @@ const schedulerLabel: Record<string, string> = {
         <div class="text-caption text-ink-2">{{ orientation }}</div>
       </div>
     </div>
+    <p v-if="resolutionError" class="mt-1 text-caption text-stop" role="alert">
+      {{ resolutionError }}
+    </p>
 
     <!-- Steps -->
     <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
@@ -328,6 +368,9 @@ const schedulerLabel: Record<string, string> = {
       max="60"
       class="mt-1 w-full accent-[var(--safelight)]"
     />
+    <p v-if="stepsError" class="mt-1 text-caption text-stop" role="alert">
+      {{ stepsError }}
+    </p>
 
     <!-- Guidance -->
     <label class="mt-3 flex items-center justify-between text-caption text-ink-2">
@@ -341,6 +384,9 @@ const schedulerLabel: Record<string, string> = {
       step="0.1"
       class="mt-1 w-full accent-[var(--safelight)]"
     />
+    <p v-if="guidanceError" class="mt-1 text-caption text-stop" role="alert">
+      {{ guidanceError }}
+    </p>
 
     <!-- CFG++ (families per matrix) -->
     <label
@@ -498,7 +544,7 @@ const schedulerLabel: Record<string, string> = {
       <p v-if="framesError" class="mt-1 text-caption text-stop">{{ framesError }}</p>
 
       <div
-        v-if="chainDecision.kind === 'chain'"
+        v-if="chainDecision.kind === 'chain' && !chainCompatibilityError"
         data-test="chain-cue"
         class="border-edge mt-1.5 rounded-control border bg-[color-mix(in_srgb,var(--safelight)_10%,transparent)] px-2 py-1.5 text-caption text-ink-2"
       >
@@ -515,6 +561,13 @@ const schedulerLabel: Record<string, string> = {
       >
         {{ chainDecision.reason }}
       </p>
+      <p
+        v-else-if="chainCompatibilityError"
+        data-test="chain-compatibility-error"
+        class="mt-1.5 text-caption text-stop"
+      >
+        {{ chainCompatibilityError }}
+      </p>
 
       <label class="mt-3 text-caption text-ink-2">FPS</label>
       <input
@@ -525,6 +578,9 @@ const schedulerLabel: Record<string, string> = {
         aria-label="Frames per second"
         class="border-edge data-mono mt-1 h-7 w-full rounded-control border bg-bath px-1.5 text-ink"
       />
+      <p v-if="fpsError" class="mt-1 text-caption text-stop" role="alert">
+        {{ fpsError }}
+      </p>
 
       <!-- Camera motion (ltx2 only) — ships as a camera-control loras[] entry -->
       <template v-if="caps.supportsAdvancedVideo">
@@ -565,6 +621,14 @@ const schedulerLabel: Record<string, string> = {
         >
           Presets are published for LTX-2 19B only — use a custom LoRA path for LTX-2.3.
         </p>
+        <p
+          v-if="cameraError"
+          data-test="camera-motion-error"
+          class="mt-1 text-caption text-stop"
+          role="alert"
+        >
+          {{ cameraError }}
+        </p>
       </template>
 
       <label
@@ -574,6 +638,9 @@ const schedulerLabel: Record<string, string> = {
         Generate audio
         <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
       </label>
+      <p v-if="audioFormatError" class="mt-1 text-caption text-stop" role="alert">
+        {{ audioFormatError }}
+      </p>
     </template>
 
     <!-- LTX-2 pipeline (ltx2 only) -->
@@ -588,6 +655,15 @@ const schedulerLabel: Record<string, string> = {
         <span class="edge-code">{{ advancedOpen ? "▾" : "▸" }} LTX-2 pipeline</span>
         <div class="border-edge h-px flex-1 border-t" />
       </button>
+
+      <p
+        v-if="advancedVideoError"
+        data-test="ltx2-validation-error"
+        class="mb-2 text-caption text-stop"
+        role="alert"
+      >
+        {{ advancedVideoError }}
+      </p>
 
       <div v-if="advancedOpen">
         <label class="text-caption text-ink-2">Pipeline</label>
