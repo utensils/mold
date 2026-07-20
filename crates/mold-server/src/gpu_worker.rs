@@ -1296,7 +1296,7 @@ mod tests {
     use super::*;
     use crate::job_registry::JobRegistry;
     use crate::model_cache::ModelCache;
-    use crate::state::QueueHandle;
+    use crate::state::{GenerationJob, QueueHandle, SseCompletionPayload};
     use mold_core::{
         Config, GenerateRequest, GenerateResponse, ImageData, ModelConfig, OutputFormat,
     };
@@ -1413,6 +1413,12 @@ mod tests {
             "DriverError(CUDA_ERROR_ECC_UNCORRECTABLE, uncorrectable ECC error)",
             "DriverError(CUDA_ERROR_LAUNCH_FAILED, unspecified launch failure)",
             "DriverError(CUDA_ERROR_ASSERT, device-side assert triggered)",
+            "DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, misaligned address)",
+            "DriverError(CUDA_ERROR_HARDWARE_STACK_ERROR, hardware stack error)",
+            "DriverError(CUDA_ERROR_ILLEGAL_INSTRUCTION, illegal instruction)",
+            "DriverError(CUDA_ERROR_INVALID_ADDRESS_SPACE, invalid address space)",
+            "DriverError(CUDA_ERROR_INVALID_PC, invalid program counter)",
+            "DriverError(CUDA_ERROR_LAUNCH_TIMEOUT, launch timed out)",
         ] {
             let err = anyhow::anyhow!(message);
             assert!(is_fatal_cuda_error(&err), "not classified: {message}");
@@ -1440,6 +1446,117 @@ mod tests {
         )
         .await
         .expect("fatal CUDA quarantine must wake server shutdown");
+    }
+
+    #[test]
+    fn quarantine_helper_ignores_ordinary_errors_and_latches_fatal_errors() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        assert!(!quarantine_if_fatal_cuda_error(
+            &worker,
+            &anyhow::anyhow!("ordinary inference failure")
+        ));
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(ensure_worker_not_poisoned(&worker, "flux-dev:q4").is_ok());
+
+        let fatal =
+            anyhow::anyhow!("DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, illegal memory access)")
+                .context("generation failed");
+        assert!(quarantine_if_fatal_cuda_error(&worker, &fatal));
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(worker.degraded_until.read().unwrap().is_none());
+        let error = ensure_worker_not_poisoned(&worker, "flux-dev:q4").unwrap_err();
+        assert!(error.to_string().contains("Restart the mold server"));
+    }
+
+    #[tokio::test]
+    async fn buffered_job_is_rejected_without_touching_a_poisoned_worker() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: "placeholder".to_string(),
+                    request: request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: placeholder_tx,
+                    output_dir: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let registry = JobRegistry::new();
+        registry.register("buffered-job", request.model.clone());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        process_job(
+            &worker,
+            GpuJob {
+                id: "buffered-job".to_string(),
+                model: request.model.clone(),
+                request,
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: Some(progress_tx),
+                result_tx,
+                output_dir: None,
+                config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                metadata_db: Arc::new(None),
+                queue: queue.clone(),
+                registry: registry.clone(),
+                events: crate::events::EventBroadcaster::new(),
+            },
+        );
+
+        let result = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("poisoned worker unexpectedly completed buffered job"),
+        };
+        assert!(result.contains("worker was quarantined"));
+        assert!(matches!(
+            progress_rx.recv().await,
+            Some(SseMessage::Error(_))
+        ));
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.pending(), 0);
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
+        drop(queue_rx.recv().await);
+    }
+
+    #[test]
+    fn poisoned_worker_rejects_admin_and_chain_entry_points() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        worker.poisoned.store(true, Ordering::SeqCst);
+        let config = Config::default();
+
+        let load_error = load_blocking(&worker, "fake-model", &config).unwrap_err();
+        assert!(load_error.to_string().contains("worker was quarantined"));
+
+        let closure_ran = AtomicBool::new(false);
+        let chain_error = run_chain_blocking(
+            &worker,
+            "fake-model",
+            &config,
+            None,
+            |_engine| -> anyhow::Result<()> {
+                closure_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(chain_error.to_string().contains("worker was quarantined"));
+        assert!(!closure_ran.load(Ordering::SeqCst));
+        assert!(worker.model_cache.lock().unwrap().contains("fake-model"));
     }
 
     #[test]
