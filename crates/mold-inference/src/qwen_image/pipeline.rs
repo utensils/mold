@@ -1138,11 +1138,20 @@ impl QwenImageEngine {
     }
 
     fn should_split_cfg_quantized_cuda(
+        is_edit_family: bool,
         transformer_size: u64,
         free_vram: u64,
         width: usize,
         height: usize,
     ) -> bool {
+        // The edit path concatenates output and conditioning image tokens.
+        // Batched true-CFG doubles that already irregular sequence and has
+        // triggered an out-of-bounds CUDA write in GGUF q4 at 800x1312. Keep
+        // quantized edits on the two-pass CFG path regardless of apparent
+        // headroom; synthesis can still batch when its measured peak fits.
+        if is_edit_family {
+            return true;
+        }
         if free_vram == 0 {
             // If VRAM probing fails, bias toward the safer split-CFG path
             // instead of assuming batched CFG will fit.
@@ -1173,6 +1182,7 @@ impl QwenImageEngine {
             let split_cfg_for_memory = device.is_cuda()
                 && (self.offload
                     || Self::should_split_cfg_quantized_cuda(
+                        self.is_edit_family(),
                         transformer_size,
                         free,
                         width,
@@ -3983,6 +3993,7 @@ mod tests {
     #[test]
     fn qwen_quantized_native_resolution_uses_split_cfg_on_24gb_cuda() {
         assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
             12_300_000_000,
             24_600_000_000,
             1328,
@@ -3991,8 +4002,20 @@ mod tests {
     }
 
     #[test]
+    fn qwen_quantized_edit_always_uses_split_cfg_on_high_vram_cuda() {
+        assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            true,
+            13_200_000_000,
+            47_000_000_000,
+            800,
+            1312,
+        ));
+    }
+
+    #[test]
     fn qwen_quantized_reduced_resolution_keeps_batched_cfg_when_it_fits() {
         assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
             12_300_000_000,
             24_600_000_000,
             512,
@@ -4006,6 +4029,7 @@ mod tests {
         let transformer_size = 12_300_000_000;
         let free_vram = transformer_size + headroom;
         assert!(!QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
             transformer_size,
             free_vram,
             1328,
@@ -4016,6 +4040,7 @@ mod tests {
     #[test]
     fn qwen_quantized_unknown_vram_biases_to_split_cfg() {
         assert!(QwenImageEngine::should_split_cfg_quantized_cuda(
+            false,
             12_300_000_000,
             0,
             1328,

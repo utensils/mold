@@ -166,6 +166,7 @@ pub async fn reveal_output_file(
 }
 
 async fn ensure_local_server_inner(
+    app: &tauri::AppHandle,
     state: &AppState,
     store: &SettingsStore,
 ) -> Result<LocalServerInfo, String> {
@@ -216,8 +217,14 @@ async fn ensure_local_server_inner(
         &state.secrets,
     );
     let port = server::available_server_port(server::LAN_BIND).map_err(|e| format!("{e:#}"))?;
-    let engine = server::start_engine(server::LAN_BIND, port, models_dir, gpu_selection)
-        .map_err(|e| format!("{e:#}"))?;
+    let engine = server::start_engine_with_app_restart(
+        app.clone(),
+        server::LAN_BIND,
+        port,
+        models_dir,
+        gpu_selection,
+    )
+    .map_err(|e| format!("{e:#}"))?;
     let base_url = engine.base_url();
     if !server::wait_healthy(&base_url, Duration::from_secs(30)).await {
         engine.join(Duration::from_secs(1));
@@ -241,19 +248,21 @@ async fn ensure_local_server_auth(base_url: &str, api_key: &str) -> Result<(), S
 /// mDNS; the returned URL remains loopback for the local webview.
 #[tauri::command]
 pub async fn ensure_local_server(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     store: tauri::State<'_, SettingsStore>,
 ) -> Result<LocalServerInfo, String> {
-    ensure_local_server_inner(&state, &store).await
+    ensure_local_server_inner(&app, &state, &store).await
 }
 
 /// Bring the local server online and select it as the primary connection.
 #[tauri::command]
 pub async fn start_local_engine(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     store: tauri::State<'_, SettingsStore>,
 ) -> Result<ConnectionInfo, String> {
-    let local = ensure_local_server_inner(&state, &store).await?;
+    let local = ensure_local_server_inner(&app, &state, &store).await?;
     let mut conn = state.conn.lock().await;
     *conn = if local.kind == "embedded" {
         Conn::Local {

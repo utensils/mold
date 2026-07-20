@@ -86,7 +86,10 @@ images are patchified through the vision tower, source-image latents are packed
 and concatenated with output-noise tokens, and true CFG uses norm rescaling.
 Quantized `--qwen2-variant` values are supported for the edit family through a
 GGUF Qwen2.5 language path plus the staged Qwen2.5-VL vision tower used for
-image conditioning.
+image conditioning. On CUDA, quantized edit transformers run true CFG as two
+passes rather than doubling the packed output-and-conditioning sequence; this
+is the stable path at non-square resolutions and is used even when extra VRAM
+is available.
 :::
 
 ::: tip Recommended Stable Quant Paths

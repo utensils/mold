@@ -56,6 +56,69 @@ pub(crate) fn is_cuda_oom(e: &anyhow::Error) -> bool {
     full.contains("CUDA_ERROR_OUT_OF_MEMORY") || full.contains("out of memory")
 }
 
+/// Detect CUDA errors that invalidate the process-owned context.
+///
+/// Candle's cudarc layer retains primary-context handles, so resetting that
+/// context in-process would turn those handles into use-after-free hazards.
+/// These errors therefore quarantine the worker until process restart instead
+/// of entering the ordinary failure cooldown and retrying a dead context.
+pub(crate) fn is_fatal_cuda_error(e: &anyhow::Error) -> bool {
+    has_fatal_cuda_error(&format!("{e:#}"))
+}
+
+fn has_fatal_cuda_error(message: &str) -> bool {
+    [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_ASSERT",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+        "CUDA_ERROR_INVALID_PC",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn fatal_cuda_user_message(model_name: &str) -> String {
+    format!(
+        "fatal CUDA error while running '{model_name}'; this GPU worker was quarantined because its CUDA context is no longer safe to reuse. Restart the mold server to recover the GPU."
+    )
+}
+
+fn quarantine_poisoned_worker(worker: &GpuWorker) {
+    worker.poisoned.store(true, Ordering::SeqCst);
+    worker.consecutive_failures.store(3, Ordering::SeqCst);
+    *worker.degraded_until.write().unwrap() = None;
+    worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+    worker.fatal_cuda_shutdown.notify_one();
+    tracing::error!(
+        gpu = worker.gpu.ordinal,
+        "GPU worker quarantined after fatal CUDA context error; shutting down for process restart"
+    );
+}
+
+pub(crate) fn quarantine_if_fatal_cuda_error(worker: &GpuWorker, error: &anyhow::Error) -> bool {
+    let fatal = is_fatal_cuda_error(error);
+    if fatal {
+        quarantine_poisoned_worker(worker);
+    }
+    fatal
+}
+
+pub(crate) fn ensure_worker_not_poisoned(
+    worker: &GpuWorker,
+    model_name: &str,
+) -> anyhow::Result<()> {
+    if worker.poisoned.load(Ordering::SeqCst) {
+        anyhow::bail!(fatal_cuda_user_message(model_name));
+    }
+    Ok(())
+}
+
 /// Build a user-friendly error message for a CUDA OOM. The raw
 /// `DriverError(CUDA_ERROR_OUT_OF_MEMORY, …)` is opaque; replace it with
 /// actionable guidance.
@@ -236,6 +299,21 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         id: job_id.clone(),
     };
 
+    // Jobs may already be buffered in this worker's channel when a preceding
+    // job kills the context. Fail them without touching CUDA, including jobs
+    // explicitly pinned to this ordinal.
+    if worker.poisoned.load(Ordering::SeqCst) {
+        let err_msg = fatal_cuda_user_message(&model_name);
+        if let Some(ref tx) = job.progress_tx {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                message: err_msg.clone(),
+            }));
+        }
+        let _ = job.result_tx.send(Err(err_msg));
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
         worker.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -250,6 +328,20 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Acquire per-GPU load lock — ensures only one model load at a time per GPU.
     let _load_lock = worker.model_load_lock.lock().unwrap();
+
+    // A chain/admin/auxiliary workload may have poisoned the context while
+    // this job waited on the load lock. Recheck before any CUDA operation.
+    if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
+        let err_msg = error.to_string();
+        if let Some(ref tx) = job.progress_tx {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                message: err_msg.clone(),
+            }));
+        }
+        let _ = job.result_tx.send(Err(err_msg));
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
 
     // Ensure model is loaded on this GPU.
     let config_snapshot = job.config.blocking_read().clone();
@@ -268,8 +360,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         // Detect CUDA OOM during load: synchronize the device so subsequent
         // allocations don't inherit a poisoned context, then surface a
         // user-friendly message instead of the opaque DriverError string.
+        let is_fatal_cuda = is_fatal_cuda_error(&e);
         let is_oom = is_cuda_oom(&e);
-        let (err_msg, count_worker_failure) = if is_oom {
+        let (err_msg, count_worker_failure) = if is_fatal_cuda {
+            quarantine_poisoned_worker(worker);
+            (fatal_cuda_user_message(&model_name), false)
+        } else if is_oom {
             mold_inference::device::try_synchronize_device(ordinal);
             cuda_oom_user_message(
                 worker,
@@ -425,8 +521,24 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     // Clear progress callback.
     cached_engine.engine.clear_on_progress();
 
-    // Restore engine to cache.
-    {
+    // A fatal driver error invalidates every CUDA object owned by this
+    // context. Never put the triggering engine back into the cache: doing so
+    // caused immediate CUBLAS_STATUS_NOT_INITIALIZED retries on the poisoned
+    // worker. We deliberately do not reset the primary context here because
+    // Candle/cudarc retain handles to it; an in-process reset would make those
+    // handles dangling. Quarantine until process restart instead.
+    let fatal_cuda = matches!(&result, Ok(Err(e)) if is_fatal_cuda_error(e));
+    if fatal_cuda {
+        // Signal process teardown before destructors touch the poisoned
+        // context; CUDA cleanup is best-effort after an illegal access.
+        quarantine_poisoned_worker(worker);
+        drop(cached_engine);
+        let remaining = {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.clear()
+        };
+        drop(remaining);
+    } else {
         let mut cache = worker.model_cache.lock().unwrap();
         cache.restore(cached_engine);
     }
@@ -488,6 +600,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                         img.clone(),
                         &mut response,
                     );
+                    if upscale_result
+                        .as_ref()
+                        .is_err_and(|error| has_fatal_cuda_error(error))
+                    {
+                        quarantine_poisoned_worker(worker);
+                    }
                     let (output, preserved_original, upscale_error) =
                         settle_post_generation_upscale(img, upscale_result);
                     img = output;
@@ -572,11 +690,13 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         }
         Ok(Err(e)) => {
             tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
-            // Detect CUDA OOM during inference: synchronize so subsequent
-            // allocations start from a clean CUDA context state, then surface
-            // a user-friendly message instead of the opaque DriverError string.
+            // Fatal driver errors invalidate the CUDA context and permanently
+            // quarantine this worker. Ordinary OOMs retain the existing
+            // synchronize-and-retry policy.
             let is_oom = is_cuda_oom(&e);
-            let (err_msg, count_worker_failure) = if is_oom {
+            let (err_msg, count_worker_failure) = if fatal_cuda {
+                (fatal_cuda_user_message(&model_name), false)
+            } else if is_oom {
                 mold_inference::device::try_synchronize_device(ordinal);
                 cuda_oom_user_message(
                     worker,
@@ -985,8 +1105,18 @@ pub fn ensure_model_ready_sync(
 /// size-only peak (no resolution context) for the preflight — admin loads
 /// don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
+    if worker.poisoned.load(Ordering::SeqCst) {
+        anyhow::bail!(fatal_cuda_user_message(model_name));
+    }
     let _lock = worker.model_load_lock.lock().unwrap();
-    ensure_model_ready_sync(worker, model_name, config, None, false)
+    if worker.poisoned.load(Ordering::SeqCst) {
+        anyhow::bail!(fatal_cuda_user_message(model_name));
+    }
+    let result = ensure_model_ready_sync(worker, model_name, config, None, false);
+    if result.as_ref().is_err_and(is_fatal_cuda_error) {
+        quarantine_poisoned_worker(worker);
+    }
+    result
 }
 
 /// Synchronously unload the currently active model on this GPU worker.
@@ -1048,7 +1178,7 @@ pub type ChainPrep<T, E> = Result<Result<T, E>, anyhow::Error>;
 ///
 /// Returns `Ok(Err(E))` if the closure itself returned an error — caller
 /// preserves the closure's typed error for precise HTTP status mapping.
-pub fn run_chain_blocking<T, E>(
+pub fn run_chain_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
     worker: &GpuWorker,
     model_name: &str,
     config: &mold_core::Config,
@@ -1068,16 +1198,28 @@ pub fn run_chain_blocking<T, E>(
     mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
     let _thread_gpu = ThreadGpuGuard;
 
+    if worker.poisoned.load(Ordering::SeqCst) {
+        anyhow::bail!(fatal_cuda_user_message(model_name));
+    }
+
     // Acquire the per-worker load lock. Held for the entire chain duration —
     // single-clip generations on this worker queue behind us on the same lock.
     let _load_lock = worker
         .model_load_lock
         .lock()
         .map_err(|e| anyhow::anyhow!("worker.model_load_lock poisoned: {e}"))?;
+    if worker.poisoned.load(Ordering::SeqCst) {
+        anyhow::bail!(fatal_cuda_user_message(model_name));
+    }
 
     // Ensure the model is GPU-resident on this worker. Handles load-from-disk,
     // parked-reload, and the reclaim-on-swap path using worker.gpu.ordinal.
-    ensure_model_ready_sync(worker, model_name, config, hint, false)?;
+    if let Err(error) = ensure_model_ready_sync(worker, model_name, config, hint, false) {
+        if is_fatal_cuda_error(&error) {
+            quarantine_poisoned_worker(worker);
+        }
+        return Err(error);
+    }
 
     // Take the engine out of the worker's cache so the closure can mutate it.
     let cached = {
@@ -1106,13 +1248,20 @@ pub fn run_chain_blocking<T, E>(
         with_engine(cached.engine.as_mut())
     }));
 
-    // Restore unconditionally — the comment above promises this, so we must
-    // honour it even if the cache mutex is poisoned. Taking the inner guard
-    // from a poisoned lock is safe here: restoring an engine reference into
-    // a HashMap entry cannot worsen an already-corrupt state, and silently
-    // dropping the engine (the alternative) would leak it out of the cache
-    // and leave every future request for this model looking at a stale hole.
-    {
+    let fatal_cuda =
+        matches!(&result, Ok(Err(error)) if has_fatal_cuda_error(&format!("{error:#}")));
+    if fatal_cuda {
+        quarantine_poisoned_worker(worker);
+        drop(cached);
+        let remaining = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        drop(remaining);
+    } else {
+        // Restore on ordinary closure errors and panics. Fatal CUDA errors are
+        // the sole exception because the engine's context cannot be reused.
         let mut cache = worker
             .model_cache
             .lock()
@@ -1130,7 +1279,7 @@ pub fn run_chain_blocking<T, E>(
 ///
 /// Lock scope is exactly one stage render; callers reacquire for each stage
 /// so the durable chain-job runner can yield between stages.
-pub fn run_stage_blocking<T, E>(
+pub fn run_stage_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
     worker: &GpuWorker,
     model_name: &str,
     config: &mold_core::Config,
@@ -1147,14 +1296,14 @@ mod tests {
     use super::*;
     use crate::job_registry::JobRegistry;
     use crate::model_cache::ModelCache;
-    use crate::state::QueueHandle;
+    use crate::state::{GenerationJob, QueueHandle, SseCompletionPayload};
     use mold_core::{
         Config, GenerateRequest, GenerateResponse, ImageData, ModelConfig, OutputFormat,
     };
     use mold_inference::device::DiscoveredGpu;
     use mold_inference::shared_pool::SharedPool;
     use mold_inference::InferenceEngine;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
@@ -1215,6 +1364,9 @@ mod tests {
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
             in_flight: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             degraded_until: RwLock::new(None),
             job_tx,
         })
@@ -1252,6 +1404,159 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    #[test]
+    fn fatal_cuda_errors_are_classified_as_context_poisoning() {
+        for message in [
+            "DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an illegal memory access was encountered)",
+            "DriverError(CUDA_ERROR_ECC_UNCORRECTABLE, uncorrectable ECC error)",
+            "DriverError(CUDA_ERROR_LAUNCH_FAILED, unspecified launch failure)",
+            "DriverError(CUDA_ERROR_ASSERT, device-side assert triggered)",
+            "DriverError(CUDA_ERROR_MISALIGNED_ADDRESS, misaligned address)",
+            "DriverError(CUDA_ERROR_HARDWARE_STACK_ERROR, hardware stack error)",
+            "DriverError(CUDA_ERROR_ILLEGAL_INSTRUCTION, illegal instruction)",
+            "DriverError(CUDA_ERROR_INVALID_ADDRESS_SPACE, invalid address space)",
+            "DriverError(CUDA_ERROR_INVALID_PC, invalid program counter)",
+            "DriverError(CUDA_ERROR_LAUNCH_TIMEOUT, launch timed out)",
+        ] {
+            let err = anyhow::anyhow!(message);
+            assert!(is_fatal_cuda_error(&err), "not classified: {message}");
+        }
+
+        assert!(!is_fatal_cuda_error(&anyhow::anyhow!(
+            "DriverError(CUDA_ERROR_OUT_OF_MEMORY, out of memory)"
+        )));
+        assert!(!is_fatal_cuda_error(&anyhow::anyhow!(
+            "CublasError(CUBLAS_STATUS_NOT_INITIALIZED)"
+        )));
+    }
+
+    #[tokio::test]
+    async fn quarantining_worker_signals_process_restart() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        quarantine_poisoned_worker(&worker);
+
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            worker.fatal_cuda_shutdown.notified(),
+        )
+        .await
+        .expect("fatal CUDA quarantine must wake server shutdown");
+    }
+
+    #[test]
+    fn quarantine_helper_ignores_ordinary_errors_and_latches_fatal_errors() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        assert!(!quarantine_if_fatal_cuda_error(
+            &worker,
+            &anyhow::anyhow!("ordinary inference failure")
+        ));
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(ensure_worker_not_poisoned(&worker, "flux-dev:q4").is_ok());
+
+        let fatal =
+            anyhow::anyhow!("DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, illegal memory access)")
+                .context("generation failed");
+        assert!(quarantine_if_fatal_cuda_error(&worker, &fatal));
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(worker.degraded_until.read().unwrap().is_none());
+        let error = ensure_worker_not_poisoned(&worker, "flux-dev:q4").unwrap_err();
+        assert!(error.to_string().contains("Restart the mold server"));
+    }
+
+    #[tokio::test]
+    async fn buffered_job_is_rejected_without_touching_a_poisoned_worker() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        let request = fake_upscale_job(Config::default(), "unused").request;
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: "placeholder".to_string(),
+                    request: request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: placeholder_tx,
+                    output_dir: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let registry = JobRegistry::new();
+        registry.register("buffered-job", request.model.clone());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        process_job(
+            &worker,
+            GpuJob {
+                id: "buffered-job".to_string(),
+                model: request.model.clone(),
+                request,
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: Some(progress_tx),
+                result_tx,
+                output_dir: None,
+                config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                metadata_db: Arc::new(None),
+                queue: queue.clone(),
+                registry: registry.clone(),
+                events: crate::events::EventBroadcaster::new(),
+            },
+        );
+
+        let result = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("poisoned worker unexpectedly completed buffered job"),
+        };
+        assert!(result.contains("worker was quarantined"));
+        assert!(matches!(
+            progress_rx.recv().await,
+            Some(SseMessage::Error(_))
+        ));
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.pending(), 0);
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
+        drop(queue_rx.recv().await);
+    }
+
+    #[test]
+    fn poisoned_worker_rejects_admin_and_chain_entry_points() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        worker.poisoned.store(true, Ordering::SeqCst);
+        let config = Config::default();
+
+        let load_error = load_blocking(&worker, "fake-model", &config).unwrap_err();
+        assert!(load_error.to_string().contains("worker was quarantined"));
+
+        let closure_ran = AtomicBool::new(false);
+        let chain_error = run_chain_blocking(
+            &worker,
+            "fake-model",
+            &config,
+            None,
+            |_engine| -> anyhow::Result<()> {
+                closure_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(chain_error.to_string().contains("worker was quarantined"));
+        assert!(!closure_ran.load(Ordering::SeqCst));
+        assert!(worker.model_cache.lock().unwrap().contains("fake-model"));
     }
 
     #[test]
@@ -1313,6 +1618,25 @@ mod tests {
 
         assert!(err.contains("failed to load upscaler"), "got: {err}");
         assert!(err.contains("upscaler weights not found"), "got: {err}");
+    }
+
+    #[test]
+    fn run_chain_blocking_quarantines_fatal_cuda_closure_error() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        let config = Config::default();
+
+        let result = run_chain_blocking(&worker, "fake-model", &config, None, |_engine| {
+            Err::<(), _>(
+                anyhow::anyhow!("DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, illegal memory access)")
+                    .context("stage render failed"),
+            )
+        })
+        .expect("engine preparation should succeed");
+
+        assert!(result.is_err());
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+        assert!(worker.model_cache.lock().unwrap().is_empty());
     }
 
     /// Two concurrent callers into `run_chain_blocking` on the same worker

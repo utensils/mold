@@ -150,6 +150,10 @@ mold run qwen-image:q2 "a poster" --qwen2-variant q6  # Qwen-Image quantized tex
 mold run flux-dev:bf16 "portrait" --lora style.safetensors  # LoRA adapter
 ```
 
+Quantized Qwen-Image-Edit uses the safer split-CFG CUDA path at every
+resolution. If CUDA reports a context-killing fault such as an illegal address,
+Mold quarantines that GPU worker and exits so service supervision can recreate the context.
+
 ### Inline preview
 
 Display generated images directly in the terminal (requires `preview` feature):

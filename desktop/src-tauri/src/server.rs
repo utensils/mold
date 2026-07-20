@@ -87,6 +87,26 @@ pub fn start_engine(
     models_dir: PathBuf,
     gpu_selection: GpuSelection,
 ) -> anyhow::Result<EngineHandle> {
+    start_engine_inner(None, bind, port, models_dir, gpu_selection)
+}
+
+pub fn start_engine_with_app_restart(
+    app: tauri::AppHandle,
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+) -> anyhow::Result<EngineHandle> {
+    start_engine_inner(Some(app), bind, port, models_dir, gpu_selection)
+}
+
+fn start_engine_inner(
+    app: Option<tauri::AppHandle>,
+    bind: &str,
+    port: u16,
+    models_dir: PathBuf,
+    gpu_selection: GpuSelection,
+) -> anyhow::Result<EngineHandle> {
     std::fs::create_dir_all(&models_dir)?;
     let bind = bind.to_string();
     let dir = models_dir.clone();
@@ -112,8 +132,18 @@ pub fn start_engine(
                     tracing::info!("embedded mold engine stopped");
                 }
                 Err(e) => {
-                    eprintln!("embedded mold engine exited with error: {e:#}");
-                    tracing::error!("embedded mold engine exited: {e:#}");
+                    let message = format!("{e:#}");
+                    eprintln!("embedded mold engine exited with error: {message}");
+                    tracing::error!("embedded mold engine exited: {message}");
+                    if message.contains("fatal CUDA context error") {
+                        // The CUDA primary context belongs to the desktop
+                        // process, not this server thread. A thread-only engine
+                        // restart would inherit the poisoned context, so relaunch
+                        // the whole app after the server has stopped.
+                        if let Some(app) = app {
+                            app.request_restart();
+                        }
+                    }
                 }
             }
         })?;
