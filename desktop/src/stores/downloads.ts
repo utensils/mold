@@ -10,6 +10,7 @@ import {
 } from "../lib/api/client";
 import { sseStream } from "../lib/api/sse";
 import { startCatalogDownload } from "../lib/api/catalog";
+import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../lib/downloads";
 import { notifyPulled } from "../lib/notify";
 import { useModelStore } from "./models";
 import { useHostModelsStore } from "./hostModels";
@@ -17,15 +18,7 @@ import { useToastStore } from "./toasts";
 import type { HostView } from "./hosts";
 import type { DownloadEvent, DownloadJob, DownloadsListing } from "../lib/api/types";
 
-export interface DownloadsState {
-  activeJobs: DownloadJob[];
-  queued: DownloadJob[];
-  history: DownloadJob[];
-}
-
-export function emptyDownloadsState(): DownloadsState {
-  return { activeJobs: [], queued: [], history: [] };
-}
+export { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../lib/downloads";
 
 export interface DownloadHostState extends DownloadsState {
   label: string;
@@ -94,100 +87,6 @@ export function computeEtaSeconds(samples: RateSample[], bytesTotal: number): nu
  */
 function byCompletedDesc(a: DownloadJob, b: DownloadJob): number {
   return (b.completed_at ?? 0) - (a.completed_at ?? 0);
-}
-
-function synthQueued(id: string, model: string): DownloadJob {
-  return {
-    id,
-    model,
-    status: "queued",
-    files_done: 0,
-    files_total: 0,
-    bytes_done: 0,
-    bytes_total: 0,
-  };
-}
-
-/** Move a settling job out of active/queued into history with a final status. */
-function finishJob(
-  state: DownloadsState,
-  id: string,
-  status: DownloadJob["status"],
-  error?: string,
-): DownloadsState {
-  const job = state.activeJobs.find((j) => j.id === id) ?? state.queued.find((j) => j.id === id);
-  const activeJobs = state.activeJobs.filter((j) => j.id !== id);
-  const queued = state.queued.filter((j) => j.id !== id);
-  const history = job
-    ? [{ ...job, status, error: error ?? job.error ?? null }, ...state.history]
-    : state.history;
-  return { activeJobs, queued, history };
-}
-
-/**
- * Pure download-event reducer. The first frame is always a `snapshot` that
- * replaces state wholesale; subsequent deltas move a job queued → active →
- * history. Exported for tests.
- */
-export function applyDownloadEvent(state: DownloadsState, ev: DownloadEvent): DownloadsState {
-  switch (ev.type) {
-    case "snapshot":
-      return {
-        activeJobs: ev.listing.active_jobs ?? (ev.listing.active ? [ev.listing.active] : []),
-        queued: [...ev.listing.queued],
-        history: [...ev.listing.history],
-      };
-    case "enqueued":
-      if (state.queued.some((j) => j.id === ev.id) || state.activeJobs.some((j) => j.id === ev.id))
-        return state;
-      return { ...state, queued: [...state.queued, synthQueued(ev.id, ev.model)] };
-    case "dequeued":
-      return { ...state, queued: state.queued.filter((j) => j.id !== ev.id) };
-    case "started": {
-      const base =
-        state.queued.find((j) => j.id === ev.id) ??
-        state.activeJobs.find((j) => j.id === ev.id) ??
-        synthQueued(ev.id, "");
-      const active: DownloadJob = {
-        ...base,
-        status: "active",
-        files_total: ev.files_total,
-        bytes_total: ev.bytes_total,
-      };
-      return {
-        activeJobs: [...state.activeJobs.filter((j) => j.id !== ev.id), active],
-        queued: state.queued.filter((j) => j.id !== ev.id),
-        history: state.history,
-      };
-    }
-    case "progress":
-      if (!state.activeJobs.some((job) => job.id === ev.id)) return state;
-      return {
-        ...state,
-        activeJobs: state.activeJobs.map((job) =>
-          job.id === ev.id
-            ? {
-                ...job,
-                files_done: ev.files_done,
-                bytes_done: ev.bytes_done,
-                current_file: ev.current_file ?? job.current_file ?? null,
-              }
-            : job,
-        ),
-      };
-    case "file_done":
-      return state;
-    case "job_done":
-      return finishJob(state, ev.id, "completed");
-    case "job_failed":
-      return finishJob(state, ev.id, "failed", ev.error);
-    case "job_cancelled":
-      return finishJob(state, ev.id, "cancelled");
-    case "catalog_ready":
-      return state;
-    default:
-      return state;
-  }
 }
 
 export const useDownloadsStore = defineStore("downloads", {

@@ -6,18 +6,11 @@ import {
   onBeforeUnmount,
   onDeactivated,
   onMounted,
-  reactive,
   ref,
   watch,
 } from "vue";
 import { apiFetchTo, ApiError, type ApiTarget } from "../lib/api/client";
-import {
-  fetchCatalogDetail,
-  fetchCatalogFamilies,
-  searchCatalog,
-  startCatalogDownload,
-} from "../lib/api/catalog";
-import { sseStream } from "../lib/api/sse";
+import { fetchCatalogDetail, fetchCatalogFamilies, searchCatalog } from "../lib/api/catalog";
 import {
   catalogFetchCaption,
   catalogPullLabel,
@@ -37,15 +30,13 @@ import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
 import { isUtilityModel } from "../lib/models";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
-import type {
-  CatalogEntry,
-  DownloadEvent,
-  DownloadJob,
-  ModelComponentStatus,
-  ModelEntry,
-} from "../lib/api/types";
-import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
+import type { CatalogEntry, DownloadJob, ModelComponentStatus, ModelEntry } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
+import {
+  useMobileDownloadsStore,
+  type MobileDownloadEventContext,
+  type MobilePullStatus,
+} from "./mobileDownloads";
 
 type MediaType = "all" | "image" | "video";
 type CatalogSource = "all" | "hf" | "civitai" | "installed";
@@ -60,28 +51,6 @@ interface DownloadRow {
   job: DownloadJob;
 }
 
-type PendingPullPhase = "connecting" | "starting";
-
-interface PendingPull {
-  entryId: string;
-  entryName: string;
-  hostId: string;
-  jobId: string | null;
-  phase: PendingPullPhase;
-}
-
-interface PullStatus {
-  label: string;
-  phase: PendingPullPhase | "queued" | "active";
-}
-
-interface StreamSubscription {
-  signature: string;
-  controller: AbortController;
-  ready: Promise<void>;
-  close: () => void;
-}
-
 const props = defineProps<{
   hosts: MobileHost[];
   selectedHostId: string;
@@ -94,7 +63,7 @@ const emit = defineEmits<{
 
 const PAGE_SIZE = 24;
 const MAX_AUTO_PAGES = 5;
-const STREAM_OPEN_TIMEOUT_MS = 10_000;
+const DOWNLOAD_CONSUMER_ID = "mobile-catalog";
 const FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
   "[href]",
@@ -118,11 +87,7 @@ const error = ref("");
 const announcement = ref("");
 const announcementIsError = ref(false);
 const modelsByHost = ref<Record<string, ModelEntry[]>>({});
-const pendingPulls = reactive(new Map<string, PendingPull>());
-const cancelling = reactive(new Set<string>());
-const downloadsByHost = reactive<Record<string, DownloadsState>>({});
-const subscriptions = new Map<string, StreamSubscription>();
-const terminalJobsByHost = new Map<string, Set<string>>();
+const mobileDownloads = useMobileDownloadsStore();
 
 const detailEntry = ref<MobileCatalogEntry | null>(null);
 const detail = ref<CatalogEntry | null>(null);
@@ -272,7 +237,7 @@ const combinedEntries = computed<MobileCatalogEntry[]>(() => {
 const downloadRows = computed<DownloadRow[]>(() => {
   const seen = new Set<string>();
   return props.hosts.flatMap((host) => {
-    const state = downloadsByHost[host.id];
+    const state = mobileDownloads.downloadsByHost[host.id];
     if (!state) return [];
     return [...state.activeJobs, ...state.queued]
       .filter((job) => {
@@ -307,10 +272,6 @@ const detailModel = computed(() => {
     : null;
 });
 
-function hostSignature(host: MobileHost): string {
-  return `${host.baseUrl}|${host.apiKey}`;
-}
-
 function announce(message: string, isError = false): void {
   announcement.value = message;
   announcementIsError.value = isError;
@@ -344,46 +305,14 @@ function clearModalInert(): void {
   inertBackground = null;
 }
 
-function pullKey(entry: CatalogEntry, hostId?: string): string {
-  return `${hostId ?? "any"}:${entry.id}`;
-}
-
-function pullJobMatches(entry: CatalogEntry, job: DownloadJob, pending?: PendingPull): boolean {
-  if (pending?.jobId && pending.jobId === job.id) return true;
-  if (job.catalog_id === entry.id) return true;
-  return job.model === entry.id || job.model === entry.name;
-}
-
-function jobsForHost(hostId: string): DownloadJob[] {
-  const state = downloadsByHost[hostId];
-  return state ? [...state.activeJobs, ...state.queued] : [];
-}
-
-function pullStatusForHost(entry: CatalogEntry, hostId: string): PullStatus | null {
-  const pending = pendingPulls.get(pullKey(entry, hostId));
-  const job = jobsForHost(hostId).find((candidate) => pullJobMatches(entry, candidate, pending));
-  if (job?.status === "active") {
-    const progress =
-      job.bytes_total > 0 ? ` ${Math.round(percent(job.bytes_done, job.bytes_total))}%` : "";
-    return { label: `Pulling${progress}`, phase: "active" };
-  }
-  if (job?.status === "queued") return { label: "Queued", phase: "queued" };
-  if (pending)
-    return {
-      label: pending.phase === "connecting" ? "Connecting…" : "Starting…",
-      phase: pending.phase,
-    };
-  return null;
-}
-
-function pullStatus(entry: MobileCatalogEntry, hostId?: string): PullStatus | null {
-  if (hostId) return pullStatusForHost(entry, hostId);
+function pullStatus(entry: MobileCatalogEntry, hostId?: string): MobilePullStatus | null {
+  if (hostId) return mobileDownloads.pullStatusForHost(entry, hostId);
   const preferred = entry.installed ? owningHost(entry) : selectedHost.value;
   const orderedHosts = preferred
     ? [preferred, ...downloadHosts.value.filter((host) => host.id !== preferred.id)]
     : downloadHosts.value;
   for (const host of orderedHosts) {
-    const status = pullStatusForHost(entry, host.id);
+    const status = mobileDownloads.pullStatusForHost(entry, host.id);
     if (status) return status;
   }
   return null;
@@ -391,42 +320,6 @@ function pullStatus(entry: MobileCatalogEntry, hostId?: string): PullStatus | nu
 
 function pullButtonLabel(entry: MobileCatalogEntry): string {
   return pullStatus(entry)?.label ?? catalogPullLabel(catalogSizeInfo(entry));
-}
-
-function reconcilePendingPulls(hostId: string, event?: DownloadEvent): void {
-  const state = downloadsByHost[hostId];
-  if (!state) return;
-  const inFlight = [...state.activeJobs, ...state.queued];
-  const terminalId =
-    event?.type === "job_done" || event?.type === "job_failed" || event?.type === "job_cancelled"
-      ? event.id
-      : null;
-  const terminalModel = event?.type === "job_done" ? event.model : null;
-  const terminalIds = terminalJobsByHost.get(hostId);
-  for (const [key, pending] of pendingPulls) {
-    if (pending.hostId !== hostId) continue;
-    const entry = { id: pending.entryId, name: pending.entryName } as CatalogEntry;
-    const inFlightMatch = inFlight.some((job) => pullJobMatches(entry, job, pending));
-    if (
-      // An opening snapshot can adopt a pre-existing pull before we POST.
-      // Once our POST returns a job id, keep the pending record as the
-      // entry-to-job association: delta events do not carry `catalog_id`, and
-      // an HF job's canonical model can differ from both entry id and label.
-      (inFlightMatch && pending.jobId == null) ||
-      (pending.jobId != null && state.history.some((job) => job.id === pending.jobId)) ||
-      (pending.jobId != null && terminalIds?.has(pending.jobId)) ||
-      (terminalId != null && pending.jobId === terminalId) ||
-      (terminalModel != null &&
-        (terminalModel === pending.entryId || terminalModel === pending.entryName))
-    )
-      pendingPulls.delete(key);
-  }
-}
-
-function clearPendingPullsForHost(hostId: string): void {
-  for (const [key, pending] of pendingPulls) {
-    if (pending.hostId === hostId) pendingPulls.delete(key);
-  }
 }
 
 function owningHost(entry: MobileCatalogEntry): MobileHost | null {
@@ -531,174 +424,71 @@ async function refreshModels(): Promise<void> {
   if (epoch === modelsEpoch) modelsByHost.value = next;
 }
 
-function ensureDownloadStream(host: MobileHost): Promise<void> {
-  const signature = hostSignature(host);
-  const existing = subscriptions.get(host.id);
-  if (existing?.signature === signature && !existing.controller.signal.aborted)
-    return existing.ready;
-  existing?.close();
-
-  downloadsByHost[host.id] ??= emptyDownloadsState();
-  const controller = new AbortController();
-  let readySettled = false;
-  let openTimer: ReturnType<typeof setTimeout>;
-  let resolveReady!: () => void;
-  let rejectReady!: (error: Error) => void;
-  const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-  // `syncDownloadStreams` starts subscriptions eagerly, before anyone awaits
-  // them. Keep the rejection observable to pull callers without generating an
-  // unhandled rejection during ordinary host probing.
-  void ready.catch(() => {});
-
-  const markReady = () => {
-    if (readySettled) return;
-    readySettled = true;
-    clearTimeout(openTimer);
-    resolveReady();
-  };
-  const failReady = (cause: Error) => {
-    if (readySettled) return;
-    readySettled = true;
-    clearTimeout(openTimer);
-    controller.abort();
-    if (subscriptions.get(host.id)?.controller === controller) subscriptions.delete(host.id);
-    rejectReady(cause);
-  };
-  const close = () => {
-    if (!readySettled) {
-      failReady(new Error(`Download monitoring stopped on ${host.name}.`));
-      return;
+function handleDownloadEvent({
+  host,
+  event,
+  hadSnapshot,
+  newlySettled,
+}: MobileDownloadEventContext): void {
+  if (!mounted) return;
+  if (event.type === "job_done") {
+    announce(`${event.model} is ready on ${host.name}.`);
+    emit("models-changed", host.id);
+    void refreshModels();
+    if (host.id === props.selectedHostId) void runSearch(true);
+  } else if (event.type === "job_failed") {
+    announce(`Download failed on ${host.name}: ${event.error}`, true);
+  } else if (event.type === "snapshot") {
+    const settled = event.listing.history.filter(
+      (job) => job.status === "completed" || job.status === "failed",
+    );
+    // A completed pull may have happened while the iPhone was suspended, so
+    // refresh model views even on the first reconciliation snapshot. Announce
+    // terminal deltas only after that baseline has been established.
+    if (
+      (!hadSnapshot && settled.some((job) => job.status === "completed")) ||
+      newlySettled.some((job) => job.status === "completed")
+    ) {
+      emit("models-changed", host.id);
+      void refreshModels();
+      if (host.id === props.selectedHostId) void runSearch(true);
     }
-    controller.abort();
-  };
-
-  openTimer = setTimeout(
-    () => failReady(new Error(`Timed out connecting to downloads on ${host.name}.`)),
-    STREAM_OPEN_TIMEOUT_MS,
-  );
-  subscriptions.set(host.id, { signature, controller, ready, close });
-  void sseStream("/api/downloads/stream", {
-    target: mobileHostTarget(host),
-    signal: controller.signal,
-    retry: true,
-    onOpenError: failReady,
-    onClose: (cause) => {
-      if (!readySettled) {
-        failReady(cause ?? new Error(`Download stream closed on ${host.name}.`));
-        return;
-      }
-      if (subscriptions.get(host.id)?.controller === controller) subscriptions.delete(host.id);
-      if (mounted && cause && !controller.signal.aborted) {
-        clearPendingPullsForHost(host.id);
-        announce(`Download monitoring stopped on ${host.name}: ${cause.message}`, true);
-      }
-    },
-    onEvent: (_event, data) => {
-      if (controller.signal.aborted) return;
-      try {
-        const event = JSON.parse(data) as DownloadEvent;
-        downloadsByHost[host.id] = applyDownloadEvent(
-          downloadsByHost[host.id] ?? emptyDownloadsState(),
-          event,
+    if (hadSnapshot) {
+      const failed = newlySettled.find((job) => job.status === "failed");
+      const completed = newlySettled.find((job) => job.status === "completed");
+      if (failed) {
+        announce(
+          `Download of ${failed.model} failed on ${host.name}${failed.error ? `: ${failed.error}` : "."}`,
+          true,
         );
-        if (event.type === "job_done") {
-          const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
-          known.add(event.id);
-          terminalJobsByHost.set(host.id, known);
-          announce(`${event.model} is ready on ${host.name}.`);
-          emit("models-changed", host.id);
-          void refreshModels();
-          if (host.id === props.selectedHostId) void runSearch(true);
-        } else if (event.type === "job_failed") {
-          const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
-          known.add(event.id);
-          terminalJobsByHost.set(host.id, known);
-          announce(`Download failed on ${host.name}: ${event.error}`, true);
-        } else if (event.type === "job_cancelled") {
-          const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
-          known.add(event.id);
-          terminalJobsByHost.set(host.id, known);
-        } else if (event.type === "snapshot") {
-          const hadSnapshot = terminalJobsByHost.has(host.id);
-          const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
-          const settled = event.listing.history.filter(
-            (job) => job.status === "completed" || job.status === "failed",
-          );
-          const newlySettled = settled.filter((job) => !known.has(job.id));
-          terminalJobsByHost.set(host.id, new Set(settled.map((job) => job.id)));
-
-          // A snapshot is the reconciliation point after launch/reconnect. A
-          // completed pull may have happened while the iPhone was suspended,
-          // so refresh both the local and parent model views even on the first
-          // snapshot. Only announce deltas after the baseline snapshot.
-          if (
-            (!hadSnapshot && settled.some((job) => job.status === "completed")) ||
-            newlySettled.some((job) => job.status === "completed")
-          ) {
-            emit("models-changed", host.id);
-            void refreshModels();
-            if (host.id === props.selectedHostId) void runSearch(true);
-          }
-          if (hadSnapshot) {
-            const failed = newlySettled.find((job) => job.status === "failed");
-            const completed = newlySettled.find((job) => job.status === "completed");
-            if (failed)
-              announce(
-                `Download of ${failed.model} failed on ${host.name}${failed.error ? `: ${failed.error}` : "."}`,
-                true,
-              );
-            else if (completed) announce(`${completed.model} is ready on ${host.name}.`);
-          }
-        }
-        reconcilePendingPulls(host.id, event);
-        // Opening the transport does not prove that existing server jobs have
-        // been reconciled. Resolve only after reducing the opening snapshot,
-        // otherwise a delayed first frame can race a duplicate POST.
-        if (event.type === "snapshot") markReady();
-      } catch {
-        // Ignore malformed frames; the next snapshot/delta repairs state.
+      } else if (completed) {
+        announce(`${completed.model} is ready on ${host.name}.`);
       }
-    },
-  });
-  return ready;
+    }
+  }
 }
 
 function syncDownloadStreams(): void {
-  const keep = new Set(downloadHosts.value.map((host) => host.id));
-  for (const [hostId, subscription] of subscriptions) {
-    if (keep.has(hostId)) continue;
-    subscription.close();
-    subscriptions.delete(hostId);
-    delete downloadsByHost[hostId];
-    terminalJobsByHost.delete(hostId);
-    clearPendingPullsForHost(hostId);
-  }
-  for (const host of downloadHosts.value) {
-    void ensureDownloadStream(host).catch((cause) => {
+  mobileDownloads.registerConsumer(DOWNLOAD_CONSUMER_ID, downloadHosts.value, {
+    onEvent: handleDownloadEvent,
+    onStreamError: (host, cause, phase) => {
       if (!mounted) return;
-      announce(`Could not monitor downloads on ${host.name}: ${errorMessage(cause)}`, true);
-    });
-  }
+      announce(
+        phase === "closed"
+          ? `Download monitoring stopped on ${host.name}: ${cause.message}`
+          : `Could not monitor downloads on ${host.name}: ${errorMessage(cause)}`,
+        true,
+      );
+    },
+  });
 }
 
 async function cancelDownload(row: DownloadRow): Promise<void> {
-  const key = `${row.host.id}:${row.job.id}`;
-  if (cancelling.has(key)) return;
-  cancelling.add(key);
   try {
-    await apiFetchTo(
-      mobileHostTarget(row.host),
-      `/api/downloads/${encodeURIComponent(row.job.id)}`,
-      { method: "DELETE" },
-    );
+    await mobileDownloads.cancel(row.host, row.job);
     announce(`Cancelling ${row.job.model}.`);
   } catch (cause) {
     announce(errorMessage(cause), true);
-  } finally {
-    cancelling.delete(key);
   }
 }
 
@@ -723,40 +513,18 @@ function requestPull(entry: MobileCatalogEntry): void {
 }
 
 async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void> {
-  const key = pullKey(entry, host.id);
-  if (pullStatusForHost(entry, host.id)) return;
-  const pending = reactive<PendingPull>({
-    entryId: entry.id,
-    entryName: entry.name,
-    hostId: host.id,
-    jobId: null,
-    phase: "connecting",
-  });
-  pendingPulls.set(key, pending);
+  if (mobileDownloads.pullStatusForHost(entry, host.id)) return;
   closeTargetPicker();
   announce(`Connecting to downloads on ${host.name}…`);
   try {
-    // Subscribe first so even an immediately-started download cannot race its
-    // `enqueued` / `started` events past the iPhone UI.
-    await ensureDownloadStream(host);
-    // The stream's opening snapshot may reveal that this exact pull already
-    // exists. In that case its live job becomes authoritative and no POST is
-    // needed.
-    if (pendingPulls.get(key) !== pending) return;
-    pending.phase = "starting";
-    const jobId = await startCatalogDownload(entry.id, mobileHostTarget(host), false);
-    // A null id is a valid server response when no primary download was
-    // enqueued. Without an id, a later HF delta may use a canonical model
-    // name that cannot be matched back to this catalog card, leaving the
-    // button stuck in "Starting…" indefinitely.
-    if (pendingPulls.get(key) === pending) {
-      if (jobId === null) throw new Error(`${host.name} did not return a download job.`);
-      pending.jobId = jobId;
-      reconcilePendingPulls(host.id);
+    const result = await mobileDownloads.startPull(entry, host);
+    if (result.kind === "conflict") {
+      announce(`${entry.name} is already queued on ${host.name}.`);
+      return;
     }
+    if (result.kind !== "started") return;
     announce(`${catalogActionLabel(entry)}ing ${entry.name} on ${host.name}.`);
   } catch (cause) {
-    if (pendingPulls.get(key) === pending) pendingPulls.delete(key);
     const alreadyQueued = cause instanceof ApiError && cause.status === 409;
     announce(
       alreadyQueued
@@ -1009,9 +777,7 @@ onBeforeUnmount(() => {
   ++detailEpoch;
   if (debounce) clearTimeout(debounce);
   deactivateInteractions();
-  for (const subscription of subscriptions.values()) subscription.close();
-  subscriptions.clear();
-  pendingPulls.clear();
+  mobileDownloads.unregisterConsumer(DOWNLOAD_CONSUMER_ID);
 });
 </script>
 
@@ -1086,11 +852,11 @@ onBeforeUnmount(() => {
             </span>
             <button
               type="button"
-              :disabled="cancelling.has(`${row.host.id}:${row.job.id}`)"
+              :disabled="mobileDownloads.isCancelling(row.host, row.job.id)"
               :aria-label="`Cancel download of ${row.job.model} on ${row.host.name}`"
               @click="cancelDownload(row)"
             >
-              {{ cancelling.has(`${row.host.id}:${row.job.id}`) ? "…" : "Cancel" }}
+              {{ mobileDownloads.isCancelling(row.host, row.job.id) ? "…" : "Cancel" }}
             </button>
           </li>
         </ul>
