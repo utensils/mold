@@ -476,6 +476,9 @@ mod tests {
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
             in_flight: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             degraded_until: RwLock::new(None),
             job_tx,
         })
@@ -2019,6 +2022,46 @@ mod tests {
             serde_json::json!(1_700_000_000_000_u64)
         );
         assert_eq!(status["gpus"][0]["ordinal"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn status_uses_resource_telemetry_for_physical_gpu_memory() {
+        let worker = gpu_worker_stub(1);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "gpu-host".to_string(),
+            timestamp: 1,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 1,
+                name: "test-gpu-1".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 48_000_000_000,
+                vram_used: 35_431_000_000,
+                vram_used_by_mold: Some(35_000_000_000),
+                vram_used_by_other: Some(431_000_000),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 128_000_000_000,
+                used: 32_000_000_000,
+                used_by_mold: 2_000_000_000,
+                used_by_other: 30_000_000_000,
+            },
+            cpu: None,
+        });
+        let app = app_with_state(state);
+
+        let resp = app
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = json_body(resp).await;
+
+        assert_eq!(status["gpus"][0]["vram_total_bytes"], 48_000_000_000_u64);
+        assert_eq!(status["gpus"][0]["vram_used_bytes"], 35_431_000_000_u64);
     }
 
     #[tokio::test]

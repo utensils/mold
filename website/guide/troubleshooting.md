@@ -48,6 +48,17 @@ mold run qwen-image-edit-2511:q4 "make the chair red leather" --image chair.png 
 force `--qwen2-variant bf16` if you are deliberately comparing the larger
 resident encoder behavior.
 
+## Fatal CUDA Errors
+
+Errors such as `CUDA_ERROR_ILLEGAL_ADDRESS`, `CUDA_ERROR_ECC_UNCORRECTABLE`,
+or `CUDA_ERROR_LAUNCH_FAILED` invalidate the affected CUDA context. Mold
+quarantines that GPU worker immediately instead of retrying jobs against the
+dead context, reports physical device VRAM from NVML or `nvidia-smi`, and stops
+the server with an error. Service managers such as the Mold NixOS module then
+restart the process to recreate the context and release retained VRAM; the desktop
+app relaunches itself, while manually started servers must be started again. Ordinary CUDA out-of-memory errors do
+not trigger this process restart.
+
 ## Connection Refused
 
 If `mold run` cannot reach the server:

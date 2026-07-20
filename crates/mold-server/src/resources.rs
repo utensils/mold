@@ -139,6 +139,28 @@ use mold_core::{GpuBackend, GpuSnapshot};
 
 /// Locate the `nvidia-smi` binary. Matches the existing resolver in
 /// `routes.rs::query_gpu_info` so NixOS hosts still work.
+/// Translate a CUDA logical ordinal to the physical NVML/nvidia-smi index.
+/// Numeric `CUDA_VISIBLE_DEVICES` entries are physical ordinals in logical
+/// order. UUID/MIG selectors cannot be mapped without carrying device identity,
+/// so return `None` rather than overlaying telemetry from the wrong card.
+pub(crate) fn physical_ordinal_for_worker(
+    logical_ordinal: usize,
+    cuda_visible_devices: Option<&str>,
+) -> Option<usize> {
+    let Some(visible) = cuda_visible_devices
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Some(logical_ordinal);
+    };
+    visible
+        .split(',')
+        .map(str::trim)
+        .nth(logical_ordinal)?
+        .parse::<usize>()
+        .ok()
+}
+
 pub(crate) fn resolve_nvidia_smi() -> &'static str {
     if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
         "/run/current-system/sw/bin/nvidia-smi"

@@ -1038,7 +1038,7 @@ async fn upscale(
         let worker = select_aux_worker(&state)?;
         worker.in_flight.fetch_add(1, Ordering::SeqCst);
         let worker_clone = worker.clone();
-        let result =
+        let joined =
             tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
                 struct ThreadGpuGuard;
                 impl Drop for ThreadGpuGuard {
@@ -1050,6 +1050,7 @@ async fn upscale(
                 mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
                 let _thread_gpu = ThreadGpuGuard;
                 let _load_lock = worker_clone.model_load_lock.lock().unwrap();
+                crate::gpu_worker::ensure_worker_not_poisoned(&worker_clone, &model_name_owned)?;
                 let mut engine = mold_inference::create_upscale_engine(
                     model_name_owned,
                     weights_path,
@@ -1058,10 +1059,14 @@ async fn upscale(
                 )?;
                 engine.upscale(&req)
             })
-            .await
-            .map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")));
+            .await;
         worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-        result?.map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
+        let result =
+            joined.map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?;
+        if let Err(error) = &result {
+            crate::gpu_worker::quarantine_if_fatal_cuda_error(&worker, error);
+        }
+        result.map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
     } else {
         let upscaler_cache = state.upscaler_cache.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
@@ -1246,6 +1251,16 @@ async fn upscale_stream(
                         mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
                         let _thread_gpu = ThreadGpuGuard;
                         let _load_lock = worker_clone.model_load_lock.lock().unwrap();
+                        if let Err(error) = crate::gpu_worker::ensure_worker_not_poisoned(
+                            &worker_clone,
+                            &model_name_for_worker,
+                        ) {
+                            let _ =
+                                tx_for_worker.send(SseMessage::Error(mold_core::SseErrorEvent {
+                                    message: error.to_string(),
+                                }));
+                            return;
+                        }
                         let _ = tx_for_worker.send(SseMessage::Progress(
                             mold_core::SseProgressEvent::StageStart {
                                 name: format!(
@@ -1262,6 +1277,10 @@ async fn upscale_stream(
                         ) {
                             Ok(engine) => engine,
                             Err(e) => {
+                                crate::gpu_worker::quarantine_if_fatal_cuda_error(
+                                    &worker_clone,
+                                    &e,
+                                );
                                 let _ = tx_for_worker.send(SseMessage::Error(
                                     mold_core::SseErrorEvent {
                                         message: format!("failed to load upscaler: {e}"),
@@ -1294,6 +1313,10 @@ async fn upscale_stream(
                                 ));
                             }
                             Err(e) => {
+                                crate::gpu_worker::quarantine_if_fatal_cuda_error(
+                                    &worker_clone,
+                                    &e,
+                                );
                                 let _ = tx_for_worker.send(SseMessage::Error(
                                     mold_core::SseErrorEvent {
                                         message: format!("upscale failed: {e}"),
@@ -2181,8 +2204,30 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
 
-    // Aggregate GPU status from the pool.
-    let gpu_statuses = state.gpu_pool.gpu_status();
+    // Aggregate worker state from the pool, then overlay physical memory from
+    // the always-on NVML/nvidia-smi resource sampler. CUDA context queries can
+    // fail after an illegal-access Xid and used to turn a real 35 GB leak into
+    // a misleading zero in /api/status.
+    let mut gpu_statuses = state.gpu_pool.gpu_status();
+    if let Some(resources) = state.resources.latest() {
+        let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+        for status in &mut gpu_statuses {
+            let Some(physical_ordinal) = crate::resources::physical_ordinal_for_worker(
+                status.ordinal,
+                visible_devices.as_deref(),
+            ) else {
+                continue;
+            };
+            if let Some(snapshot) = resources
+                .gpus
+                .iter()
+                .find(|gpu| gpu.ordinal == physical_ordinal)
+            {
+                status.vram_total_bytes = snapshot.vram_total;
+                status.vram_used_bytes = snapshot.vram_used;
+            }
+        }
+    }
     let has_gpus = !gpu_statuses.is_empty();
 
     // Collect loaded models from GPU workers.

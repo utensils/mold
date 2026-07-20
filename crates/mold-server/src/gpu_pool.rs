@@ -4,7 +4,7 @@ use mold_db::MetadataDb;
 use mold_inference::device::DiscoveredGpu;
 use mold_inference::shared_pool::SharedPool;
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,13 @@ pub struct GpuWorker {
     pub shared_pool: Arc<Mutex<SharedPool>>,
     pub in_flight: AtomicUsize,
     pub consecutive_failures: AtomicUsize,
+    /// Fatal CUDA errors poison a process-owned context permanently. A poisoned
+    /// worker is quarantined until the server process is restarted.
+    pub poisoned: AtomicBool,
+    /// Shared process-level signal. A fatal context requires process teardown;
+    /// supervised servers restart after `run_server` returns an error.
+    pub fatal_cuda_error: Arc<AtomicBool>,
+    pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
     pub degraded_until: RwLock<Option<Instant>>,
     pub job_tx: std::sync::mpsc::SyncSender<GpuJob>,
 }
@@ -172,6 +179,9 @@ impl GpuWorker {
     /// flip back to Degraded on the very first post-cooldown failure
     /// (because `consecutive_failures` is still >= 3 from before).
     pub fn is_degraded(&self) -> bool {
+        if self.poisoned.load(Ordering::SeqCst) {
+            return true;
+        }
         if self.consecutive_failures.load(Ordering::SeqCst) < 3 {
             return false;
         }
@@ -491,10 +501,25 @@ mod tests {
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
             in_flight: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             degraded_until: RwLock::new(None),
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn poisoned_worker_stays_degraded_after_cooldown_expiry() {
+        let (worker, _rx) = test_worker(0, 24_000_000_000);
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+
+        assert!(worker.is_degraded());
+        assert_eq!(worker.consecutive_failures.load(Ordering::SeqCst), 3);
+        assert!(worker.degraded_until.read().unwrap().is_some());
     }
 
     /// When GPU 0 is actively generating a different model, the cache

@@ -166,6 +166,27 @@ fn ram_snapshot_satisfies_invariants() {
 }
 
 #[test]
+fn physical_gpu_ordinal_honors_cuda_visible_devices_remapping() {
+    assert_eq!(
+        crate::resources::physical_ordinal_for_worker(0, Some("2,0")),
+        Some(2)
+    );
+    assert_eq!(
+        crate::resources::physical_ordinal_for_worker(1, Some("2,0")),
+        Some(0)
+    );
+    assert_eq!(
+        crate::resources::physical_ordinal_for_worker(0, None),
+        Some(0)
+    );
+    assert_eq!(
+        crate::resources::physical_ordinal_for_worker(0, Some("GPU-deadbeef")),
+        None,
+        "UUID selectors must skip the overlay rather than report another card"
+    );
+}
+
+#[test]
 fn parse_nvidia_smi_line_happy_path() {
     let line = "0, NVIDIA GeForce RTX 3090, 24564, 14248";
     let parsed = crate::resources::parse_nvidia_smi_line(line).expect("parse should succeed");

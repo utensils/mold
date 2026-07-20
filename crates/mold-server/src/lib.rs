@@ -43,7 +43,7 @@ use mold_core::types::GpuSelection;
 use mold_core::{Config, ModelPaths};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -83,6 +83,11 @@ pub async fn run_server(
     let shared_pool = std::sync::Arc::new(std::sync::Mutex::new(
         mold_inference::shared_pool::SharedPool::new(),
     ));
+    // CUDA primary contexts are process-owned. Fatal driver faults signal the
+    // HTTP server to stop and return an error so systemd/desktop recovery can
+    // restart the process instead of retrying a poisoned context.
+    let fatal_cuda_error = std::sync::Arc::new(AtomicBool::new(false));
+    let fatal_cuda_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
 
     let discovered = mold_inference::device::discover_gpus();
     let selected = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
@@ -117,6 +122,9 @@ pub async fn run_server(
             shared_pool: shared_pool.clone(),
             in_flight: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: fatal_cuda_error.clone(),
+            fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
             degraded_until: std::sync::RwLock::new(None),
             job_tx,
         });
@@ -568,15 +576,28 @@ pub async fn run_server(
         }
     };
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
-        let _ = shutdown_rx.await;
-        tracing::info!("shutting down");
-    })
-    .await?;
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+            tracing::info!("shutting down");
+        }),
+    );
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        _ = fatal_cuda_shutdown.notified() => {
+            tracing::error!("fatal CUDA context error; stopping server for process restart");
+            // Give the triggering request a brief window to receive its explicit
+            // fatal-context error, then drop the server future. A normal graceful
+            // shutdown could wait forever on queued SSE requests assigned to the
+            // now-quarantined worker and prevent the service manager from restarting.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
 
     // Server has stopped accepting requests — cancel the downloads token so the
     // driver's `wait_for_work` arm returns, then abort the JoinHandle to ensure
@@ -592,6 +613,10 @@ pub async fn run_server(
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();
+
+    if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
+        anyhow::bail!("fatal CUDA context error; server restart required");
+    }
 
     Ok(())
 }

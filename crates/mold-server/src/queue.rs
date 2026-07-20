@@ -1753,6 +1753,9 @@ mod tests {
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
             in_flight: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             degraded_until: RwLock::new(None),
             job_tx,
         });
