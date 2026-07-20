@@ -19,6 +19,15 @@ export class PromptCycler {
     this.cursor = null;
   }
 
+  /** Make an accepted local or remote submission immediately available while
+   * its owning host persists the row and the multi-host refetch catches up. */
+  record(prompt: string) {
+    const value = prompt.trim();
+    if (!value) return;
+    this.entries = [value, ...this.entries.filter((entry) => entry !== value)];
+    this.cursor = null;
+  }
+
   get navigating(): boolean {
     return this.cursor !== null;
   }

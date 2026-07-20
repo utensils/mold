@@ -1,6 +1,75 @@
 use std::io::{Read, Seek, SeekFrom};
 
+use serde::Serialize;
 use tauri::http::{header, Request, Response, StatusCode};
+
+const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+pub struct ImportedSourceImage {
+    filename: String,
+    base64: String,
+    metadata: Option<mold_core::OutputMetadata>,
+}
+
+fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourceImage, String> {
+    use base64::Engine;
+
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("Couldn't inspect the dropped image: {error}"))?
+        .len();
+    if size > MAX_SOURCE_IMAGE_BYTES {
+        return Err("Drop an image no larger than 64 MiB.".into());
+    }
+
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "The dropped image has no valid filename.".to_string())?
+        .to_string();
+    let reader = image::ImageReader::open(path)
+        .map_err(|error| format!("Couldn't open the dropped image: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| format!("Couldn't identify the dropped image: {error}"))?;
+    let format = match reader.format() {
+        Some(image::ImageFormat::Png) => mold_core::OutputFormat::Png,
+        Some(image::ImageFormat::Jpeg) => mold_core::OutputFormat::Jpeg,
+        _ => return Err("Drop a PNG or JPEG image.".into()),
+    };
+    reader
+        .into_dimensions()
+        .map_err(|error| format!("Couldn't decode the dropped image: {error}"))?;
+
+    // Read through a hard cap as well as checking metadata so a file that grows
+    // between validation and ingestion cannot force an unbounded allocation.
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::fs::File::open(path)
+        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?
+        .take(MAX_SOURCE_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?;
+    if bytes.len() as u64 > MAX_SOURCE_IMAGE_BYTES {
+        return Err("Drop an image no larger than 64 MiB.".into());
+    }
+    let metadata = mold_db::metadata_io::read_embedded(path, format);
+    Ok(ImportedSourceImage {
+        filename,
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        metadata,
+    })
+}
+
+/// Read an OS-dropped still and its embedded Mold generation metadata. The
+/// command validates the file's decoded format instead of trusting its suffix.
+#[tauri::command]
+pub async fn import_source_image(path: String) -> Result<ImportedSourceImage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        import_source_image_from_path(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
 
 fn output_dir() -> Option<std::path::PathBuf> {
     let config = mold_core::Config::load_or_default();
@@ -359,6 +428,52 @@ fn parse_byte_range(value: &str, total: u64) -> Result<Option<(u64, u64)>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_a_valid_png_as_base64() {
+        use base64::Engine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        image::RgbImage::from_pixel(2, 1, image::Rgb([12, 34, 56]))
+            .save(&path)
+            .unwrap();
+
+        let imported = import_source_image_from_path(&path).unwrap();
+        assert_eq!(imported.filename, "source.png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(imported.base64)
+                .unwrap(),
+            std::fs::read(path).unwrap()
+        );
+        assert!(imported.metadata.is_none());
+    }
+
+    #[test]
+    fn rejects_non_image_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"not an image").unwrap();
+
+        assert_eq!(
+            import_source_image_from_path(&path).unwrap_err(),
+            "Drop a PNG or JPEG image."
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_drops_before_reading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SOURCE_IMAGE_BYTES + 1).unwrap();
+
+        assert_eq!(
+            import_source_image_from_path(&path).unwrap_err(),
+            "Drop an image no larger than 64 MiB."
+        );
+    }
 
     #[test]
     fn file_matches_bytes_requires_identical_content() {

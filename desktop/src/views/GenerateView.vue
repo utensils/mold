@@ -67,7 +67,7 @@ import type { HostRoute } from "../stores/hosts";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { autoGrowRows } from "../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
-import { fetchHistory } from "../lib/api/history";
+import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
 import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
 import type { GenerateRequest, ModelEntry, OutputMetadata } from "../lib/api/types";
@@ -84,6 +84,7 @@ import { localMediaPath, mediaPath } from "../lib/gallery/media";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
+import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
@@ -188,6 +189,49 @@ const previewFrameSize = ref({ width: 0, height: 0 });
 const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const pickerEl = ref<HTMLDivElement | null>(null);
 const pickerOpen = ref(false);
+const nativeImageDragOver = ref(false);
+
+let stopNativeImageDrop: (() => void) | null = null;
+let nativeImageDropUnmounted = false;
+
+async function importDroppedImage(path: string) {
+  try {
+    const image = await ipc.importSourceImage(path);
+    const result = applyDesktopImageDrop(form, image, installedModels.value);
+    if (result.metadataApplied && result.attached) {
+      toasts.push("Loaded generation settings and attached the image as source.");
+    } else if (result.metadataApplied) {
+      toasts.push("Loaded generation settings; this model doesn't accept a source image.");
+    } else if (result.attached) {
+      toasts.push("Source image attached.");
+    } else {
+      toasts.push("The selected model doesn't accept a source image.", "error");
+    }
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+/** Tauri intercepts Finder/file-manager drops before HTML DataTransfer sees
+ * them. Bridge its native paths while this route is mounted; browser dev mode
+ * keeps SourceImageWell's ordinary DOM drop handler. */
+async function listenForNativeImageDrops() {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const unlisten = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+    if (payload.type === "enter" || payload.type === "over") {
+      nativeImageDragOver.value = true;
+      return;
+    }
+    nativeImageDragOver.value = false;
+    if (payload.type !== "drop") return;
+    const path = payload.paths.find((candidate) => /\.(png|jpe?g)$/i.test(candidate));
+    if (path) void importDroppedImage(path);
+    else toasts.push("Drop a PNG or JPEG image.", "error");
+  });
+  if (nativeImageDropUnmounted) unlisten();
+  else stopNativeImageDrop = unlisten;
+}
 
 function onDocumentPointerDown(event: PointerEvent) {
   if (!pickerOpen.value || !pickerEl.value) return;
@@ -599,8 +643,9 @@ async function generate() {
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
   const { settled } = generation.submitBatch(request, batch, route, chainRouting);
-  void loadPromptHistory();
+  cycler.record(request.prompt);
   const done = await settled;
+  void loadPromptHistory();
   const ok = done.filter((s) => s.status === "complete").length;
   const failed = done.find((s) => s.status === "error");
   if (ok > 0) {
@@ -651,7 +696,19 @@ onMounted(() => growPrompt());
 
 async function loadPromptHistory() {
   try {
-    cycler.setEntries((await fetchHistory("", 100)).map((e) => e.prompt));
+    const targets: HistoryHostTarget[] = hosts.all.flatMap((host) =>
+      host.status === "ready" && host.baseUrl
+        ? [
+            {
+              hostId: host.id,
+              label: host.label,
+              target: { baseUrl: host.baseUrl, apiKey: host.apiKey },
+            },
+          ]
+        : [],
+    );
+    const history = await fetchHistoryAll(targets);
+    cycler.setEntries(history.entries.map((entry) => entry.prompt));
   } catch {
     // No history API (older engine / DB off) — arrows just move the caret.
   }
@@ -814,9 +871,12 @@ onMounted(() => {
     previewResizeObserver.observe(previewRegion.value);
   }
   resizePreview();
+  void listenForNativeImageDrops();
 });
 
 onBeforeUnmount(() => {
+  nativeImageDropUnmounted = true;
+  stopNativeImageDrop?.();
   document.removeEventListener("pointerdown", onDocumentPointerDown);
   previewResizeObserver?.disconnect();
 });
@@ -831,6 +891,14 @@ onBeforeUnmount(() => {
     class="relative grid h-full min-h-0 overflow-hidden"
     :style="{ gridTemplateColumns: `1fr ${asideWidth}px` }"
   >
+    <div
+      v-if="nativeImageDragOver"
+      data-test="native-image-drop-overlay"
+      class="pointer-events-none absolute inset-3 z-40 flex items-center justify-center rounded-chrome border-2 border-dashed border-safelight bg-bath/90 text-body-lg text-safelight shadow-raised"
+    >
+      Drop image to load settings and use as source
+    </div>
+
     <!-- Canvas + composer -->
     <div data-test="generate-workbench" class="flex min-h-0 min-w-0 flex-col overflow-hidden p-6">
       <div class="flex min-h-0 flex-1 flex-col">

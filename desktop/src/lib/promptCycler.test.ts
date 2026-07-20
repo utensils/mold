@@ -52,4 +52,11 @@ describe("PromptCycler", () => {
     expect(c.navigating).toBe(false);
     expect(c.prev("draft")).toBe("fresh");
   });
+
+  it("records a just-submitted remote prompt before its host history refetch completes", () => {
+    const c = cyclerWith(["older"]);
+    c.record("just submitted");
+    expect(c.prev("")).toBe("just submitted");
+    expect(c.prev("just submitted")).toBe("older");
+  });
 });

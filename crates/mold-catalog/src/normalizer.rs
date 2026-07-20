@@ -121,6 +121,30 @@ fn classify_hf_kind(detail: &HfDetail, files: &[RecipeFile]) -> Kind {
     Kind::Checkpoint
 }
 
+/// LoRA repositories frequently publish mutually-exclusive precision, step,
+/// and fused-checkpoint variants. A pull must select one runnable LoRA payload
+/// instead of downloading every safetensors file in the repository.
+fn select_hf_lora_payload(files: &[RecipeFile]) -> Option<RecipeFile> {
+    files
+        .iter()
+        .filter(|file| file.url.to_ascii_lowercase().ends_with(".safetensors"))
+        // Fused FP8 checkpoints can live beside the actual LoRA weights. They
+        // are full models, not an alternative LoRA payload.
+        .filter(|file| !file.url.to_ascii_lowercase().contains("fp8_e4m3fn_scaled"))
+        .max_by_key(|file| {
+            let path = file.url.split("/resolve/main/").nth(1).unwrap_or(&file.url);
+            let lower = path.to_ascii_lowercase();
+            (
+                lower == "pytorch_lora_weights.safetensors",
+                !path.contains('/'),
+                lower.contains("4step"),
+                lower.contains("bf16"),
+                lower,
+            )
+        })
+        .cloned()
+}
+
 pub fn from_hf(
     detail: HfDetail,
     tree: Vec<HfTreeEntry>,
@@ -195,14 +219,18 @@ pub fn from_hf(
         return Err(NormalizeError::EmptyTree);
     }
     files.sort_by(|a, b| a.url.cmp(&b.url));
-
-    let total_size = files.iter().filter_map(|f| f.size_bytes).sum::<u64>();
     let modality = match family {
         Family::LtxVideo | Family::Ltx2 => Modality::Video,
         _ => Modality::Image,
     };
 
     let kind = classify_hf_kind(&detail, &files);
+    if kind == Kind::Lora {
+        files = select_hf_lora_payload(&files)
+            .map(|file| vec![file])
+            .ok_or(NormalizeError::EmptyTree)?;
+    }
+    let total_size = files.iter().filter_map(|f| f.size_bytes).sum::<u64>();
     let companions = match bundling {
         // HF entries don't currently carry a sub_family — pass None and let
         // `companions_for` use its default branch. Single-file HF Flux.2

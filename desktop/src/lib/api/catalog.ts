@@ -115,7 +115,11 @@ export async function startCatalogDownload(
     });
     // The primary job id lets pull-and-resume watch THIS pull exactly.
     const body = (await res.json().catch(() => null)) as CatalogDownloadResponse | null;
-    return body?.primary_job_id ?? null;
+    const jobId = body?.primary_job_id ?? body?.companion_jobs?.[0]?.job_id ?? null;
+    if (!jobId) {
+      throw new Error("The host accepted the pull but did not queue any files.");
+    }
+    return jobId;
   }
   headers.set("Content-Type", "application/json");
   const res = await apiFetchTo(target, "/api/downloads", {

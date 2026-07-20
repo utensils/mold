@@ -357,6 +357,52 @@ fn hf_lora_tag_is_classified_as_lora() {
 }
 
 #[test]
+fn hf_lora_repo_with_alternative_weights_selects_one_runnable_payload() {
+    // Live lightx2v Lightning repos publish many mutually-exclusive LoRA and
+    // fused-checkpoint variants. Summing every safetensors file made one LoRA
+    // look 65–108 GB and produced a recipe that tried to fetch all variants.
+    let detail = hf_detail_with_tags("lightx2v/Qwen-Image-Lightning", vec!["lora"]);
+    let tree: Vec<HfTreeEntry> = serde_json::from_value(serde_json::json!([
+        { "type": "file", "path": "Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors", "size": 849_608_296 },
+        { "type": "file", "path": "Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors", "size": 849_608_296 },
+        { "type": "file", "path": "Qwen-Image-Lightning-4steps-V2.0.safetensors", "size": 1_698_951_104 },
+        { "type": "file", "path": "Qwen-Image/qwen_image_fp8_e4m3fn_scaled.safetensors", "size": 20_436_302_974u64 }
+    ]))
+    .unwrap();
+
+    let entry = from_hf(detail, tree, Family::QwenImage, FamilyRole::Finetune).unwrap();
+
+    assert_eq!(entry.kind, Kind::Lora);
+    assert_eq!(entry.size_bytes, Some(849_608_296));
+    assert_eq!(entry.download_recipe.files.len(), 1);
+    assert!(entry.download_recipe.files[0]
+        .url
+        .ends_with("Qwen-Image-Lightning-4steps-V2.0-bf16.safetensors"));
+}
+
+#[test]
+fn hf_edit_lora_repo_does_not_select_a_fused_fp8_checkpoint() {
+    let detail = hf_detail_with_tags(
+        "lightx2v/Qwen-Image-Edit-2511-Lightning",
+        vec!["lora", "adapter"],
+    );
+    let tree: Vec<HfTreeEntry> = serde_json::from_value(serde_json::json!([
+        { "type": "file", "path": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "size": 849_608_296 },
+        { "type": "file", "path": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-fp32.safetensors", "size": 1_698_951_104 },
+        { "type": "file", "path": "qwen_image_edit_2511_fp8_e4m3fn_scaled_lightning_4steps_v1.0.safetensors", "size": 20_580_040_288u64 }
+    ]))
+    .unwrap();
+
+    let entry = from_hf(detail, tree, Family::QwenImage, FamilyRole::Finetune).unwrap();
+
+    assert_eq!(entry.size_bytes, Some(849_608_296));
+    assert_eq!(entry.download_recipe.files.len(), 1);
+    assert!(entry.download_recipe.files[0]
+        .url
+        .ends_with("Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"));
+}
+
+#[test]
 fn hf_id_substring_classifies_as_lora() {
     // Repo-id substring is the fallback when the curator forgot tags.
     let detail = hf_detail_with_tags("ntc-ai/SDXL-LoRA-slider.cinematic-lighting", vec![]);

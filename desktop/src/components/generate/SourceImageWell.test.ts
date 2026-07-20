@@ -43,6 +43,16 @@ describe("SourceImageWell", () => {
     expect(form.sourceImage).toBe("PICKED");
   });
 
+  it("stacks a loaded source preview and gallery action vertically", () => {
+    const form = formFor("sd15");
+    form.sourceImage = "SRC";
+    const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });
+
+    const mediaControls = wrapper.get("[data-test='source-media-controls']");
+    expect(mediaControls.classes()).toContain("flex-col");
+    expect(mediaControls.get("img").classes()).toContain("max-w-full");
+  });
+
   it("gates Edit mask on a source image and applies the painted mask", async () => {
     const form = formFor("sd15");
     const wrapper = mount(SourceImageWell, { props: { form }, attachTo: document.body });

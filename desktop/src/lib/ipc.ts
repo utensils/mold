@@ -7,6 +7,7 @@ import type {
   RunPodPod,
 } from "./runpod";
 import type { GalleryImage, OutputMetadata } from "./api/types";
+import type { DesktopImageImport } from "./desktopImageDrop";
 import type { Theme, ThemeFamily } from "./theme";
 
 export type { Theme, ThemeFamily } from "./theme";
@@ -253,6 +254,11 @@ export const ipc = {
   localGalleryDelete(filename: string): Promise<void> {
     if (!inTauri()) return Promise.resolve();
     return invoke<void>("local_gallery_delete", { filename });
+  },
+  /** Read a native OS-dropped PNG/JPEG plus any embedded Mold metadata. */
+  importSourceImage(path: string): Promise<DesktopImageImport> {
+    if (!inTauri()) return Promise.reject(new Error("Native file drops require the desktop app."));
+    return invoke<DesktopImageImport>("import_source_image", { path });
   },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
   saveOutputBytes(
