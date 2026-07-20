@@ -40,10 +40,25 @@ mold server discover
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
 output, or `--timeout-secs N` to browse longer on a busy network. The desktop
 app shows the same list under Settings → Hosts with a one-click **Add** button.
+The iPhone app's **Hosts → Discover nearby** uses Apple's native Bonjour browser
+for the same service and asks for Local Network permission. It also accepts a
+manual IP address, hostname, HTTPS URL, or Tailscale MagicDNS name.
 
 Advertising is on by default; a server can opt out with `mold serve --no-mdns`
 or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
 (`--bind 127.0.0.1`) are never advertised.
+
+## iPhone over Tailscale
+
+Join the iPhone and GPU host to the same tailnet, then add the host in Mold by
+its MagicDNS name, such as `plato` or `plato.example-tailnet.ts.net`. A bare
+name becomes `http://<name>:7680`; use an explicit HTTPS URL only when your own
+reverse proxy provides TLS. Bonjour remains LAN-local, so a remote Tailscale
+host is normally added by name rather than discovered.
+
+The app uses Tailscale's existing network path; it does not embed a Tailscale
+SDK or manage login, ACLs, MagicDNS, or certificates. See the
+[iPhone guide](/guide/iphone) for the complete setup.
 
 ## Recommended Pattern
 
@@ -54,6 +69,8 @@ or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
    tokens in Desktop Settings → Accounts. For remote catalog searches and
    pulls, the desktop sends its local token as a request-scoped fallback when
    the server has no working token; the server's own credential remains first.
+   The iPhone has no separate token editor or forwarding store, so its selected
+   remote host must have any required upstream credentials.
 
 ## OpenClaw and Discord
 
@@ -113,6 +130,7 @@ That distinction matters if your laptop has little disk space or no GPU.
 | -------------- | --------------------------------------------- |
 | GPU host       | Runs `mold serve`, stores model files         |
 | Laptop         | Runs `mold run`, `mold list`, `mold ps`       |
+| iPhone         | Remote Generate, Gallery, Catalog, and Hosts  |
 | Discord worker | Runs `mold discord` or `mold serve --discord` |
 | OpenClaw host  | Uses mold via `MOLD_HOST`                     |
 

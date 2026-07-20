@@ -7,6 +7,7 @@ on:
       [
         "apps/mobile/**",
         "desktop/src/mobile/**",
+        "desktop/src/components/**",
         "desktop/src/lib/**",
         "desktop/src/stores/**",
         "desktop/src/styles/**",
@@ -30,6 +31,7 @@ on:
       [
         "apps/mobile/**",
         "desktop/src/mobile/**",
+        "desktop/src/components/**",
         "desktop/src/lib/**",
         "desktop/src/stores/**",
         "desktop/src/styles/**",
@@ -65,6 +67,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: ../scripts/tests/ios-release-assets.sh
+      - run: bun run test
       - run: bun run fmt:check
 
   simulator-rust:

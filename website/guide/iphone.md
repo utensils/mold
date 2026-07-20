@@ -1,0 +1,193 @@
+# iPhone App
+
+Mold for iPhone is a first-class remote studio for a Mold server. The phone
+does not run AI models itself: generation, model storage, downloads, queueing,
+and gallery files stay on one or more remote Mold hosts while the app provides
+an iPhone-native control surface.
+
+Mold requires iOS 17 or later. The current build is distributed through the
+project's internal TestFlight group; there is not yet a public App Store
+listing.
+
+## Connect a host
+
+Start a reachable server on the GPU machine. Use an API key whenever the server
+is reachable beyond localhost:
+
+```bash
+MOLD_API_KEY='choose-a-long-secret' mold serve --bind 0.0.0.0 --port 7680
+```
+
+Open **Hosts** on the iPhone and use one of these paths:
+
+- Tap **Discover nearby** to browse `_mold._tcp` services on the current LAN.
+  Allow Local Network access when iOS asks.
+- Enter an IP address such as `192.168.1.10`. Mold adds `http://` and port
+  `7680` when they are omitted.
+- Enter a DNS hostname, HTTPS URL, or Tailscale MagicDNS name.
+
+Paste the same API key, then tap **Test and save**. Saved host metadata remains
+in the app's local storage, while the API key is kept separately in the iOS
+Keychain.
+
+### Tailscale
+
+Tailscale is the simplest way to reach a private GPU host away from its LAN:
+
+1. Join the iPhone and GPU host to the same tailnet.
+2. Keep `mold serve` listening on an address the Tailscale interface can reach.
+3. Add the host by its MagicDNS name, for example `plato` or
+   `plato.example-tailnet.ts.net`. Mold supplies port `7680` for a bare name.
+4. Include `https://` and an explicit port only when your own reverse proxy
+   provides TLS.
+
+Bonjour discovery is LAN-local; Tailscale hosts are normally added by name.
+Mold uses the installed Tailscale network and does not manage tailnet login,
+ACLs, DNS, or certificates.
+
+## Generate
+
+Choose a host and one of its installed generation models. The form adapts to
+the selected model family and uses the same request contract and model defaults
+as desktop.
+
+The mobile composer includes:
+
+- prompt expansion with 1, 3, or 5 candidates, undo, and remote prompt history;
+- local templates that can be saved, searched, sorted, renamed, loaded, and
+  deleted;
+- batch generation as independent queued jobs, each with its own progress and
+  Cancel action;
+- source images and fit policies, Qwen edit target/reference images, masks,
+  ControlNet, LoRA stacks and trigger words;
+- scheduler, CFG++, steps, guidance, output format, and post-generation
+  upscaling where the selected family supports them;
+- validated video frames/FPS, audio, camera motion, source media, keyframes,
+  retake, and LTX-2 pipeline/spatial/temporal controls; and
+- a host-aware memory estimate before submission.
+
+Choose resolution through orientation, proportionally drawn aspect-ratio
+tiles, a resolution tier, or explicit custom dimensions. Seed has separate
+**Random** and **Fixed** modes, including one-tap reuse of the last generated
+seed.
+
+When several jobs are submitted, the Queue section keeps them visible while
+you continue composing. Mold limits simultaneous streams so generation does
+not starve gallery or download requests.
+
+## Gallery
+
+Gallery merges prints from every saved host, newest first. Unavailable hosts
+are reported without hiding media from hosts that did respond.
+
+Tap a tile to open the full-screen viewer:
+
+- images are shown uncropped;
+- videos stream from their owning host with native playback and seeking;
+- swipe left or right to move through the loaded prints; and
+- use **Use as prompt** to restore recorded generation settings, or **Use as
+  source** to attach a still to the next compatible generation.
+
+Reusing settings switches to the print's host and restores the model when it is
+installed there. If the original model is unavailable, Mold clearly identifies
+the compatible fallback and removes non-portable adapter/component choices.
+
+Authenticated hosts issue a short-lived read-only media ticket for the selected
+file. The app never puts a long-lived API key in a video URL or buffers an
+entire video into phone memory.
+
+## Catalog
+
+Catalog combines installed models with live Hugging Face and Civitai results.
+You can search, filter All/Images/Video, filter by source or family, inspect
+download contents and installed components, and include NSFW entries
+explicitly.
+
+The host selector controls where Catalog browses. Pulling a model can target a
+different ready host without changing the host selected in Generate. With more
+than one target available, Mold opens a host picker.
+
+Pull buttons reflect the server state immediately:
+
+- **Connecting...** while the download event stream opens
+- **Starting...** while the request is accepted
+- **Queued** while waiting for a download slot
+- **Pulling N%** during transfer
+
+Active downloads stay pinned above results and can be cancelled. Installed
+model details offer Load on GPU, Unload from GPU, and a guarded Remove from
+host action.
+
+## Host details
+
+Tap a saved host to inspect its current state. The detail screen shows:
+
+- GPU/VRAM, CPU, and RAM telemetry;
+- free and used storage for the models filesystem;
+- queued/running generation work and loaded models;
+- queued/active model downloads with progress; and
+- the models installed on that host.
+
+From the same screen you can rename or retry the host, select it for Generate,
+unload a model, open its Catalog, or forget it. Forgetting a host also deletes
+its API key from the iOS Keychain.
+
+## Settings and themes
+
+Open Settings from the sliders button in the header. Mobile settings currently
+cover:
+
+- **Color family:** Mold or Safelight
+- **Appearance:** System, Dark, or Light
+- **Remote hosts:** saved-host count and a shortcut to manage them
+- **About:** app version, remote-only processing, and TestFlight updates
+
+Fresh installs start with the Safelight color family and System appearance.
+Existing users keep any valid Mold or Safelight choice they already saved.
+
+The appearance choice updates both the WebView and native iOS system chrome so
+status-bar content remains readable. Themes change the app chrome but never
+recolor generated photos or videos.
+
+The app intentionally prevents WebKit input-focus and double-tap page
+magnification and suppresses rubber-band scrolling. The gallery's horizontal
+swipe navigation remains enabled. iOS system-level accessibility Zoom is
+separate from WebView page zoom.
+
+## Updates and current boundaries
+
+Internal TestFlight builds are created automatically after mobile-relevant
+changes pass the iOS workflow on `main`. The pipeline validates the bundled
+mobile `index.html`, Mold icon catalog, native archive, App Store Connect
+processing, and internal tester access before it is considered complete.
+
+The initial iPhone release focuses on remote Generate, Gallery, Catalog, Hosts,
+and appearance settings. Use desktop or the CLI for a local engine, the full
+Chains authoring/jobs workspace, RunPod provisioning, engine configuration, and
+desktop Stable/Nightly self-update controls.
+
+For server networking and deployment options, continue with
+[Remote Workflows](/guide/remote-workflows). For supported model-family
+controls, see [Feature Support](/guide/feature-matrix).
+
+## Troubleshooting
+
+### Discovery finds nothing
+
+- Confirm Local Network access is enabled for Mold in iOS Settings.
+- Confirm the phone and host are on the same LAN; Bonjour does not browse a
+  remote tailnet.
+- Confirm the server was not started with `--no-mdns` or `MOLD_MDNS=0`.
+- Add the IP address or Tailscale MagicDNS name manually.
+
+### The host test fails
+
+- Open `http://host:7680/health` from another device on the same network.
+- Confirm the server listens on `0.0.0.0`, not only `127.0.0.1`.
+- Check the firewall, Tailscale ACL, port, scheme, and API key.
+
+### A video will not play
+
+Update the remote Mold host. Current authenticated video playback needs the
+short-lived gallery media-ticket endpoint so iOS can make native Range requests
+without exposing the API key.

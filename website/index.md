@@ -53,6 +53,14 @@ features:
       Run mold serve on a GPU host, generate from anywhere. REST API with SSE
       streaming for real-time progress.
   - icon:
+      src: /icons/grid.svg
+    title: iPhone Remote Studio
+    details:
+      Generate, browse a merged gallery, manage models, and inspect remote hosts
+      from an iPhone-first Tauri app over LAN or Tailscale.
+    link: /guide/iphone
+    linkText: Explore the iPhone app
+  - icon:
       src: /icons/discord.svg
     title: Discord Bot
     details:

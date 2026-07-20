@@ -43,6 +43,8 @@ mold run "a sunset over mountains"
 - **Image upscaling** — Real-ESRGAN super-resolution (2x/4x) via CLI, server API, or TUI
 - **Pipe-friendly** — `mold run "a cat" | viu -` just works
 - **Client-server** — run the GPU part on one machine, generate from anywhere
+- **Native apps** — a local/multi-host desktop studio and a remote-only iPhone
+  companion
 - **Prompt expansion** — short prompts become detailed via local LLM
 - **LoRA adapters** — apply fine-tuned styles across FLUX, Flux.2, LTX-2, SD1.5, SD3, SDXL, Qwen-Image, Qwen-Image-Edit, and Z-Image
 - **PNG metadata** — generation parameters embedded for reproducibility
@@ -57,6 +59,9 @@ mold run "a sunset over mountains"
 - [Installation](/guide/installation) — all the ways to install mold
 - [Configuration](/guide/configuration) — environment variables, config file
 - [Generating Images](/guide/generating) — full usage guide
+- [Desktop App](/guide/desktop) — local and multi-host native studio
+- [iPhone App](/guide/iphone) — remote Generate, Gallery, Catalog, Hosts, and
+  Settings
 - [Feature Support](/guide/feature-matrix) — which model families support which
   features
 - [Remote Workflows](/guide/remote-workflows) — laptop-to-GPU-server setups

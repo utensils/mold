@@ -21,7 +21,7 @@
     "publisher": "James Brink",
     "category": "GraphicsAndDesign",
     "shortDescription": "Generate with remote Mold hosts from iPhone.",
-    "longDescription": "Mold for iPhone connects to remote Mold engines over your LAN or Tailscale for generation and gallery access.",
+    "longDescription": "Mold for iPhone connects to remote Mold engines over your LAN or Tailscale for generation, gallery, model catalog, host monitoring, and appearance settings.",
     "iOS": {
       "developmentTeam": "28X9H69QGE",
       "minimumSystemVersion": "17.0"

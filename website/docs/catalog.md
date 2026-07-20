@@ -5,8 +5,8 @@ by a short in-process cache and the installed-state sidecars in your models
 directory. It is not an offline shard database and there is no separate catalog
 CLI surface.
 
-Use it from the web UI's **Catalog** tab, or call the `/api/catalog/*` routes
-from a running `mold serve` instance.
+Use it from the web UI, desktop app, or iPhone app's **Catalog** view, or call
+the `/api/catalog/*` routes from a running `mold serve` instance.
 
 ## What You Can Install
 
@@ -17,12 +17,14 @@ Catalog entries use stable install IDs:
 | `hf:`  | Hugging Face | `hf:black-forest-labs/FLUX.1-dev` |
 | `cv:`  | Civitai      | `cv:618692`                       |
 
-The web UI can install base checkpoints, fine-tunes, LoRAs, and supported
-single-file checkpoints. When an entry needs shared components, mold queues the
-primary file and any missing companions in the same catalog group. Examples
-include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
+The catalog clients can install base checkpoints, fine-tunes, LoRAs, and
+supported single-file checkpoints. When an entry needs shared components, mold
+queues the primary file and any missing companions in the same catalog group.
+Examples include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
 
-## Web UI Flow
+## Client flows
+
+### Web UI
 
 1. Start the server with `mold serve`.
 2. Open `http://localhost:7680/catalog`.
@@ -30,9 +32,24 @@ include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
    searches include NSFW rows by default.
 4. Click **Install** on the entry you want.
 
-The downloads drawer tracks queued jobs and up to two concurrent transfers. Cancelling a queued or running job remains visible until the server confirms it has stopped. Installed LoRAs then appear
-in compatible LoRA pickers in Generate, and installed models appear in the model
-picker and `mold list`.
+The downloads drawer tracks queued jobs and up to two concurrent transfers.
+Cancelling a queued or running job remains visible until the server confirms it
+has stopped. Installed LoRAs then appear in compatible LoRA pickers in Generate,
+and installed models appear in the model picker and `mold list`.
+
+### Desktop and iPhone
+
+Both native apps merge installed models with the live Hugging Face/Civitai
+catalog, keep installed entries first, expose All/Images/Video and source
+filters, and show download contents before a Pull or Repair.
+
+The iPhone Catalog browses one selected host while allowing Pull to target any
+ready saved host. Choosing a pull target does not change the host selected in
+Generate. Its card, detail sheet, and host picker share one download state:
+**Connecting...**, **Starting...**, **Queued**, then **Pulling N%**. Active
+downloads pin above the results and can be cancelled. Installed details route
+Load on GPU, Unload from GPU, guarded Remove, and Repair actions to the host
+that owns the model.
 
 ## API
 
@@ -79,6 +96,11 @@ for Civitai entries. It is additive (older clients can ignore it) and may be
 Set tokens in the server environment before `mold serve`, or save them in the
 web Settings panel. The web settings persist to `mold.db` as
 `huggingface.token` and `civitai.token`.
+
+The desktop app can forward its locally stored Hugging Face or Civitai token as
+a request-scoped fallback to a remote host; the host's own credential remains
+first. The iPhone stores only per-host Mold API keys, not upstream catalog
+tokens, so its selected remote host must be configured for gated content.
 
 ## Disabling Catalog
 

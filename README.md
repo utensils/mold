@@ -102,11 +102,14 @@ live in the desktop guide.
 ## iPhone app
 
 Mold for iPhone is a remote-only Tauri companion with first-class Generate,
-Gallery, Catalog, and Hosts views. Add a host by LAN discovery, IP address,
+Gallery, Catalog, and Hosts views, plus a dedicated Settings screen. Add a host by LAN discovery, IP address,
 hostname, or Tailscale MagicDNS name; generation, model management, and media
 remain on that remote Mold server. Host details expose live resources, queue,
 downloads, and installed models, while Catalog can browse one host and send a
 pull to another without silently changing the host selected for generation.
+Pull actions immediately progress through Connecting, Starting, Queued, and
+Pulling states, with live percentage and cancellation instead of leaving the
+button looking idle.
 The app uses the same HTTP, SSE, model defaults, resolution presets, and
 generation request contract as the desktop app. New installs use the Safelight
 theme family with system appearance, while saved theme choices persist. Generate brings its
@@ -119,13 +122,18 @@ choices direct. Every queued print has independent status and cancellation.
 Saved results stream from the host instead of crossing the iPhone WebView as
 encoded media; full-screen images swipe between prints, videos retain native
 playback controls, and a still can become the next generation's source image.
-Internal TestFlight builds are produced from relevant `main` changes, with
-release checks that verify Tauri's embedded `index.html` and the opaque
-Mold-branded Apple icon catalog before upload.
+Settings offers Mold or Safelight color families in System, Dark, or Light
+appearance and keeps native iOS chrome in sync. The app prevents input-focus and
+double-tap page zoom, removes rubber-band overscroll, and preserves the
+gallery's horizontal swipe gesture. Internal TestFlight builds are produced
+after mobile-relevant `main` changes pass iOS CI; release checks verify Tauri's
+embedded `index.html`, the opaque Mold-branded Apple icon catalog, App Store
+Connect `VALID` processing, and internal tester access.
 
 On macOS, `nix develop` exposes `ios-dev`, `ios-run`, `ios-check`, and
 `ios-build`. Xcode, CocoaPods, and Apple signing are required for device and App
-Store builds.
+Store builds. See the [iPhone guide](https://utensils.io/mold/guide/iphone) for
+host setup, Tailscale, every current screen, and TestFlight boundaries.
 
 ## Usage
 
@@ -255,6 +263,8 @@ See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM r
 - **Interactive TUI** — generate, gallery, models, settings
 - **Native desktop** — local and multi-host generation, gallery, model library,
   chains, history, jobs, RunPod, and settings
+- **Native iPhone** — remote multi-host generation, gallery, model catalog,
+  host telemetry, and appearance settings through internal TestFlight
 
 ## Deployment
 
