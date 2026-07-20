@@ -118,7 +118,7 @@ Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector
 
 The WebKit app shell uses `overscroll-behavior: none`; trackpad scrolling stops at the limits of each view instead of elastically moving the desktop chrome.
 
-Dragging a PNG or JPEG from the file manager anywhere over Generate shows a full-workspace drop target and attaches it through Tauri's native file-drop event. Embedded `mold:parameters` restore generation settings first; the same still then becomes the source image or Qwen edit Target when the restored family supports image input. The loaded preview and its gallery action stack vertically, stay within the inspector width, and leave a distinct gap before Strength.
+Dragging a PNG or JPEG up to 64 MiB from the file manager anywhere over Generate shows a full-workspace drop target and attaches it through Tauri's native file-drop event. The native importer checks the file size before decoding or base64 encoding it. Embedded `mold:parameters` restore generation settings first; the same still then becomes the source image or Qwen edit Target when the restored family supports image input. The loaded preview and its gallery action stack vertically, stay within the inspector width, and leave a distinct gap before Strength.
 
 ```
 ├──────────┬──────────────────────────────────────────────┬──────────────────┤

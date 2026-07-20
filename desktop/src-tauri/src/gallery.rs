@@ -3,6 +3,8 @@ use std::io::{Read, Seek, SeekFrom};
 use serde::Serialize;
 use tauri::http::{header, Request, Response, StatusCode};
 
+const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Serialize)]
 pub struct ImportedSourceImage {
     filename: String,
@@ -12,6 +14,13 @@ pub struct ImportedSourceImage {
 
 fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourceImage, String> {
     use base64::Engine;
+
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("Couldn't inspect the dropped image: {error}"))?
+        .len();
+    if size > MAX_SOURCE_IMAGE_BYTES {
+        return Err("Drop an image no larger than 64 MiB.".into());
+    }
 
     let filename = path
         .file_name()
@@ -32,8 +41,17 @@ fn import_source_image_from_path(path: &std::path::Path) -> Result<ImportedSourc
         .into_dimensions()
         .map_err(|error| format!("Couldn't decode the dropped image: {error}"))?;
 
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("Couldn't read the dropped image: {error}"))?;
+    // Read through a hard cap as well as checking metadata so a file that grows
+    // between validation and ingestion cannot force an unbounded allocation.
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::fs::File::open(path)
+        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?
+        .take(MAX_SOURCE_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Couldn't read the dropped image: {error}"))?;
+    if bytes.len() as u64 > MAX_SOURCE_IMAGE_BYTES {
+        return Err("Drop an image no larger than 64 MiB.".into());
+    }
     let metadata = mold_db::metadata_io::read_embedded(path, format);
     Ok(ImportedSourceImage {
         filename,
@@ -441,6 +459,19 @@ mod tests {
         assert_eq!(
             import_source_image_from_path(&path).unwrap_err(),
             "Drop a PNG or JPEG image."
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_drops_before_reading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SOURCE_IMAGE_BYTES + 1).unwrap();
+
+        assert_eq!(
+            import_source_image_from_path(&path).unwrap_err(),
+            "Drop an image no larger than 64 MiB."
         );
     }
 
