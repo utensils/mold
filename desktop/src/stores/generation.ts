@@ -104,20 +104,41 @@ export function resolveBaseSeed(seed: number | undefined, rng: () => number = ra
   return seed !== undefined && Number.isFinite(seed) ? seed : rng();
 }
 
+export interface BatchRequestOptions {
+  /** Ordered prompt override for each sibling. Must exactly match the normalized batch size. */
+  prompts?: readonly string[];
+  /** Shared source prompt retained as provenance on every sibling request. */
+  originalPrompt?: string;
+  /** Durable identity shared by prepared siblings and retained in gallery metadata. */
+  batchId?: string;
+}
+
 /**
  * Expand one request into `batchSize` sibling requests with seeds
  * `baseSeed + i`, each forced to `batch_size: 1` (the client drives the
- * sequence, one job per server call). Pure — the seed decision lives here so
- * it can be tested without the store or the network.
+ * sequence, one job per server call). Optional per-item prompts preserve their
+ * order and one shared source prompt. Pure — the seed and prompt decisions
+ * live here so they can be tested without the store or the network.
  */
 export function planBatchRequests(
   req: GenerateRequest,
   batchSize: number,
   baseSeed: number,
+  options: BatchRequestOptions = {},
 ): GenerateRequest[] {
   const size = Math.max(1, Math.floor(batchSize));
+  if (options.prompts !== undefined && options.prompts.length !== size) {
+    throw new RangeError(
+      `Per-item prompt count ${options.prompts.length} does not match batch size ${size}`,
+    );
+  }
   return Array.from({ length: size }, (_, i) => ({
     ...req,
+    ...(options.prompts !== undefined ? { prompt: options.prompts[i]! } : {}),
+    ...(options.originalPrompt !== undefined ? { original_prompt: options.originalPrompt } : {}),
+    ...(options.batchId !== undefined
+      ? { batch_id: options.batchId, batch_index: i + 1, batch_count: size }
+      : {}),
     seed: baseSeed + i,
     batch_size: 1,
   }));
@@ -336,11 +357,12 @@ export const useGenerationStore = defineStore("generation", {
       batchSize: number,
       route: JobRoute | null = null,
       chainRouting: ChainRoutingDecision | null = null,
+      requestOptions: BatchRequestOptions = {},
     ): { jobs: Job[]; settled: Promise<Job[]> } {
       if (chainRouting?.kind === "reject") throw new Error(chainRouting.reason);
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
-      const plans = planBatchRequests(req, size, baseSeed);
+      const plans = planBatchRequests(req, size, baseSeed, requestOptions);
       const batchId = this.nextBatchId++;
       this.pendingConsumerBatchIds.push(batchId);
       const jobs = plans.map((plan) => {

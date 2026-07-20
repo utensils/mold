@@ -191,6 +191,17 @@ pub struct ChainRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<DevicePlacement>,
 
+    /// Original source prompt shared by a client-prepared sibling batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_prompt: Option<String>,
+    /// Durable prepared-batch identity and one-based sibling position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_count: Option<u32>,
+
     // ── Auto-expand form ────────────────────────────────────────────────
     // These are only read when `stages` is empty; `normalise` clears them
     // after expansion so the canonical form only ever carries `stages`.
@@ -494,7 +505,10 @@ impl ChainRequest {
             control_model: None,
             control_scale: 1.0,
             expand: None,
-            original_prompt: None,
+            original_prompt: self.original_prompt.clone(),
+            batch_id: self.batch_id.clone(),
+            batch_index: self.batch_index,
+            batch_count: self.batch_count,
             lora: None,
             frames: Some(frames),
             fps: Some(fps),
@@ -798,6 +812,10 @@ mod tests {
             strength: 1.0,
             output_format: OutputFormat::Mp4,
             placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             prompt: Some(prompt.into()),
             total_frames: Some(total_frames),
             clip_frames: Some(clip_frames),
@@ -820,6 +838,10 @@ mod tests {
             strength: 1.0,
             output_format: OutputFormat::Mp4,
             placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -972,6 +994,21 @@ mod tests {
     }
 
     #[test]
+    fn normalise_preserves_optional_prepared_batch_provenance() {
+        let mut req = auto_expand_request("expanded prompt", 190, 97, 17, None);
+        req.original_prompt = Some("source prompt".into());
+        req.batch_id = Some("prepared-batch-1".into());
+        req.batch_index = Some(2);
+        req.batch_count = Some(3);
+
+        let normalised = req.normalise().unwrap();
+        assert_eq!(normalised.original_prompt.as_deref(), Some("source prompt"));
+        assert_eq!(normalised.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(normalised.batch_index, Some(2));
+        assert_eq!(normalised.batch_count, Some(3));
+    }
+
+    #[test]
     fn normalise_rejects_motion_tail_ge_clip() {
         // motion_tail must leave at least one new frame per continuation.
         let err = auto_expand_request("bad tail", 200, 97, 97, None)
@@ -1001,6 +1038,10 @@ mod tests {
         }))
         .expect("valid minimal chain request");
         assert_eq!(req.enable_audio, None);
+        assert_eq!(req.original_prompt, None);
+        assert_eq!(req.batch_id, None);
+        assert_eq!(req.batch_index, None);
+        assert_eq!(req.batch_count, None);
 
         let req_with_audio: ChainRequest = serde_json::from_value(serde_json::json!({
             "model": "ltx-2.3-22b-distilled:fp8",
@@ -1260,6 +1301,10 @@ mod tests {
             strength: 1.0,
             output_format: OutputFormat::Mp4,
             placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -1398,6 +1443,10 @@ mod tests {
             strength: 1.0,
             output_format: OutputFormat::Mp4,
             placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -1449,6 +1498,10 @@ mod tests {
     #[test]
     fn synthetic_generate_request_reads_stages_zero() {
         let mut req = auto_expand_request("stage zero prompt", 190, 97, 17, None);
+        req.original_prompt = Some("source prompt".into());
+        req.batch_id = Some("prepared-batch-1".into());
+        req.batch_index = Some(2);
+        req.batch_count = Some(3);
         req.stages = vec![
             ChainStage {
                 prompt: "stage zero prompt".into(),
@@ -1487,6 +1540,16 @@ mod tests {
         assert_eq!(synth.seed, Some(42));
         assert_eq!(synth.frames, Some(190));
         assert_eq!(synth.enable_audio, None);
+        assert_eq!(synth.original_prompt.as_deref(), Some("source prompt"));
+        assert_eq!(synth.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(synth.batch_index, Some(2));
+        assert_eq!(synth.batch_count, Some(3));
+
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190);
+        assert_eq!(metadata.original_prompt.as_deref(), Some("source prompt"));
+        assert_eq!(metadata.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(metadata.batch_index, Some(2));
+        assert_eq!(metadata.batch_count, Some(3));
     }
 
     /// The recorded output_format must be the ACTUAL post-fallback

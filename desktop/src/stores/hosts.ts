@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
   hostIdFromUrl,
   hostnamesCompatible,
@@ -10,7 +11,7 @@ import {
 } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
-import type { GpuInfo, ServerStatus } from "../lib/api/types";
+import type { GpuInfo, ServerCapabilities, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -100,6 +101,9 @@ export const useHostsStore = defineStore("hosts", {
   state: () => ({
     extras: [] as ExtraHost[],
     telemetry: {} as Record<string, HostTelemetry>,
+    /** Last capability snapshot per live host. A successful older-host
+     *  payload may omit `expand`; that absence is deliberately "unknown". */
+    capabilities: {} as Record<string, ServerCapabilities>,
     /** Friendly names from savedHosts, so the primary can be renamed too. */
     names: {} as Record<string, string>,
     /** Last-known server-reported hostname per host id. Sticky — unlike
@@ -322,6 +326,7 @@ export const useHostsStore = defineStore("hosts", {
       useDownloadsStore().unsubscribeHost(id);
       this.extras = this.extras.filter((h) => h.id !== id);
       delete this.telemetry[id];
+      delete this.capabilities[id];
       let clearedTarget = false;
       await withSettingsLock(async () => {
         const settings = await ipc.appSettingsGet();
@@ -378,6 +383,8 @@ export const useHostsStore = defineStore("hosts", {
       const test = await ipc.testRemoteHost(extra.url, extra.apiKey);
       extra.status = test.ok ? "ready" : "error";
       extra.error = test.ok ? null : test.error;
+      if (test.ok) void this.refresh();
+      else delete this.capabilities[id];
     },
     /**
      * Resolve where a batch should run. `null` = Auto (least busy);
@@ -429,11 +436,9 @@ export const useHostsStore = defineStore("hosts", {
       await Promise.all(
         this.all.map(async (host) => {
           if (!host.baseUrl || host.status === "connecting") return;
+          const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
           try {
-            const status = await apiJsonTo<ServerStatus>(
-              { baseUrl: host.baseUrl, apiKey: host.apiKey },
-              "/api/status",
-            );
+            const status = await apiJsonTo<ServerStatus>(target, "/api/status");
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
@@ -450,6 +455,22 @@ export const useHostsStore = defineStore("hosts", {
               extra.status = "ready";
               extra.error = null;
             }
+            try {
+              const capabilities = await fetchServerCapabilities(target);
+              // Disconnect/dedupe may remove or re-home a host while the
+              // request is in flight. Never resurrect its cache entry with a
+              // late response from the old identity or address.
+              const current = this.all.find((candidate) => candidate.id === host.id);
+              if (current?.status === "ready" && current.baseUrl === host.baseUrl) {
+                this.capabilities[host.id] = capabilities;
+              } else {
+                delete this.capabilities[host.id];
+              }
+            } catch {
+              // Capability discovery is advisory. A failed/unsupported probe
+              // must not mark a healthy host unavailable or imply expand=false.
+              delete this.capabilities[host.id];
+            }
           } catch (err) {
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra) {
@@ -465,6 +486,7 @@ export const useHostsStore = defineStore("hosts", {
               void conn.ensureLocal(true);
             }
             delete this.telemetry[host.id];
+            delete this.capabilities[host.id];
           }
         }),
       );
@@ -529,12 +551,14 @@ export const useHostsStore = defineStore("hosts", {
           if (loserLive && !this.extras.some((h) => h.id === survivor)) {
             this.extras = this.extras.map((h) => (h.id === loser ? { ...h, id: survivor } : h));
             if (this.telemetry[loser]) this.telemetry[survivor] = this.telemetry[loser];
+            if (this.capabilities[loser]) this.capabilities[survivor] = this.capabilities[loser];
             if (this.hostnames[loser] && !this.hostnames[survivor])
               this.hostnames[survivor] = this.hostnames[loser];
           } else {
             this.extras = this.extras.filter((h) => h.id !== loser);
           }
           delete this.telemetry[loser];
+          delete this.capabilities[loser];
           delete this.hostnames[loser];
           // Carry the loser's user-assigned name in memory, mirroring the
           // saved-entry merge — labels must not wait for a relaunch.

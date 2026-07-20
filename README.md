@@ -92,6 +92,16 @@ independently of This Mac's startup; unreachable hosts stay visible and retry.
 Chains also uses the all-host video-model union and keeps creation, progress,
 previews, and durable job actions routed to the selected model's host.
 
+Desktop prompt expansion follows the visible Batch count. Batch 1 is a quick
+rewrite with undo; larger batches prepare exactly N editable variations for
+review before any work is queued. Expansion and every generated sibling stay
+on one resolved host (including Batch 1's next Generate), and changes to the
+source prompt, model, host, or count preserve the prepared work while requiring
+an explicit refresh or discard. Gallery records the prepared batch identity and
+each sibling's position. If that host lacks the expansion model, Generate keeps
+the recovery in place and shows its exact-host pull from connection through
+queue, byte/file progress, readiness, or retry without hiding reviewed prompts.
+
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 
 The macOS DMG is signed and notarized. Linux builds are currently available

@@ -70,6 +70,9 @@ describe("Lightbox metadata panel", () => {
       prompt: "a ship in a storm",
       negative_prompt: "calm seas",
       original_prompt: "a ship",
+      batch_id: "batch-2026-07-20",
+      batch_index: 2,
+      batch_count: 3,
       model: "ltx2:q8",
       seed: 7,
       steps: 30,
@@ -96,6 +99,8 @@ describe("Lightbox metadata panel", () => {
 
     expect(wrapper.get("[data-test='lightbox-negative']").text()).toContain("calm seas");
     expect(wrapper.get("[data-test='lightbox-original']").text()).toContain("a ship");
+    expect(wrapper.get("[data-test='lightbox-batch']").text()).toContain("2 of 3");
+    expect(wrapper.get("[data-test='lightbox-batch']").text()).toContain("batch-2026-07-20");
     expect(wrapper.get("[data-test='lightbox-scheduler']").text()).toContain("ddim");
     expect(wrapper.get("[data-test='lightbox-cfg-plus']").text()).toContain("on");
     expect(wrapper.get("[data-test='lightbox-strength']").text()).toContain("0.60");
@@ -115,6 +120,7 @@ describe("Lightbox metadata panel", () => {
     for (const row of [
       "lightbox-negative",
       "lightbox-original",
+      "lightbox-batch",
       "lightbox-scheduler",
       "lightbox-cfg-plus",
       "lightbox-strength",

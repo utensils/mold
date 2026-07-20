@@ -54,7 +54,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/queue/:id`                          | Cancel a still-queued generation job                                                                              |
 | `GET`    | `/api/history`                            | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                            | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
-| `GET`    | `/api/capabilities`                       | Feature capabilities (gallery delete, chain limits, …)                                                            |
+| `GET`    | `/api/capabilities`                       | Feature capabilities, including optional per-host expansion configuration/model state                             |
 | `GET`    | `/api/capabilities/chain-limits`          | Chain-generation request limits                                                                                   |
 | `GET`    | `/api/config`                             | List every effective config row with its source (`db`/`file`/`env`)                                               |
 | `GET`    | `/api/config/:key`                        | Read one config key (value + owning source)                                                                       |
@@ -295,6 +295,7 @@ Important fields:
 | `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
 | `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
 | `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
+| `batch_id`, `batch_index`, `batch_count`            | optional prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                |
 | `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                |
 
 When `upscale_model` is set, the server gallery retains both artifacts as
@@ -617,6 +618,11 @@ shape `mold run` sends; the canonical `stages[]` shape is reserved for the
 forthcoming movie-maker UI that will author per-stage prompts/keyframes. Both
 normalise to the same internal `Vec<ChainStage>` before any engine work kicks
 off.
+
+Both forms also accept optional `original_prompt`, `batch_id`, `batch_index`,
+and `batch_count` provenance. These fields survive normalization and durable
+resume and are copied into the stitched output's completion and Gallery
+metadata.
 
 **Auto-expand body** (what `mold run --frames N` emits):
 

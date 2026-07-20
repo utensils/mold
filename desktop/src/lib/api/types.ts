@@ -65,11 +65,21 @@ export interface ServerStatus {
   models_disk?: { total_bytes: number; free_bytes: number } | null;
 }
 
+export type ExpandBackend = "local" | "api";
+
+export interface ExpandCapabilities {
+  configured: boolean;
+  model_present: boolean | null;
+  backend: ExpandBackend;
+}
+
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
   catalog?: { available: boolean; families: string[] } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Absent on older servers means unknown, not unavailable. */
+  expand?: ExpandCapabilities | null;
 }
 
 // ── Models ───────────────────────────────────────────────────────────────
@@ -216,6 +226,10 @@ export interface GenerateRequest {
   lora?: LoraWeight;
   expand?: boolean;
   original_prompt?: string;
+  /** Durable prepared-batch provenance. Index is one-based. */
+  batch_id?: string;
+  batch_index?: number;
+  batch_count?: number;
   /** Post-generate upscaler model (e.g. "real-esrgan-x4plus"); image-only. */
   upscale_model?: string;
   // Video families (ltx-video / ltx2). Frame count must be 8n+1.
@@ -315,6 +329,9 @@ export interface OutputMetadata {
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
   model: string;
   seed: number;
   steps: number;
@@ -611,6 +628,10 @@ export interface ChainRequest {
   strength?: number;
   output_format?: OutputFormat;
   enable_audio?: boolean | null;
+  original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
 }
 
 /**
@@ -635,6 +656,10 @@ export interface AutoChainRequest {
   /** Starting image for the first generated clip, base64 without a data URI. */
   source_image?: string | null;
   enable_audio?: boolean | null;
+  original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
 }
 
 /**

@@ -331,6 +331,15 @@ pub struct GenerateRequest {
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    /// Durable client-generated identifier shared by prepared batch siblings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// One-based sibling position within `batch_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+    /// Total number of siblings in the prepared batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_count: Option<u32>,
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
@@ -607,6 +616,12 @@ pub struct OutputMetadata {
     pub negative_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_count: Option<u32>,
     pub model: String,
     pub seed: u64,
     pub steps: u32,
@@ -696,6 +711,9 @@ impl OutputMetadata {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
+            batch_id: req.batch_id.clone(),
+            batch_index: req.batch_index,
+            batch_count: req.batch_count,
             model: req.model.clone(),
             seed,
             steps: req.steps,
@@ -1404,6 +1422,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1587,6 +1608,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1638,6 +1662,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1686,6 +1713,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: Some("prepared-batch-1".to_string()),
+            batch_index: Some(2),
+            batch_count: Some(3),
             lora: None,
             frames: None,
             fps: None,
@@ -1708,6 +1738,9 @@ mod tests {
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
         assert_eq!(metadata.version, "0.1.0");
+        assert_eq!(metadata.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(metadata.batch_index, Some(2));
+        assert_eq!(metadata.batch_count, Some(3));
         // No source image → no provenance fields (and the label alone never
         // rides without the image).
         assert_eq!(metadata.source_image_name, None);
@@ -1746,6 +1779,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1826,6 +1862,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1874,6 +1913,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1925,6 +1967,9 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: Some(97),
             fps: Some(24),
@@ -2316,6 +2361,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2370,6 +2418,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2437,6 +2488,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2489,6 +2543,9 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2562,6 +2619,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -3152,6 +3212,29 @@ pub struct QueueCapabilities {
     pub can_cancel_all: bool,
 }
 
+/// Prompt-expansion backend category. The API intentionally reports the
+/// category rather than the configured URL so capabilities never disclose
+/// credentials or internal network details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpandBackend {
+    Local,
+    Api,
+}
+
+/// Local facts about prompt expansion on this server. API-backed expansion
+/// does not probe the external service, so `model_present` is `None` there
+/// rather than implying reachability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpandCapabilities {
+    /// An API backend is configured, or local expansion support is compiled.
+    pub configured: bool,
+    /// Whether the configured local model is installed. Unknown/not
+    /// applicable for API backends.
+    pub model_present: Option<bool>,
+    pub backend: ExpandBackend,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -3167,6 +3250,10 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Absent on older servers. Unlike default-false capability groups,
+    /// absence here means unknown so newer clients may still try expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand: Option<ExpandCapabilities>,
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
@@ -3589,6 +3676,48 @@ mod server_event_tests {
         .unwrap();
         assert!(!caps.queue.can_pause);
         assert!(!caps.queue.can_cancel_all);
+    }
+
+    #[test]
+    fn capabilities_without_expand_field_deserializes_as_unknown() {
+        // Older servers predate expansion capability discovery. Absence must
+        // remain distinguishable from a current server reporting local facts.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(caps.expand.is_none());
+    }
+
+    #[test]
+    fn expansion_capabilities_round_trip_nullable_model_presence() {
+        let local = ExpandCapabilities {
+            configured: true,
+            model_present: Some(false),
+            backend: ExpandBackend::Local,
+        };
+        let api = ExpandCapabilities {
+            configured: true,
+            model_present: None,
+            backend: ExpandBackend::Api,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::json!({
+                "configured": true,
+                "model_present": false,
+                "backend": "local"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&api).unwrap(),
+            serde_json::json!({
+                "configured": true,
+                "model_present": null,
+                "backend": "api"
+            })
+        );
     }
 }
 

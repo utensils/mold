@@ -192,20 +192,22 @@ describe("GenerateView source-fit submit path", () => {
     mount(GenerateView, { shallow: true, attachTo: document.body });
     await flushPromises();
     const form = primeForm();
-    form.batchSize = 3;
+    // Batch N now requires a reviewed prepared expansion set. This regression
+    // isolates the ordinary Batch 1 source-preprocess snapshot boundary.
+    form.batchSize = 1;
     useUiStore().generateTick++;
     await flushPromises();
     expect(applySourceFitPreprocess).toHaveBeenCalledTimes(1);
 
     form.prompt = "a different live prompt";
-    form.batchSize = 1;
+    form.batchSize = 3;
     finishPreprocess();
     await flushPromises();
 
     expect(submitBatch).toHaveBeenCalledTimes(1);
     const [request, batch] = submitBatch.mock.calls[0]!;
     expect(request).toMatchObject({ prompt: "a lighthouse", source_image: "FIT" });
-    expect(batch).toBe(3);
+    expect(batch).toBe(1);
   });
 
   it("does not overwrite a mask or fit policy edited while preprocessing", async () => {

@@ -227,6 +227,16 @@ function onDelete() {
       >
         <span class="text-ink-3">Negative</span> {{ meta.negative_prompt }}
       </p>
+      <p
+        v-if="meta.batch_id && meta.batch_index && meta.batch_count"
+        data-test="lightbox-batch"
+        data-selectable
+        class="mt-2 text-caption text-ink-2"
+        :title="meta.batch_id"
+      >
+        <span class="text-ink-3">Prepared batch</span>
+        {{ meta.batch_index }} of {{ meta.batch_count }} · {{ meta.batch_id }}
+      </p>
 
       <dl class="mt-4 space-y-1.5">
         <div class="flex justify-between gap-2">

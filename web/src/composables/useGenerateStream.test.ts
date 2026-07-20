@@ -236,13 +236,26 @@ describe("resolveChainRequest", () => {
   });
 
   it("projects a single-prompt request into the auto-expand form", () => {
-    const req = singleGen({ prompt: "a single prompt", frames: 241 });
+    const req = singleGen({
+      prompt: "a single prompt",
+      frames: 241,
+      original_prompt: "source prompt",
+      batch_id: "prepared-batch-1",
+      batch_index: 2,
+      batch_count: 3,
+    });
     const resolved = resolveChainRequest(req, chainDecision());
     expect(resolved.stages).toBeUndefined();
     expect(resolved.prompt).toBe("a single prompt");
     expect(resolved.total_frames).toBe(241);
     expect(resolved.clip_frames).toBe(97);
     expect(resolved.motion_tail_frames).toBe(4);
+    expect(resolved).toMatchObject({
+      original_prompt: "source prompt",
+      batch_id: "prepared-batch-1",
+      batch_index: 2,
+      batch_count: 3,
+    });
   });
 
   it("falls back to auto-expand when stages[] is empty", () => {

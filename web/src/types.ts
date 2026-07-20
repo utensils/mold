@@ -34,6 +34,9 @@ export interface OutputMetadata {
   prompt: string;
   negative_prompt?: string | null;
   original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
   model: string;
   seed: number;
   steps: number;
@@ -171,6 +174,9 @@ export interface GenerateRequestWire {
   control_scale?: number;
   expand?: boolean;
   original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
   frames?: number | null;
   fps?: number | null;
   upscale_model?: string | null;
@@ -361,6 +367,10 @@ export interface ChainRequestWire {
    * didn't ask for. The server returns 400 if `true` for non-AV
    * families (see `chain_limits::family_supports_audio`). */
   enable_audio?: boolean | null;
+  original_prompt?: string | null;
+  batch_id?: string | null;
+  batch_index?: number | null;
+  batch_count?: number | null;
 }
 
 export type ChainProgressEvent =

@@ -916,6 +916,10 @@ mod tests {
             strength: 1.0,
             output_format: format,
             placement: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             prompt: None,
             total_frames: None,
             clip_frames: None,
@@ -1228,7 +1232,12 @@ mod tests {
         let db = MetadataDb::open_in_memory().unwrap();
         let jobs_root = dir.path().join("jobs");
         let output_dir = dir.path().join("gallery");
-        let request = req(OutputFormat::Mp4).normalise().unwrap();
+        let mut request = req(OutputFormat::Mp4);
+        request.original_prompt = Some("source prompt".into());
+        request.batch_id = Some("prepared-batch-1".into());
+        request.batch_index = Some(2);
+        request.batch_count = Some(3);
+        let request = request.normalise().unwrap();
         let final_bytes = audio_muxed_mp4_fixture();
         let row = completed_ephemeral_job(
             &db,
@@ -1270,10 +1279,25 @@ mod tests {
         );
         let complete = build_sse_chain_complete_event(&result, 33, SseCompletionPayload::Full);
         assert_eq!(complete.generation_time_ms, Some(33));
+        let complete_metadata = complete.metadata.expect("saved metadata rides completion");
+        assert_eq!(
+            complete_metadata.original_prompt.as_deref(),
+            Some("source prompt")
+        );
+        assert_eq!(
+            complete_metadata.batch_id.as_deref(),
+            Some("prepared-batch-1")
+        );
+        assert_eq!(complete_metadata.batch_index, Some(2));
+        assert_eq!(complete_metadata.batch_count, Some(3));
         let db = state.metadata_db.as_ref().as_ref().unwrap();
         let rows = db.list(Some(&output_dir)).unwrap();
         assert_eq!(rows.len(), 1, "shim owns the sole ephemeral gallery row");
         assert_eq!(rows[0].generation_time_ms, Some(33));
+        assert_eq!(
+            rows[0].metadata.batch_id.as_deref(),
+            Some("prepared-batch-1")
+        );
         assert!(!job_dir.exists(), "shim deletes the ephemeral job dir");
         assert!(chain_jobs::get_job(db, "01JBR55SHIMDONE")
             .unwrap()

@@ -27,6 +27,18 @@ Navigation covers Generate, Gallery, Catalog, and Hosts; Settings is a pushed
 header destination. Generate reuses the capability matrix and request builder
 for prompt tools, templates, independent batch jobs, source/edit/mask/ControlNet
 inputs, LoRA, resolution/seed controls, estimates, and video/LTX-2 controls.
+Desktop prepared expansion is intentionally view-ephemeral: `GenerateView`
+owns the input snapshot, monotonic request guard, frozen `HostRoute`, and stale
+calculation; `PreparedExpansionBatch.vue` owns inline review and focus behavior;
+`stores/generation.ts` maps the ordered prompts plus shared source provenance and
+durable batch ID/position metadata to one independently cancellable sibling each.
+`ExpansionPullStatus.vue` is shared by quick and prepared expansion while
+`GenerateView` projects only the frozen route's `useDownloadsStore` bucket into
+its lifecycle. Returned job IDs are authoritative; a newly observed exact-model
+in-flight row covers older snapshot/response timing without treating stale
+history or another host's matching pull as completion.
+Capability discovery is advisory
+per host and never participates in fallback routing.
 Gallery merges every saved remote host, streams full-size media through a
 short-lived path-scoped ticket, plays videos with native seeking, swipes between
 prints, and exposes explicit Use as prompt / Use as source actions. Host detail

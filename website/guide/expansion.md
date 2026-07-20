@@ -30,6 +30,28 @@ mold run "a sunset" --expand --batch 4
 mold run "a cat" --no-expand
 ```
 
+## Desktop prepared batches
+
+In the desktop Generate workspace, the Batch control also sets the expansion
+count. Batch 1 keeps the quick **Expand** rewrite and undo, with the host route
+frozen through the next Generate. Batch 2 or greater
+uses **Prepare N variations** and opens an inline review workspace before any
+generation request is queued. Each prompt can be edited or removed; the whole
+set can be regenerated or discarded.
+
+Mold resolves the selected Generate host before expansion and keeps that exact
+route for every sibling. It rejects responses that do not contain exactly N
+non-empty prompts. Changing the source prompt, model, host, or Batch count keeps
+the reviewed prompts visible but blocks generation until you refresh or discard
+them. A missing expansion model is pulled on the named host without falling
+back to another machine. Generate keeps that recovery inline for both quick and
+prepared expansion: it shows Connecting, Starting, Queued, live percentage,
+bytes, current file, ETA, and an explicit Retry expansion action when Ready.
+Failed or cancelled pulls can be retried on the same host without losing the
+prompt or reviewed set.
+Each prepared sibling records a durable batch ID and its one-based position in
+the Gallery details panel.
+
 ## External Backend
 
 Use an OpenAI-compatible API instead of the local LLM:

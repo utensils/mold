@@ -102,6 +102,10 @@ export function buildAutoChainRequest(
     ...(req.output_format !== undefined ? { output_format: req.output_format } : {}),
     ...(req.source_image !== undefined ? { source_image: req.source_image } : {}),
     ...(req.enable_audio !== undefined ? { enable_audio: req.enable_audio } : {}),
+    ...(req.original_prompt !== undefined ? { original_prompt: req.original_prompt } : {}),
+    ...(req.batch_id !== undefined ? { batch_id: req.batch_id } : {}),
+    ...(req.batch_index !== undefined ? { batch_index: req.batch_index } : {}),
+    ...(req.batch_count !== undefined ? { batch_count: req.batch_count } : {}),
   };
 }
 

@@ -16,6 +16,8 @@ import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
+import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
+import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import SourceGlyph from "../components/generate/SourceGlyph.vue";
@@ -32,6 +34,7 @@ import {
   jobPhase,
   jobProgress,
   needsHostRoute,
+  type BatchRequestOptions,
   type Job,
 } from "../stores/generation";
 import { useGenerateFormStore } from "../stores/generateForm";
@@ -63,6 +66,7 @@ import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
+import { expandPrompt } from "../lib/api/expand";
 import type { HostRoute } from "../stores/hosts";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { autoGrowRows } from "../lib/autogrow";
@@ -78,7 +82,7 @@ import {
 } from "../lib/sourceRestore";
 import { isMissingModelError } from "../lib/generateErrors";
 import { startCatalogDownload } from "../lib/api/catalog";
-import { useDownloadsStore } from "../stores/downloads";
+import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { localMediaPath, mediaPath } from "../lib/gallery/media";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
@@ -88,6 +92,23 @@ import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
+import { parseMissingExpandModel } from "../lib/expandErrors";
+import {
+  expansionPullJobMatchesModel,
+  resolveExpansionPullStatus,
+  type ExpansionPullPhase,
+  type ExpansionPullView,
+} from "../lib/expansionPull";
+import {
+  PreparationRequestGuard,
+  createPreparedExpansionBatch,
+  preparedExpansionStaleReasons,
+  quickExpansionStaleReasons,
+  validateExpandedPrompts,
+  type PreparedExpansionBatch as PreparedExpansionBatchState,
+  type PreparedExpansionInputs,
+  type QuickExpansionSnapshot,
+} from "../lib/preparedExpansion";
 
 const router = useRouter();
 const conn = useConnectionStore();
@@ -113,6 +134,7 @@ const missingModel = ref<{
   request: GenerateRequest;
   batch: number;
   chainRouting: ChainRoutingDecision | null;
+  requestOptions: BatchRequestOptions;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -143,6 +165,7 @@ async function pullMissingModel() {
     batch: info.batch,
     route,
     chainRouting: info.chainRouting,
+    requestOptions: info.requestOptions,
   };
   // The resume watcher is fed by this stream — a dead stream means the
   // promise "generation starts when it's ready" could never be kept, so
@@ -190,6 +213,30 @@ const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
 const pickerEl = ref<HTMLDivElement | null>(null);
 const pickerOpen = ref(false);
 const nativeImageDragOver = ref(false);
+const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
+const expansionRunning = ref(false);
+const expansionError = ref<string | null>(null);
+const expansionMissingModel = ref<{ model: string; route: HostRoute } | null>(null);
+interface ExpansionPullAttempt {
+  id: number;
+  model: string;
+  route: HostRoute;
+  phase: Exclude<ExpansionPullPhase, "missing">;
+  jobId: string | null;
+  observedJobId: string | null;
+  baselineMatchingInFlightId: string | null;
+  baselineJobIds: string[];
+  allowExistingInFlight: boolean;
+  requestError: string | null;
+}
+const expansionPullAttempt = ref<ExpansionPullAttempt | null>(null);
+let expansionPullRequestId = 0;
+const expansionAttemptHostLabel = ref<string | null>(null);
+const quickExpansionOriginal = ref<string | null>(null);
+const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
+const preparedSubmitting = ref(false);
+const preparationGuard = new PreparationRequestGuard();
+const submissionGuard = new PreparationRequestGuard();
 
 let stopNativeImageDrop: (() => void) | null = null;
 let nativeImageDropUnmounted = false;
@@ -341,6 +388,67 @@ const estimateTarget = computed(() =>
 const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
 );
+
+const effectiveBatchSize = computed(() =>
+  caps.value.forcesBatchSizeOne ? 1 : Math.max(1, Math.floor(form.batchSize)),
+);
+
+/** Expansion always resolves a concrete host, even in the one-host case. */
+const currentExpansionRoute = computed<HostRoute | null>(() =>
+  hosts.resolveRoute(stickyTarget.value, form.model || null),
+);
+const expansionHostLabel = computed(() => currentExpansionRoute.value?.label ?? null);
+
+const preparedStaleReasons = computed(() => {
+  const batch = preparedBatch.value;
+  if (!batch) return [];
+  return preparedExpansionStaleReasons(batch, {
+    sourcePrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    requestedCount: effectiveBatchSize.value,
+    selectedHostPolicy: stickyTarget.value,
+    readyHostIds: new Set(
+      hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
+    ),
+    hostLabels: new Map(hosts.all.map((host) => [host.id, host.label])),
+    hostTargets: new Map(
+      hosts.all.flatMap((host) =>
+        host.baseUrl
+          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          : [],
+      ),
+    ),
+  });
+});
+
+function currentHostSnapshot() {
+  return {
+    readyHostIds: new Set(
+      hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
+    ),
+    hostLabels: new Map(hosts.all.map((host) => [host.id, host.label])),
+    hostTargets: new Map(
+      hosts.all.flatMap((host) =>
+        host.baseUrl
+          ? [[host.id, { baseUrl: host.baseUrl, apiKey: host.apiKey, kind: host.kind }] as const]
+          : [],
+      ),
+    ),
+  };
+}
+
+const quickStaleReasons = computed(() => {
+  const snapshot = quickExpansionSnapshot.value;
+  if (!snapshot) return [];
+  return quickExpansionStaleReasons(snapshot, {
+    expandedPrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    selectedHostPolicy: stickyTarget.value,
+    ...currentHostSnapshot(),
+  });
+});
 
 const pickerModels = computed<ModelEntry[]>(() => {
   const target = stickyTarget.value;
@@ -514,13 +622,335 @@ function canvasMenu(): MenuEntry[] {
   ];
 }
 
-function onExpandApply(payload: { expanded: string; original: string }) {
-  form.prompt = payload.expanded;
-  form.originalPrompt = payload.original;
+function expansionInputs(count: number): PreparedExpansionInputs {
+  return {
+    sourcePrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    requestedCount: count,
+    selectedHostPolicy: stickyTarget.value,
+  };
 }
-function onExpandRestore(original: string) {
+
+function unavailableExpansionHostMessage(): string {
+  const selection = stickyTarget.value;
+  const selected = selection ? hosts.all.find((host) => host.id === selection) : null;
+  if (selected) {
+    return `${selected.label} isn't reachable. Expansion will not fall back to another host.`;
+  }
+  return "No generation host is reachable. Connect the selected host before expanding.";
+}
+
+function describeExpansionError(error: unknown, route: HostRoute): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const missingModel = parseMissingExpandModel(message);
+  expansionMissingModel.value = missingModel ? { model: missingModel, route } : null;
+  expansionPullAttempt.value = null;
+  return missingModel
+    ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
+    : `Expansion failed on ${route.label}: ${message}`;
+}
+
+/**
+ * Resolve once, expand on that target, then retain the same route in the
+ * prepared batch. A refresh can resolve the current policy again, but an
+ * already prepared batch never does so implicitly.
+ */
+async function expandForCurrentBatch(
+  replacePrepared = false,
+  routeOverride: HostRoute | null = null,
+) {
+  const count = effectiveBatchSize.value;
+  const inputs = expansionInputs(count);
+  if (
+    !inputs.sourcePrompt ||
+    !inputs.model ||
+    expansionRunning.value ||
+    (preparedBatch.value && count === 1 && !replacePrepared)
+  )
+    return;
+
+  const preparedSection = document.querySelector<HTMLElement>(
+    '[data-test="prepared-expansion-batch"]',
+  );
+  const replacementOwnedFocus =
+    replacePrepared &&
+    !!preparedSection &&
+    !!document.activeElement &&
+    preparedSection.contains(document.activeElement);
+  // Starting another expansion supersedes any Generate still preprocessing
+  // an older quick snapshot. Its late completion must not queue or clear the
+  // replacement snapshot created below.
+  submissionGuard.invalidate();
+
+  const route = routeOverride ?? currentExpansionRoute.value;
+  if (!route) {
+    expansionAttemptHostLabel.value = null;
+    expansionError.value = unavailableExpansionHostMessage();
+    expansionMissingModel.value = null;
+    return;
+  }
+  expansionAttemptHostLabel.value = route.label;
+  const capability = hosts.capabilities[route.hostId]?.expand;
+  if (capability?.configured === false) {
+    expansionError.value = `Prompt expansion isn't configured on ${route.label}. Configure that host before retrying.`;
+    expansionMissingModel.value = null;
+    return;
+  }
+
+  const token = preparationGuard.begin();
+  expansionRunning.value = true;
+  expansionError.value = null;
+  expansionMissingModel.value = null;
+  try {
+    const response = await expandPrompt(
+      inputs.sourcePrompt,
+      {
+        variations: count,
+        ...(inputs.family ? { modelFamily: inputs.family } : {}),
+      },
+      route.target,
+    );
+    if (!preparationGuard.isCurrent(token)) return;
+    const prompts = validateExpandedPrompts(response.expanded, count);
+    if (count === 1) {
+      // Quick expansion has no review workspace. Never overwrite edits or a
+      // target change that happened while its request was in flight.
+      const current = expansionInputs(1);
+      const hostStillReady = hosts.all.some(
+        (host) => host.id === route.hostId && host.status === "ready",
+      );
+      if (
+        current.sourcePrompt !== inputs.sourcePrompt ||
+        current.model !== inputs.model ||
+        current.family !== inputs.family ||
+        current.selectedHostPolicy !== inputs.selectedHostPolicy ||
+        !hostStillReady
+      ) {
+        expansionError.value =
+          "The prompt or generation host changed while expansion was running. Expand again to use the current inputs.";
+        return;
+      }
+      quickExpansionOriginal.value = inputs.sourcePrompt;
+      form.prompt = prompts[0]!;
+      form.originalPrompt = inputs.sourcePrompt;
+      quickExpansionSnapshot.value = {
+        requestToken: token,
+        originalPrompt: inputs.sourcePrompt,
+        expandedPrompt: prompts[0]!,
+        model: inputs.model,
+        family: inputs.family,
+        selectedHostPolicy: inputs.selectedHostPolicy,
+        route: { ...route, target: { ...route.target } },
+      };
+      if (replacePrepared) {
+        const active = document.activeElement;
+        const shouldRestoreFocus =
+          replacementOwnedFocus &&
+          (active === document.body || (!!active && preparedSection?.contains(active)));
+        preparedBatch.value = null;
+        if (shouldRestoreFocus) void nextTick(() => promptEl.value?.focus());
+      }
+      return;
+    }
+    preparedBatch.value = createPreparedExpansionBatch(inputs, route, prompts, token);
+    quickExpansionSnapshot.value = null;
+  } catch (error) {
+    if (!preparationGuard.isCurrent(token)) return;
+    expansionError.value = describeExpansionError(error, route);
+  } finally {
+    if (preparationGuard.isCurrent(token)) expansionRunning.value = false;
+  }
+}
+
+function restoreQuickExpansion() {
+  const original = quickExpansionOriginal.value;
+  if (original === null) return;
+  submissionGuard.invalidate();
   form.prompt = original;
   form.originalPrompt = null;
+  quickExpansionOriginal.value = null;
+  quickExpansionSnapshot.value = null;
+  expansionError.value = null;
+}
+
+function editPreparedPrompt(payload: { id: string; text: string }) {
+  if (preparedSubmitting.value) return;
+  const prompt = preparedBatch.value?.prompts.find((candidate) => candidate.id === payload.id);
+  if (prompt) prompt.text = payload.text;
+}
+
+function removePreparedPrompt(id: string) {
+  if (preparedSubmitting.value) return;
+  const batch = preparedBatch.value;
+  if (!batch || batch.prompts.length <= 2) return;
+  batch.prompts = batch.prompts.filter((prompt) => prompt.id !== id);
+  batch.requestedCount = batch.prompts.length;
+  form.batchSize = batch.prompts.length;
+}
+
+function collapsePreparedBatch(removedId: string) {
+  if (preparedSubmitting.value) return;
+  const batch = preparedBatch.value;
+  if (!batch || batch.prompts.length !== 2) return;
+  const remaining = batch.prompts.find((prompt) => prompt.id !== removedId);
+  if (!remaining) return;
+  preparationGuard.invalidate();
+  preparedBatch.value = null;
+  expansionRunning.value = false;
+  expansionError.value = null;
+  expansionMissingModel.value = null;
+  expansionAttemptHostLabel.value = null;
+  form.batchSize = 1;
+  form.prompt = remaining.text;
+  form.originalPrompt = batch.sourcePrompt;
+  quickExpansionOriginal.value = batch.sourcePrompt;
+  quickExpansionSnapshot.value = null;
+  void nextTick(() => promptEl.value?.focus());
+}
+
+function discardPreparedBatch() {
+  preparationGuard.invalidate();
+  submissionGuard.invalidate();
+  preparedBatch.value = null;
+  expansionRunning.value = false;
+  expansionError.value = null;
+  expansionMissingModel.value = null;
+  expansionAttemptHostLabel.value = null;
+  void nextTick(() => promptEl.value?.focus());
+}
+
+async function pullExpansionModel() {
+  const missing = expansionMissingModel.value;
+  if (!missing) return;
+  const route = missing.route;
+  const bucket = downloadBucketForRoute(route);
+  const baselineInFlight = [...bucket.activeJobs, ...bucket.queued];
+  const attempt: ExpansionPullAttempt = {
+    id: ++expansionPullRequestId,
+    model: missing.model,
+    route: { ...route, target: { ...route.target } },
+    phase: "connecting",
+    jobId: null,
+    observedJobId: null,
+    baselineMatchingInFlightId:
+      baselineInFlight.find((job) => expansionPullJobMatchesModel(job, missing.model))?.id ?? null,
+    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
+      (job) => job.id,
+    ),
+    allowExistingInFlight: false,
+    requestError: null,
+  };
+  expansionPullAttempt.value = attempt;
+  const host = hosts.all.find((candidate) => candidate.id === route.hostId) ?? null;
+  const streamHost = host
+    ? {
+        ...host,
+        label: route.label,
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey,
+      }
+    : null;
+  try {
+    if (route.kind === "remote" && !host) {
+      throw new Error(`${route.label} is no longer connected.`);
+    }
+    await downloads.subscribe(streamHost ?? undefined);
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    expansionPullAttempt.value.phase = "starting";
+    const jobId = await startCatalogDownload(missing.model, route.target, route.kind === "remote");
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    expansionPullAttempt.value.jobId = jobId;
+  } catch (error) {
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    if (error instanceof ApiError && error.status === 409) {
+      expansionPullAttempt.value.phase = "starting";
+      expansionPullAttempt.value.allowExistingInFlight = true;
+      const conflictId =
+        typeof error.body === "object" &&
+        error.body !== null &&
+        "id" in error.body &&
+        typeof error.body.id === "string" &&
+        error.body.id.trim()
+          ? error.body.id
+          : null;
+      expansionPullAttempt.value.observedJobId ??=
+        conflictId ?? expansionPullAttempt.value.baselineMatchingInFlightId;
+      return;
+    }
+    expansionPullAttempt.value.requestError =
+      error instanceof Error ? error.message : `Couldn't pull ${missing.model} on ${route.label}.`;
+  }
+}
+
+function downloadBucketForRoute(route: HostRoute): DownloadsState {
+  if (route.kind === "local" || route.hostId === downloads.primaryHostId) {
+    return downloads;
+  }
+  return downloads.hostStates[route.hostId] ?? { activeJobs: [], queued: [], history: [] };
+}
+
+const expansionPullBucket = computed<DownloadsState>(() => {
+  const route = expansionPullAttempt.value?.route ?? expansionMissingModel.value?.route;
+  return route ? downloadBucketForRoute(route) : { activeJobs: [], queued: [], history: [] };
+});
+
+watch(expansionMissingModel, (missing) => {
+  if (!missing) expansionPullAttempt.value = null;
+});
+
+watch(
+  [expansionPullAttempt, expansionPullBucket],
+  ([attempt, bucket]) => {
+    if (!attempt || attempt.jobId || attempt.observedJobId) return;
+    const baseline = new Set(attempt.baselineJobIds);
+    const candidate = [...bucket.activeJobs, ...bucket.queued].find(
+      (job) =>
+        expansionPullJobMatchesModel(job, attempt.model) &&
+        (attempt.allowExistingInFlight || !baseline.has(job.id)),
+    );
+    if (candidate) attempt.observedJobId = candidate.id;
+  },
+  { deep: true, flush: "sync" },
+);
+
+const expansionPullStatus = computed<ExpansionPullView | null>(() => {
+  const missing = expansionMissingModel.value;
+  if (!missing) return null;
+  const attempt = expansionPullAttempt.value;
+  if (
+    !attempt ||
+    attempt.model !== missing.model ||
+    attempt.route.hostId !== missing.route.hostId
+  ) {
+    return { kind: "missing", job: null };
+  }
+  return resolveExpansionPullStatus({
+    model: attempt.model,
+    phase: attempt.phase,
+    jobId: attempt.jobId,
+    observedJobId: attempt.observedJobId,
+    baselineJobIds: attempt.baselineJobIds,
+    allowExistingInFlight: attempt.allowExistingInFlight,
+    activeJobs: expansionPullBucket.value.activeJobs,
+    queued: expansionPullBucket.value.queued,
+    history: expansionPullBucket.value.history,
+    requestError: attempt.requestError,
+  });
+});
+
+const expansionPullEtaSeconds = computed(() => {
+  const attempt = expansionPullAttempt.value;
+  const job = expansionPullStatus.value?.job;
+  if (!attempt || !job || job.status !== "active") return null;
+  const scope = attempt.route.kind === "local" ? "primary" : attempt.route.hostId;
+  return computeEtaSeconds(downloads.rateSamples[`${scope}:${job.id}`] ?? [], job.bytes_total);
+});
+
+function retryExpansionAfterPull() {
+  const route = expansionPullAttempt.value?.route ?? expansionMissingModel.value?.route;
+  if (!route) return;
+  void expandForCurrentBatch(!!preparedBatch.value, route);
 }
 function appendPromptWord(word: string) {
   const trimmed = word.trim();
@@ -600,81 +1030,189 @@ async function preprocessSourceFit(
 }
 
 async function generate() {
-  if (!form.prompt.trim() || !form.model || chainReject.value) return;
-  const draft = cloneGenerateForm(form);
-  const draftCaps = generationCapabilitiesForFamily(draft.family);
-  const batch = draftCaps.forcesBatchSizeOne ? 1 : draft.batchSize;
-  // With multiple live hosts — or a dead primary while another host can
-  // serve — route the batch (sticky pick, Auto = least busy, or Most
-  // capable) — model-aware, so hosts that already have the weights win.
-  // A pinned host that went away is an error, not a reroute. Resolved
-  // BEFORE source preprocessing so upscale-then-fit hits the same host.
-  let route = null;
-  if (routeRequired.value) {
-    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, draft.model || null);
-    if (!route) {
-      toasts.push("The selected host isn't reachable — pick another host.", "error");
+  if (!form.prompt.trim() || !form.model || chainReject.value || preparedSubmitting.value) return;
+  const prepared = preparedBatch.value;
+  if (effectiveBatchSize.value > 1 && !prepared) {
+    await expandForCurrentBatch();
+    return;
+  }
+  if (
+    prepared &&
+    (preparedStaleReasons.value.length > 0 ||
+      prepared.prompts.some((prompt) => !prompt.text.trim()))
+  ) {
+    return;
+  }
+  if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
+    expansionError.value = `${quickStaleReasons.value.join(" ")} Restore or expand again before generating.`;
+    return;
+  }
+
+  const preparedSubmission = prepared
+    ? {
+        batchId: prepared.batchId,
+        batch: prepared.prompts.length,
+        promptIds: prepared.prompts.map((prompt) => prompt.id),
+        prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
+        originalPrompt: prepared.sourcePrompt,
+        route: { ...prepared.route, target: { ...prepared.route.target } },
+      }
+    : null;
+  const quickSubmission = !preparedSubmission
+    ? quickExpansionSnapshot.value
+      ? {
+          requestToken: quickExpansionSnapshot.value.requestToken,
+          route: {
+            ...quickExpansionSnapshot.value.route,
+            target: { ...quickExpansionSnapshot.value.route.target },
+          },
+        }
+      : null
+    : null;
+  const submitToken = submissionGuard.begin();
+  preparedSubmitting.value = preparedSubmission !== null;
+  try {
+    const draft = cloneGenerateForm(form);
+    const draftCaps = generationCapabilitiesForFamily(draft.family);
+    const batch = preparedSubmission
+      ? preparedSubmission.batch
+      : draftCaps.forcesBatchSizeOne
+        ? 1
+        : draft.batchSize;
+    // With multiple live hosts — or a dead primary while another host can
+    // serve — route the batch (sticky pick, Auto = least busy, or Most
+    // capable) — model-aware, so hosts that already have the weights win.
+    // A pinned host that went away is an error, not a reroute. Resolved
+    // BEFORE source preprocessing so upscale-then-fit hits the same host.
+    let route: HostRoute | null = preparedSubmission?.route ?? quickSubmission?.route ?? null;
+    if (!preparedSubmission && !quickSubmission && routeRequired.value) {
+      route = hosts.resolveRoute(
+        appPrefs.settings?.generateTargetHost ?? null,
+        draft.model || null,
+      );
+      if (!route) {
+        toasts.push("The selected host isn't reachable. Pick another host.", "error");
+        return;
+      }
+    }
+    if (!(await preprocessSourceFit(route, draft))) return;
+    if (!submissionGuard.isCurrent(submitToken)) return;
+    if (preparedSubmission) {
+      const current = preparedBatch.value;
+      const unchanged =
+        current?.batchId === preparedSubmission.batchId &&
+        current.prompts.length === preparedSubmission.prompts.length &&
+        current.prompts.every(
+          (prompt, index) =>
+            prompt.id === preparedSubmission.promptIds[index] &&
+            prompt.text.trim() === preparedSubmission.prompts[index],
+        );
+      if (!unchanged || preparedStaleReasons.value.length > 0) {
+        expansionError.value =
+          "Prepared inputs changed while source preprocessing was running. Nothing was queued; refresh or discard the preserved batch.";
+        return;
+      }
+    } else if (quickSubmission) {
+      const current = quickExpansionSnapshot.value;
+      if (
+        !current ||
+        current.requestToken !== quickSubmission.requestToken ||
+        quickStaleReasons.value.length > 0
+      ) {
+        // Restore/re-expand/snapshot replacement intentionally superseded
+        // this queued intent. Preserve whichever newer quick state exists.
+        return;
+      }
+    }
+    const request = buildRequest(draft);
+    const chainRouting = decideGenerateRequestRouting(request, draft.family);
+    if (chainRouting.kind === "reject") {
+      toasts.push(chainRouting.reason, "error");
       return;
     }
-  }
-  if (!(await preprocessSourceFit(route, draft))) return;
-  const request = buildRequest(draft);
-  const chainRouting = decideGenerateRequestRouting(request, draft.family);
-  if (chainRouting.kind === "reject") {
-    toasts.push(chainRouting.reason, "error");
-    return;
-  }
-  if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
-    toasts.push(
-      "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
-      "error",
-    );
-    return;
-  }
-  // Stash the exact source bytes by sha (the hash the server records as
-  // source_image_sha256) so Reuse settings can restore uploads and fitted
-  // sources later. Fire-and-forget — never blocks the submit.
-  if (request.source_image) {
-    const sourceB64 = request.source_image;
-    void sha256HexOfBase64(sourceB64)
-      .then((sha) => ipc.sourceStashPut(sha, sourceB64))
-      .catch(() => {});
-  }
-  // Submitting while another print develops queues server-side; each job
-  // snapshots its own model + params, so tweaking the form afterwards is safe.
-  const { settled } = generation.submitBatch(request, batch, route, chainRouting);
-  cycler.record(request.prompt);
-  const done = await settled;
-  void loadPromptHistory();
-  const ok = done.filter((s) => s.status === "complete").length;
-  const failed = done.find((s) => s.status === "error");
-  if (ok > 0) {
-    toasts.push(
-      ok === 1 ? "Generated — saved to Gallery" : `Generated ${ok} prints — saved to Gallery`,
-    );
-    // Gallery refresh is handled by the generation store's complete hook
-    // (per-origin bucket) plus the SSE / fallback-poll paths.
-  } else if (failed?.error && failed.error !== "Cancelled") {
-    // A 404 also fires on proxy/base-URL mismatches — only offer the pull
-    // when the availability snapshot doesn't CONTRADICT "model missing"
-    // (unknown availability still offers; the pull endpoint will say no).
-    const routedId = route?.hostId ?? "local";
-    const hostSaysInstalled =
-      (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
-      hostModels.installedOn(routedId).some((m) => m.name === request.model);
-    if (isMissingModelError(failed.error) && !hostSaysInstalled) {
-      // The routed host doesn't have the model — offer pull-and-resume
-      // instead of the raw HTTP error.
-      missingModel.value = {
-        model: request.model,
-        route,
-        request,
-        batch,
-        chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
-      };
-    } else {
-      toasts.push(failed.error, "error");
+    if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
+      toasts.push(
+        "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
+        "error",
+      );
+      return;
     }
+    // Stash the exact source bytes by sha (the hash the server records as
+    // source_image_sha256) so Reuse settings can restore uploads and fitted
+    // sources later. Fire-and-forget — never blocks the submit.
+    if (request.source_image) {
+      const sourceB64 = request.source_image;
+      void sha256HexOfBase64(sourceB64)
+        .then((sha) => ipc.sourceStashPut(sha, sourceB64))
+        .catch(() => {});
+    }
+    // Submitting while another print develops queues server-side; each job
+    // snapshots its own model + params, so tweaking the form afterwards is safe.
+    const requestOptions = preparedSubmission
+      ? {
+          prompts: preparedSubmission.prompts,
+          originalPrompt: preparedSubmission.originalPrompt,
+          batchId: preparedSubmission.batchId,
+        }
+      : {};
+    const { settled } = generation.submitBatch(request, batch, route, chainRouting, requestOptions);
+    if (preparedSubmission) {
+      preparationGuard.invalidate();
+      preparedBatch.value = null;
+      expansionError.value = null;
+      expansionMissingModel.value = null;
+      void nextTick(() => promptEl.value?.focus());
+    }
+    if (
+      !quickSubmission ||
+      quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
+    ) {
+      quickExpansionSnapshot.value = null;
+    }
+    cycler.record(preparedSubmission?.originalPrompt ?? request.prompt);
+    const done = await settled;
+    void loadPromptHistory();
+    const ok = done.filter((s) => s.status === "complete").length;
+    const failedCount = done.filter((s) => s.status === "error").length;
+    const failed = done.find((s) => s.status === "error");
+    if (ok > 0) {
+      if (failedCount > 0) {
+        toasts.push(
+          `Generated ${ok} of ${done.length} variations. ${failedCount} failed; successful prints were saved to Gallery.`,
+          "error",
+        );
+      } else {
+        toasts.push(
+          ok === 1 ? "Generated, saved to Gallery" : `Generated ${ok} prints, saved to Gallery`,
+        );
+      }
+      // Gallery refresh is handled by the generation store's complete hook
+      // (per-origin bucket) plus the SSE / fallback-poll paths.
+    } else if (failed?.error && failed.error !== "Cancelled") {
+      // A 404 also fires on proxy/base-URL mismatches — only offer the pull
+      // when the availability snapshot doesn't CONTRADICT "model missing"
+      // (unknown availability still offers; the pull endpoint will say no).
+      const routedId = route?.hostId ?? "local";
+      const hostSaysInstalled =
+        (hostModels.byHost[routedId]?.fetchedAt ?? 0) > 0 &&
+        hostModels.installedOn(routedId).some((m) => m.name === request.model);
+      if (isMissingModelError(failed.error) && !hostSaysInstalled) {
+        // The routed host doesn't have the model — offer pull-and-resume
+        // instead of the raw HTTP error.
+        missingModel.value = {
+          model: request.model,
+          route,
+          request,
+          batch,
+          chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+          requestOptions,
+        };
+      } else {
+        toasts.push(failed.error, "error");
+      }
+    }
+  } finally {
+    preparedSubmitting.value = false;
   }
 }
 
@@ -838,6 +1376,15 @@ watch(
   () => ui.newGenerationTick,
   () => {
     restoreEpoch += 1; // an in-flight source restore must not repopulate ⌘N
+    preparationGuard.invalidate();
+    preparedBatch.value = null;
+    expansionRunning.value = false;
+    expansionError.value = null;
+    expansionMissingModel.value = null;
+    expansionAttemptHostLabel.value = null;
+    quickExpansionOriginal.value = null;
+    quickExpansionSnapshot.value = null;
+    submissionGuard.invalidate();
     formStore.clearComposer();
     void nextTick(() => promptEl.value?.focus());
   },
@@ -875,6 +1422,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  preparationGuard.invalidate();
+  submissionGuard.invalidate();
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
   document.removeEventListener("pointerdown", onDocumentPointerDown);
@@ -998,7 +1547,8 @@ onBeforeUnmount(() => {
             :key="i"
             class="data-mono text-body"
             :class="siblingDot(s)"
-            :title="`${i + 1} of ${siblings.length}`"
+            :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
+            :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
           >
             {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
           </span>
@@ -1033,9 +1583,13 @@ onBeforeUnmount(() => {
           <ExpandControl
             ref="expandControl"
             :prompt="form.prompt"
-            :family="form.family"
-            @apply="onExpandApply"
-            @restore="onExpandRestore"
+            :batch-size="effectiveBatchSize"
+            :running="expansionRunning"
+            :host-label="expansionHostLabel"
+            :can-undo="quickExpansionOriginal !== null"
+            :blocked="!!preparedBatch && effectiveBatchSize === 1"
+            @expand="expandForCurrentBatch"
+            @restore="restoreQuickExpansion"
           />
           <div class="flex min-w-0 items-center gap-3">
             <span
@@ -1047,9 +1601,11 @@ onBeforeUnmount(() => {
             </span>
             <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
             <button
+              v-if="effectiveBatchSize === 1"
               type="button"
+              data-test="generate-button"
               class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
-              :disabled="!form.prompt.trim() || !form.model || chainReject"
+              :disabled="!form.prompt.trim() || !form.model || chainReject || !!preparedBatch"
               @click="generate"
             >
               {{ buttonLabel }}
@@ -1057,6 +1613,45 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
+        <div
+          v-if="expansionError && !preparedBatch && !expansionMissingModel"
+          role="alert"
+          class="border-stop/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
+        >
+          <span>{{ expansionError }}</span>
+        </div>
+        <ExpansionPullStatus
+          v-if="expansionError && expansionMissingModel && expansionPullStatus && !preparedBatch"
+          :model="expansionMissingModel.model"
+          :host-label="expansionMissingModel.route.label"
+          :error="expansionError"
+          :status="expansionPullStatus"
+          :eta-seconds="expansionPullEtaSeconds"
+          @pull="pullExpansionModel"
+          @retry-expansion="retryExpansionAfterPull"
+        />
+        <PreparedExpansionBatch
+          v-if="preparedBatch"
+          :batch="preparedBatch"
+          :stale-reasons="preparedStaleReasons"
+          :preparing="expansionRunning"
+          :error="expansionError"
+          :pull-status="expansionPullStatus"
+          :pull-model="expansionMissingModel?.model ?? null"
+          :pull-host-label="expansionMissingModel?.route.label ?? null"
+          :pull-eta-seconds="expansionPullEtaSeconds"
+          :active-host-label="expansionAttemptHostLabel"
+          :submitting="preparedSubmitting"
+          @edit="editPreparedPrompt"
+          @remove="removePreparedPrompt"
+          @collapse="collapsePreparedBatch"
+          @regenerate="expandForCurrentBatch(true)"
+          @refresh="expandForCurrentBatch(true)"
+          @discard="discardPreparedBatch"
+          @pull="pullExpansionModel"
+          @retry-expansion="retryExpansionAfterPull"
+          @generate="generate"
+        />
       </div>
     </div>
 

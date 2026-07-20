@@ -363,6 +363,10 @@ pub async fn run(
                     source_image: source_image.clone(),
                     placement: placement.clone(),
                     enable_audio,
+                    original_prompt: original_prompt.clone(),
+                    batch_id: None,
+                    batch_index: None,
+                    batch_count: None,
                 };
                 // Consume otherwise-unused LTX-2 knobs that chain v1 ignores so
                 // clippy doesn't fire `unused_variables` on the early return.
@@ -466,6 +470,9 @@ pub async fn run(
         control_scale,
         expand,
         original_prompt,
+        batch_id: None,
+        batch_index: None,
+        batch_count: None,
         lora: lora.clone(),
         frames: effective_frames,
         fps: effective_fps,
