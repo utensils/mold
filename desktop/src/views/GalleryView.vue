@@ -467,10 +467,8 @@ async function removeEntry(entry: MergedPrint) {
 async function requestSingleDelete(entry: MergedPrint) {
   select(entry);
   const target = { sourceKey: entry.sourceKey, filename: entry.item.filename };
-  if (
-    confirmingSingleDelete.value?.sourceKey !== target.sourceKey ||
-    confirmingSingleDelete.value.filename !== target.filename
-  ) {
+  const pending = confirmingSingleDelete.value;
+  if (!pending || pending.sourceKey !== target.sourceKey || pending.filename !== target.filename) {
     confirmingSingleDelete.value = target;
     return;
   }
