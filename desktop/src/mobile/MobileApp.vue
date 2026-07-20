@@ -51,8 +51,14 @@ import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
+import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
+import {
+  loadMobileSettings,
+  updateMobileSettings as persistMobileSettings,
+  type MobileSettings,
+} from "./settings";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -79,6 +85,11 @@ const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
+const settingsOpen = ref(false);
+const settingsButton = ref<HTMLButtonElement | null>(null);
+const settingsBackButton = ref<HTMLButtonElement | null>(null);
+const mobileSettings = reactive<MobileSettings>(loadMobileSettings());
+const appVersion = ref(import.meta.env.DEV ? "Development build" : "Current build");
 const hosts = ref<MobileHost[]>(loadHosts());
 const selectedHostId = ref(localStorage.getItem(SELECTED_KEY) ?? hosts.value[0]?.id ?? "");
 const catalogHostId = ref(selectedHostId.value || hosts.value[0]?.id || "");
@@ -938,6 +949,28 @@ function reuseSelectedPrint(): void {
   if (print) void reusePrint(print);
 }
 
+function openSettings(): void {
+  settingsOpen.value = true;
+  void nextTick(() => settingsBackButton.value?.focus());
+}
+
+function closeSettings(): void {
+  settingsOpen.value = false;
+  void nextTick(() => settingsButton.value?.focus());
+}
+
+function manageHostsFromSettings(): void {
+  settingsOpen.value = false;
+  tab.value = "hosts";
+  void nextTick(() => {
+    document.querySelector<HTMLButtonElement>("[data-test='mobile-tab-hosts']")?.focus();
+  });
+}
+
+function updateSettings(patch: Partial<MobileSettings>): void {
+  Object.assign(mobileSettings, persistMobileSettings(mobileSettings, patch));
+}
+
 watch(selectedHostId, (id, previousId) => {
   if (id !== previousId) clearHostScopedGenerationSelections();
   if (id) localStorage.setItem(SELECTED_KEY, id);
@@ -956,6 +989,14 @@ watch(resultPreviewError, (error) => {
 });
 
 onMounted(async () => {
+  if ("__TAURI_INTERNALS__" in window) {
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((version) => {
+        appVersion.value = version;
+      })
+      .catch(() => {});
+  }
   await hydrateApiKeys();
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
@@ -982,10 +1023,38 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="mobile-shell">
-    <header class="mobile-header">
+  <main class="mobile-shell" :class="{ 'is-settings-open': settingsOpen }">
+    <header v-if="settingsOpen" class="mobile-header mobile-settings-nav">
+      <button
+        ref="settingsBackButton"
+        class="mobile-settings-back"
+        type="button"
+        data-test="mobile-settings-back"
+        @click="closeSettings"
+      >
+        <span aria-hidden="true">‹</span>
+        Back
+      </button>
+      <strong>Settings</strong>
+      <span class="mobile-settings-nav-spacer" aria-hidden="true" />
+    </header>
+    <header v-else class="mobile-header">
       <div class="mobile-wordmark">Mold</div>
-      <div class="host-chip">{{ selectedHost?.name ?? "Remote only" }}</div>
+      <div class="mobile-header-actions">
+        <div class="host-chip">{{ selectedHost?.name ?? "Remote only" }}</div>
+        <button
+          ref="settingsButton"
+          class="mobile-settings-button"
+          type="button"
+          aria-label="Open settings"
+          data-test="mobile-open-settings"
+          @click="openSettings"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
+          </svg>
+        </button>
+      </div>
     </header>
 
     <p class="sr-only" aria-live="polite" aria-atomic="true">
@@ -996,7 +1065,15 @@ onBeforeUnmount(() => {
     </p>
 
     <section class="mobile-content">
-      <template v-if="tab === 'generate'">
+      <MobileSettingsView
+        v-if="settingsOpen"
+        :settings="mobileSettings"
+        :host-count="hosts.length"
+        :app-version="appVersion"
+        @update="updateSettings"
+        @manage-hosts="manageHostsFromSettings"
+      />
+      <template v-else-if="tab === 'generate'">
         <div v-if="!selectedHost" class="empty-state">
           <div>
             <h1 class="section-title">Connect a host</h1>
@@ -1415,7 +1492,7 @@ onBeforeUnmount(() => {
 
       <KeepAlive>
         <MobileCatalogView
-          v-if="tab === 'catalog'"
+          v-if="!settingsOpen && tab === 'catalog'"
           :hosts="hosts"
           :selected-host-id="catalogHostId"
           @select-host="selectCatalogHost"
@@ -1447,7 +1524,7 @@ onBeforeUnmount(() => {
       @next="navigateSelectedPrint(1)"
     />
 
-    <nav class="mobile-tabs" aria-label="Primary">
+    <nav v-if="!settingsOpen" class="mobile-tabs" aria-label="Primary">
       <button
         class="mobile-tab"
         type="button"

@@ -60,6 +60,21 @@ interface DownloadRow {
   job: DownloadJob;
 }
 
+type PendingPullPhase = "connecting" | "starting";
+
+interface PendingPull {
+  entryId: string;
+  entryName: string;
+  hostId: string;
+  jobId: string | null;
+  phase: PendingPullPhase;
+}
+
+interface PullStatus {
+  label: string;
+  phase: PendingPullPhase | "queued" | "active";
+}
+
 interface StreamSubscription {
   signature: string;
   controller: AbortController;
@@ -103,7 +118,7 @@ const error = ref("");
 const announcement = ref("");
 const announcementIsError = ref(false);
 const modelsByHost = ref<Record<string, ModelEntry[]>>({});
-const pulling = reactive(new Set<string>());
+const pendingPulls = reactive(new Map<string, PendingPull>());
 const cancelling = reactive(new Set<string>());
 const downloadsByHost = reactive<Record<string, DownloadsState>>({});
 const subscriptions = new Map<string, StreamSubscription>();
@@ -254,12 +269,21 @@ const combinedEntries = computed<MobileCatalogEntry[]>(() => {
   return sortInstalledFirst([...byId.values()]);
 });
 
-const downloadRows = computed<DownloadRow[]>(() =>
-  props.hosts.flatMap((host) => {
+const downloadRows = computed<DownloadRow[]>(() => {
+  const seen = new Set<string>();
+  return props.hosts.flatMap((host) => {
     const state = downloadsByHost[host.id];
-    return state ? [...state.activeJobs, ...state.queued].map((job) => ({ host, job })) : [];
-  }),
-);
+    if (!state) return [];
+    return [...state.activeJobs, ...state.queued]
+      .filter((job) => {
+        const key = `${host.id}:${job.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((job) => ({ host, job }));
+  });
+});
 
 const mergedDetail = computed<CatalogEntry | null>(() => {
   const summary = detailEntry.value;
@@ -322,6 +346,87 @@ function clearModalInert(): void {
 
 function pullKey(entry: CatalogEntry, hostId?: string): string {
   return `${hostId ?? "any"}:${entry.id}`;
+}
+
+function pullJobMatches(entry: CatalogEntry, job: DownloadJob, pending?: PendingPull): boolean {
+  if (pending?.jobId && pending.jobId === job.id) return true;
+  if (job.catalog_id === entry.id) return true;
+  return job.model === entry.id || job.model === entry.name;
+}
+
+function jobsForHost(hostId: string): DownloadJob[] {
+  const state = downloadsByHost[hostId];
+  return state ? [...state.activeJobs, ...state.queued] : [];
+}
+
+function pullStatusForHost(entry: CatalogEntry, hostId: string): PullStatus | null {
+  const pending = pendingPulls.get(pullKey(entry, hostId));
+  const job = jobsForHost(hostId).find((candidate) => pullJobMatches(entry, candidate, pending));
+  if (job?.status === "active") {
+    const progress =
+      job.bytes_total > 0 ? ` ${Math.round(percent(job.bytes_done, job.bytes_total))}%` : "";
+    return { label: `Pulling${progress}`, phase: "active" };
+  }
+  if (job?.status === "queued") return { label: "Queued", phase: "queued" };
+  if (pending)
+    return {
+      label: pending.phase === "connecting" ? "Connecting…" : "Starting…",
+      phase: pending.phase,
+    };
+  return null;
+}
+
+function pullStatus(entry: MobileCatalogEntry, hostId?: string): PullStatus | null {
+  if (hostId) return pullStatusForHost(entry, hostId);
+  const preferred = entry.installed ? owningHost(entry) : selectedHost.value;
+  const orderedHosts = preferred
+    ? [preferred, ...downloadHosts.value.filter((host) => host.id !== preferred.id)]
+    : downloadHosts.value;
+  for (const host of orderedHosts) {
+    const status = pullStatusForHost(entry, host.id);
+    if (status) return status;
+  }
+  return null;
+}
+
+function pullButtonLabel(entry: MobileCatalogEntry): string {
+  return pullStatus(entry)?.label ?? catalogPullLabel(catalogSizeInfo(entry));
+}
+
+function reconcilePendingPulls(hostId: string, event?: DownloadEvent): void {
+  const state = downloadsByHost[hostId];
+  if (!state) return;
+  const inFlight = [...state.activeJobs, ...state.queued];
+  const terminalId =
+    event?.type === "job_done" || event?.type === "job_failed" || event?.type === "job_cancelled"
+      ? event.id
+      : null;
+  const terminalModel = event?.type === "job_done" ? event.model : null;
+  const terminalIds = terminalJobsByHost.get(hostId);
+  for (const [key, pending] of pendingPulls) {
+    if (pending.hostId !== hostId) continue;
+    const entry = { id: pending.entryId, name: pending.entryName } as CatalogEntry;
+    const inFlightMatch = inFlight.some((job) => pullJobMatches(entry, job, pending));
+    if (
+      // An opening snapshot can adopt a pre-existing pull before we POST.
+      // Once our POST returns a job id, keep the pending record as the
+      // entry-to-job association: delta events do not carry `catalog_id`, and
+      // an HF job's canonical model can differ from both entry id and label.
+      (inFlightMatch && pending.jobId == null) ||
+      (pending.jobId != null && state.history.some((job) => job.id === pending.jobId)) ||
+      (pending.jobId != null && terminalIds?.has(pending.jobId)) ||
+      (terminalId != null && pending.jobId === terminalId) ||
+      (terminalModel != null &&
+        (terminalModel === pending.entryId || terminalModel === pending.entryName))
+    )
+      pendingPulls.delete(key);
+  }
+}
+
+function clearPendingPullsForHost(hostId: string): void {
+  for (const [key, pending] of pendingPulls) {
+    if (pending.hostId === hostId) pendingPulls.delete(key);
+  }
 }
 
 function owningHost(entry: MobileCatalogEntry): MobileHost | null {
@@ -479,7 +584,6 @@ function ensureDownloadStream(host: MobileHost): Promise<void> {
     target: mobileHostTarget(host),
     signal: controller.signal,
     retry: true,
-    onOpen: markReady,
     onOpenError: failReady,
     onClose: (cause) => {
       if (!readySettled) {
@@ -487,8 +591,10 @@ function ensureDownloadStream(host: MobileHost): Promise<void> {
         return;
       }
       if (subscriptions.get(host.id)?.controller === controller) subscriptions.delete(host.id);
-      if (mounted && cause && !controller.signal.aborted)
+      if (mounted && cause && !controller.signal.aborted) {
+        clearPendingPullsForHost(host.id);
         announce(`Download monitoring stopped on ${host.name}: ${cause.message}`, true);
+      }
     },
     onEvent: (_event, data) => {
       if (controller.signal.aborted) return;
@@ -511,6 +617,10 @@ function ensureDownloadStream(host: MobileHost): Promise<void> {
           known.add(event.id);
           terminalJobsByHost.set(host.id, known);
           announce(`Download failed on ${host.name}: ${event.error}`, true);
+        } else if (event.type === "job_cancelled") {
+          const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
+          known.add(event.id);
+          terminalJobsByHost.set(host.id, known);
         } else if (event.type === "snapshot") {
           const hadSnapshot = terminalJobsByHost.has(host.id);
           const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
@@ -543,6 +653,11 @@ function ensureDownloadStream(host: MobileHost): Promise<void> {
             else if (completed) announce(`${completed.model} is ready on ${host.name}.`);
           }
         }
+        reconcilePendingPulls(host.id, event);
+        // Opening the transport does not prove that existing server jobs have
+        // been reconciled. Resolve only after reducing the opening snapshot,
+        // otherwise a delayed first frame can race a duplicate POST.
+        if (event.type === "snapshot") markReady();
       } catch {
         // Ignore malformed frames; the next snapshot/delta repairs state.
       }
@@ -559,6 +674,7 @@ function syncDownloadStreams(): void {
     subscriptions.delete(hostId);
     delete downloadsByHost[hostId];
     terminalJobsByHost.delete(hostId);
+    clearPendingPullsForHost(hostId);
   }
   for (const host of downloadHosts.value) {
     void ensureDownloadStream(host).catch((cause) => {
@@ -608,17 +724,39 @@ function requestPull(entry: MobileCatalogEntry): void {
 
 async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void> {
   const key = pullKey(entry, host.id);
-  if (pulling.has(key)) return;
-  pulling.add(key);
+  if (pullStatusForHost(entry, host.id)) return;
+  const pending = reactive<PendingPull>({
+    entryId: entry.id,
+    entryName: entry.name,
+    hostId: host.id,
+    jobId: null,
+    phase: "connecting",
+  });
+  pendingPulls.set(key, pending);
   closeTargetPicker();
   announce(`Connecting to downloads on ${host.name}…`);
   try {
     // Subscribe first so even an immediately-started download cannot race its
     // `enqueued` / `started` events past the iPhone UI.
     await ensureDownloadStream(host);
-    await startCatalogDownload(entry.id, mobileHostTarget(host), false);
+    // The stream's opening snapshot may reveal that this exact pull already
+    // exists. In that case its live job becomes authoritative and no POST is
+    // needed.
+    if (pendingPulls.get(key) !== pending) return;
+    pending.phase = "starting";
+    const jobId = await startCatalogDownload(entry.id, mobileHostTarget(host), false);
+    // A null id is a valid server response when no primary download was
+    // enqueued. Without an id, a later HF delta may use a canonical model
+    // name that cannot be matched back to this catalog card, leaving the
+    // button stuck in "Starting…" indefinitely.
+    if (pendingPulls.get(key) === pending) {
+      if (jobId === null) throw new Error(`${host.name} did not return a download job.`);
+      pending.jobId = jobId;
+      reconcilePendingPulls(host.id);
+    }
     announce(`${catalogActionLabel(entry)}ing ${entry.name} on ${host.name}.`);
   } catch (cause) {
+    if (pendingPulls.get(key) === pending) pendingPulls.delete(key);
     const alreadyQueued = cause instanceof ApiError && cause.status === 409;
     announce(
       alreadyQueued
@@ -626,8 +764,6 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
         : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entry.name} on ${host.name}: ${errorMessage(cause)}`,
       !alreadyQueued,
     );
-  } finally {
-    pulling.delete(key);
   }
 }
 
@@ -875,6 +1011,7 @@ onBeforeUnmount(() => {
   deactivateInteractions();
   for (const subscription of subscriptions.values()) subscription.close();
   subscriptions.clear();
+  pendingPulls.clear();
 });
 </script>
 
@@ -1077,14 +1214,12 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             class="mobile-catalog-pull"
-            :disabled="pulling.has(pullKey(entry, downloadHosts[0]?.id))"
+            :disabled="downloadHosts.length <= 1 && Boolean(pullStatus(entry))"
+            :aria-busy="Boolean(pullStatus(entry))"
+            :data-pull-state="pullStatus(entry)?.phase"
             @click="requestPull(entry)"
           >
-            {{
-              pulling.has(pullKey(entry, downloadHosts[0]?.id))
-                ? "Queuing…"
-                : catalogPullLabel(catalogSizeInfo(entry))
-            }}
+            {{ pullButtonLabel(entry) }}
           </button>
         </li>
       </ul>
@@ -1295,11 +1430,16 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="primary-button"
-            :disabled="!canDownloadEntry(mergedDetail)"
+            :disabled="
+              !canDownloadEntry(mergedDetail) ||
+              (downloadHosts.length <= 1 && Boolean(pullStatus(detailEntry)))
+            "
+            :aria-busy="Boolean(pullStatus(detailEntry))"
+            :data-pull-state="pullStatus(detailEntry)?.phase"
             @click="requestPull(detailEntry)"
           >
-            {{ catalogActionLabel(mergedDetail) }}
-            <template v-if="detailDownloadTotal.bytes != null">
+            {{ pullStatus(detailEntry)?.label ?? catalogActionLabel(mergedDetail) }}
+            <template v-if="!pullStatus(detailEntry) && detailDownloadTotal.bytes != null">
               · {{ detailTotalLabel() }}</template
             >
           </button>
@@ -1336,13 +1476,22 @@ onBeforeUnmount(() => {
               v-for="host in downloadHosts"
               :key="host.id"
               type="button"
+              :disabled="Boolean(pullStatus(targetEntry, host.id))"
+              :aria-busy="Boolean(pullStatus(targetEntry, host.id))"
+              :data-pull-state="pullStatus(targetEntry, host.id)?.phase"
               @click="pullTo(targetEntry, host)"
             >
               <span>
                 <strong>{{ host.name }}</strong>
                 <small>{{ host.baseUrl }}</small>
               </span>
-              <span>{{ host.id === selectedHostId ? "Current" : "" }} ›</span>
+              <span>
+                {{
+                  pullStatus(targetEntry, host.id)?.label ??
+                  (host.id === selectedHostId ? "Current" : "")
+                }}
+                <template v-if="!pullStatus(targetEntry, host.id)"> ›</template>
+              </span>
             </button>
           </div>
         </div>

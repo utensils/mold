@@ -179,6 +179,8 @@ afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
+  delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.themeFamily;
 });
 
 describe("MobileApp generation queue", () => {
@@ -1279,6 +1281,58 @@ describe("MobileApp generation queue", () => {
     await vi.waitFor(() => expect(galleryCalls).toBe(2));
     await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+  });
+});
+
+describe("MobileApp settings", () => {
+  it("opens as a focused destination and returns to the unchanged primary tab", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-settings']").isVisible()).toBe(true);
+    expect(wrapper.find(".mobile-tabs").exists()).toBe(false);
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-settings-back']").element);
+
+    await wrapper.get("[data-test='mobile-settings-back']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-tab-gallery']").attributes("aria-current")).toBe("page");
+    expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-open-settings']").element);
+  });
+
+  it("applies and persists family and appearance changes immediately", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+
+    await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
+    await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);
+    await flushPromises();
+
+    expect(document.documentElement.dataset.themeFamily).toBe("safelight");
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}")).toEqual({
+      theme: "light",
+      themeFamily: "safelight",
+    });
+
+    await wrapper.get('input[name="mobile-theme-appearance"][value="system"]').setValue(true);
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
+
+  it("opens host management from Settings", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-open-settings']").trigger("click");
+    await wrapper.get(".mobile-settings-manage").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-settings']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-tab-hosts']").attributes("aria-current")).toBe("page");
   });
 });
 

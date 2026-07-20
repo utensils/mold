@@ -5,6 +5,7 @@ body,
   width: 100%;
   overflow: hidden;
   overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 body {
@@ -55,6 +56,82 @@ button {
   background: var(--bench);
 }
 
+.mobile-header-actions {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mobile-header-actions .host-chip {
+  max-width: min(58vw, 220px);
+}
+
+.mobile-settings-button,
+.mobile-settings-back {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.mobile-settings-button {
+  display: grid;
+  flex: 0 0 44px;
+  place-items: center;
+}
+
+.mobile-settings-button:active,
+.mobile-settings-back:active {
+  background: color-mix(in srgb, var(--safelight) 12%, transparent);
+  color: var(--safelight);
+}
+
+.mobile-settings-button svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.mobile-settings-nav {
+  display: grid;
+  grid-template-columns: minmax(72px, 1fr) auto minmax(72px, 1fr);
+}
+
+.mobile-settings-nav > strong {
+  font-size: var(--text-body-lg);
+  font-weight: 700;
+}
+
+.mobile-settings-back {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  padding: 0 8px 0 2px;
+  color: var(--safelight);
+  font-size: var(--text-body);
+}
+
+.mobile-settings-back > span {
+  margin-top: -2px;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.mobile-settings-nav-spacer {
+  width: 44px;
+  justify-self: end;
+}
+
 .mobile-wordmark {
   font-family: var(--font-display);
   font-size: var(--text-display);
@@ -78,7 +155,12 @@ button {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
+  touch-action: manipulation;
   padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
+}
+
+.mobile-shell.is-settings-open .mobile-content {
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
 }
 
 .mobile-tabs {
@@ -103,6 +185,250 @@ button {
 .mobile-tab[aria-current="page"] {
   background: color-mix(in srgb, var(--safelight) 12%, transparent);
   color: var(--safelight);
+}
+
+.mobile-settings {
+  width: min(620px, 100%);
+  margin: 0 auto;
+}
+
+.mobile-settings-section {
+  padding: 22px 0;
+  border-bottom: 1px solid var(--edge);
+}
+
+.mobile-settings-section:first-child {
+  padding-top: 2px;
+}
+
+.mobile-settings-section:last-child {
+  border-bottom: 0;
+}
+
+.mobile-settings-section-copy {
+  margin-bottom: 14px;
+}
+
+.mobile-settings-section-copy h1,
+.mobile-settings-section-copy h2 {
+  margin: 0;
+  color: var(--rebate);
+  font-family: var(--font-display);
+  font-size: var(--text-display-sm);
+  letter-spacing: -0.02em;
+}
+
+.mobile-settings-section-copy p {
+  max-width: 54ch;
+  margin: 5px 0 0;
+  color: var(--ink-3);
+  font-size: var(--text-body);
+  line-height: 1.45;
+}
+
+.mobile-settings-fieldset {
+  min-width: 0;
+  margin: 18px 0 0;
+  border: 0;
+  padding: 0;
+}
+
+.mobile-settings-fieldset legend {
+  margin-bottom: 7px;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mobile-theme-options {
+  overflow: hidden;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+}
+
+.mobile-theme-option {
+  display: grid;
+  min-height: 72px;
+  box-sizing: border-box;
+  grid-template-columns: 52px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.mobile-theme-option + .mobile-theme-option {
+  border-top: 1px solid var(--edge);
+}
+
+.mobile-theme-option[data-selected="true"] {
+  background: color-mix(in srgb, var(--safelight) 10%, transparent);
+}
+
+.mobile-theme-option:has(input:focus-visible),
+.mobile-appearance-option:has(input:focus-visible) {
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
+}
+
+.mobile-theme-preview {
+  position: relative;
+  display: block;
+  width: 52px;
+  height: 38px;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, white 18%, transparent);
+  border-radius: var(--radius-media);
+  background: var(--preview-bath);
+}
+
+.mobile-theme-preview[data-theme-family="mold"] {
+  --preview-bath: #12101d;
+  --preview-bench: #201b30;
+  --preview-halide: #67e8f9;
+  --preview-safelight: #e879f9;
+}
+
+.mobile-theme-preview[data-theme-family="safelight"] {
+  --preview-bath: #141110;
+  --preview-bench: #211b16;
+  --preview-halide: #93a7b0;
+  --preview-safelight: #f08a24;
+}
+
+.mobile-theme-preview > span:first-child {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 10px;
+  background: var(--preview-bench);
+}
+
+.mobile-theme-preview > span:nth-child(2),
+.mobile-theme-preview > span:nth-child(3) {
+  position: absolute;
+  bottom: 7px;
+  width: 15px;
+  height: 9px;
+  border-radius: 1px;
+}
+
+.mobile-theme-preview > span:nth-child(2) {
+  left: 8px;
+  background: var(--preview-halide);
+}
+
+.mobile-theme-preview > span:nth-child(3) {
+  right: 8px;
+  background: var(--preview-safelight);
+}
+
+.mobile-theme-option-copy,
+.mobile-theme-option-copy strong,
+.mobile-theme-option-copy small {
+  display: block;
+  min-width: 0;
+}
+
+.mobile-theme-option-copy strong {
+  color: var(--rebate);
+  font-size: var(--text-body-lg);
+}
+
+.mobile-theme-option-copy small {
+  margin-top: 2px;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
+}
+
+.mobile-settings-check {
+  opacity: 0;
+  color: var(--safelight);
+  font-size: 18px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.mobile-theme-option[data-selected="true"] .mobile-settings-check {
+  opacity: 1;
+}
+
+.mobile-appearance-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+}
+
+.mobile-appearance-option {
+  display: grid;
+  min-height: 58px;
+  box-sizing: border-box;
+  align-content: center;
+  gap: 2px;
+  padding: 7px 4px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.mobile-appearance-option + .mobile-appearance-option {
+  border-left: 1px solid var(--edge);
+}
+
+.mobile-appearance-option strong {
+  font-size: var(--text-body);
+}
+
+.mobile-appearance-option small {
+  font-size: var(--text-edge-code);
+}
+
+.mobile-appearance-option[data-selected="true"] {
+  background: color-mix(in srgb, var(--safelight) 14%, transparent);
+  color: var(--safelight);
+}
+
+.mobile-settings-manage {
+  width: 100%;
+}
+
+.mobile-settings-about {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-control);
+  background: var(--bench);
+}
+
+.mobile-settings-about > div {
+  display: grid;
+  min-height: 44px;
+  box-sizing: border-box;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 11px;
+}
+
+.mobile-settings-about > div + div {
+  border-top: 1px solid var(--edge);
+}
+
+.mobile-settings-about dt {
+  color: var(--ink-3);
+  font-size: var(--text-body);
+}
+
+.mobile-settings-about dd {
+  margin: 0;
+  color: var(--rebate);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  text-align: right;
 }
 
 .section-title {
@@ -1089,6 +1415,7 @@ button.mobile-generate-disclosure {
 
 .mobile-surface .mask-editor-stage {
   flex: 1;
+  touch-action: manipulation;
 }
 
 .primary-button,
@@ -1868,6 +2195,19 @@ button:disabled {
   font-size: var(--text-edge-code);
 }
 
+.mobile-catalog-pull[data-pull-state],
+.mobile-catalog-detail-action button[data-pull-state] {
+  border-color: var(--halide);
+  background: var(--halide);
+  color: var(--on-accent);
+  opacity: 1;
+}
+
+.mobile-catalog-target-list > button[data-pull-state] {
+  color: var(--halide);
+  opacity: 1;
+}
+
 .mobile-catalog-more {
   width: 100%;
   margin-top: 14px;
@@ -1920,6 +2260,7 @@ button:disabled {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
+  touch-action: manipulation;
 }
 
 .mobile-catalog-detail-preview {
@@ -2135,6 +2476,7 @@ button:disabled {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: none;
+  touch-action: manipulation;
   padding: 16px max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
     max(16px, env(safe-area-inset-left));
   border-top: 1px solid var(--edge);
