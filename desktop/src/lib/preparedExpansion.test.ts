@@ -29,6 +29,14 @@ describe("prepared expansion validation", () => {
     expect(validateExpandedPrompts([" one ", "two", " three"], 3)).toEqual(["one", "two", "three"]);
   });
 
+  it("unwraps singleton JSON arrays returned as individual variations", () => {
+    expect(validateExpandedPrompts(['["one"]', '["two"]', '["three"]'], 3)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+  });
+
   it("rejects short, long, and blank responses without silently resizing", () => {
     expect(() => validateExpandedPrompts(["one", "two"], 3)).toThrow(
       "Expected exactly 3 non-empty prompts, but the host returned 2.",

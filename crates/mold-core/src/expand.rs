@@ -288,7 +288,20 @@ fn parse_variations(text: &str, expected: usize) -> Vec<String> {
 
 /// Clean up an expanded prompt: trim whitespace, remove quotes, collapse whitespace.
 fn clean_expanded_prompt(text: &str) -> String {
-    let trimmed = text.trim().trim_matches('"').trim_matches('\'').trim();
+    // Some OpenAI-compatible/local backends emit one JSON array per requested
+    // variation (`["prompt"]\n["prompt"]`) instead of one shared array. The
+    // line fallback feeds each singleton here, so unwrap it before ordinary
+    // quote/whitespace cleanup. Never flatten a real multi-item array.
+    let singleton = serde_json::from_str::<Vec<String>>(text.trim())
+        .ok()
+        .and_then(|items| (items.len() == 1).then(|| items.into_iter().next().unwrap()));
+    let trimmed = singleton
+        .as_deref()
+        .unwrap_or(text)
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
 
     // Strip any thinking block if present
     let cleaned = if let Some(end_idx) = trimmed.find("</think>") {
@@ -498,6 +511,14 @@ mod tests {
     }
 
     #[test]
+    fn clean_prompt_unwraps_singleton_json_array() {
+        assert_eq!(
+            clean_expanded_prompt(r#"["a cat on mars"]"#),
+            "a cat on mars"
+        );
+    }
+
+    #[test]
     fn clean_prompt_strips_thinking() {
         let input = "<think>hmm let me think</think>\n\na cat on mars";
         assert_eq!(clean_expanded_prompt(input), "a cat on mars");
@@ -622,6 +643,13 @@ mod tests {
         let result = parse_variations(input, 2);
         assert_eq!(result[0], "a cat");
         assert_eq!(result[1], "a dog");
+    }
+
+    #[test]
+    fn parse_variations_repeated_singleton_json_arrays() {
+        let input = "[\"a cat\"]\n[\"a dog\"]\n[\"a bird\"]";
+        let result = parse_variations(input, 3);
+        assert_eq!(result, vec!["a cat", "a dog", "a bird"]);
     }
 
     // ── ExpandSettings ───────────────────────────────────────────────────

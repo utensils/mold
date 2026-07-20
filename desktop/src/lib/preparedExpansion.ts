@@ -62,7 +62,18 @@ export function validateExpandedPrompts(prompts: readonly string[], expected: nu
       `Expected exactly ${expected} non-empty prompts, but the host returned ${prompts.length}.`,
     );
   }
-  const normalized = prompts.map((prompt) => prompt.trim());
+  const normalized = prompts.map((prompt) => {
+    const trimmed = prompt.trim();
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === "string") {
+        return parsed[0].trim();
+      }
+    } catch {
+      // Ordinary prompt text is not JSON and needs only edge trimming.
+    }
+    return trimmed;
+  });
   const emptyIndex = normalized.findIndex((prompt) => !prompt);
   if (emptyIndex >= 0) {
     throw new Error(
