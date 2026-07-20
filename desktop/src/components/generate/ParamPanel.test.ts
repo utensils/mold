@@ -298,6 +298,18 @@ describe("ParamPanel — chained-clip routing cue", () => {
       "does not support chained video generation",
     );
   });
+
+  it("replaces the chain cue with a directed error for unsupported advanced settings", () => {
+    const form = distilledForm();
+    form.frames = 177;
+    form.negativePrompt = "flicker";
+
+    const wrapper = mount(ParamPanel, { props: { form } });
+    expect(wrapper.find("[data-test='chain-cue']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='chain-compatibility-error']").text()).toContain(
+      "can’t preserve",
+    );
+  });
 });
 
 describe("ParamPanel — camera motion (LTX-2)", () => {

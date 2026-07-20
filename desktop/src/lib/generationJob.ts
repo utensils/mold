@@ -1,4 +1,10 @@
-import type { CompleteEvent, GenerateRequest, ProgressEvent } from "./api/types";
+import type {
+  ChainProgressEvent,
+  CompleteEvent,
+  GenerateRequest,
+  ProgressEvent,
+  SseChainCompleteEvent,
+} from "./api/types";
 import type { DevelopPhase } from "./develop/grain";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
@@ -27,6 +33,10 @@ export interface Job {
   step: number;
   total: number;
   stage: string | null;
+  /** Current zero-based clip when this job uses automatic chain routing. */
+  chainStageIndex: number | null;
+  /** Total clips reported by the chain stream. */
+  chainStageCount: number | null;
   error: string | null;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
@@ -72,6 +82,8 @@ export function newJob(req: GenerateRequest): Job {
     step: 0,
     total: req.steps,
     stage: null,
+    chainStageIndex: null,
+    chainStageCount: null,
     error: null,
     resultUrl: null,
     previewUrl: null,
@@ -130,6 +142,82 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
       break;
   }
   return job;
+}
+
+/** Apply one chain-specific SSE progress frame to the shared Job shape. */
+export function applyChainProgress(job: Job, event: ChainProgressEvent): Job {
+  if (event.job_id) job.id = event.job_id;
+  job.queuePosition = null;
+
+  switch (event.type) {
+    case "chain_start":
+      job.status = "loading";
+      job.chainStageIndex = null;
+      job.chainStageCount = event.stage_count;
+      job.step = 0;
+      job.stage = `Preparing ${event.stage_count} clips`;
+      break;
+    case "stage_start": {
+      job.status = "loading";
+      job.chainStageIndex = event.stage_idx;
+      const count = job.chainStageCount;
+      job.stage = count ? `Clip ${event.stage_idx + 1} of ${count}` : `Clip ${event.stage_idx + 1}`;
+      break;
+    }
+    case "denoise_step": {
+      job.status = "denoising";
+      job.chainStageIndex = event.stage_idx;
+      const count = job.chainStageCount ?? event.stage_idx + 1;
+      job.step = event.stage_idx * event.total + event.step;
+      job.total = count * event.total;
+      job.stage = `Clip ${event.stage_idx + 1} of ${count}`;
+      break;
+    }
+    case "stage_done":
+      job.status = "loading";
+      job.chainStageIndex = event.stage_idx;
+      if (job.chainStageCount) {
+        job.stage = `Clip ${event.stage_idx + 1} of ${job.chainStageCount} complete`;
+      }
+      break;
+    case "stitching":
+      job.status = "finishing";
+      job.step = job.total;
+      job.stage = `Stitching ${event.total_frames} frames`;
+      break;
+  }
+  return job;
+}
+
+/** Adapt a chain completion to the result shape consumed by every Job UI. */
+export function chainCompleteToComplete(
+  event: SseChainCompleteEvent,
+  req: GenerateRequest,
+): CompleteEvent {
+  return {
+    image: event.video,
+    format: event.format,
+    width: event.width,
+    height: event.height,
+    original_image: null,
+    original_width: null,
+    original_height: null,
+    seed_used: event.metadata?.seed ?? req.seed ?? 0,
+    generation_time_ms: event.generation_time_ms ?? 0,
+    model: event.metadata?.model ?? req.model,
+    video_frames: event.frames,
+    video_fps: event.fps,
+    video_thumbnail: event.thumbnail ?? null,
+    video_gif_preview: event.gif_preview ?? null,
+    video_has_audio: event.has_audio ?? false,
+    video_duration_ms: event.duration_ms ?? null,
+    video_audio_sample_rate: event.audio_sample_rate ?? null,
+    video_audio_channels: event.audio_channels ?? null,
+    gpu: event.gpu ?? null,
+    filename: event.filename ?? null,
+    original_filename: null,
+    metadata: event.metadata ?? null,
+  };
 }
 
 export function jobPhase(job: Job): DevelopPhase {

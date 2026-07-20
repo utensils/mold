@@ -5,6 +5,7 @@ import { useDownloadsStore } from "./downloads";
 import { useGenerationStore } from "./generation";
 import { useToastStore } from "./toasts";
 import type { DownloadJob, GenerateRequest } from "../lib/api/types";
+import type { ChainRoutingDecision } from "../lib/chainRouting";
 
 const job = (id: string, model: string, status: DownloadJob["status"]): DownloadJob => ({
   id,
@@ -52,7 +53,7 @@ describe("pullResume store", () => {
     useDownloadsStore().history = [job("d1", "jibmix-flux:fp8", "completed")];
     store.check();
 
-    expect(submit).toHaveBeenCalledWith(request, 1, null);
+    expect(submit).toHaveBeenCalledWith(request, 1, null, null);
     expect(store.pending).toBeNull();
   });
 
@@ -115,7 +116,34 @@ describe("pullResume store", () => {
       .mockReturnValue({ jobs: [], settled: Promise.resolve([]) } as never);
 
     store.check();
-    expect(submit).toHaveBeenCalledWith(request, 2, null);
+    expect(submit).toHaveBeenCalledWith(request, 2, null, null);
+  });
+
+  it("preserves automatic chain routing when a pulled video model resumes", () => {
+    const chainRouting: ChainRoutingDecision = {
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: 17,
+      stageCount: 2,
+    };
+    const store = usePullResumeStore();
+    store.arm({
+      model: "jibmix-flux:fp8",
+      hostId: null,
+      hostLabel: "plato",
+      request,
+      batch: 1,
+      route: null,
+      chainRouting,
+    });
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) } as never);
+
+    useDownloadsStore().history = [job("chain-download", "jibmix-flux:fp8", "completed")];
+    store.check();
+
+    expect(submit).toHaveBeenCalledWith(request, 1, null, chainRouting);
   });
 
   it("cancel() clears the pending resume without submitting", () => {
@@ -157,7 +185,7 @@ describe("pullResume id matching (arm-race hardening)", () => {
     // …only the armed job id does.
     downloads.history = [...downloads.history, job("fresh-pull", "jibmix-flux:fp8", "completed")];
     store.check();
-    expect(submit).toHaveBeenCalledWith(request2, 1, null);
+    expect(submit).toHaveBeenCalledWith(request2, 1, null, null);
   });
 
   it("toasts when the RESUMED generation itself fails", async () => {

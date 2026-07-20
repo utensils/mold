@@ -35,14 +35,20 @@ describe("MobileResolutionPicker", () => {
   it("reuses family presets and applies an orientation-aware resolution", async () => {
     const { wrapper, state } = mountPicker(1024, 1024, "flux");
 
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("1024 × 1024");
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain("1:1 · Square");
+    expect(wrapper.find("[data-test='mobile-resolution-summary']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
+      "Selected resolution: 1024 by 1024 pixels, 1:1, Square.",
+    );
     expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
+    expect(
+      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
+    ).toBe("1:1 · 1024×1024");
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
     expect(state).toMatchObject({ width: 896, height: 1152 });
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain(
-      "3:4 · Portrait",
+    expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
+      "Selected resolution: 896 by 1152 pixels, 3:4, Portrait.",
     );
     expect(wrapper.get("[data-aspect='3:4']").attributes("aria-pressed")).toBe("true");
 
@@ -68,8 +74,8 @@ describe("MobileResolutionPicker", () => {
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
     expect(state).toMatchObject({ width: 928, height: 1664 });
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain(
-      "≈9:16 · Portrait",
+    expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
+      "Selected resolution: 928 by 1664 pixels, ≈9:16, Portrait.",
     );
 
     await wrapper.get("[data-aspect='4:7']").trigger("click");
@@ -105,8 +111,8 @@ describe("MobileResolutionPicker", () => {
 
     expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
-    expect(wrapper.get("[data-test='mobile-resolution-summary']").text()).toContain(
-      "1000:777 · Landscape",
+    expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
+      "Selected resolution: 1000 by 777 pixels, 1000:777, Landscape.",
     );
 
     const width = wrapper.get("input[aria-label='Custom width']");
@@ -135,6 +141,20 @@ describe("MobileResolutionPicker", () => {
     expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
     expect(state).toMatchObject({ width: 1024, height: 1024 });
     expect(toggle.text()).toBe("Hide custom size");
+  });
+
+  it("blocks custom sizes above the server's 1.8 MP ceiling", async () => {
+    const { wrapper, state } = mountPicker(2000, 2000);
+    const picker = wrapper.getComponent(MobileResolutionPicker);
+
+    expect(wrapper.get("[data-test='mobile-resolution-error']").text()).toContain("1.8 MP");
+    expect(picker.emitted("validity-change")?.at(-1)).toEqual([false]);
+
+    state.width = 1328;
+    state.height = 1328;
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-resolution-error']").exists()).toBe(false);
+    expect(picker.emitted("validity-change")?.at(-1)).toEqual([true]);
   });
 
   it("disables orientations that the desktop family does not recommend", async () => {

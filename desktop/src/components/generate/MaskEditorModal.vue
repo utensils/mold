@@ -199,12 +199,12 @@ function applyMask() {
   <Teleport to="body">
     <div
       v-if="open && source"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      class="mask-editor-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       @click.self="emit('close')"
       @keydown.esc="emit('close')"
     >
       <div
-        class="border-edge flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-chrome border bg-bench p-4"
+        class="mask-editor-dialog border-edge flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-chrome border bg-bench p-4"
         role="dialog"
         aria-modal="true"
         aria-label="Mask editor"
@@ -222,7 +222,9 @@ function applyMask() {
           </button>
         </div>
 
-        <div class="border-edge mt-4 flex flex-wrap items-center gap-2 border-y py-3">
+        <div
+          class="mask-editor-toolbar border-edge mt-4 flex flex-wrap items-center gap-2 border-y py-3"
+        >
           <button
             type="button"
             class="rounded-control px-3 py-1 text-body transition-colors duration-100"
@@ -298,7 +300,7 @@ function applyMask() {
 
         <p class="mt-3 text-caption text-ink-3">White repaints, black preserves.</p>
 
-        <div class="mt-2 flex min-h-0 justify-center overflow-auto">
+        <div class="mask-editor-stage mt-2 flex min-h-0 justify-center overflow-auto">
           <div
             class="border-edge relative max-h-[62vh] max-w-full overflow-hidden rounded-media border"
           >
@@ -321,7 +323,7 @@ function applyMask() {
           </div>
         </div>
 
-        <div class="mt-4 flex justify-end gap-2">
+        <div class="mask-editor-actions mt-4 flex justify-end gap-2">
           <button
             type="button"
             class="border-edge rounded-control border px-4 py-2 text-body text-ink-2 hover:text-ink"

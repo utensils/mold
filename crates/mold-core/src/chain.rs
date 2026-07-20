@@ -318,7 +318,8 @@ pub struct ChainResponse {
 /// and can evolve separately.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SseChainCompleteEvent {
-    /// Base64-encoded stitched video bytes (format per `format` field).
+    /// Base64-encoded stitched video bytes (format per `format` field), or an
+    /// empty string when `X-Mold-SSE-Payload: metadata-only` was requested.
     pub video: String,
     pub format: OutputFormat,
     #[schema(example = 1216)]
@@ -360,6 +361,17 @@ pub struct SseChainCompleteEvent {
     /// Reserved for sub-project D; `None` in this release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vram_estimate: Option<VramEstimate>,
+    /// Filename this stitched output was saved under in the server gallery.
+    /// Present for servers that persist chain output and absent on older
+    /// servers or when gallery output is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// The exact metadata recorded for the saved stitched output. Streaming
+    /// clients can use this with `filename` instead of reconstructing chain
+    /// provenance from the request or encoded media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    pub metadata: Option<Box<OutputMetadata>>,
 }
 
 /// Chain-specific SSE progress event. Streamed as `data:` JSON frames from

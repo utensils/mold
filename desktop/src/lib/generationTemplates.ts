@@ -4,8 +4,8 @@
  * recalled with one click. Ported from the web SPA's `generationTemplates.ts`,
  * but keyed on a desktop-only storage key so the two never share blobs.
  *
- * Media fields (`sourceImage` / `maskImage` / `controlImage`, and the optional
- * B4 video fields `sourceVideo` / `keyframes`) hold browser-local base64 that
+ * Media fields (`sourceImage` / `maskImage` / `controlImage`, plus video,
+ * keyframe, and audio conditioning files) hold browser-local base64 that
  * we deliberately do NOT persist — a saved template records only a
  * human-facing `mediaReferences` hint so the user knows to re-select bytes.
  */
@@ -18,7 +18,7 @@ export type GenerationTemplateSort = "updated-desc" | "updated-asc" | "name-asc"
 
 /** Human-facing labels for media that a template could not persist. */
 export type GenerationTemplateMediaField =
-  "source" | "mask" | "control" | "sourceVideo" | "keyframes" | "editImages";
+  "source" | "mask" | "control" | "sourceVideo" | "keyframes" | "editImages" | "audioFile";
 
 export interface GenerationTemplate {
   id: string;
@@ -29,18 +29,25 @@ export interface GenerationTemplate {
   form: GenerateForm;
   /** Which media slots were populated when saved — the user must re-select them. */
   mediaReferences: GenerationTemplateMediaField[];
+  /** Optional host scope for remote-only clients. Legacy/desktop templates omit it. */
+  scopeId?: string;
 }
 
-/**
- * The form fields that hold browser-local base64. `sourceVideo` / `keyframes`
- * are added by the LTX-2 video workstream (B4); they are optional here so this
- * module compiles against the current `GenerateForm` and keeps working once
- * they land.
- */
-type FormWithOptionalMedia = GenerateForm & {
-  sourceVideo?: unknown;
-  keyframes?: unknown;
+const MEDIA_REFERENCE_LABELS: Record<GenerationTemplateMediaField, string> = {
+  source: "source photo",
+  mask: "mask",
+  control: "control photo",
+  sourceVideo: "source video",
+  keyframes: "keyframes",
+  editImages: "edit pictures",
+  audioFile: "conditioning audio",
 };
+
+export function formatTemplateMediaReferences(
+  references: readonly GenerationTemplateMediaField[],
+): string {
+  return references.map((reference) => MEDIA_REFERENCE_LABELS[reference]).join(", ");
+}
 
 function now(): number {
   return Date.now();
@@ -66,28 +73,29 @@ export function fallbackTemplateName(form: GenerateForm): string {
 }
 
 export function collectTemplateMediaReferences(form: GenerateForm): GenerationTemplateMediaField[] {
-  const f = form as FormWithOptionalMedia;
   const refs: GenerationTemplateMediaField[] = [];
   if (form.sourceImage) refs.push("source");
   if (form.maskImage) refs.push("mask");
   if (form.controlImage) refs.push("control");
   if (form.imageAttachments.length > 0) refs.push("editImages");
-  if (f.sourceVideo) refs.push("sourceVideo");
-  if (Array.isArray(f.keyframes) && f.keyframes.length > 0) refs.push("keyframes");
+  if (form.sourceVideo) refs.push("sourceVideo");
+  if (form.keyframes.length > 0) refs.push("keyframes");
+  if (form.audioFile) refs.push("audioFile");
   return refs;
 }
 
 /** Deep-clone the form and null out every base64 media field before persisting. */
 function stripTemplateForm(form: GenerateForm): GenerateForm {
-  const clone = JSON.parse(JSON.stringify(form)) as FormWithOptionalMedia;
+  const clone = JSON.parse(JSON.stringify(form)) as GenerateForm;
   clone.sourceImage = null;
   clone.sourceImageName = null;
   clone.maskImage = null;
   clone.controlImage = null;
   clone.imageAttachments = [];
-  if ("sourceVideo" in clone) clone.sourceVideo = null;
-  if ("keyframes" in clone) clone.keyframes = [];
-  return clone as GenerateForm;
+  clone.sourceVideo = null;
+  clone.keyframes = [];
+  clone.audioFile = null;
+  return clone;
 }
 
 function isTemplate(value: unknown): value is GenerationTemplate {
@@ -114,8 +122,11 @@ function parseTemplates(raw: string | null): GenerationTemplate[] {
   }
 }
 
-function writeTemplates(templates: GenerationTemplate[]): void {
-  localStorage.setItem(GENERATION_TEMPLATES_STORAGE_KEY, JSON.stringify(templates));
+function writeTemplates(
+  templates: GenerationTemplate[],
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+): void {
+  localStorage.setItem(storageKey, JSON.stringify(templates));
 }
 
 export function sortGenerationTemplates(
@@ -141,14 +152,17 @@ export function sortGenerationTemplates(
 
 export function loadGenerationTemplates(
   sort: GenerationTemplateSort = "updated-desc",
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
 ): GenerationTemplate[] {
-  return sortGenerationTemplates(
-    parseTemplates(localStorage.getItem(GENERATION_TEMPLATES_STORAGE_KEY)),
-    sort,
-  );
+  return sortGenerationTemplates(parseTemplates(localStorage.getItem(storageKey)), sort);
 }
 
-export function saveGenerationTemplate(name: string, form: GenerateForm): GenerationTemplate {
+export function saveGenerationTemplate(
+  name: string,
+  form: GenerateForm,
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+  scopeId?: string,
+): GenerationTemplate {
   const timestamp = now();
   const template: GenerationTemplate = {
     id: templateId(),
@@ -157,32 +171,44 @@ export function saveGenerationTemplate(name: string, form: GenerateForm): Genera
     updatedAt: timestamp,
     form: stripTemplateForm(form),
     mediaReferences: collectTemplateMediaReferences(form),
+    ...(scopeId ? { scopeId } : {}),
   };
-  writeTemplates([template, ...loadGenerationTemplates()]);
+  writeTemplates([template, ...loadGenerationTemplates("updated-desc", storageKey)], storageKey);
   return template;
 }
 
-export function renameGenerationTemplate(id: string, name: string): GenerationTemplate | null {
+export function renameGenerationTemplate(
+  id: string,
+  name: string,
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+): GenerationTemplate | null {
   let renamed: GenerationTemplate | null = null;
-  const next = loadGenerationTemplates().map((template) => {
+  const next = loadGenerationTemplates("updated-desc", storageKey).map((template) => {
     if (template.id !== id) return template;
     renamed = { ...template, name: normalizeName(name), updatedAt: now() };
     return renamed;
   });
-  writeTemplates(next);
+  writeTemplates(next, storageKey);
   return renamed;
 }
 
-export function deleteGenerationTemplate(id: string): void {
-  writeTemplates(loadGenerationTemplates().filter((template) => template.id !== id));
+export function deleteGenerationTemplate(
+  id: string,
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
+): void {
+  writeTemplates(
+    loadGenerationTemplates("updated-desc", storageKey).filter((template) => template.id !== id),
+    storageKey,
+  );
 }
 
 export function searchGenerationTemplates(
   query: string,
   sort: GenerationTemplateSort = "updated-desc",
+  storageKey = GENERATION_TEMPLATES_STORAGE_KEY,
 ): GenerationTemplate[] {
   const q = query.trim().toLowerCase();
-  const templates = loadGenerationTemplates(sort);
+  const templates = loadGenerationTemplates(sort, storageKey);
   if (!q) return templates;
   return templates.filter((template) =>
     [

@@ -1,4 +1,4 @@
-import { apiJson } from "./client";
+import { apiJson, apiJsonTo, type ApiTarget } from "./client";
 import type { LoraInfo } from "./types";
 
 /**
@@ -6,7 +6,8 @@ import type { LoraInfo } from "./types";
  * `model`. The server returns `[]` (not an error) for a model whose family
  * can't take LoRAs; an unknown model 400s.
  */
-export function fetchLoras(model?: string): Promise<LoraInfo[]> {
+export function fetchLoras(model?: string, target?: ApiTarget | null): Promise<LoraInfo[]> {
   const query = model ? `?model=${encodeURIComponent(model)}` : "";
-  return apiJson<LoraInfo[]>(`/api/loras${query}`);
+  const path = `/api/loras${query}`;
+  return target ? apiJsonTo<LoraInfo[]>(target, path) : apiJson<LoraInfo[]>(path);
 }

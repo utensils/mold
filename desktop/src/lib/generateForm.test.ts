@@ -4,6 +4,7 @@ import {
   applyModelDefaults,
   applyPrefillToForm,
   buildRequest,
+  cloneGenerateForm,
   newGenerateForm,
   seedMode,
 } from "./generateForm";
@@ -68,6 +69,37 @@ describe("newGenerateForm advanced-video defaults", () => {
     expect(form.retakeRange).toBeNull();
     expect(form.spatialUpscale).toBeNull();
     expect(form.temporalUpscale).toBeNull();
+  });
+});
+
+describe("cloneGenerateForm", () => {
+  it("creates an independent snapshot of every nested mutable field", () => {
+    const form = ltx2Form();
+    form.imageAttachments = ["EDIT"];
+    form.sourceFit = {
+      mode: "upscale-then-fit",
+      upscalerModel: "realesrgan",
+      fit: { mode: "crop-fill", alignX: "left", alignY: "top" },
+    };
+    form.loras = [{ path: "film.safetensors", name: "Film", scale: 0.8, trainedWords: ["film"] }];
+    form.sourceVideo = { filename: "source.mp4", base64: "VIDEO" };
+    form.audioFile = { filename: "sound.wav", base64: "AUDIO" };
+    form.keyframes = [{ frame: 0, image: { filename: "first.png", base64: "FRAME" } }];
+    form.retakeRange = { start_seconds: 1, end_seconds: 2 };
+
+    const snapshot = cloneGenerateForm(form);
+    snapshot.imageAttachments.push("NEXT");
+    if (snapshot.sourceFit.mode === "upscale-then-fit") snapshot.sourceFit.fit.mode = "pad-fit";
+    snapshot.loras[0]!.trainedWords.push("grain");
+    snapshot.keyframes[0]!.image.filename = "changed.png";
+    snapshot.retakeRange!.start_seconds = 9;
+
+    expect(form.imageAttachments).toEqual(["EDIT"]);
+    expect(form.sourceFit).toMatchObject({ fit: { mode: "crop-fill" } });
+    expect(form.loras[0]!.trainedWords).toEqual(["film"]);
+    expect(form.keyframes[0]!.image.filename).toBe("first.png");
+    expect(form.retakeRange!.start_seconds).toBe(1);
+    expect(snapshot).not.toBe(form);
   });
 });
 
@@ -307,6 +339,41 @@ describe("buildRequest — qwen-edit edit_images", () => {
   });
 });
 
+describe("buildRequest — independent ControlNet conditioning", () => {
+  it("ships control_image, model, and scale without source_image", () => {
+    const form = newGenerateForm();
+    form.model = "sd15:fp16";
+    form.family = "sd15";
+    form.prompt = "a mountain observatory";
+    form.controlImage = "CONTROL";
+    form.controlModel = "/models/controlnet-canny.safetensors";
+    form.controlScale = 0.85;
+
+    const req = buildRequest(form);
+    expect(req.control_image).toBe("CONTROL");
+    expect(req.control_model).toBe("/models/controlnet-canny.safetensors");
+    expect(req.control_scale).toBe(0.85);
+    expect(req.source_image).toBeUndefined();
+    expect(req.source_image_name).toBeUndefined();
+    expect(req.strength).toBeUndefined();
+  });
+
+  it("still strips stale ControlNet fields from unsupported families", () => {
+    const form = newGenerateForm();
+    form.model = "sdxl:fp16";
+    form.family = "sdxl";
+    form.prompt = "a mountain observatory";
+    form.controlImage = "STALE";
+    form.controlModel = "stale-control";
+    form.controlScale = 0.5;
+
+    const req = buildRequest(form);
+    expect(req.control_image).toBeUndefined();
+    expect(req.control_model).toBeUndefined();
+    expect(req.control_scale).toBeUndefined();
+  });
+});
+
 describe("applyModelDefaults — qwen-edit attachment seeding", () => {
   it("seeds the strip with the single-mode source as Target when switching to qwen-edit", () => {
     const form = newGenerateForm();
@@ -463,6 +530,7 @@ describe("applyMetadataToForm", () => {
     form.sourceVideo = { filename: "v.mp4", base64: "V" };
     form.keyframes = [{ frame: 0, image: { filename: "k.png", base64: "K" } }];
     form.audioFile = { filename: "a.wav", base64: "A" };
+    form.cameraControl = "dolly-in";
 
     applyMetadataToForm(form, richImageMetadata(), [sd15Model()]);
 
@@ -473,6 +541,7 @@ describe("applyMetadataToForm", () => {
     expect(form.sourceVideo).toBeNull();
     expect(form.keyframes).toEqual([]);
     expect(form.audioFile).toBeNull();
+    expect(form.cameraControl).toBeNull();
   });
 
   it("falls back gracefully when the metadata's model is not installed", () => {

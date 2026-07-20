@@ -1,10 +1,18 @@
 # Desktop and iPhone Apps
 
-Mold for iPhone is a remote-only companion focused on Generate and Gallery.
-Add the desktop or server by Bonjour discovery, an IP/hostname, or its Tailscale
-MagicDNS name. The phone does not run inference or download models; it uses the
-same authenticated HTTP/SSE contract and the remote host remains the source of
-truth for models, jobs, and gallery media.
+Mold for iPhone is a remote-only companion with first-class Generate, Gallery,
+Catalog, and Hosts views. Add the desktop or server by Bonjour discovery, an
+IP/hostname, or its Tailscale MagicDNS name. The phone does not run inference;
+it uses the same authenticated HTTP/SSE contract and the remote host remains the
+source of truth for models, jobs, downloads, and gallery media.
+
+Generate adapts to the selected model and host, with prompt expansion/history,
+saved templates, independently cancellable batch jobs, source/edit images,
+masks, ControlNet, LoRA, scheduler/CFG++/upscale options, target-aware estimates,
+and video/LTX-2 controls. Resolution is chosen directly through orientation,
+proportional aspect-ratio tiles, and resolution tiers. In Gallery, full-screen
+photos swipe between prints, videos play with native controls, and a still can
+be reused either as prompt settings or as the next source image.
 
 mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
 Vue 3 + TypeScript frontend with its own **Safelight** design language, a warm,

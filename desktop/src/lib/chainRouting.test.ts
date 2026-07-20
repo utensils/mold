@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MOTION_TAIL, LTX2_DISTILLED_CLIP_CAP, decideChainRouting } from "./chainRouting";
+import {
+  DEFAULT_MOTION_TAIL,
+  LTX2_DISTILLED_CLIP_CAP,
+  MAX_CHAIN_STAGES,
+  buildAutoChainRequest,
+  buildGenerationEstimateRequest,
+  decideChainRouting,
+  decideGenerateRequestRouting,
+  unsupportedAutoChainFields,
+} from "./chainRouting";
+import type { GenerateRequest } from "./api/types";
 
 describe("decideChainRouting", () => {
   it("returns single when frames is null/undefined/zero", () => {
@@ -105,6 +115,25 @@ describe("decideChainRouting", () => {
     expect(d.kind).toBe("reject");
   });
 
+  it("enforces the server's sixteen-stage chain ceiling", () => {
+    expect(decideChainRouting(1297, "ltx2", "ltx-2-19b-distilled:fp8")).toMatchObject({
+      kind: "chain",
+      stageCount: MAX_CHAIN_STAGES,
+    });
+    expect(decideChainRouting(1305, "ltx2", "ltx-2-19b-distilled:fp8")).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("at most 1297 frames"),
+    });
+    expect(decideChainRouting(1552, "ltx-video", "ltx-video:bf16")).toMatchObject({
+      kind: "chain",
+      stageCount: MAX_CHAIN_STAGES,
+    });
+    expect(decideChainRouting(1553, "ltx-video", "ltx-video:bf16")).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("at most 1552 frames"),
+    });
+  });
+
   it("returns single when family is missing", () => {
     expect(decideChainRouting(50, null, "anything")).toEqual({
       kind: "single",
@@ -145,5 +174,146 @@ describe("decideChainRouting", () => {
     // path implements chain rendering on the server.
     const d = decideChainRouting(241, "ltx-2", "ltx-2-19b:fp8");
     expect(d.kind).toBe("reject");
+  });
+});
+
+describe("request-aware generation routing", () => {
+  const request: GenerateRequest = {
+    prompt: "a continuous crane shot",
+    model: "ltx-2-19b:fp8",
+    width: 768,
+    height: 512,
+    steps: 20,
+    guidance: 3,
+    batch_size: 8,
+    output_format: "mp4",
+    frames: 257,
+    fps: 24,
+    temporal_upscale: "x2",
+  };
+
+  it("keeps temporal x2 on ordinary generation through its 257-frame limit", () => {
+    expect(decideGenerateRequestRouting(request, "ltx2")).toEqual({ kind: "single" });
+    expect(decideGenerateRequestRouting({ ...request, frames: 265 }, "ltx2")).toMatchObject({
+      kind: "reject",
+      reason: expect.stringContaining("at most 257 frames"),
+    });
+  });
+
+  it("estimates one concrete batch sibling and one chain clip", () => {
+    const chained = {
+      ...request,
+      model: "ltx-2-19b-distilled:fp8",
+      frames: 241,
+      source_video: "VIDEO",
+      keyframes: [{ frame: 0, image: "IMAGE" }],
+      audio_file: "AUDIO",
+      control_image: "CONTROL",
+      control_model: "controlnet-canny-sd15",
+      control_scale: 0.8,
+    };
+    delete chained.temporal_upscale;
+    expect(buildGenerationEstimateRequest(chained, "ltx2")).toMatchObject({
+      batch_size: 1,
+      frames: 97,
+    });
+    const estimate = buildGenerationEstimateRequest(chained, "ltx2");
+    expect(estimate).not.toHaveProperty("source_video");
+    expect(estimate).not.toHaveProperty("keyframes");
+    expect(estimate).not.toHaveProperty("audio_file");
+    expect(estimate).not.toHaveProperty("control_image");
+    expect(estimate).not.toHaveProperty("control_model");
+    expect(estimate).not.toHaveProperty("control_scale");
+    expect(buildGenerationEstimateRequest(request, "ltx2")).toMatchObject({
+      batch_size: 1,
+      frames: 257,
+      temporal_upscale: "x2",
+    });
+  });
+});
+
+describe("automatic chain request projection", () => {
+  const request: GenerateRequest = {
+    prompt: "a lighthouse in a storm",
+    negative_prompt: "text",
+    model: "ltx-2.3-22b-distilled:fp8",
+    width: 1536,
+    height: 640,
+    steps: 24,
+    guidance: 3.5,
+    seed: 42,
+    batch_size: 1,
+    output_format: "mp4",
+    source_image: "source-b64",
+    source_image_name: "source.png",
+    strength: 0.7,
+    frames: 241,
+    fps: 24,
+    enable_audio: true,
+    cfg_plus: true,
+    scheduler: "unipc",
+  };
+
+  it("builds only fields accepted by the server auto-expand form", () => {
+    const decision = decideChainRouting(request.frames, "ltx2", request.model);
+    expect(decision.kind).toBe("chain");
+    if (decision.kind !== "chain") throw new Error("expected chain routing");
+
+    expect(buildAutoChainRequest(request, decision)).toEqual({
+      model: request.model,
+      prompt: request.prompt,
+      total_frames: 241,
+      clip_frames: 97,
+      motion_tail_frames: 17,
+      width: 1536,
+      height: 640,
+      fps: 24,
+      seed: 42,
+      steps: 24,
+      guidance: 3.5,
+      strength: 0.7,
+      output_format: "mp4",
+      source_image: "source-b64",
+      enable_audio: true,
+    });
+  });
+
+  it("reports every advanced field that auto-expand cannot preserve", () => {
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        loras: [
+          { path: "/models/style.safetensors", scale: 0.8 },
+          { path: "camera-control:dolly-in", scale: 1 },
+        ],
+        audio_file: "audio-b64",
+        source_video: "video-b64",
+        keyframes: [{ frame: 0, image: "frame-b64" }],
+        pipeline: "retake",
+        retake_range: { start_seconds: 1, end_seconds: 2 },
+        spatial_upscale: "x2",
+        temporal_upscale: "x2",
+      }),
+    ).toEqual([
+      "negative_prompt",
+      "loras",
+      "audio_file",
+      "source_video",
+      "keyframes",
+      "pipeline",
+      "retake_range",
+      "spatial_upscale",
+      "temporal_upscale",
+    ]);
+  });
+
+  it("ignores empty optional values and reports singular LoRA compatibility", () => {
+    expect(
+      unsupportedAutoChainFields({
+        ...request,
+        negative_prompt: "  ",
+        lora: { path: "/models/legacy.safetensors", scale: 1 },
+      }),
+    ).toEqual(["loras"]);
   });
 });

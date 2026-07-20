@@ -57,6 +57,12 @@ describe("mobile safe areas", () => {
       ".mobile-catalog-media button",
       ".mobile-catalog-sources button",
       ".mobile-section-head > button",
+      ".mobile-disclosure-button",
+      ".mobile-generate-stepper-button",
+      ".mobile-media-tile-action",
+      ".mobile-token-list button",
+      ".mobile-template-actions button",
+      "button.mobile-generate-disclosure",
     ]) {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const rules = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "gs"))];
@@ -79,5 +85,16 @@ describe("mobile safe areas", () => {
     expect(aspects?.[1]).toMatch(/minmax\(64px,\s*84px\)/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
     expect(shape?.[1]).toMatch(/border:\s*1px solid currentColor\s*;/);
+  });
+
+  it("does not keep the redundant resolution summary card", () => {
+    for (const selector of [
+      ".mobile-resolution-summary",
+      ".mobile-resolution-preview",
+      ".mobile-resolution-copy",
+      ".mobile-resolution-custom-badge",
+    ]) {
+      expect(css).not.toContain(selector);
+    }
   });
 });

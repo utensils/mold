@@ -42,14 +42,29 @@ import { copyBase64ImageToClipboard } from "../lib/clipboard";
 import { useUiStore } from "../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { generationCapabilitiesForFamily } from "../lib/capabilities";
-import { decideChainRouting } from "../lib/chainRouting";
-import { applyPrefillToForm, buildRequest } from "../lib/generateForm";
+import {
+  buildGenerationEstimateRequest,
+  decideGenerateRequestRouting,
+  unsupportedAutoChainFields,
+  type ChainRoutingDecision,
+} from "../lib/chainRouting";
+import { applyPrefillToForm, buildRequest, cloneGenerateForm } from "../lib/generateForm";
+import { frames8n1Error } from "../lib/chain";
+import {
+  advancedVideoValidationError,
+  audioOutputValidationError,
+  cameraControlValidationError,
+  fpsValidationError,
+  guidanceValidationError,
+  resolutionValidationError,
+  stepsValidationError,
+} from "../lib/generateValidation";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import type { HostRoute } from "../stores/hosts";
-import type { GenerationTemplate } from "../lib/generationTemplates";
+import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { autoGrowRows } from "../lib/autogrow";
 import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
 import { fetchHistory } from "../lib/api/history";
@@ -96,6 +111,7 @@ const missingModel = ref<{
   route: HostRoute | null;
   request: GenerateRequest;
   batch: number;
+  chainRouting: ChainRoutingDecision | null;
 } | null>(null);
 
 const missingModelHostLabel = computed(
@@ -125,6 +141,7 @@ async function pullMissingModel() {
     request: info.request,
     batch: info.batch,
     route,
+    chainRouting: info.chainRouting,
   };
   // The resume watcher is fed by this stream — a dead stream means the
   // promise "generation starts when it's ready" could never be kept, so
@@ -201,11 +218,28 @@ function onAsideReset() {
 const job = computed(() => generation.active);
 const siblings = computed(() => generation.siblings);
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const formValidationError = computed(
+  () =>
+    resolutionValidationError(form.width, form.height) ??
+    stepsValidationError(form.steps) ??
+    guidanceValidationError(form.guidance) ??
+    (caps.value.supportsVideo ? frames8n1Error(form.frames) : null) ??
+    (caps.value.supportsVideo ? fpsValidationError(form.fps) : null) ??
+    cameraControlValidationError(form) ??
+    audioOutputValidationError(form) ??
+    advancedVideoValidationError(form),
+);
 /** Over-budget video frames on a non-chainable model would fail server-side —
  *  ParamPanel shows the reason under Frames; this blocks the submit. */
 const chainReject = computed(() => {
+  if (formValidationError.value) return true;
   if (!caps.value.supportsVideo) return false;
-  return decideChainRouting(form.frames, form.family, form.model).kind === "reject";
+  const request = buildRequest(form);
+  const decision = decideGenerateRequestRouting(request, form.family);
+  return (
+    decision.kind === "reject" ||
+    (decision.kind === "chain" && unsupportedAutoChainFields(buildRequest(form)).length > 0)
+  );
 });
 const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
@@ -228,7 +262,10 @@ const showStarterCards = computed(() =>
 );
 
 /** The request the estimate badge previews — null until a model is chosen. */
-const estimateRequest = computed(() => (form.model ? buildRequest(form) : null));
+const estimateRequest = computed(() => {
+  if (!form.model) return null;
+  return buildGenerationEstimateRequest(buildRequest(form), form.family);
+});
 
 /** True when submits (and the estimate preflight) must resolve a route:
  *  multiple hosts, or a dead primary while another host can serve. */
@@ -380,7 +417,7 @@ function loadTemplate(template: GenerationTemplate) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
   if (template.mediaReferences.length > 0) {
-    toasts.push(`Re-add media: ${template.mediaReferences.join(", ")}.`);
+    toasts.push(`Re-add media: ${formatTemplateMediaReferences(template.mediaReferences)}.`);
   }
 }
 
@@ -458,20 +495,27 @@ const preprocessingStatus = ref<string | null>(null);
  * generation host so the upscaler model auto-downloads on the same machine
  * the job will run on. Returns false when the submit must abort.
  */
-async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
-  if (!caps.value.supportsImg2img || caps.value.sourceImageMode !== "single") return true;
-  if (!form.sourceImage) return true;
+async function preprocessSourceFit(
+  route: HostRoute | null,
+  draft: ReturnType<typeof cloneGenerateForm>,
+): Promise<boolean> {
+  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
+  if (!draft.sourceImage) return true;
+  const originalSource = draft.sourceImage;
+  const originalMask = draft.maskImage;
+  const originalSourceFit = JSON.stringify(draft.sourceFit);
   try {
     const result = await applySourceFitPreprocess(
       {
-        source: form.sourceImage,
+        source: draft.sourceImage,
         // Maskless families (LTX-2 img2video) can't ship the repaint mask —
         // coerce defensively even if a stale pad-repaint policy survived.
-        mask: caps.value.supportsMask ? form.maskImage : null,
-        policy: caps.value.supportsMask
-          ? form.sourceFit
-          : coerceSourceFitForMaskless(form.sourceFit),
-        target: { width: form.width, height: form.height },
+        mask: draftCaps.supportsMask ? draft.maskImage : null,
+        policy: draftCaps.supportsMask
+          ? draft.sourceFit
+          : coerceSourceFitForMaskless(draft.sourceFit),
+        target: { width: draft.width, height: draft.height },
       },
       {
         ops: domCanvasOps,
@@ -485,8 +529,22 @@ async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
         onStatus: (message) => (preprocessingStatus.value = message),
       },
     );
-    form.sourceImage = result.source;
-    form.maskImage = result.mask;
+    draft.sourceImage = result.source;
+    draft.maskImage = result.mask;
+    // Keep the visible well in sync only if the user has not moved the live
+    // composer to another model/source while preprocessing was in flight.
+    if (
+      form.model === draft.model &&
+      form.family === draft.family &&
+      form.sourceImage === originalSource &&
+      form.maskImage === originalMask &&
+      JSON.stringify(form.sourceFit) === originalSourceFit &&
+      form.width === draft.width &&
+      form.height === draft.height
+    ) {
+      form.sourceImage = result.source;
+      form.maskImage = result.mask;
+    }
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -499,7 +557,9 @@ async function preprocessSourceFit(route: HostRoute | null): Promise<boolean> {
 
 async function generate() {
   if (!form.prompt.trim() || !form.model || chainReject.value) return;
-  const batch = caps.value.forcesBatchSizeOne ? 1 : form.batchSize;
+  const draft = cloneGenerateForm(form);
+  const draftCaps = generationCapabilitiesForFamily(draft.family);
+  const batch = draftCaps.forcesBatchSizeOne ? 1 : draft.batchSize;
   // With multiple live hosts — or a dead primary while another host can
   // serve — route the batch (sticky pick, Auto = least busy, or Most
   // capable) — model-aware, so hosts that already have the weights win.
@@ -507,14 +567,26 @@ async function generate() {
   // BEFORE source preprocessing so upscale-then-fit hits the same host.
   let route = null;
   if (routeRequired.value) {
-    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, form.model || null);
+    route = hosts.resolveRoute(appPrefs.settings?.generateTargetHost ?? null, draft.model || null);
     if (!route) {
       toasts.push("The selected host isn't reachable — pick another host.", "error");
       return;
     }
   }
-  if (!(await preprocessSourceFit(route))) return;
-  const request = buildRequest(form);
+  if (!(await preprocessSourceFit(route, draft))) return;
+  const request = buildRequest(draft);
+  const chainRouting = decideGenerateRequestRouting(request, draft.family);
+  if (chainRouting.kind === "reject") {
+    toasts.push(chainRouting.reason, "error");
+    return;
+  }
+  if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
+    toasts.push(
+      "Long-video chaining can’t preserve the selected advanced options. Remove them or reduce Frames to 97 or fewer.",
+      "error",
+    );
+    return;
+  }
   // Stash the exact source bytes by sha (the hash the server records as
   // source_image_sha256) so Reuse settings can restore uploads and fitted
   // sources later. Fire-and-forget — never blocks the submit.
@@ -526,7 +598,7 @@ async function generate() {
   }
   // Submitting while another print develops queues server-side; each job
   // snapshots its own model + params, so tweaking the form afterwards is safe.
-  const { settled } = generation.submitBatch(request, batch, route);
+  const { settled } = generation.submitBatch(request, batch, route, chainRouting);
   void loadPromptHistory();
   const done = await settled;
   const ok = done.filter((s) => s.status === "complete").length;
@@ -548,7 +620,13 @@ async function generate() {
     if (isMissingModelError(failed.error) && !hostSaysInstalled) {
       // The routed host doesn't have the model — offer pull-and-resume
       // instead of the raw HTTP error.
-      missingModel.value = { model: request.model, route, request, batch };
+      missingModel.value = {
+        model: request.model,
+        route,
+        request,
+        batch,
+        chainRouting: chainRouting.kind === "chain" ? chainRouting : null,
+      };
     } else {
       toasts.push(failed.error, "error");
     }

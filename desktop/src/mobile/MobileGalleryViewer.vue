@@ -23,6 +23,8 @@ const props = withDefaults(
     total?: number;
     hasPrevious?: boolean | null;
     hasNext?: boolean | null;
+    canUseAsSource?: boolean;
+    usingSource?: boolean;
   }>(),
   {
     reusing: false,
@@ -32,10 +34,18 @@ const props = withDefaults(
     total: 1,
     hasPrevious: null,
     hasNext: null,
+    canUseAsSource: false,
+    usingSource: false,
   },
 );
 
-const emit = defineEmits<{ close: []; reuse: []; previous: []; next: [] }>();
+const emit = defineEmits<{
+  close: [];
+  reuse: [];
+  previous: [];
+  next: [];
+  "use-source": [];
+}>();
 
 const dialog = ref<HTMLDialogElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
@@ -47,6 +57,7 @@ const video = computed(() => isVideoItem(props.item));
 const canReuse = computed(
   () => !props.item.metadata_synthetic && !!props.item.metadata.prompt?.trim(),
 );
+const canUseSource = computed(() => props.canUseAsSource && !video.value);
 const actionLabel = computed(() =>
   props.reusing ? "Loading prompt…" : canReuse.value ? "Use as prompt" : "Prompt unavailable",
 );
@@ -379,16 +390,29 @@ onBeforeUnmount(() => {
           {{ reuseError }}
         </p>
       </div>
-      <button
-        class="primary-button gallery-viewer-reuse"
-        type="button"
-        data-test="gallery-viewer-reuse"
-        :disabled="!canReuse || reusing"
-        :aria-busy="reusing"
-        @click="emit('reuse')"
-      >
-        {{ actionLabel }}
-      </button>
+      <div class="gallery-viewer-actions">
+        <button
+          v-if="canUseSource"
+          class="secondary-button gallery-viewer-source"
+          type="button"
+          data-test="gallery-viewer-use-source"
+          :disabled="usingSource || reusing"
+          :aria-busy="usingSource"
+          @click="emit('use-source')"
+        >
+          {{ usingSource ? "Loading source…" : "Use as source" }}
+        </button>
+        <button
+          class="primary-button gallery-viewer-reuse"
+          type="button"
+          data-test="gallery-viewer-reuse"
+          :disabled="!canReuse || reusing || usingSource"
+          :aria-busy="reusing"
+          @click="emit('reuse')"
+        >
+          {{ actionLabel }}
+        </button>
+      </div>
     </footer>
   </dialog>
 </template>

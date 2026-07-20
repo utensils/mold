@@ -8,10 +8,23 @@ import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { useAppPrefsStore } from "./appPrefs";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
-import type { CompleteEvent, GenerateRequest, ProgressEvent } from "../lib/api/types";
+import type {
+  ChainProgressEvent,
+  CompleteEvent,
+  GenerateRequest,
+  ProgressEvent,
+  SseChainCompleteEvent,
+} from "../lib/api/types";
 import {
+  buildAutoChainRequest,
+  type AutoChainRoutingDecision,
+  type ChainRoutingDecision,
+} from "../lib/chainRouting";
+import {
+  applyChainProgress,
   applyProgress,
   base64ToBlobUrl,
+  chainCompleteToComplete,
   isCancelledError,
   metadataOnlyResult,
   newJob,
@@ -19,8 +32,10 @@ import {
 } from "../lib/generationJob";
 
 export {
+  applyChainProgress,
   applyProgress,
   base64ToBlobUrl,
+  chainCompleteToComplete,
   isCancelledError,
   jobPhase,
   jobProgress,
@@ -320,7 +335,9 @@ export const useGenerationStore = defineStore("generation", {
       req: GenerateRequest,
       batchSize: number,
       route: JobRoute | null = null,
+      chainRouting: ChainRoutingDecision | null = null,
     ): { jobs: Job[]; settled: Promise<Job[]> } {
+      if (chainRouting?.kind === "reject") throw new Error(chainRouting.reason);
       const size = Math.max(1, Math.floor(batchSize));
       const baseSeed = resolveBaseSeed(req.seed);
       const plans = planBatchRequests(req, size, baseSeed);
@@ -367,6 +384,7 @@ export const useGenerationStore = defineStore("generation", {
             }
           }
         }
+        if (chainRouting?.kind === "chain") chainRoutes.set(job.clientId, chainRouting);
         return job;
       });
       const tasks = jobs.map((job, i) => () => {
@@ -405,10 +423,10 @@ export const useGenerationStore = defineStore("generation", {
       return this.submitBatch(req, batchSize).settled;
     },
     /**
-     * Cancel one job (default: the canvas job). Queued jobs leave the server
-     * queue via DELETE /api/queue/:id (409 = already running: the server
-     * finishes the compute; we stop listening); the stream is aborted either
-     * way and the job is marked cancelled.
+     * Cancel one job (default: the canvas job). Ordinary queued jobs leave
+     * the server queue via DELETE /api/queue/:id; automatic chains use their
+     * durable shim id with POST /api/chain-jobs/:id/cancel. The stream is
+     * aborted either way and the job is marked cancelled.
      */
     async cancel(clientId?: number): Promise<void> {
       const job =
@@ -419,10 +437,13 @@ export const useGenerationStore = defineStore("generation", {
       let cancellationError: unknown = null;
       if (job.id) {
         try {
+          const chainRoute = chainRoutes.get(job.clientId);
           await apiFetchTo(
             targets.get(job.clientId) ?? currentTarget(),
-            `/api/queue/${encodeURIComponent(job.id)}`,
-            { method: "DELETE" },
+            chainRoute
+              ? `/api/chain-jobs/${encodeURIComponent(job.id)}/cancel`
+              : `/api/queue/${encodeURIComponent(job.id)}`,
+            { method: chainRoute ? "POST" : "DELETE" },
           );
         } catch (err) {
           if (!(err instanceof ApiError && (err.status === 409 || err.status === 404))) {
@@ -485,6 +506,7 @@ export const useGenerationStore = defineStore("generation", {
         if (job.resultUrl && job.resultUrlIsObjectUrl) URL.revokeObjectURL(job.resultUrl);
         if (job.previewUrl) URL.revokeObjectURL(job.previewUrl);
         targets.delete(job.clientId);
+        chainRoutes.delete(job.clientId);
       }
       this.jobs = this.jobs.filter((j) => !drop.has(j.clientId));
     },
@@ -566,6 +588,7 @@ export const useGenerationStore = defineStore("generation", {
       }
       aborts.clear();
       targets.clear();
+      chainRoutes.clear();
       this.pendingConsumerBatchIds = [];
       this.jobs = [];
     },
@@ -595,9 +618,12 @@ export const useGenerationStore = defineStore("generation", {
 
       let streamError: unknown = null;
       job.streamStarted = true;
-      await sseStream("/api/generate/stream", {
+      const chainRoute = chainRoutes.get(job.clientId);
+      const path = chainRoute ? "/api/generate/chain/stream" : "/api/generate/stream";
+      const body = chainRoute ? buildAutoChainRequest(req, chainRoute) : req;
+      await sseStream(path, {
         method: "POST",
-        body: req,
+        body,
         signal: abort.signal,
         retry: false,
         ...(job.metadataOnlyCompletion
@@ -612,12 +638,21 @@ export const useGenerationStore = defineStore("generation", {
           if (abort.signal.aborted || jobHasSettled(current)) return;
           try {
             if (event === "progress") {
-              applyProgress(current, JSON.parse(data) as ProgressEvent);
+              if (chainRoute) {
+                applyChainProgress(current, JSON.parse(data) as ChainProgressEvent);
+              } else {
+                applyProgress(current, JSON.parse(data) as ProgressEvent);
+              }
             } else if (event === "complete") {
-              const complete = JSON.parse(data) as CompleteEvent;
+              const complete = chainRoute
+                ? chainCompleteToComplete(JSON.parse(data) as SseChainCompleteEvent, req)
+                : (JSON.parse(data) as CompleteEvent);
               const useSavedResult =
-                current.metadataOnlyCompletion && (!complete.image || complete.format === "mp4");
-              if (!useSavedResult) {
+                !complete.image ||
+                (current.metadataOnlyCompletion &&
+                  complete.format === "mp4" &&
+                  !!complete.filename);
+              if (complete.image && !useSavedResult) {
                 current.resultUrl = base64ToBlobUrl(
                   complete.image,
                   MIME[complete.format] ?? "application/octet-stream",
@@ -648,6 +683,7 @@ export const useGenerationStore = defineStore("generation", {
               if (
                 current.remote &&
                 current.mirrorRemoteOutput &&
+                complete.image &&
                 (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)
               ) {
                 const now = Date.now();
@@ -772,3 +808,6 @@ const aborts = new Map<number, AbortController>();
  * jobs without an entry use the primary connection.
  */
 const targets = new Map<number, ApiTarget>();
+
+/** Automatic-chain routing snapshot for endpoint selection and cancellation. */
+const chainRoutes = new Map<number, AutoChainRoutingDecision>();

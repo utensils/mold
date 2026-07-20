@@ -613,6 +613,84 @@ export interface ChainRequest {
   enable_audio?: boolean | null;
 }
 
+/**
+ * Auto-expand request accepted by `POST /api/generate/chain/stream`. The
+ * server expands one prompt into the canonical `stages` array using the
+ * requested total/clip frame budgets.
+ */
+export interface AutoChainRequest {
+  model: string;
+  prompt: string;
+  total_frames: number;
+  clip_frames: number;
+  motion_tail_frames: number;
+  width: number;
+  height: number;
+  fps?: number;
+  seed?: number | null;
+  steps: number;
+  guidance: number;
+  strength?: number;
+  output_format?: OutputFormat;
+  /** Starting image for the first generated clip, base64 without a data URI. */
+  source_image?: string | null;
+  enable_audio?: boolean | null;
+}
+
+/**
+ * SSE `progress` frames from `POST /api/generate/chain/stream`. Newer
+ * servers add the durable shim job id to every variant so a connected client
+ * can cancel the underlying chain job; older servers omit it.
+ */
+export type ChainProgressEvent =
+  | {
+      type: "chain_start";
+      stage_count: number;
+      estimated_total_frames: number;
+      job_id?: string;
+    }
+  | { type: "stage_start"; stage_idx: number; job_id?: string }
+  | {
+      type: "denoise_step";
+      stage_idx: number;
+      step: number;
+      total: number;
+      job_id?: string;
+    }
+  | {
+      type: "stage_done";
+      stage_idx: number;
+      frames_emitted: number;
+      job_id?: string;
+    }
+  | { type: "stitching"; total_frames: number; job_id?: string };
+
+/** Final `complete` frame from `POST /api/generate/chain/stream`. */
+export interface SseChainCompleteEvent {
+  /** Base64 stitched media; empty for metadata-only completions. */
+  video: string;
+  format: OutputFormat;
+  width: number;
+  height: number;
+  frames: number;
+  fps: number;
+  thumbnail?: string | null;
+  gif_preview?: string | null;
+  has_audio?: boolean;
+  duration_ms?: number | null;
+  audio_sample_rate?: number | null;
+  audio_channels?: number | null;
+  stage_count: number;
+  gpu?: number | null;
+  generation_time_ms?: number | null;
+  script: ChainScript;
+  vram_estimate?: { worst_case_bytes: number; fits: boolean } | null;
+  /** Saved gallery filename; present on metadata-only completions. */
+  filename?: string | null;
+  /** Exact metadata persisted beside the stitched output. */
+  metadata?: OutputMetadata | null;
+}
+
 /** `[chain]` table of a `mold.chain.v1` script (mirrors `ChainScriptChain`). */
 export interface ChainScriptChain {
   model: string;

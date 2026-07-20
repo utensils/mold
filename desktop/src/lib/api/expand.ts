@@ -1,4 +1,4 @@
-import { apiJson } from "./client";
+import { apiJson, apiJsonTo, type ApiTarget } from "./client";
 import type { ExpandRequest, ExpandResponse } from "./types";
 
 export interface ExpandPromptOptions {
@@ -18,13 +18,17 @@ export interface ExpandPromptOptions {
 export function expandPrompt(
   prompt: string,
   opts: ExpandPromptOptions = {},
+  target?: ApiTarget | null,
 ): Promise<ExpandResponse> {
   const body: ExpandRequest = { prompt, variations: opts.variations ?? 1 };
   const family = opts.modelFamily?.trim();
   if (family) body.model_family = family;
-  return apiJson<ExpandResponse>("/api/expand", {
+  const init = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  };
+  return target
+    ? apiJsonTo<ExpandResponse>(target, "/api/expand", init)
+    : apiJson<ExpandResponse>("/api/expand", init);
 }

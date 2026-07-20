@@ -8,6 +8,7 @@ import {
   GENERATION_TEMPLATES_STORAGE_KEY,
   collectTemplateMediaReferences,
   deleteGenerationTemplate,
+  formatTemplateMediaReferences,
   loadGenerationTemplates,
   renameGenerationTemplate,
   saveGenerationTemplate,
@@ -91,22 +92,20 @@ describe("save / load round-trip", () => {
     expect(tpl?.mediaReferences).toEqual([]);
   });
 
-  it("strips optional video media fields once present (B4)", () => {
-    // sourceVideo / keyframes are added by a concurrent workstream; the form
-    // type treats them as optional, so save must handle them defensively.
+  it("strips video, keyframe, and conditioning-audio media", () => {
     const form = formWith({
       prompt: "a river",
-    }) as GenerateForm & {
-      sourceVideo?: unknown;
-      keyframes?: unknown;
-    };
+    });
     form.sourceVideo = { filename: "clip.mp4", base64: B64 };
     form.keyframes = [{ frame: 8, image: { filename: "kf.png", base64: B64 } }];
+    form.audioFile = { filename: "score.wav", base64: B64 };
 
     const saved = saveGenerationTemplate("River", form);
 
     expect(saved.mediaReferences).toContain("sourceVideo");
     expect(saved.mediaReferences).toContain("keyframes");
+    expect(saved.mediaReferences).toContain("audioFile");
+    expect(saved.form.audioFile).toBeNull();
     const raw = localStorage.getItem(GENERATION_TEMPLATES_STORAGE_KEY) ?? "";
     expect(raw).not.toContain(B64);
   });
@@ -117,6 +116,16 @@ describe("save / load round-trip", () => {
 
     const untitled = saveGenerationTemplate("", formWith({ prompt: "" }));
     expect(untitled.name).toBe("Untitled template");
+  });
+
+  it("can scope a remote template to its owning host", () => {
+    const saved = saveGenerationTemplate(
+      "Remote",
+      formWith({ prompt: "remote" }),
+      "mold.mobile.templates.test",
+      "host-a",
+    );
+    expect(saved.scopeId).toBe("host-a");
   });
 });
 
@@ -263,9 +272,29 @@ describe("delete", () => {
   });
 });
 
+describe("storage namespaces", () => {
+  it("can isolate mobile templates from desktop templates", () => {
+    const mobileKey = "mold.mobile.generation.templates.v1";
+
+    saveGenerationTemplate("Desktop", formWith({ prompt: "desktop prompt" }));
+    saveGenerationTemplate("Mobile", formWith({ prompt: "mobile prompt" }), mobileKey);
+
+    expect(loadGenerationTemplates().map((template) => template.name)).toEqual(["Desktop"]);
+    expect(
+      loadGenerationTemplates("updated-desc", mobileKey).map((template) => template.name),
+    ).toEqual(["Mobile"]);
+  });
+});
+
 describe("collectTemplateMediaReferences", () => {
   it("lists only the media fields that are populated", () => {
     expect(collectTemplateMediaReferences(formWith({ sourceImage: B64 }))).toEqual(["source"]);
     expect(collectTemplateMediaReferences(formWith())).toEqual([]);
+  });
+
+  it("formats internal media keys as readable instructions", () => {
+    expect(formatTemplateMediaReferences(["editImages", "audioFile"])).toBe(
+      "edit pictures, conditioning audio",
+    );
   });
 });
