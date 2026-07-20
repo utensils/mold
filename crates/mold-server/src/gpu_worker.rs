@@ -1249,7 +1249,7 @@ pub fn run_chain_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
     }));
 
     let fatal_cuda =
-        matches!(&result, Ok(Err(error)) if has_fatal_cuda_error(&format!("{error:#?}")));
+        matches!(&result, Ok(Err(error)) if has_fatal_cuda_error(&format!("{error:#}")));
     if fatal_cuda {
         quarantine_poisoned_worker(worker);
         drop(cached);

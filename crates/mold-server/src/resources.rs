@@ -137,8 +137,6 @@ pub use nvml_source::NvmlSource;
 
 use mold_core::{GpuBackend, GpuSnapshot};
 
-/// Locate the `nvidia-smi` binary. Matches the existing resolver in
-/// `routes.rs::query_gpu_info` so NixOS hosts still work.
 /// Translate a CUDA logical ordinal to the physical NVML/nvidia-smi index.
 /// Numeric `CUDA_VISIBLE_DEVICES` entries are physical ordinals in logical
 /// order. UUID/MIG selectors cannot be mapped without carrying device identity,

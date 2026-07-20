@@ -55,9 +55,9 @@ or `CUDA_ERROR_LAUNCH_FAILED` invalidate the affected CUDA context. Mold
 quarantines that GPU worker immediately instead of retrying jobs against the
 dead context, reports physical device VRAM from NVML or `nvidia-smi`, and stops
 the server with an error. Service managers such as the Mold NixOS module then
-restart the process to recreate the context and release retained VRAM; the desktop
-app relaunches itself, while manually started servers must be started again. Ordinary CUDA out-of-memory errors do
-not trigger this process restart.
+restart the process to recreate the context and release retained VRAM. The desktop
+app relaunches itself; if you started `mold serve` manually, restart it yourself.
+Ordinary CUDA out-of-memory errors do not trigger this process restart.
 
 ## Connection Refused
 
