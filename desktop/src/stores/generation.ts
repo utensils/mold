@@ -683,6 +683,7 @@ export const useGenerationStore = defineStore("generation", {
               if (
                 current.remote &&
                 current.mirrorRemoteOutput &&
+                complete.image &&
                 (useAppPrefsStore().settings?.saveRemoteOutputs ?? true)
               ) {
                 const now = Date.now();

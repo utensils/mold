@@ -163,6 +163,8 @@ export function buildGenerationEstimateRequest(
   delete estimate.source_image_name;
   delete estimate.mask_image;
   delete estimate.control_image;
+  delete estimate.control_model;
+  delete estimate.control_scale;
   delete estimate.edit_images;
   delete estimate.source_video;
   delete estimate.keyframes;

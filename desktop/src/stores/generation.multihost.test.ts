@@ -299,6 +299,30 @@ describe("generation store multi-host routing", () => {
     expect(jobs[0]!.result?.image).toBe("");
   });
 
+  it("does not mirror a metadata-only completion without encoded media", async () => {
+    sseStream.mockImplementation(
+      (_path: string, opts: { onEvent: (e: string, d: string) => void }) => {
+        opts.onEvent(
+          "complete",
+          JSON.stringify({
+            ...JSON.parse(completeFrame()),
+            image: "",
+            original_image: null,
+            filename: "generated image.png",
+          }),
+        );
+        return Promise.resolve();
+      },
+    );
+
+    await useGenerationStore().submitBatch(request(), 1, {
+      ...halRoute,
+      metadataOnlyCompletion: true,
+    }).settled;
+
+    expect(saveOutputBytes).not.toHaveBeenCalled();
+  });
+
   it("loads a metadata-only iPhone image from its saved host file", async () => {
     const createObjectUrl = vi.spyOn(URL, "createObjectURL");
     streamableMediaUrl.mockResolvedValueOnce("https://hal9000/media/generated-image");

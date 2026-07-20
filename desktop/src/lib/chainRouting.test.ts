@@ -208,6 +208,9 @@ describe("request-aware generation routing", () => {
       source_video: "VIDEO",
       keyframes: [{ frame: 0, image: "IMAGE" }],
       audio_file: "AUDIO",
+      control_image: "CONTROL",
+      control_model: "controlnet-canny-sd15",
+      control_scale: 0.8,
     };
     delete chained.temporal_upscale;
     expect(buildGenerationEstimateRequest(chained, "ltx2")).toMatchObject({
@@ -218,6 +221,9 @@ describe("request-aware generation routing", () => {
     expect(estimate).not.toHaveProperty("source_video");
     expect(estimate).not.toHaveProperty("keyframes");
     expect(estimate).not.toHaveProperty("audio_file");
+    expect(estimate).not.toHaveProperty("control_image");
+    expect(estimate).not.toHaveProperty("control_model");
+    expect(estimate).not.toHaveProperty("control_scale");
     expect(buildGenerationEstimateRequest(request, "ltx2")).toMatchObject({
       batch_size: 1,
       frames: 257,
