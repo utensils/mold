@@ -20,6 +20,7 @@ import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { primaryModifierPressed } from "../lib/platform";
+import { allowsNativeContextMenu } from "../lib/shortcuts";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -208,10 +209,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     {
       label: "Delete",
       danger: true,
-      action: () => {
-        select(entry);
-        void removeSelected().then(() => toasts.push("Deleted"));
-      },
+      action: () => void requestSingleDelete(entry),
     },
   ];
 }
@@ -219,6 +217,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
 const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
 const selected = ref<{ sourceKey: string; filename: string } | null>(null);
+const confirmingSingleDelete = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
 const rowHeight = ref(180);
 
@@ -254,6 +253,7 @@ const bulkDeleting = ref(false);
 
 function setSelectMode(next: boolean) {
   selectMode.value = next;
+  confirmingSingleDelete.value = null;
   if (!next) {
     bulkSelection.value = new Set();
     bulkAnchor.value = null;
@@ -364,7 +364,15 @@ const isSelected = (entry: MergedPrint) =>
   selected.value.filename === entry.item.filename;
 
 function select(entry: MergedPrint) {
-  selected.value = { sourceKey: entry.sourceKey, filename: entry.item.filename };
+  const next = { sourceKey: entry.sourceKey, filename: entry.item.filename };
+  if (
+    confirmingSingleDelete.value &&
+    (confirmingSingleDelete.value.sourceKey !== next.sourceKey ||
+      confirmingSingleDelete.value.filename !== next.filename)
+  ) {
+    confirmingSingleDelete.value = null;
+  }
+  selected.value = next;
 }
 
 const selectedIndex = computed(() => gallery.filtered.findIndex((e) => isSelected(e)));
@@ -412,7 +420,19 @@ function onKeydown(e: KeyboardEvent) {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === "ArrowRight") {
+  if (e.key === "Delete" || e.key === "Backspace") {
+    // WebKit treats an unhandled Backspace/Delete as history-back. Keep the
+    // native editing behavior in text fields, but always claim it elsewhere
+    // in Gallery so deleting a print can never navigate to Generate.
+    if (allowsNativeContextMenu(e.target as Element | null)) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (selectMode.value && bulkSelection.value.size > 0) {
+      void deleteSelectedPrints();
+    } else if (selectedEntry.value) {
+      void requestSingleDelete(selectedEntry.value);
+    }
+  } else if (e.key === "ArrowRight") {
     e.preventDefault();
     moveSelection(1);
   } else if (e.key === "ArrowLeft") {
@@ -422,23 +442,48 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
-    if (lightboxOpen.value) lightboxOpen.value = false;
+    if (confirmingSingleDelete.value) confirmingSingleDelete.value = null;
+    else if (lightboxOpen.value) lightboxOpen.value = false;
     else if (selectMode.value) setSelectMode(false);
   }
 }
 
-async function removeSelected() {
-  const entry = selectedEntry.value;
-  if (!entry) return;
-  const index = selectedIndex.value;
+async function removeEntry(entry: MergedPrint) {
+  const index = gallery.filtered.findIndex(
+    (candidate) =>
+      candidate.sourceKey === entry.sourceKey && candidate.item.filename === entry.item.filename,
+  );
   await gallery.remove(entry.sourceKey, entry.item.filename);
+  if (!isSelected(entry)) return;
   const remaining = gallery.filtered;
   if (remaining.length === 0) {
     lightboxOpen.value = false;
     selected.value = null;
   } else {
-    select(remaining[Math.min(index, remaining.length - 1)]!);
+    select(remaining[Math.min(Math.max(index, 0), remaining.length - 1)]!);
   }
+}
+
+async function requestSingleDelete(entry: MergedPrint) {
+  select(entry);
+  const target = { sourceKey: entry.sourceKey, filename: entry.item.filename };
+  const pending = confirmingSingleDelete.value;
+  if (!pending || pending.sourceKey !== target.sourceKey || pending.filename !== target.filename) {
+    confirmingSingleDelete.value = target;
+    return;
+  }
+  confirmingSingleDelete.value = null;
+  try {
+    await removeEntry(entry);
+    toasts.push("Deleted print");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function removeSelected() {
+  const entry = selectedEntry.value;
+  if (entry) await removeEntry(entry);
 }
 
 // Deep link: /gallery?host=<bucket key> pre-picks a chip ("local" = This
@@ -650,6 +695,31 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+    </div>
+
+    <div
+      v-if="confirmingSingleDelete && !selectMode"
+      data-test="single-delete-confirm"
+      class="border-edge absolute bottom-4 left-1/2 z-50 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 rounded-chrome border bg-bench px-3 py-2 shadow-lg"
+      role="alert"
+    >
+      <span class="text-caption text-ink">
+        Delete {{ confirmingSingleDelete.filename }}? This can't be undone.
+      </span>
+      <button
+        type="button"
+        class="h-7 rounded-control bg-stop px-2.5 text-caption font-semibold text-on-accent"
+        @click="selectedEntry && requestSingleDelete(selectedEntry)"
+      >
+        Delete
+      </button>
+      <button
+        type="button"
+        class="h-7 rounded-control px-2.5 text-caption text-ink-2 hover:text-ink"
+        @click="confirmingSingleDelete = null"
+      >
+        Cancel
+      </button>
     </div>
 
     <!-- Floating bulk-action bar while select mode is active. -->

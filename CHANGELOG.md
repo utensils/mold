@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Desktop Gallery deletion now works from the keyboard and context menu.** Delete/Backspace claims WebKit's history-back shortcut when a print is selected and uses a visible two-step confirmation before removing it; the tile context menu shares the same confirmation path instead of issuing a silent fire-and-forget delete. Text fields retain native editing behavior, and delete failures surface as errors.
 - **Desktop image drops now work from Finder anywhere in Generate.** Native Tauri file-drop events bridge PNG/JPEG paths into the source controls, reject files larger than 64 MiB before ingestion, and restore prompt, model, seed, dimensions, and other settings from embedded Mold metadata before attaching the dropped still as the family-appropriate source or Qwen edit target. Loaded previews, gallery actions, and strength controls remain vertically separated inside the narrow inspector instead of overlapping.
 - **Desktop scrolling stays anchored at its limits.** The app shell disables WebKit elastic overscroll so trackpad scrolling no longer rubber-bands the desktop interface past its edges.
 - **Desktop prompt recall now includes every connected host.** Up/Down in the Generate composer merges prompt history from This device and all ready remote hosts, and a newly submitted prompt is available immediately while its owning host persists it.
