@@ -1970,52 +1970,59 @@ button:disabled {
   padding: 9px 12px;
 }
 
-.mobile-catalog-media {
+.mobile-catalog-media,
+.mobile-catalog-sources {
   display: grid;
+  gap: 8px;
+}
+
+.mobile-catalog-media {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px;
-  padding: 3px;
+}
+
+.mobile-catalog-sources {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 10px;
+}
+
+.mobile-catalog-media button,
+.mobile-catalog-sources button {
+  min-width: 0;
   border: 1px solid var(--control-edge);
   border-radius: var(--radius-control);
+  padding: 0 10px;
   background: var(--bench);
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  line-height: 1.2;
 }
 
 .mobile-catalog-media button {
   min-height: 44px;
-  border: 0;
-  border-radius: calc(var(--radius-control) - 2px);
-  background: transparent;
-  color: var(--ink-3);
-  font-family: var(--font-utility);
-  font-size: var(--text-data);
-}
-
-.mobile-catalog-media button[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--safelight) 15%, transparent);
-  color: var(--safelight);
-}
-
-.mobile-catalog-sources {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 11px;
 }
 
 .mobile-catalog-sources button {
   min-height: 44px;
-  border: 1px solid var(--control-edge);
-  border-radius: 999px;
-  padding: 6px 11px;
-  background: transparent;
-  color: var(--ink-2);
-  font-size: var(--text-caption);
 }
 
+.mobile-catalog-media button[aria-pressed="true"],
 .mobile-catalog-sources button[aria-pressed="true"] {
-  border-color: var(--safelight);
-  background: var(--safelight);
-  color: var(--on-accent);
+  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
+.mobile-catalog-media button:not([aria-pressed="true"]):active,
+.mobile-catalog-sources button:not([aria-pressed="true"]):active {
+  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
+  color: var(--rebate);
+}
+
+.mobile-catalog-media button:focus-visible,
+.mobile-catalog-sources button:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
 }
 
 .mobile-catalog-filters {

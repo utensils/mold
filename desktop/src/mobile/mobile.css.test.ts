@@ -100,6 +100,34 @@ describe("mobile safe areas", () => {
     }
   });
 
+  it("renders catalog filters as balanced equal-width tiles", () => {
+    const containers = css.match(
+      /\.mobile-catalog-media,\s*\.mobile-catalog-sources\s*\{([^}]*)\}/s,
+    );
+    const media = [...css.matchAll(/\.mobile-catalog-media\s*\{([^}]*)\}/gs)].find((rule) =>
+      rule[1]?.includes("grid-template-columns"),
+    );
+    const sources = [...css.matchAll(/\.mobile-catalog-sources\s*\{([^}]*)\}/gs)].find((rule) =>
+      rule[1]?.includes("grid-template-columns"),
+    );
+    const buttons = css.match(
+      /\.mobile-catalog-media button,\s*\.mobile-catalog-sources button\s*\{([^}]*)\}/s,
+    );
+    const selected = css.match(
+      /\.mobile-catalog-media button\[aria-pressed="true"\],\s*\.mobile-catalog-sources button\[aria-pressed="true"\]\s*\{([^}]*)\}/s,
+    );
+
+    expect(media?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(containers?.[1]).toMatch(/gap:\s*8px/);
+    expect(buttons?.[1]).toMatch(/min-width:\s*0/);
+    expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--control-edge\)/);
+    expect(buttons?.[1]).toMatch(/background:\s*var\(--bench\)/);
+    expect(buttons?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(selected?.[1]).toContain("color-mix(in srgb, var(--safelight) 11%, var(--bench))");
+    expect(selected?.[1]).toMatch(/color:\s*var\(--safelight\)/);
+  });
+
   it("gives aspect choices a proportional visual frame inside a uniform touch tile", () => {
     const aspects = css.match(/\.mobile-resolution-aspects\s*\{([^}]*)\}/s);
     const choice = css.match(/\.mobile-resolution-aspect\s*\{([^}]*)\}/s);
