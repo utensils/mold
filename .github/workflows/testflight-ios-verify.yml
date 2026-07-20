@@ -1,0 +1,60 @@
+name: Verify iOS TestFlight build
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_version:
+        description: Exact uploaded CFBundleVersion, for example 0.18.0.402
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight-verify-${{ inputs.bundle_version }}
+  cancel-in-progress: false
+
+env:
+  APP_BUNDLE_ID: com.utensils.mold
+  TESTFLIGHT_GROUP_NAME: Mold Internal
+  TESTFLIGHT_TESTER_EMAIL: brink.james@gmail.com
+
+jobs:
+  verify:
+    name: Wait for VALID and verify tester
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install App Store Connect key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          test -n "$APPLE_API_PRIVATE_KEY" && test -n "$APPLE_API_KEY" && test -n "$APPLE_API_ISSUER"
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key"
+          chmod 600 "$key"
+          {
+            echo "ASC_KEY_PATH=$key"
+            echo "ASC_KEY_ID=$APPLE_API_KEY"
+            echo "ASC_ISSUER_ID=$APPLE_API_ISSUER"
+          } >> "$GITHUB_ENV"
+      - name: Resolve marketing version
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/mobile/src-tauri/Cargo.toml | head -1)
+          echo "MARKETING_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Wait for VALID processing
+        env:
+          BUNDLE_VERSION: ${{ inputs.bundle_version }}
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/wait-for-testflight.rb "$APP_BUNDLE_ID" "$MARKETING_VERSION" "$BUNDLE_VERSION"
+      - name: Ensure internal TestFlight access
+        run: |
+          PRIVATE_KEY=$(cat "$ASC_KEY_PATH")
+          export PRIVATE_KEY
+          ruby scripts/ensure-testflight-tester.rb
