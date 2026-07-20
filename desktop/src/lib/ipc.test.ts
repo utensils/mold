@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const open = vi.fn();
-const invoke = vi.fn();
+const { open, invoke } = vi.hoisted(() => ({ open: vi.fn(), invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 
 import { ipc } from "./ipc";
