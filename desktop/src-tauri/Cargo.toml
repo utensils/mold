@@ -75,9 +75,10 @@ mold-server = { path = "../../crates/mold-server", package = "mold-ai-server", v
 # Use Apple's native DNS-SD stack for desktop discovery. Raw multicast sockets
 # can miss services that mDNSResponder already has in its shared cache.
 mdns-sd-discovery = "0.2.0"
-# Tauri's notification wrapper does not forward its icon option on macOS.
-# Send with the bundled identity image so Notification Center shows Mold.
-mac-notification-sys = "0.6.15"
+# Use Apple's current notification framework so release alerts inherit the
+# signed Mold bundle identity and CFBundleIconFile on modern macOS.
+block2 = "0.6"
+objc2-user-notifications = "0.3"
 # Give debug builds an unmistakable native menu and Dock identity.
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
 # macOS 26 can make standard overlay-titlebar controls fully transparent when

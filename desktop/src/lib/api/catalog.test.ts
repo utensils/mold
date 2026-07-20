@@ -18,7 +18,7 @@ vi.mock("../catalogCredentials", () => ({
   }),
 }));
 
-import { fetchCatalogDetail, fetchCatalogInstalled } from "./catalog";
+import { fetchCatalogDetail, fetchCatalogInstalled, startCatalogDownload } from "./catalog";
 import type { CatalogEntry } from "./types";
 
 const PRIMARY = { baseUrl: "http://127.0.0.1:49152", apiKey: null };
@@ -111,5 +111,31 @@ describe("fetchCatalogInstalled", () => {
     };
     apiJsonTo.mockResolvedValueOnce(envelope);
     expect(await fetchCatalogInstalled({})).toEqual(envelope);
+  });
+});
+
+describe("startCatalogDownload", () => {
+  it("surfaces an accepted catalog pull that enqueued no work", async () => {
+    apiFetchTo.mockResolvedValueOnce(
+      new Response(JSON.stringify({ primary_job_id: null, companion_jobs: [] }), { status: 202 }),
+    );
+
+    await expect(startCatalogDownload("hf:lightx2v/Qwen-Image-Lightning")).rejects.toThrow(
+      "did not queue any files",
+    );
+  });
+
+  it("returns a companion job when the catalog entry has no primary", async () => {
+    apiFetchTo.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          primary_job_id: null,
+          companion_jobs: [{ name: "clip-l", job_id: "companion-1" }],
+        }),
+        { status: 202 },
+      ),
+    );
+
+    await expect(startCatalogDownload("hf:companion/test")).resolves.toBe("companion-1");
   });
 });

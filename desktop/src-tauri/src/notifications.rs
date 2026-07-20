@@ -1,15 +1,7 @@
-#[cfg(target_os = "macos")]
-use tauri::Manager;
-
-#[cfg(target_os = "macos")]
-fn bundled_icon(resource_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let path = resource_dir.join("icon.icns");
-    path.is_file().then_some(path)
-}
-
-/// Send a notification through the platform path that can preserve Mold's
-/// identity icon. Other platforms (and unbundled macOS development builds)
-/// return `false` so the frontend can use Tauri's cross-platform fallback.
+/// Send through Apple's current UserNotifications framework so Notification
+/// Center associates the alert with the running signed Mold bundle and uses
+/// its CFBundleIconFile. The previous NSUserNotification/private-identity-image
+/// path is ignored by current macOS releases and produced a generic icon.
 #[tauri::command]
 pub async fn send_native_notification(
     app: tauri::AppHandle,
@@ -18,26 +10,13 @@ pub async fn send_native_notification(
 ) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-        let Some(icon) = bundled_icon(&resource_dir) else {
-            return Ok(false);
-        };
-        let icon = icon.to_string_lossy().into_owned();
-        let identifier = app.config().identifier.clone();
-
+        let _ = app;
         tauri::async_runtime::spawn_blocking(move || {
-            // This is process-global and may report AlreadySet if another
-            // notification raced us. Either way, the existing value is Mold.
-            let _ = mac_notification_sys::set_application(&identifier);
-            let mut notification = mac_notification_sys::Notification::new();
-            notification
-                .title(&title)
-                .message(body.as_deref().unwrap_or(""))
-                .app_icon(&icon);
-            notification.send().map(|_| true).map_err(|e| e.to_string())
+            send_macos_notification(&title, body.as_deref())
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())??;
+        Ok(true)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -47,23 +26,71 @@ pub async fn send_native_notification(
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::bundled_icon;
+#[cfg(target_os = "macos")]
+fn wait_for_callback<T>(
+    receiver: std::sync::mpsc::Receiver<T>,
+    operation: &str,
+) -> Result<T, String> {
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| format!("Timed out while {operation}."))
+}
 
-    #[test]
-    fn uses_the_bundled_macos_icon_when_present() {
-        let dir = tempfile::tempdir().unwrap();
-        let icon = dir.path().join("icon.icns");
-        std::fs::write(&icon, b"test icon").unwrap();
+#[cfg(target_os = "macos")]
+fn send_macos_notification(title: &str, body: Option<&str>) -> Result<(), String> {
+    use block2::RcBlock;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
+        UNUserNotificationCenter,
+    };
 
-        assert_eq!(bundled_icon(dir.path()), Some(icon));
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+
+    // Requesting an already-decided permission is cheap and asynchronous; it
+    // also covers a fresh install before the JS fallback has asked permission.
+    let (auth_tx, auth_rx) = std::sync::mpsc::sync_channel(1);
+    let auth = RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
+        let _ = auth_tx.send((granted.as_bool(), error.is_null()));
+    });
+    center.requestAuthorizationWithOptions_completionHandler(
+        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+        &auth,
+    );
+    let (granted, no_error) = wait_for_callback(auth_rx, "requesting notification permission")?;
+    if !no_error {
+        return Err("macOS couldn't resolve notification permission.".into());
+    }
+    if !granted {
+        return Err("Notifications are not permitted for Mold.".into());
     }
 
-    #[test]
-    fn leaves_unbundled_development_runs_to_the_fallback() {
-        let dir = tempfile::tempdir().unwrap();
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body.unwrap_or("")));
+    let identifier = NSString::from_str(&uuid::Uuid::new_v4().to_string());
+    let request =
+        UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
 
-        assert_eq!(bundled_icon(dir.path()), None);
+    let (delivery_tx, delivery_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = RcBlock::new(move |error: *mut NSError| {
+        let _ = delivery_tx.send(error.is_null());
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&completion));
+    if !wait_for_callback(delivery_rx, "delivering the notification")? {
+        return Err("macOS rejected the notification request.".into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::wait_for_callback;
+
+    #[test]
+    fn callback_wait_returns_the_delivered_value() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(true).unwrap();
+        assert!(wait_for_callback(receiver, "testing").unwrap());
     }
 }

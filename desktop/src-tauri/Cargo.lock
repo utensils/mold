@@ -1477,6 +1477,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
+ "subtle",
 ]
 
 [[package]]
@@ -2880,6 +2881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "hostname"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3942,7 +3952,9 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "futures-core",
+ "getrandom 0.3.4",
  "governor",
+ "hmac",
  "hostname",
  "image",
  "libc",
@@ -3978,13 +3990,13 @@ version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "block2",
  "filetime",
  "flate2",
  "hostname",
  "if-addrs",
  "image",
  "libc",
- "mac-notification-sys",
  "mdns-sd-discovery",
  "mold-ai-core",
  "mold-ai-db",
@@ -3993,6 +4005,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-quartz-core",
+ "objc2-user-notifications",
  "percent-encoding",
  "plist",
  "reqwest 0.12.28",
@@ -4547,7 +4560,10 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.0",
+ "block2",
  "objc2",
+ "objc2-core-location",
  "objc2-foundation",
 ]
 

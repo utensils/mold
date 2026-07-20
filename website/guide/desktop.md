@@ -46,7 +46,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   visualized as a print _developing_: a deterministic grain field, seeded from
   the job's real seed, resolves in lockstep with `DenoiseStep` events. Batches
   run sequentially with `base_seed + i`, and a VRAM preflight forecasts fit
-  before you press Generate.
+  before you press Generate. Drop a PNG or JPEG from the file manager anywhere
+  in Generate to attach it as the current family's source; Mold images with
+  embedded generation metadata also restore their complete saved settings.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
   every parameter restored. All merges every connected host without repeating
@@ -70,7 +72,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   encoders and VAEs), so shared dependencies are not mistaken for checkpoint
   size. Curated manifest variants take precedence over ambiguous
   multi-checkpoint Hugging Face repositories, preventing a whole repository
-  from being presented as one oversized pull. The
+  from being presented as one oversized pull. Live Hugging Face LoRA
+  collections likewise select one runnable adapter variant instead of summing
+  mutually exclusive adapters and fused checkpoints. A host that accepts a
+  pull without returning any queued job is reported as an error. The
   Chains and video Generate empty states deep-link straight to the video
   catalog.
 - **Chains** — a filmstrip editing bench for multi-stage video
@@ -80,7 +85,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   import/export, and a durable jobs list with resume, cancel, and retake. Its
   picker includes video models installed on every connected host; limits,
   creation, events, previews, and job actions stay routed to the model's host.
-- **History** — a fast, searchable list of past prompts; ↩ refills the composer.
+- **History** — a fast, searchable list of past prompts from every ready host;
+  ↩ refills the composer, while Up/Down recalls the same merged history inline.
 - **RunPod** — secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
@@ -110,7 +116,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   prompt-history search in one field.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
   window decorations, macOS overlay chrome, and background notifications on
-  generation, chain, and pull completion.
+  generation, chain, and pull completion. macOS uses UserNotifications so a
+  signed release inherits Mold's bundle identity and app icon.
 
 ## Updates
 

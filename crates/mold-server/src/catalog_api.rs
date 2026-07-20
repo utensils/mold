@@ -494,26 +494,91 @@ pub async fn post_catalog_download(
     )
     .await;
 
-    // Primary entry. HF rows map onto a manifest model name (best-effort —
-    // diffusers entries with a recognised source_id flow through; the rest
-    // surface a `null` primary while companion downloads still run). `cv:`
-    // rows go through the recipe path: resolve `CIVITAI_TOKEN` if
-    // `needs_token: Civitai`, and call `DownloadQueue::enqueue_recipe`.
-    use mold_catalog::entry::Source;
+    // Primary entry. Built-in HF models use their canonical manifest. Live HF
+    // LoRA rows use the normalized single-file recipe, just like Civitai rows,
+    // so remote hosts can pull catalog-only adapters. Unsupported HF repos now
+    // return a real error instead of a successful response with no queued job.
+    use mold_catalog::entry::{Kind, Source};
     let primary_job_id: Option<String> = match entry.source {
         Source::Hf => {
-            let model = match mold_core::manifest::find_manifest(&entry.source_id) {
-                Some(m) => m.name.clone(),
-                None => entry.source_id.clone(),
-            };
-            match state
-                .downloads
-                .enqueue_in_group_with_hf_fallback(model, &entry_id, resolved_token.clone())
-                .await
-            {
-                Ok((jid, _, _)) => Some(jid),
-                Err(crate::downloads::EnqueueError::UnknownModel(_)) => None,
-                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            if let Some(manifest) = mold_core::manifest::find_manifest(&entry.source_id) {
+                match state
+                    .downloads
+                    .enqueue_in_group_with_hf_fallback(
+                        manifest.name.clone(),
+                        &entry_id,
+                        resolved_token.clone(),
+                    )
+                    .await
+                {
+                    Ok((jid, _, _)) => Some(jid),
+                    Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+                }
+            } else if entry.kind == Kind::Lora {
+                let auth = match entry.download_recipe.needs_token {
+                    Some(mold_catalog::entry::TokenKind::Hf) => match resolved_token.clone() {
+                        Some(token) => mold_core::download::RecipeAuth::Bearer(token),
+                        None => {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                "this Hugging Face repository requires an HF token",
+                            )
+                                .into_response();
+                        }
+                    },
+                    _ => mold_core::download::RecipeAuth::None,
+                };
+                let (author, name) = match entry.source_id.split_once('/') {
+                    Some((a, n)) => (a.to_string(), n.to_string()),
+                    None => (String::new(), entry.source_id.clone()),
+                };
+                let files = entry
+                    .download_recipe
+                    .files
+                    .iter()
+                    .map(|file| crate::downloads::OwnedRecipeFile {
+                        url: file.url.clone(),
+                        dest: mold_catalog::entry::render_recipe_dest(
+                            &file.dest,
+                            entry.family.as_str(),
+                            &author,
+                            &name,
+                        ),
+                        sha256: file.sha256.clone(),
+                        size_bytes: file.size_bytes,
+                    })
+                    .collect();
+                if let Some(primary_dest) = rendered_primary_recipe_dest(&entry, &author, &name) {
+                    let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary_dest);
+                    let path = mold_catalog::sidecar::civitai_sidecar_path(&models_dir, &entry_id);
+                    if let Err(error) = mold_catalog::sidecar::write_sidecar(&path, &sidecar) {
+                        tracing::warn!(
+                            target: "catalog.sidecar",
+                            catalog_id = %entry_id,
+                            %error,
+                            "HF LoRA sidecar write failed",
+                        );
+                    }
+                }
+                let payload = crate::downloads::RecipePayload {
+                    catalog_id: entry_id.clone(),
+                    files,
+                    auth,
+                };
+                match state
+                    .downloads
+                    .enqueue_recipe_in_group(payload, &entry_id)
+                    .await
+                {
+                    Ok((jid, _, _)) => Some(jid),
+                    Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+                }
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "this Hugging Face catalog entry is not a supported built-in model or LoRA",
+                )
+                    .into_response();
             }
         }
         Source::Civitai => {
