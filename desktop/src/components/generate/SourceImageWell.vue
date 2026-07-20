@@ -314,7 +314,7 @@ function setSourceFitMode(e: Event) {
     </div>
 
     <!-- Source well -->
-    <div>
+    <div data-test="source-media-controls" class="flex flex-col items-start">
       <input
         :ref="(el) => (inputEls.source = el as HTMLInputElement | null)"
         type="file"
@@ -341,11 +341,11 @@ function setSourceFitMode(e: Event) {
       >
         Drop an image or click to pick
       </div>
-      <div v-else class="relative inline-block">
+      <div v-else class="relative inline-block max-w-full">
         <img
           :src="base64ToDataUrl(form.sourceImage)"
           alt="source"
-          class="max-h-40 rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
+          class="max-h-40 max-w-full rounded-media border border-[color-mix(in_srgb,var(--rebate)_25%,transparent)] p-px"
         />
         <button
           type="button"

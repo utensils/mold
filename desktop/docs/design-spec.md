@@ -116,7 +116,9 @@ or Generate action outside the window.
 
 Three regions: **canvas** (center), **composer** (bottom of canvas), **inspector** (right, 320px default, drag-resizable 280–480px via its left-edge divider — width persists, double-click resets).
 
-Dragging a PNG or JPEG from the file manager anywhere over Generate shows a full-workspace drop target and attaches it through Tauri's native file-drop event. Embedded `mold:parameters` restore generation settings first; the same still then becomes the source image or Qwen edit Target when the restored family supports image input.
+The WebKit app shell uses `overscroll-behavior: none`; trackpad scrolling stops at the limits of each view instead of elastically moving the desktop chrome.
+
+Dragging a PNG or JPEG from the file manager anywhere over Generate shows a full-workspace drop target and attaches it through Tauri's native file-drop event. Embedded `mold:parameters` restore generation settings first; the same still then becomes the source image or Qwen edit Target when the restored family supports image input. The loaded preview and its gallery action stack vertically, stay within the inspector width, and leave a distinct gap before Strength.
 
 ```
 ├──────────┬──────────────────────────────────────────────┬──────────────────┤
