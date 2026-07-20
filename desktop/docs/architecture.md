@@ -1,21 +1,54 @@
-# mold Desktop — Tauri 2 Implementation Plan
+# mold Desktop and iPhone — Tauri 2 Architecture
 
-A native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA) desktop app for mold with full feature parity against the web SPA and a shared Safelight design. The backend and frontend stay platform-neutral; Tauri platform configs own window chrome and bundle details.
+Mold ships native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA)
+desktop apps plus a remote-only iPhone companion. The backend and shared
+frontend logic stay platform-neutral; Tauri platform configs and thin native
+bridges own window chrome, device capabilities, and bundle details. Mold and
+Safelight theme families are shared without changing generated-media color.
 
 ## iOS companion
 
 The iPhone app is a separate thin Tauri crate at `apps/mobile/src-tauri`, with
-its Vue entry at `desktop/src/mobile`. It never embeds an engine: every request
-targets a saved remote host, so the typed HTTP/SSE client and pure generation
-form builder are shared while desktop stores that assume **This device** remain
-desktop-only. Native DNS-SD browses `_mold._tcp`; manual host entry also accepts
-Tailscale MagicDNS and HTTPS names. Navigation covers Generate,
-Gallery, Catalog, and Hosts, laid out for iPhone safe areas and touch targets.
-Fresh installs start with Safelight under the system appearance; persisted
-theme choices continue to win on later launches.
-Generate reuses the capability matrix and request builder for prompt tools,
-templates, batch jobs, source/edit/mask/ControlNet inputs, LoRA, advanced image
-parameters, target-host estimates, and video/LTX-2 controls.
+its Vue entry at `desktop/src/mobile`. It is excluded from the root workspace
+and never embeds an engine: every request targets a saved remote host. The app
+shares API types, explicit-target HTTP/SSE helpers, capability and form logic,
+source fitting, gallery media, catalog helpers, and themes; desktop stores that
+assume **This device** remain desktop-only.
+
+Host metadata, the selected host, mobile templates, and appearance preferences
+live in WebView local storage. API keys never do: native Keychain commands store
+them under `com.utensils.mold.remote-api-key`. Apple DNS-SD browses
+`_mold._tcp` under Local Network permission; manual entry accepts IP/DNS/HTTPS
+and Tailscale MagicDNS names. Tailscale support is network/DNS interoperability,
+not an embedded SDK. The only other native command synchronizes System, Light,
+or Dark appearance to UIKit so status-bar glyphs match the WebView.
+
+Navigation covers Generate, Gallery, Catalog, and Hosts; Settings is a pushed
+header destination. Generate reuses the capability matrix and request builder
+for prompt tools, templates, independent batch jobs, source/edit/mask/ControlNet
+inputs, LoRA, resolution/seed controls, estimates, and video/LTX-2 controls.
+Gallery merges every saved remote host, streams full-size media through a
+short-lived path-scoped ticket, plays videos with native seeking, swipes between
+prints, and exposes explicit Use as prompt / Use as source actions. Host detail
+shows telemetry, storage, queue, downloads, and installed models. Catalog merges
+installed/live entries and routes actions per host; Pull visibly progresses
+through Connecting, Starting, Queued, and Pulling percentage states with
+snapshot-before-POST reconciliation and duplicate prevention.
+
+The shell is iPhone-first with safe areas, 44pt controls, 16px editable text,
+document zoom disabled, and overscroll bounce suppressed. The gallery viewer
+keeps a narrowly scoped horizontal swipe gesture. Settings persists Mold or
+Safelight with System/Dark/Light, host management, version, and the TestFlight
+update channel. Fresh installs start with Safelight + System; valid persisted
+theme choices remain authoritative.
+
+`.github/workflows/ios.yml` gates mobile-relevant pull requests and `main`
+changes. A successful eligible `main` run triggers
+`.github/workflows/testflight-ios.yml` (there is no wall-clock cron), which
+builds an internal-only archive, waits for App Store Connect `VALID`, and
+verifies membership in the Mold Internal tester group. See
+`apps/mobile/README.md` for commands, signing inputs, asset guards, and the
+manual verification workflow.
 
 ---
 

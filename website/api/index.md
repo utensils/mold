@@ -30,6 +30,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/models/unload`                      | Unload model to free GPU memory                                                                                   |
 | `DELETE` | `/api/models/:model`                      | Remove a downloaded model (keeps components shared with other models)                                             |
 | `GET`    | `/api/gallery`                            | List saved images                                                                                                 |
+| `POST`   | `/api/gallery/media-token`                | Mint a short-lived, read-only ticket for one full-size gallery path                                               |
 | `GET`    | `/api/gallery/image/:name`                | Fetch a saved image                                                                                               |
 | `DELETE` | `/api/gallery/image/:name`                | Delete a saved image                                                                                              |
 | `GET`    | `/api/gallery/thumbnail/:name`            | Fetch a cached thumbnail                                                                                          |
@@ -98,6 +99,31 @@ compatible).
 
 The `mold` CLI reads `MOLD_API_KEY` from the environment and sends the header
 automatically.
+
+### Gallery media tickets
+
+Browser and native `<video>` elements cannot attach an `X-Api-Key` header to
+their own streaming and Range requests. An authenticated client can exchange
+normal API-key authentication for a short-lived credential scoped to one
+full-size gallery path:
+
+```bash
+curl -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'X-Api-Key: your-secret-key' \
+  -d '{"path":"/api/gallery/image/clip.mp4"}' \
+  http://localhost:7680/api/gallery/media-token
+```
+
+The response is
+`{"token":"...","expires_at":1234567890,"auth_required":true}`. For the
+next 15 minutes, append the token as `media_token` and the Unix expiry as
+`expires` to that exact gallery-image URL. It authorizes only `GET` or `HEAD`
+reads, including HTTP Range requests; it cannot access another file, delete
+media, or call any other endpoint. The signing secret is per server process,
+the response is `no-store`, and request tracing omits the bearer query. When API
+authentication is disabled, the endpoint returns `auth_required: false` and
+the direct media URL needs no ticket.
 
 ## Rate Limiting
 

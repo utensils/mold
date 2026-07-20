@@ -76,10 +76,10 @@ gets its own scale slider and remove button.
 
 ## Browsing & Installing LoRAs
 
-The web Catalog tab searches Hugging Face and Civitai live. Open **Catalog**,
-choose a family, click the **LoRAs** chip, then **Install** on the LoRA you
-want. Once installed, it appears in compatible **Generate → Settings → LoRA**
-pickers.
+The web, desktop, and iPhone Catalog surfaces search Hugging Face and Civitai
+live. Open **Catalog**, choose a family and LoRA kind where available, then use
+**Install** on the web or **Pull** in a native app. Once installed, it appears
+in compatible Generate LoRA pickers on that host.
 
 The same flow is available over the server API:
 

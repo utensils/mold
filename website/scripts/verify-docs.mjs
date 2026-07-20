@@ -73,7 +73,11 @@ if (!configSource.includes("hostname: 'https://utensils.io/mold/'")) {
 }
 
 const visibleLinks = new Set(sidebarLinks)
-const requiredVisibleDocs = ['guide/video.md', 'docs/catalog.md']
+const requiredVisibleDocs = [
+  'guide/video.md',
+  'guide/iphone.md',
+  'docs/catalog.md',
+]
 for (const relPath of requiredVisibleDocs) {
   const route = routeForDoc(relPath)
   if (!visibleLinks.has(route)) {
@@ -162,6 +166,7 @@ if (!loraMatch?.groups?.body) {
 
 const apiDocs = readRel('api/index.md')
 const requiredApiEndpoints = [
+  '/api/gallery/media-token',
   '/api/gallery/preview/:name',
   '/api/downloads',
   '/api/downloads/:id',

@@ -57,6 +57,7 @@ export default defineConfig({
             { text: 'Video', link: '/guide/video' },
             { text: 'Terminal UI', link: '/guide/tui' },
             { text: 'Desktop App', link: '/guide/desktop' },
+            { text: 'iPhone App', link: '/guide/iphone' },
             { text: 'Image-to-Image', link: '/guide/img2img' },
             { text: 'Upscaling', link: '/guide/upscaling' },
             { text: 'Prompt Expansion', link: '/guide/expansion' },

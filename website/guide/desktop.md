@@ -1,23 +1,15 @@
-# Desktop and iPhone Apps
+# Desktop App
 
-Mold for iPhone is a remote-only companion with first-class Generate, Gallery,
-Catalog, and Hosts views. Add the desktop or server by Bonjour discovery, an
-IP/hostname, or its Tailscale MagicDNS name. The phone does not run inference;
-it uses the same authenticated HTTP/SSE contract and the remote host remains the
-source of truth for models, jobs, downloads, and gallery media.
-
-Generate adapts to the selected model and host, with prompt expansion/history,
-saved templates, independently cancellable batch jobs, source/edit images,
-masks, ControlNet, LoRA, scheduler/CFG++/upscale options, target-aware estimates,
-and video/LTX-2 controls. Resolution is chosen directly through orientation,
-proportional aspect-ratio tiles, and resolution tiers. In Gallery, full-screen
-photos swipe between prints, videos play with native controls, and a still can
-be reused either as prompt settings or as the next source image.
+::: tip Looking for Mold on iPhone?
+The remote-only companion has its own [iPhone App guide](/guide/iphone),
+including LAN/Tailscale setup, Generate, Gallery, Catalog, Hosts, themes, and
+TestFlight distribution.
+:::
 
 mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
-Vue 3 + TypeScript frontend with its own **Safelight** design language, a warm,
-matte "digital darkroom" that treats every generation as a print being
-developed.
+Vue 3 + TypeScript frontend. Its shared Mold and Safelight theme families create
+a disciplined "digital darkroom" that treats every generation as a print being
+developed without recoloring the media itself.
 
 ::: info
 The desktop app lives in `desktop/`. Local generation uses Metal on Apple
@@ -122,8 +114,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
 
 ## Updates
 
-Automatic signed updates are currently macOS-only. Linux Nix/AppImage builds
-report updates as unsupported and are replaced manually.
+This section describes Mold's in-app desktop updater. Automatic signed desktop
+updates are currently macOS-only; Linux Nix/AppImage builds report updates as
+unsupported and are replaced manually. The iPhone app updates through
+TestFlight after mobile-relevant `main` changes pass iOS CI, App Store Connect
+reports the build `VALID`, and internal tester access is verified.
 
 Signed desktop builds keep update checks separate from installation. Mold makes
 a best-effort check after the app opens, and **Mold → Check for Updates…** plus
@@ -209,9 +204,10 @@ loading a template that used them the app reminds you to re-select the files.
 If the template's model isn't installed you still get its settings, with a
 prompt to pull the model.
 
-Templates are stored locally, per machine (in the app's own storage), and are
-never shared with the browser SPA or synced to the server — they travel with
-the Mac you saved them on.
+Templates are stored locally in the app and never shared with the browser SPA
+or synced to the server. Desktop and iPhone maintain separate device-local
+template libraries; a template saved on one does not appear automatically on
+the other.
 
 ## Device placement
 
@@ -335,6 +331,10 @@ desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test (CPU) + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
 desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+ios-dev            # iPhone app with Tauri hot reload (Vite on :1431)
+ios-run            # production-mode run on an iPhone or simulator
+ios-check          # Rust check for the Apple Silicon simulator target
+ios-build          # archive/export for App Store Connect
 ```
 
 On Linux, `nix build .#mold-desktop` builds the sm_89 native package and
@@ -345,6 +345,12 @@ sign/notarize path and intentionally exits on Linux.
 The Rust crate under `desktop/src-tauri` is its own cargo root (excluded from
 the workspace); the frontend lives in `desktop/src`. CI runs the `desktop-check`
 and `desktop-test` gates via `.github/workflows/desktop.yml`.
+
+The separate remote-only iOS crate lives under `apps/mobile/src-tauri`; its
+shared frontend entry is `desktop/src/mobile`. Mobile CI runs through
+`.github/workflows/ios.yml`. See the repository's
+[`apps/mobile/README.md`](https://github.com/utensils/mold/blob/main/apps/mobile/README.md)
+for native setup, simulator validation, icon guards, and TestFlight maintenance.
 
 ## Signed distribution
 
