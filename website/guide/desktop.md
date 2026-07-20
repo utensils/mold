@@ -190,7 +190,8 @@ use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
 Appearance offers Safelight and Mold theme families in System, Light, or Dark
-mode. All combinations keep text and interactive boundaries at WCAG AA
+mode. New iPhone installs start with Safelight and System; existing choices are
+preserved. All combinations keep text and interactive boundaries at WCAG AA
 contrast; an empty generation canvas follows the selected chrome, while actual
 generated media remains on a color-stable viewing surface.
 

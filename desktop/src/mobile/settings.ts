@@ -10,7 +10,7 @@ export interface MobileSettings {
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
   theme: "system",
-  themeFamily: "mold",
+  themeFamily: "safelight",
 };
 
 type SettingsStorage = Pick<Storage, "getItem" | "setItem">;

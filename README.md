@@ -108,7 +108,8 @@ remain on that remote Mold server. Host details expose live resources, queue,
 downloads, and installed models, while Catalog can browse one host and send a
 pull to another without silently changing the host selected for generation.
 The app uses the same HTTP, SSE, model defaults, resolution presets, and
-generation request contract as the desktop app. Generate brings its
+generation request contract as the desktop app. New installs use the Safelight
+theme family with system appearance, while saved theme choices persist. Generate brings its
 capability-aware controls to touch: prompt expansion, candidates, recent prompts,
 saved templates, batch queueing, source/edit images, masks, ControlNet, LoRA,
 schedulers, CFG++, upscaling, and the video/LTX-2 pipeline controls. Estimates

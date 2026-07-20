@@ -11,6 +11,8 @@ form builder are shared while desktop stores that assume **This device** remain
 desktop-only. Native DNS-SD browses `_mold._tcp`; manual host entry also accepts
 Tailscale MagicDNS and HTTPS names. Navigation covers Generate,
 Gallery, Catalog, and Hosts, laid out for iPhone safe areas and touch targets.
+Fresh installs start with Safelight under the system appearance; persisted
+theme choices continue to win on later launches.
 Generate reuses the capability matrix and request builder for prompt tools,
 templates, batch jobs, source/edit/mask/ControlNet inputs, LoRA, advanced image
 parameters, target-host estimates, and video/LTX-2 controls.
