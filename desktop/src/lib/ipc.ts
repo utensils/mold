@@ -260,6 +260,26 @@ export const ipc = {
     if (!inTauri()) return Promise.reject(new Error("Native file drops require the desktop app."));
     return invoke<DesktopImageImport>("import_source_image", { path });
   },
+  /**
+   * Open the platform file picker for still-image conditioning inputs. The
+   * native dialog avoids the WebView file-control stall, and the backend
+   * validates the chosen files by decoding them rather than trusting this
+   * suffix filter.
+   */
+  async pickSourceImages(multiple: boolean): Promise<DesktopImageImport[] | null> {
+    if (!inTauri()) return null;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      title: "Choose image",
+      multiple,
+      filters: [{ name: "PNG or JPEG images", extensions: ["png", "jpg", "jpeg"] }],
+    });
+    if (!picked) return null;
+    const paths = Array.isArray(picked) ? picked : [picked];
+    return Promise.all(
+      paths.map((path) => invoke<DesktopImageImport>("import_source_image", { path })),
+    );
+  },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
   saveOutputBytes(
     filename: string,

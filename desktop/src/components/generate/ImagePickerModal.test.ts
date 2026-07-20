@@ -19,6 +19,7 @@ vi.mock("../../lib/ipc", () => ({
   ipc: {
     localGalleryList: vi.fn(),
     localGalleryDelete: vi.fn(),
+    pickSourceImages: vi.fn(),
   },
 }));
 
@@ -281,7 +282,7 @@ describe("ImagePickerModal", () => {
     expect(gallery.fetchAll).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects non-PNG/JPEG uploads with an error instead of emitting", async () => {
+  it("rejects non-PNG/JPEG dropped files with an error instead of emitting", async () => {
     const gallery = useGalleryStore();
     vi.spyOn(gallery, "fetchAll").mockResolvedValue();
     const wrapper = mount(ImagePickerModal, {
@@ -291,10 +292,9 @@ describe("ImagePickerModal", () => {
     });
     await flushPromises();
 
-    const input = bodyGet<HTMLInputElement>("[data-test='picker-upload-input']");
-    expect(input.attributes("accept")).toBe("image/png,image/jpeg");
-
     const webp = new File(["x"], "anim.webp", { type: "image/webp" });
+    const input = bodyGet<HTMLInputElement>("[data-test='picker-browser-file-input']");
+    expect(input.attributes("accept")).toBe("image/png,image/jpeg");
     Object.defineProperty(input.element, "files", { value: [webp] });
     await input.trigger("change");
     await flushPromises();
@@ -302,6 +302,30 @@ describe("ImagePickerModal", () => {
     expect(wrapper.emitted("pick")).toBeFalsy();
     const err = bodyGet<HTMLElement>("[data-test='picker-upload-error']");
     expect(err.text()).toContain("Only PNG or JPEG");
+  });
+
+  it("uses the native file chooser with PNG/JPEG filtering instead of the WebView picker", async () => {
+    const { ipc } = await import("../../lib/ipc");
+    vi.mocked(ipc.pickSourceImages).mockResolvedValue([
+      { filename: "source.jpeg", base64: "eA==", metadata: null },
+    ]);
+    const gallery = useGalleryStore();
+    vi.spyOn(gallery, "fetchAll").mockResolvedValue();
+    const wrapper = mount(ImagePickerModal, {
+      props: { open: true, multiple: true },
+      global: { plugins: [pinia] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await bodyGet<HTMLButtonElement>("[data-test='picker-native-file-button']").trigger("click");
+
+    await vi.waitFor(() => expect(wrapper.emitted("pick")).toBeTruthy());
+    expect(ipc.pickSourceImages).toHaveBeenCalledWith(true);
+    expect(wrapper.emitted("pick")?.[0]?.[0]).toEqual([
+      { filename: "source.jpeg", base64: "eA==" },
+    ]);
+    expect(wrapper.emitted("close")).toBeTruthy();
   });
 
   it("does not render when closed", () => {

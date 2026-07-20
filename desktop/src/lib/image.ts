@@ -3,8 +3,8 @@
  * prefix — the shape mold-core expects for `source_image` / `mask_image` /
  * `control_image` on the wire. Works in WKWebView and a plain browser.
  *
- * TODO(M6): use the native Tauri file dialog + fs plugin when picking on macOS
- * so large images don't round-trip through the WebView.
+ * Native desktop chooser selection is read by the Rust backend; this remains
+ * the portable path for drag-and-drop and the browser development surface.
  */
 export function fileToBase64(file: File): Promise<string> {
   return blobToBase64(file);

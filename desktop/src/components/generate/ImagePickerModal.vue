@@ -4,6 +4,7 @@ import AuthedMedia from "../gallery/AuthedMedia.vue";
 import { apiFetch, apiFetchTo } from "../../lib/api/client";
 import { galleryMediaPath, localMediaPath, mediaPath } from "../../lib/gallery/media";
 import { blobToBase64, fileToBase64, isStillImageFile } from "../../lib/image";
+import { inTauri, ipc } from "../../lib/ipc";
 import type { PickedImage } from "../../lib/generateForm";
 import { useGalleryStore, type MergedPrint } from "../../stores/gallery";
 
@@ -22,6 +23,7 @@ const dragOver = ref(false);
 // Focus the close button on open and restore focus to the opener on close,
 // so the dialog is keyboard-operable and doesn't strand focus (matches Lightbox).
 const closeBtn = ref<HTMLButtonElement | null>(null);
+const fallbackFileInput = ref<HTMLInputElement | null>(null);
 let restoreFocusEl: HTMLElement | null = null;
 
 // The gallery tab is the same unified multi-host view as the Gallery's All
@@ -97,6 +99,26 @@ function onDrop(event: DragEvent) {
   void ingestFiles(Array.from(event.dataTransfer?.files ?? []));
 }
 
+async function chooseFiles() {
+  try {
+    const selected = await ipc.pickSourceImages(props.multiple);
+    if (!selected?.length) {
+      // `bun run dev` has no native dialog backend. Keep its browser-only
+      // development path usable without ever invoking this input in Tauri.
+      if (!inTauri()) fallbackFileInput.value?.click();
+      return;
+    }
+    error.value = null;
+    emit(
+      "pick",
+      selected.map(({ filename, base64 }) => ({ filename, base64 })),
+    );
+    emit("close");
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function pickFromGallery(entry: MergedPrint) {
   try {
     // Bytes come from the print's own origin: a host print is fetched with
@@ -162,7 +184,7 @@ async function pickFromGallery(entry: MergedPrint) {
             data-test="picker-tab-upload"
             @click="tab = 'upload'"
           >
-            Upload
+            Choose file
           </button>
           <button
             type="button"
@@ -180,23 +202,31 @@ async function pickFromGallery(entry: MergedPrint) {
         </div>
 
         <div v-if="tab === 'upload'" class="mt-4 flex-1 overflow-y-auto">
-          <label
+          <button
+            type="button"
             class="flex h-48 w-full cursor-pointer items-center justify-center rounded-media border border-dashed text-caption transition-colors"
             :class="dragOver ? 'border-safelight text-safelight' : 'border-control-edge text-ink-3'"
+            data-test="picker-native-file-button"
             @dragover.prevent="dragOver = true"
             @dragleave="dragOver = false"
             @drop.prevent="onDrop"
+            @click="chooseFiles"
           >
-            <span>Drop a PNG or JPEG here or click to browse</span>
-            <input
-              type="file"
-              accept="image/png,image/jpeg"
-              :multiple="multiple"
-              class="hidden"
-              data-test="picker-upload-input"
-              @change="onFiles"
-            />
-          </label>
+            <span
+              class="text-caption text-ink-2 underline decoration-dotted underline-offset-4 hover:text-ink"
+            >
+              Drop a PNG or JPEG here, or choose a file
+            </span>
+          </button>
+          <input
+            ref="fallbackFileInput"
+            type="file"
+            accept="image/png,image/jpeg"
+            :multiple="multiple"
+            class="hidden"
+            data-test="picker-browser-file-input"
+            @change="onFiles"
+          />
           <p v-if="error" class="mt-2 text-caption text-stop" data-test="picker-upload-error">
             {{ error }}
           </p>
