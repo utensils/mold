@@ -23,9 +23,16 @@ afterEach(() => {
 });
 
 describe("mobile settings persistence", () => {
-  it("defaults new and corrupt installs to Mold with system appearance", () => {
-    expect(loadMobileSettings(memoryStorage())).toEqual(DEFAULT_MOBILE_SETTINGS);
-    expect(loadMobileSettings(memoryStorage("not json"))).toEqual(DEFAULT_MOBILE_SETTINGS);
+  it("defaults new and corrupt installs to Safelight with system appearance", () => {
+    expect(DEFAULT_MOBILE_SETTINGS).toEqual({ theme: "system", themeFamily: "safelight" });
+    expect(loadMobileSettings(memoryStorage())).toEqual({
+      theme: "system",
+      themeFamily: "safelight",
+    });
+    expect(loadMobileSettings(memoryStorage("not json"))).toEqual({
+      theme: "system",
+      themeFamily: "safelight",
+    });
   });
 
   it("keeps each valid field when another stored value is unknown", () => {
@@ -33,12 +40,18 @@ describe("mobile settings persistence", () => {
       loadMobileSettings(
         memoryStorage(JSON.stringify({ theme: "light", themeFamily: "unknown", future: true })),
       ),
-    ).toEqual({ theme: "light", themeFamily: "mold" });
+    ).toEqual({ theme: "light", themeFamily: "safelight" });
     expect(
       loadMobileSettings(
         memoryStorage(JSON.stringify({ theme: "sepia", themeFamily: "safelight" })),
       ),
     ).toEqual({ theme: "system", themeFamily: "safelight" });
+  });
+
+  it("preserves an existing user's saved Mold preference", () => {
+    expect(
+      loadMobileSettings(memoryStorage(JSON.stringify({ theme: "dark", themeFamily: "mold" }))),
+    ).toEqual({ theme: "dark", themeFamily: "mold" });
   });
 
   it("persists and applies a change immediately, including native iOS appearance", () => {

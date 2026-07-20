@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **New iPhone installs now start with the Safelight theme family.** System appearance remains the default, and existing users keep their saved Safelight or Mold choice.
 - **iPhone resolution and seed controls are more direct.** The redundant selected-resolution summary card is gone: orientation, proportionally drawn aspect-ratio tiles, the resolution tier, and custom-size fields now serve as both the choice and its confirmation. Seed uses clear Random and Fixed modes with last-seed reuse, one-tap replacement, and validation that prevents invalid fixed values from silently becoming random requests.
 
 ### Fixed
