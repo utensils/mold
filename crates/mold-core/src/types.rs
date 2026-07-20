@@ -331,6 +331,15 @@ pub struct GenerateRequest {
     /// Original user prompt before expansion (set by client when expanding locally).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    /// Durable client-generated identifier shared by prepared batch siblings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// One-based sibling position within `batch_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+    /// Total number of siblings in the prepared batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_count: Option<u32>,
     /// LoRA adapter to apply during generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraWeight>,
@@ -607,6 +616,12 @@ pub struct OutputMetadata {
     pub negative_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_count: Option<u32>,
     pub model: String,
     pub seed: u64,
     pub steps: u32,
@@ -696,6 +711,9 @@ impl OutputMetadata {
             prompt: req.prompt.clone(),
             negative_prompt: req.negative_prompt.clone(),
             original_prompt: req.original_prompt.clone(),
+            batch_id: req.batch_id.clone(),
+            batch_index: req.batch_index,
+            batch_count: req.batch_count,
             model: req.model.clone(),
             seed,
             steps: req.steps,
@@ -1404,6 +1422,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1587,6 +1608,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1638,6 +1662,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1686,6 +1713,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: Some("prepared-batch-1".to_string()),
+            batch_index: Some(2),
+            batch_count: Some(3),
             lora: None,
             frames: None,
             fps: None,
@@ -1708,6 +1738,9 @@ mod tests {
         let metadata = OutputMetadata::from_generate_request(&req, 7, None, "0.1.0");
         assert_eq!(metadata.strength, None);
         assert_eq!(metadata.version, "0.1.0");
+        assert_eq!(metadata.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(metadata.batch_index, Some(2));
+        assert_eq!(metadata.batch_count, Some(3));
         // No source image → no provenance fields (and the label alone never
         // rides without the image).
         assert_eq!(metadata.source_image_name, None);
@@ -1746,6 +1779,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1826,6 +1862,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1874,6 +1913,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -1925,6 +1967,9 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: Some(97),
             fps: Some(24),
@@ -2316,6 +2361,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2370,6 +2418,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2437,6 +2488,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2489,6 +2543,9 @@ mod tests {
             control_scale: 0.8,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2562,6 +2619,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,

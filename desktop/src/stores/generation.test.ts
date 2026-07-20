@@ -125,12 +125,40 @@ describe("batch sequencing", () => {
     const plans = planBatchRequests(req, 3, 40, {
       prompts,
       originalPrompt: "a lighthouse at dusk",
+      batchId: "batch-abc",
     });
 
     expect(plans).toEqual([
-      { ...req, prompt: prompts[0], original_prompt: req.prompt, seed: 40, batch_size: 1 },
-      { ...req, prompt: prompts[1], original_prompt: req.prompt, seed: 41, batch_size: 1 },
-      { ...req, prompt: prompts[2], original_prompt: req.prompt, seed: 42, batch_size: 1 },
+      {
+        ...req,
+        prompt: prompts[0],
+        original_prompt: req.prompt,
+        batch_id: "batch-abc",
+        batch_index: 1,
+        batch_count: 3,
+        seed: 40,
+        batch_size: 1,
+      },
+      {
+        ...req,
+        prompt: prompts[1],
+        original_prompt: req.prompt,
+        batch_id: "batch-abc",
+        batch_index: 2,
+        batch_count: 3,
+        seed: 41,
+        batch_size: 1,
+      },
+      {
+        ...req,
+        prompt: prompts[2],
+        original_prompt: req.prompt,
+        batch_id: "batch-abc",
+        batch_index: 3,
+        batch_count: 3,
+        seed: 42,
+        batch_size: 1,
+      },
     ]);
   });
 

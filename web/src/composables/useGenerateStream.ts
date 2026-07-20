@@ -241,6 +241,10 @@ function buildChainRequest(
     // when the form's enableAudio is null — the chain endpoint then
     // defaults to off, matching the wire's omit-when-None semantics.
     enable_audio: req.enable_audio ?? undefined,
+    original_prompt: req.original_prompt ?? undefined,
+    batch_id: req.batch_id ?? undefined,
+    batch_index: req.batch_index ?? undefined,
+    batch_count: req.batch_count ?? undefined,
   };
 }
 

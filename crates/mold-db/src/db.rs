@@ -359,6 +359,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<GenerationRecord> 
         prompt: row.get(8)?,
         negative_prompt: row.get(9)?,
         original_prompt: row.get(10)?,
+        batch_id: None,
+        batch_index: None,
+        batch_count: None,
         seed: row.get::<_, i64>(11)? as u64,
         steps: row.get::<_, i64>(12)? as u32,
         guidance: row.get(13)?,
@@ -466,6 +469,9 @@ mod tests {
             prompt: "a cat".into(),
             negative_prompt: Some("blurry".into()),
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             model: "flux-dev:q4".into(),
             seed: 42,
             steps: 20,
@@ -545,6 +551,9 @@ mod tests {
         rec.metadata.cfg_plus = Some(true);
         rec.metadata.control_model = Some("controlnet-canny-sd15".into());
         rec.metadata.control_scale = Some(0.8);
+        rec.metadata.batch_id = Some("prepared-batch-1".into());
+        rec.metadata.batch_index = Some(2);
+        rec.metadata.batch_count = Some(3);
 
         db.upsert(&rec).unwrap();
         let got = db
@@ -563,6 +572,9 @@ mod tests {
             Some("controlnet-canny-sd15")
         );
         assert_eq!(got.metadata.control_scale, Some(0.8));
+        assert_eq!(got.metadata.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(got.metadata.batch_index, Some(2));
+        assert_eq!(got.metadata.batch_count, Some(3));
     }
 
     #[test]

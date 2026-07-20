@@ -49,6 +49,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before you press Generate. Drop a PNG or JPEG from the file manager anywhere
   in Generate to attach it as the current family's source; Mold images with
   embedded generation metadata also restore their complete saved settings.
+  Prompt expansion follows Batch: Batch 1 is a quick rewrite with undo, while
+  Batch N greater than 1 prepares exactly N editable variations for review
+  before generation. Mold shows and freezes the resolved host for expansion
+  and every sibling. Source, model, host, or count changes keep the reviewed
+  work visible but require refresh or discard before it can run. Gallery shows
+  each prepared print's durable batch identity and sibling position.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
   every parameter restored. All merges every connected host without repeating

@@ -1665,6 +1665,9 @@ mod tests {
             control_scale: 1.0,
             expand: None,
             original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
             lora: None,
             frames: None,
             fps: None,
@@ -2307,7 +2310,10 @@ mod tests {
 
     #[test]
     fn build_sse_complete_event_carries_saved_names_and_recorded_metadata() {
-        let req = fake_request("flux-dev:q4");
+        let mut req = fake_request("flux-dev:q4");
+        req.batch_id = Some("prepared-batch-1".to_string());
+        req.batch_index = Some(2);
+        req.batch_count = Some(3);
         let resp = mold_core::GenerateResponse {
             images: vec![fake_image()],
             video: None,
@@ -2341,6 +2347,9 @@ mod tests {
         assert_eq!(meta.seed, 5);
         assert_eq!(meta.width, fake_image().width);
         assert_eq!(meta.height, fake_image().height);
+        assert_eq!(meta.batch_id.as_deref(), Some("prepared-batch-1"));
+        assert_eq!(meta.batch_index, Some(2));
+        assert_eq!(meta.batch_count, Some(3));
 
         let metadata_only = build_sse_complete_event(
             &resp,

@@ -252,6 +252,10 @@ describe("automatic chain request projection", () => {
     enable_audio: true,
     cfg_plus: true,
     scheduler: "unipc",
+    original_prompt: "a lighthouse at dusk",
+    batch_id: "prepared-batch-1",
+    batch_index: 2,
+    batch_count: 3,
   };
 
   it("builds only fields accepted by the server auto-expand form", () => {
@@ -275,6 +279,10 @@ describe("automatic chain request projection", () => {
       output_format: "mp4",
       source_image: "source-b64",
       enable_audio: true,
+      original_prompt: "a lighthouse at dusk",
+      batch_id: "prepared-batch-1",
+      batch_index: 2,
+      batch_count: 3,
     });
   });
 

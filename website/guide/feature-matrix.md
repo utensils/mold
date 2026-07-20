@@ -104,16 +104,16 @@ the Metal backend — LTX-2 is the only family that is currently CUDA-gated.
 Both native apps use the family capabilities above and the same generation
 request contract. Their platform roles differ intentionally:
 
-| Area             | Desktop                                                                              | iPhone                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Engine           | Built-in local engine plus remote hosts                                              | Remote hosts only                                                                                          |
-| Generate         | Capability-driven image/video controls, batch jobs, estimates                        | Same core controls and independent batch jobs, optimized for touch                                         |
-| Gallery          | Unified local/remote grid with host filters, deduplication, and desktop file actions | Merged saved-host gallery with full-screen image/video, swipe navigation, Use as prompt, and Use as source |
-| Catalog          | Installed/live union, host-targeted Pull/Repair, download progress                   | Installed/live union, host picker, Connecting/Starting/Queued/Pulling feedback, cancel, load/unload/remove |
-| Hosts            | This device plus remembered/discovered remote hosts, automatic routing choices       | Bonjour, IP/DNS/HTTPS, or Tailscale MagicDNS; explicit generation host and detailed telemetry              |
-| Settings         | Engine, accounts, hosts, performance, generation, themes, and Stable/Nightly updater | Mold/Safelight, System/Dark/Light, remote-host shortcut, version, and TestFlight update channel            |
-| Chains and cloud | Chains authoring/jobs and RunPod provisioning                                        | Generation-time video/auto-chain controls only; no Chains or RunPod workspace yet                          |
-| Updates          | Signed Stable/Nightly in-app updater on macOS                                        | Internal TestFlight builds after eligible `main` CI                                                        |
+| Area             | Desktop                                                                                    | iPhone                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Engine           | Built-in local engine plus remote hosts                                                    | Remote hosts only                                                                                          |
+| Generate         | Capability-driven image/video controls, review-first prepared expansion batches, estimates | Same core controls and independent batch jobs, optimized for touch                                         |
+| Gallery          | Unified local/remote grid with host filters, deduplication, and desktop file actions       | Merged saved-host gallery with full-screen image/video, swipe navigation, Use as prompt, and Use as source |
+| Catalog          | Installed/live union, host-targeted Pull/Repair, download progress                         | Installed/live union, host picker, Connecting/Starting/Queued/Pulling feedback, cancel, load/unload/remove |
+| Hosts            | This device plus remembered/discovered remote hosts, automatic routing choices             | Bonjour, IP/DNS/HTTPS, or Tailscale MagicDNS; explicit generation host and detailed telemetry              |
+| Settings         | Engine, accounts, hosts, performance, generation, themes, and Stable/Nightly updater       | Mold/Safelight, System/Dark/Light, remote-host shortcut, version, and TestFlight update channel            |
+| Chains and cloud | Chains authoring/jobs and RunPod provisioning                                              | Generation-time video/auto-chain controls only; no Chains or RunPod workspace yet                          |
+| Updates          | Signed Stable/Nightly in-app updater on macOS                                              | Internal TestFlight builds after eligible `main` CI                                                        |
 
 See the [Desktop App](/guide/desktop) and [iPhone App](/guide/iphone) guides for
 complete workflows.

@@ -10,7 +10,7 @@
 import { defineStore } from "pinia";
 import { watch } from "vue";
 import { useDownloadsStore, type DownloadHostState } from "./downloads";
-import { useGenerationStore } from "./generation";
+import { useGenerationStore, type BatchRequestOptions } from "./generation";
 import { useToastStore } from "./toasts";
 import type { HostRoute } from "./hosts";
 import type { DownloadJob, GenerateRequest } from "../lib/api/types";
@@ -30,6 +30,8 @@ export interface PendingResume {
   route: HostRoute | null;
   /** Preserve automatic long-video endpoint selection across the pull. */
   chainRouting?: ChainRoutingDecision | null;
+  /** Preserve ordered prepared prompts and their shared source provenance. */
+  requestOptions?: BatchRequestOptions;
 }
 
 const isTerminal = (job: DownloadJob) =>
@@ -82,17 +84,30 @@ export const usePullResumeStore = defineStore("pullResume", {
         useToastStore().push(`${pending.model} is ready on ${pending.hostLabel} — generating`);
         // The resumed submit must not fail silently — the last thing the
         // user saw was a promise that it would generate.
-        void useGenerationStore()
-          .submitBatch(pending.request, pending.batch, pending.route, pending.chainRouting ?? null)
-          .settled.then((jobs) => {
-            const failed = jobs.find((job) => job.status === "error");
-            if (failed?.error && failed.error !== "Cancelled") {
-              useToastStore().push(
-                `Resumed generation of ${pending.model} failed — ${failed.error}`,
-                "error",
-              );
-            }
-          });
+        const generation = useGenerationStore();
+        const submission = pending.requestOptions
+          ? generation.submitBatch(
+              pending.request,
+              pending.batch,
+              pending.route,
+              pending.chainRouting ?? null,
+              pending.requestOptions,
+            )
+          : generation.submitBatch(
+              pending.request,
+              pending.batch,
+              pending.route,
+              pending.chainRouting ?? null,
+            );
+        void submission.settled.then((jobs) => {
+          const failed = jobs.find((job) => job.status === "error");
+          if (failed?.error && failed.error !== "Cancelled") {
+            useToastStore().push(
+              `Resumed generation of ${pending.model} failed — ${failed.error}`,
+              "error",
+            );
+          }
+        });
         return;
       }
       const failed = fresh.find((job) => job.status !== "completed");

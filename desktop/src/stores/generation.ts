@@ -109,6 +109,8 @@ export interface BatchRequestOptions {
   prompts?: readonly string[];
   /** Shared source prompt retained as provenance on every sibling request. */
   originalPrompt?: string;
+  /** Durable identity shared by prepared siblings and retained in gallery metadata. */
+  batchId?: string;
 }
 
 /**
@@ -134,6 +136,9 @@ export function planBatchRequests(
     ...req,
     ...(options.prompts !== undefined ? { prompt: options.prompts[i]! } : {}),
     ...(options.originalPrompt !== undefined ? { original_prompt: options.originalPrompt } : {}),
+    ...(options.batchId !== undefined
+      ? { batch_id: options.batchId, batch_index: i + 1, batch_count: size }
+      : {}),
     seed: baseSeed + i,
     batch_size: 1,
   }));

@@ -146,6 +146,64 @@ describe("pullResume store", () => {
     expect(submit).toHaveBeenCalledWith(request, 1, null, chainRouting);
   });
 
+  it("preserves prepared prompt order and source provenance after a pull", () => {
+    const requestOptions = {
+      prompts: ["storm light", "sea mist"],
+      originalPrompt: "a lighthouse at dusk",
+    };
+    const store = usePullResumeStore();
+    store.arm({
+      model: "jibmix-flux:fp8",
+      hostId: null,
+      hostLabel: "plato",
+      request,
+      batch: 2,
+      route: null,
+      requestOptions,
+    });
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) } as never);
+
+    useDownloadsStore().history = [job("prepared-download", "jibmix-flux:fp8", "completed")];
+    store.check();
+
+    expect(submit).toHaveBeenCalledWith(request, 2, null, null, requestOptions);
+  });
+
+  it("preserves prepared provenance together with automatic chain routing after a pull", () => {
+    const chainRouting: ChainRoutingDecision = {
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: 17,
+      stageCount: 2,
+    };
+    const requestOptions = {
+      prompts: ["storm light", "sea mist"],
+      originalPrompt: "a lighthouse at dusk",
+      batchId: "prepared-batch-1",
+    };
+    const store = usePullResumeStore();
+    store.arm({
+      model: request.model,
+      hostId: null,
+      hostLabel: "plato",
+      request,
+      batch: 2,
+      route: null,
+      chainRouting,
+      requestOptions,
+    });
+    const submit = vi
+      .spyOn(useGenerationStore(), "submitBatch")
+      .mockReturnValue({ jobs: [], settled: Promise.resolve([]) } as never);
+
+    useDownloadsStore().history = [job("prepared-chain-download", request.model, "completed")];
+    store.check();
+
+    expect(submit).toHaveBeenCalledWith(request, 2, null, chainRouting, requestOptions);
+  });
+
   it("cancel() clears the pending resume without submitting", () => {
     const store = armOnPrimary();
     store.cancel();
