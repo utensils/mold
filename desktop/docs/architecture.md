@@ -32,6 +32,11 @@ owns the input snapshot, monotonic request guard, frozen `HostRoute`, and stale
 calculation; `PreparedExpansionBatch.vue` owns inline review and focus behavior;
 `stores/generation.ts` maps the ordered prompts plus shared source provenance and
 durable batch ID/position metadata to one independently cancellable sibling each.
+`ExpansionPullStatus.vue` is shared by quick and prepared expansion while
+`GenerateView` projects only the frozen route's `useDownloadsStore` bucket into
+its lifecycle. Returned job IDs are authoritative; a newly observed exact-model
+in-flight row covers older snapshot/response timing without treating stale
+history or another host's matching pull as completion.
 Capability discovery is advisory
 per host and never participates in fallback routing.
 Gallery merges every saved remote host, streams full-size media through a

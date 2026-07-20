@@ -98,7 +98,9 @@ review before any work is queued. Expansion and every generated sibling stay
 on one resolved host (including Batch 1's next Generate), and changes to the
 source prompt, model, host, or count preserve the prepared work while requiring
 an explicit refresh or discard. Gallery records the prepared batch identity and
-each sibling's position.
+each sibling's position. If that host lacks the expansion model, Generate keeps
+the recovery in place and shows its exact-host pull from connection through
+queue, byte/file progress, readiness, or retry without hiding reviewed prompts.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 

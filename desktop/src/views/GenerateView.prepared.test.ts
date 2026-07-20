@@ -4,24 +4,41 @@ import { createPinia, setActivePinia } from "pinia";
 import GenerateView from "./GenerateView.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
+import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
 import { useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
+import { useDownloadsStore } from "../stores/downloads";
 import { useUiStore } from "../stores/ui";
 import { expandPrompt } from "../lib/api/expand";
 import { startCatalogDownload } from "../lib/api/catalog";
+import { ApiError } from "../lib/api/client";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import type { ModelEntry } from "../lib/api/types";
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {
-    status = 500;
+    constructor(
+      message: string,
+      public readonly status: number,
+      public readonly body: unknown = null,
+    ) {
+      super(message);
+    }
   },
   apiJson: (...args: unknown[]) => apiJson(...args),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
@@ -49,7 +66,9 @@ function mountView() {
   return mount(GenerateView, {
     shallow: true,
     attachTo: document.body,
-    global: { stubs: { ExpandControl: false, PreparedExpansionBatch: false } },
+    global: {
+      stubs: { ExpandControl: false, PreparedExpansionBatch: false, ExpansionPullStatus: false },
+    },
   });
 }
 
@@ -508,6 +527,7 @@ describe("GenerateView prepared expansion batches", () => {
   });
 
   it("offers a missing expansion-model pull on the exact resolved host", async () => {
+    const subscribe = vi.spyOn(useDownloadsStore(), "subscribe").mockResolvedValue();
     vi.mocked(expandPrompt).mockRejectedValue(
       new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
     );
@@ -516,15 +536,257 @@ describe("GenerateView prepared expansion batches", () => {
     wrapper.findComponent(ExpandControl).vm.$emit("expand");
     await flushPromises();
 
-    expect(wrapper.get('[role="alert"]').text()).toContain(
+    expect(wrapper.get('[data-test="expansion-pull-status"]').text()).toContain(
       "qwen3-expand:q8 isn't installed on This device",
     );
-    await wrapper.get('[data-test="pull-expand-model"]').trigger("click");
+    wrapper.findComponent(ExpansionPullStatus).vm.$emit("pull");
     await flushPromises();
+    expect(subscribe).toHaveBeenCalled();
     expect(startCatalogDownload).toHaveBeenCalledWith(
       "qwen3-expand:q8",
       { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
       false,
+    );
+  });
+
+  it("keeps Batch 1 pull progress inline from connection through exact-job readiness", async () => {
+    useGenerateFormStore().form.batchSize = 1;
+    const stream = deferred<void>();
+    const start = deferred<string | null>();
+    vi.spyOn(useDownloadsStore(), "subscribe").mockReturnValue(stream.promise);
+    vi.mocked(startCatalogDownload).mockReturnValue(start.promise);
+    vi.mocked(expandPrompt)
+      .mockRejectedValueOnce(new Error("local expand model not found, run: mold pull qwen3-expand"))
+      .mockResolvedValueOnce({ original: "a lighthouse at dusk", expanded: ["storm light"] });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    wrapper.findComponent(ExpansionPullStatus).vm.$emit("pull");
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "connecting",
+    });
+
+    stream.resolve();
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "starting",
+    });
+
+    useDownloadsStore().apply({
+      type: "snapshot",
+      listing: {
+        active_jobs: [],
+        queued: [
+          {
+            id: "snapshot-before-id",
+            model: "qwen3-expand:q8",
+            status: "queued",
+            files_done: 0,
+            files_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+          },
+        ],
+        history: [],
+      },
+    });
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "queued",
+      job: { id: "snapshot-before-id" },
+    });
+
+    start.resolve(null);
+    await flushPromises();
+    useDownloadsStore().apply({
+      type: "started",
+      id: "snapshot-before-id",
+      files_total: 2,
+      bytes_total: 1_000,
+    });
+    useDownloadsStore().apply({
+      type: "progress",
+      id: "snapshot-before-id",
+      files_done: 1,
+      bytes_done: 750,
+      current_file: "model.safetensors",
+    });
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "pulling",
+      job: { bytes_done: 750, current_file: "model.safetensors" },
+    });
+
+    useDownloadsStore().apply({
+      type: "job_done",
+      id: "snapshot-before-id",
+      model: "qwen3-expand:q8",
+    });
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "ready",
+    });
+    wrapper.findComponent(ExpansionPullStatus).vm.$emit("retry-expansion");
+    await flushPromises();
+    expect(expandPrompt).toHaveBeenLastCalledWith(
+      "a lighthouse at dusk",
+      { variations: 1, modelFamily: "flux" },
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+    );
+    expect(useGenerateFormStore().form.prompt).toBe("storm light");
+  });
+
+  it("adopts the exact already-queued job id from a 409 body for the real bare alias", async () => {
+    useGenerateFormStore().form.batchSize = 1;
+    const downloads = useDownloadsStore();
+    downloads.queued = [
+      {
+        id: "existing-A",
+        model: "qwen3-expand:q8",
+        status: "queued",
+        files_done: 0,
+        files_total: 0,
+        bytes_done: 0,
+        bytes_total: 0,
+      },
+      {
+        id: "competing-B",
+        model: "qwen3-expand:q8",
+        status: "queued",
+        files_done: 0,
+        files_total: 0,
+        bytes_done: 0,
+        bytes_total: 0,
+      },
+    ];
+    vi.spyOn(downloads, "subscribe").mockResolvedValue();
+    vi.mocked(startCatalogDownload).mockRejectedValue(
+      new ApiError("already queued", 409, { id: "existing-A" }),
+    );
+    vi.mocked(expandPrompt).mockRejectedValue(
+      new Error("local expand model not found, run: mold pull qwen3-expand"),
+    );
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(ExpansionPullStatus).vm.$emit("pull");
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "qwen3-expand",
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+      false,
+    );
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "queued",
+      job: { id: "existing-A" },
+    });
+  });
+
+  it("places the same inline pull surface inside a preserved prepared batch", async () => {
+    vi.mocked(expandPrompt)
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["one", "two", "three"],
+      })
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      );
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(PreparedExpansionBatch).vm.$emit("regenerate");
+    await flushPromises();
+
+    const prepared = wrapper.findComponent(PreparedExpansionBatch);
+    expect(prepared.exists()).toBe(true);
+    expect(prepared.props("pullStatus")).toEqual({ kind: "missing", job: null });
+    expect(prepared.props("pullModel")).toBe("qwen3-expand:q8");
+    expect(prepared.findComponent(ExpansionPullStatus).exists()).toBe(true);
+  });
+
+  it("ignores matching download activity from every host except the frozen route", async () => {
+    useGenerateFormStore().form.batchSize = 1;
+    const hosts = useHostsStore();
+    hosts.extras = [
+      {
+        id: "studio",
+        label: "Studio GPU",
+        url: "http://studio:7680",
+        apiKey: "studio-key",
+        status: "ready",
+        error: null,
+        instanceId: "studio-instance",
+      },
+    ];
+    vi.spyOn(hosts, "resolveRoute").mockReturnValue({
+      hostId: "studio",
+      label: "Studio GPU",
+      kind: "remote",
+      target: { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+    });
+    const downloads = useDownloadsStore();
+    downloads.hostStates.studio = {
+      label: "Studio GPU",
+      target: { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+      subscribed: true,
+      abort: null,
+      cancelling: [],
+      ready: null,
+      activeJobs: [],
+      queued: [],
+      history: [],
+    };
+    const subscribe = vi.spyOn(downloads, "subscribe").mockResolvedValue();
+    vi.mocked(startCatalogDownload).mockReturnValue(new Promise(() => {}));
+    vi.mocked(expandPrompt).mockRejectedValue(
+      new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+    );
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    wrapper.findComponent(ExpansionPullStatus).vm.$emit("pull");
+    await flushPromises();
+    expect(subscribe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "studio",
+        baseUrl: "http://studio:7680",
+        apiKey: "studio-key",
+      }),
+    );
+
+    downloads.apply({
+      type: "enqueued",
+      id: "wrong-host-job",
+      model: "qwen3-expand:q8",
+      position: 1,
+    });
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "starting",
+    });
+
+    downloads.applyForHost("studio", {
+      type: "enqueued",
+      id: "exact-host-job",
+      model: "qwen3-expand:q8",
+      position: 1,
+    });
+    await flushPromises();
+    expect(wrapper.findComponent(ExpansionPullStatus).props("status")).toMatchObject({
+      kind: "queued",
+      job: { id: "exact-host-job" },
+    });
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      "qwen3-expand:q8",
+      { baseUrl: "http://studio:7680", apiKey: "studio-key" },
+      true,
     );
   });
 

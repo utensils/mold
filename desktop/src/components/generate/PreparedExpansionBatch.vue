@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { hostSelectionLabel, type PreparedExpansionBatch } from "../../lib/preparedExpansion";
+import type { ExpansionPullView } from "../../lib/expansionPull";
+import ExpansionPullStatus from "./ExpansionPullStatus.vue";
 
 const props = defineProps<{
   batch: PreparedExpansionBatch;
   staleReasons: string[];
   preparing: boolean;
   error: string | null;
-  missingModel: string | null;
-  errorHostLabel: string | null;
+  pullStatus: ExpansionPullView | null;
+  pullModel: string | null;
+  pullHostLabel: string | null;
+  pullEtaSeconds: number | null;
   activeHostLabel: string | null;
   submitting: boolean;
 }>();
@@ -21,6 +25,7 @@ const emit = defineEmits<{
   (e: "refresh"): void;
   (e: "discard"): void;
   (e: "pull"): void;
+  (e: "retry-expansion"): void;
   (e: "generate"): void;
 }>();
 
@@ -170,21 +175,23 @@ function confirmCollapse() {
     </div>
 
     <div
-      v-if="error"
+      v-if="error && !pullStatus"
       role="alert"
       class="border-stop/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
     >
       <span>{{ error }}</span>
-      <button
-        v-if="missingModel"
-        type="button"
-        data-test="pull-expand-model"
-        class="min-h-7 rounded-control border border-stop/60 px-2 text-caption text-ink transition-colors duration-100 hover:border-stop"
-        @click="emit('pull')"
-      >
-        Pull {{ missingModel }} on {{ errorHostLabel ?? batch.route.label }}
-      </button>
     </div>
+
+    <ExpansionPullStatus
+      v-if="pullStatus && pullModel && pullHostLabel && error"
+      :model="pullModel"
+      :host-label="pullHostLabel"
+      :error="error"
+      :status="pullStatus"
+      :eta-seconds="pullEtaSeconds"
+      @pull="emit('pull')"
+      @retry-expansion="emit('retry-expansion')"
+    />
 
     <ol class="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
       <li

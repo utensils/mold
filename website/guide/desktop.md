@@ -54,7 +54,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   before generation. Mold shows and freezes the resolved host for expansion
   and every sibling. Source, model, host, or count changes keep the reviewed
   work visible but require refresh or discard before it can run. Gallery shows
-  each prepared print's durable batch identity and sibling position.
+  each prepared print's durable batch identity and sibling position. When the
+  expansion model is missing, the same inline area follows its pull on that
+  frozen host through connection, queue, byte/file/ETA progress, readiness, or
+  retry; it never redirects away from the composer or hides prepared work.
 - **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
   every parameter restored. All merges every connected host without repeating

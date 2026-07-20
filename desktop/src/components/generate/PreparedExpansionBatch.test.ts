@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import PreparedExpansionBatch from "./PreparedExpansionBatch.vue";
 import { createPreparedExpansionBatch } from "../../lib/preparedExpansion";
+import type { ExpansionPullView } from "../../lib/expansionPull";
 
 const batch = () =>
   createPreparedExpansionBatch(
@@ -29,8 +30,10 @@ function mountBatch(
     staleReasons: string[];
     preparing: boolean;
     error: string | null;
-    missingModel: string | null;
-    errorHostLabel: string | null;
+    pullStatus: ExpansionPullView | null;
+    pullModel: string | null;
+    pullHostLabel: string | null;
+    pullEtaSeconds: number | null;
     activeHostLabel: string | null;
     submitting: boolean;
   }> = {},
@@ -42,8 +45,10 @@ function mountBatch(
       staleReasons: [],
       preparing: false,
       error: null,
-      missingModel: null,
-      errorHostLabel: null,
+      pullStatus: null,
+      pullModel: null,
+      pullHostLabel: null,
+      pullEtaSeconds: null,
       activeHostLabel: null,
       submitting: false,
       ...props,
@@ -185,7 +190,9 @@ describe("PreparedExpansionBatch", () => {
   it("exposes regenerate, discard, pull, and generate actions with explicit labels", async () => {
     const wrapper = mountBatch({
       error: "Expansion model is missing.",
-      missingModel: "Qwen/Qwen3",
+      pullStatus: { kind: "missing", job: null },
+      pullModel: "Qwen/Qwen3",
+      pullHostLabel: "Studio 4090",
     });
     await wrapper.get('[data-test="regenerate-prepared"]').trigger("click");
     await wrapper.get('[data-test="discard-prepared"]').trigger("click");

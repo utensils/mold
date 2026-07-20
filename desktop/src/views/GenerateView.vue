@@ -16,6 +16,7 @@ import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import SourceImageWell from "../components/generate/SourceImageWell.vue";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import ExpandControl from "../components/generate/ExpandControl.vue";
+import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
 import HostSelector from "../components/generate/HostSelector.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
@@ -81,7 +82,7 @@ import {
 } from "../lib/sourceRestore";
 import { isMissingModelError } from "../lib/generateErrors";
 import { startCatalogDownload } from "../lib/api/catalog";
-import { useDownloadsStore } from "../stores/downloads";
+import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
 import { localMediaPath, mediaPath } from "../lib/gallery/media";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
@@ -92,6 +93,12 @@ import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
 import { parseMissingExpandModel } from "../lib/expandErrors";
+import {
+  expansionPullJobMatchesModel,
+  resolveExpansionPullStatus,
+  type ExpansionPullPhase,
+  type ExpansionPullView,
+} from "../lib/expansionPull";
 import {
   PreparationRequestGuard,
   createPreparedExpansionBatch,
@@ -210,6 +217,20 @@ const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
 const expansionError = ref<string | null>(null);
 const expansionMissingModel = ref<{ model: string; route: HostRoute } | null>(null);
+interface ExpansionPullAttempt {
+  id: number;
+  model: string;
+  route: HostRoute;
+  phase: Exclude<ExpansionPullPhase, "missing">;
+  jobId: string | null;
+  observedJobId: string | null;
+  baselineMatchingInFlightId: string | null;
+  baselineJobIds: string[];
+  allowExistingInFlight: boolean;
+  requestError: string | null;
+}
+const expansionPullAttempt = ref<ExpansionPullAttempt | null>(null);
+let expansionPullRequestId = 0;
 const expansionAttemptHostLabel = ref<string | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
@@ -624,6 +645,7 @@ function describeExpansionError(error: unknown, route: HostRoute): string {
   const message = error instanceof Error ? error.message : String(error);
   const missingModel = parseMissingExpandModel(message);
   expansionMissingModel.value = missingModel ? { model: missingModel, route } : null;
+  expansionPullAttempt.value = null;
   return missingModel
     ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
     : `Expansion failed on ${route.label}: ${message}`;
@@ -634,7 +656,10 @@ function describeExpansionError(error: unknown, route: HostRoute): string {
  * prepared batch. A refresh can resolve the current policy again, but an
  * already prepared batch never does so implicitly.
  */
-async function expandForCurrentBatch(replacePrepared = false) {
+async function expandForCurrentBatch(
+  replacePrepared = false,
+  routeOverride: HostRoute | null = null,
+) {
   const count = effectiveBatchSize.value;
   const inputs = expansionInputs(count);
   if (
@@ -658,7 +683,7 @@ async function expandForCurrentBatch(replacePrepared = false) {
   // replacement snapshot created below.
   submissionGuard.invalidate();
 
-  const route = currentExpansionRoute.value;
+  const route = routeOverride ?? currentExpansionRoute.value;
   if (!route) {
     expansionAttemptHostLabel.value = null;
     expansionError.value = unavailableExpansionHostMessage();
@@ -798,24 +823,134 @@ function discardPreparedBatch() {
 async function pullExpansionModel() {
   const missing = expansionMissingModel.value;
   if (!missing) return;
+  const route = missing.route;
+  const bucket = downloadBucketForRoute(route);
+  const baselineInFlight = [...bucket.activeJobs, ...bucket.queued];
+  const attempt: ExpansionPullAttempt = {
+    id: ++expansionPullRequestId,
+    model: missing.model,
+    route: { ...route, target: { ...route.target } },
+    phase: "connecting",
+    jobId: null,
+    observedJobId: null,
+    baselineMatchingInFlightId:
+      baselineInFlight.find((job) => expansionPullJobMatchesModel(job, missing.model))?.id ?? null,
+    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
+      (job) => job.id,
+    ),
+    allowExistingInFlight: false,
+    requestError: null,
+  };
+  expansionPullAttempt.value = attempt;
+  const host = hosts.all.find((candidate) => candidate.id === route.hostId) ?? null;
+  const streamHost = host
+    ? {
+        ...host,
+        label: route.label,
+        baseUrl: route.target.baseUrl,
+        apiKey: route.target.apiKey,
+      }
+    : null;
   try {
-    await startCatalogDownload(
-      missing.model,
-      missing.route.target,
-      missing.route.kind === "remote",
-    );
-    toasts.push(
-      `Pulling ${missing.model} on ${missing.route.label}. Retry expansion when it lands.`,
-    );
-    expansionMissingModel.value = null;
+    if (route.kind === "remote" && !host) {
+      throw new Error(`${route.label} is no longer connected.`);
+    }
+    await downloads.subscribe(streamHost ?? undefined);
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    expansionPullAttempt.value.phase = "starting";
+    const jobId = await startCatalogDownload(missing.model, route.target, route.kind === "remote");
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
+    expansionPullAttempt.value.jobId = jobId;
   } catch (error) {
+    if (expansionPullAttempt.value?.id !== attempt.id) return;
     if (error instanceof ApiError && error.status === 409) {
-      toasts.push(`${missing.model} is already downloading on ${missing.route.label}.`);
-      expansionMissingModel.value = null;
+      expansionPullAttempt.value.phase = "starting";
+      expansionPullAttempt.value.allowExistingInFlight = true;
+      const conflictId =
+        typeof error.body === "object" &&
+        error.body !== null &&
+        "id" in error.body &&
+        typeof error.body.id === "string" &&
+        error.body.id.trim()
+          ? error.body.id
+          : null;
+      expansionPullAttempt.value.observedJobId ??=
+        conflictId ?? expansionPullAttempt.value.baselineMatchingInFlightId;
       return;
     }
-    expansionError.value = `Couldn't pull ${missing.model} on ${missing.route.label}: ${error instanceof Error ? error.message : String(error)}`;
+    expansionPullAttempt.value.requestError =
+      error instanceof Error ? error.message : `Couldn't pull ${missing.model} on ${route.label}.`;
   }
+}
+
+function downloadBucketForRoute(route: HostRoute): DownloadsState {
+  if (route.kind === "local" || route.hostId === downloads.primaryHostId) {
+    return downloads;
+  }
+  return downloads.hostStates[route.hostId] ?? { activeJobs: [], queued: [], history: [] };
+}
+
+const expansionPullBucket = computed<DownloadsState>(() => {
+  const route = expansionPullAttempt.value?.route ?? expansionMissingModel.value?.route;
+  return route ? downloadBucketForRoute(route) : { activeJobs: [], queued: [], history: [] };
+});
+
+watch(expansionMissingModel, (missing) => {
+  if (!missing) expansionPullAttempt.value = null;
+});
+
+watch(
+  [expansionPullAttempt, expansionPullBucket],
+  ([attempt, bucket]) => {
+    if (!attempt || attempt.jobId || attempt.observedJobId) return;
+    const baseline = new Set(attempt.baselineJobIds);
+    const candidate = [...bucket.activeJobs, ...bucket.queued].find(
+      (job) =>
+        expansionPullJobMatchesModel(job, attempt.model) &&
+        (attempt.allowExistingInFlight || !baseline.has(job.id)),
+    );
+    if (candidate) attempt.observedJobId = candidate.id;
+  },
+  { deep: true, flush: "sync" },
+);
+
+const expansionPullStatus = computed<ExpansionPullView | null>(() => {
+  const missing = expansionMissingModel.value;
+  if (!missing) return null;
+  const attempt = expansionPullAttempt.value;
+  if (
+    !attempt ||
+    attempt.model !== missing.model ||
+    attempt.route.hostId !== missing.route.hostId
+  ) {
+    return { kind: "missing", job: null };
+  }
+  return resolveExpansionPullStatus({
+    model: attempt.model,
+    phase: attempt.phase,
+    jobId: attempt.jobId,
+    observedJobId: attempt.observedJobId,
+    baselineJobIds: attempt.baselineJobIds,
+    allowExistingInFlight: attempt.allowExistingInFlight,
+    activeJobs: expansionPullBucket.value.activeJobs,
+    queued: expansionPullBucket.value.queued,
+    history: expansionPullBucket.value.history,
+    requestError: attempt.requestError,
+  });
+});
+
+const expansionPullEtaSeconds = computed(() => {
+  const attempt = expansionPullAttempt.value;
+  const job = expansionPullStatus.value?.job;
+  if (!attempt || !job || job.status !== "active") return null;
+  const scope = attempt.route.kind === "local" ? "primary" : attempt.route.hostId;
+  return computeEtaSeconds(downloads.rateSamples[`${scope}:${job.id}`] ?? [], job.bytes_total);
+});
+
+function retryExpansionAfterPull() {
+  const route = expansionPullAttempt.value?.route ?? expansionMissingModel.value?.route;
+  if (!route) return;
+  void expandForCurrentBatch(!!preparedBatch.value, route);
 }
 function appendPromptWord(word: string) {
   const trimmed = word.trim();
@@ -1479,29 +1614,32 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div
-          v-if="expansionError && !preparedBatch"
+          v-if="expansionError && !preparedBatch && !expansionMissingModel"
           role="alert"
           class="border-stop/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
         >
           <span>{{ expansionError }}</span>
-          <button
-            v-if="expansionMissingModel"
-            type="button"
-            data-test="pull-expand-model"
-            class="min-h-7 rounded-control border border-stop/60 px-2 text-caption text-ink transition-colors duration-100 hover:border-stop"
-            @click="pullExpansionModel"
-          >
-            Pull {{ expansionMissingModel.model }} on {{ expansionMissingModel.route.label }}
-          </button>
         </div>
+        <ExpansionPullStatus
+          v-if="expansionError && expansionMissingModel && expansionPullStatus && !preparedBatch"
+          :model="expansionMissingModel.model"
+          :host-label="expansionMissingModel.route.label"
+          :error="expansionError"
+          :status="expansionPullStatus"
+          :eta-seconds="expansionPullEtaSeconds"
+          @pull="pullExpansionModel"
+          @retry-expansion="retryExpansionAfterPull"
+        />
         <PreparedExpansionBatch
           v-if="preparedBatch"
           :batch="preparedBatch"
           :stale-reasons="preparedStaleReasons"
           :preparing="expansionRunning"
           :error="expansionError"
-          :missing-model="expansionMissingModel?.model ?? null"
-          :error-host-label="expansionMissingModel?.route.label ?? null"
+          :pull-status="expansionPullStatus"
+          :pull-model="expansionMissingModel?.model ?? null"
+          :pull-host-label="expansionMissingModel?.route.label ?? null"
+          :pull-eta-seconds="expansionPullEtaSeconds"
           :active-host-label="expansionAttemptHostLabel"
           :submitting="preparedSubmitting"
           @edit="editPreparedPrompt"
@@ -1511,6 +1649,7 @@ onBeforeUnmount(() => {
           @refresh="expandForCurrentBatch(true)"
           @discard="discardPreparedBatch"
           @pull="pullExpansionModel"
+          @retry-expansion="retryExpansionAfterPull"
           @generate="generate"
         />
       </div>
