@@ -6,6 +6,7 @@ pub mod gallery;
 mod macos_window;
 pub mod menu;
 pub mod notifications;
+pub mod relocate;
 pub mod runpod;
 pub mod secrets;
 pub mod server;
@@ -92,6 +93,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
+            // If Mold was launched from a disk image or a translocation path,
+            // offer to move it to /Applications first — running from a transient
+            // bundle poisons the Launch Services icon lookup notifications use.
+            #[cfg(target_os = "macos")]
+            relocate::maybe_offer_relocation(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(app_window_title(cfg!(debug_assertions)))?;
             }
