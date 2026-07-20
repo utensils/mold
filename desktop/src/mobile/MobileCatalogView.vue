@@ -745,7 +745,12 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
     if (pendingPulls.get(key) !== pending) return;
     pending.phase = "starting";
     const jobId = await startCatalogDownload(entry.id, mobileHostTarget(host), false);
+    // A null id is a valid server response when no primary download was
+    // enqueued. Without an id, a later HF delta may use a canonical model
+    // name that cannot be matched back to this catalog card, leaving the
+    // button stuck in "Starting…" indefinitely.
     if (pendingPulls.get(key) === pending) {
+      if (jobId === null) throw new Error(`${host.name} did not return a download job.`);
       pending.jobId = jobId;
       reconcilePendingPulls(host.id);
     }

@@ -577,6 +577,52 @@ describe("MobileCatalogView", () => {
     expect((pullButton.element as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("clears a pending pull when the host returns no job id despite an HF model mismatch", async () => {
+    startCatalogDownload.mockResolvedValue(null);
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Friendly repo name", {
+          id: "hf:owner/repo",
+          source_id: "owner/repo",
+        }),
+      ]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const pullButton = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Friendly repo name"))!
+      .get(".mobile-catalog-pull");
+    await pullButton.trigger("click");
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith("hf:owner/repo", targets.studio, false);
+    expect(pullButton.text()).not.toBe("Starting…");
+    expect((pullButton.element as HTMLButtonElement).disabled).toBe(false);
+    expect(wrapper.get("[data-test='mobile-catalog-action-status']").text()).toContain(
+      "Studio did not return a download job",
+    );
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "canonical-job",
+        model: "canonical-manifest-name",
+        position: 0,
+      } satisfies DownloadEvent),
+    );
+    await flushPromises();
+
+    expect(pullButton.text()).not.toBe("Starting…");
+    expect((pullButton.element as HTMLButtonElement).disabled).toBe(false);
+
+    await pullButton.trigger("click");
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledTimes(2);
+  });
+
   it("does not POST when an asynchronous opening snapshot adopts an existing pull", async () => {
     sseStream.mockImplementation(
       (

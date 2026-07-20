@@ -15,6 +15,32 @@ export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
 
 type SettingsStorage = Pick<Storage, "getItem" | "setItem">;
 type MobileAppearanceInvoker = (command: string, args: { appearance: Theme }) => Promise<unknown>;
+type NativeAppearanceRequest = {
+  appearance: Theme;
+  bridge: MobileAppearanceInvoker;
+};
+
+let pendingNativeAppearance: NativeAppearanceRequest | null = null;
+let nativeAppearanceFlush: Promise<void> | null = null;
+
+async function flushNativeAppearanceQueue(): Promise<void> {
+  try {
+    while (pendingNativeAppearance) {
+      const next = pendingNativeAppearance;
+      pendingNativeAppearance = null;
+      try {
+        await next.bridge("set_mobile_appearance", { appearance: next.appearance });
+      } catch (error) {
+        console.warn("Unable to synchronize the native mobile appearance", error);
+      }
+    }
+  } finally {
+    // Clear ownership before the flush promise resolves. A new request made
+    // from another promise reaction can then start its own drain instead of
+    // attaching to an already-finished flush and becoming stranded.
+    nativeAppearanceFlush = null;
+  }
+}
 
 function defaultStorage(): SettingsStorage | null {
   return typeof localStorage === "undefined" ? null : localStorage;
@@ -65,11 +91,12 @@ export async function syncMobileNativeAppearance(
       : null);
   if (!bridge) return;
 
-  try {
-    await bridge("set_mobile_appearance", { appearance });
-  } catch (error) {
-    console.warn("Unable to synchronize the native mobile appearance", error);
+  pendingNativeAppearance = { appearance, bridge };
+  if (!nativeAppearanceFlush) {
+    nativeAppearanceFlush = flushNativeAppearanceQueue();
   }
+
+  await nativeAppearanceFlush;
 }
 
 export function applyMobileSettings(

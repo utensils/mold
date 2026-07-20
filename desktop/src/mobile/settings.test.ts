@@ -3,6 +3,7 @@ import {
   DEFAULT_MOBILE_SETTINGS,
   MOBILE_SETTINGS_STORAGE_KEY,
   loadMobileSettings,
+  syncMobileNativeAppearance,
   updateMobileSettings,
 } from "./settings";
 
@@ -71,6 +72,50 @@ describe("mobile settings persistence", () => {
 
     expect(nativeInvoke).toHaveBeenCalledWith("set_mobile_appearance", {
       appearance: "system",
+    });
+  });
+
+  it("serializes native updates and applies only the latest pending appearance", async () => {
+    let finishFirst: (() => void) | undefined;
+    const firstUpdate = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const nativeInvoke = vi.fn().mockReturnValueOnce(firstUpdate).mockResolvedValue(undefined);
+
+    const darkUpdate = syncMobileNativeAppearance("dark", nativeInvoke);
+    const lightUpdate = syncMobileNativeAppearance("light", nativeInvoke);
+    const systemUpdate = syncMobileNativeAppearance("system", nativeInvoke);
+
+    expect(nativeInvoke).toHaveBeenCalledTimes(1);
+    expect(nativeInvoke).toHaveBeenNthCalledWith(1, "set_mobile_appearance", {
+      appearance: "dark",
+    });
+
+    finishFirst?.();
+    await Promise.all([darkUpdate, lightUpdate, systemUpdate]);
+
+    expect(nativeInvoke).toHaveBeenCalledTimes(2);
+    expect(nativeInvoke).toHaveBeenNthCalledWith(2, "set_mobile_appearance", {
+      appearance: "system",
+    });
+  });
+
+  it("starts a new native flush for a request made as the prior bridge resolves", async () => {
+    let finishFirst: (() => void) | undefined;
+    const firstUpdate = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const nativeInvoke = vi.fn().mockReturnValueOnce(firstUpdate).mockResolvedValue(undefined);
+
+    const darkUpdate = syncMobileNativeAppearance("dark", nativeInvoke);
+    const lightUpdate = firstUpdate.then(() => syncMobileNativeAppearance("light", nativeInvoke));
+
+    finishFirst?.();
+    await Promise.all([darkUpdate, lightUpdate]);
+
+    expect(nativeInvoke).toHaveBeenCalledTimes(2);
+    expect(nativeInvoke).toHaveBeenLastCalledWith("set_mobile_appearance", {
+      appearance: "light",
     });
   });
 });
