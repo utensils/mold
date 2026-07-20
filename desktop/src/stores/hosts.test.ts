@@ -35,7 +35,7 @@ import { useDownloadsStore } from "./downloads";
 import { useHostModelsStore } from "./hostModels";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
-import type { ModelEntry } from "../lib/api/types";
+import type { ModelEntry, ServerCapabilities } from "../lib/api/types";
 
 function installedModel(name: string): ModelEntry {
   return {
@@ -235,6 +235,84 @@ describe("hosts store", () => {
     const persisted = appSettingsSet.mock.lastCall?.[0] as ReturnType<typeof settings>;
     expect(persisted.connectedHostIds).not.toContain("hal9000-7680");
     expect(persisted.savedHosts.map((h: SavedHost) => h.id)).toContain("hal9000-7680");
+  });
+
+  it("refresh() caches expansion capability for each ready host using its authenticated target", async () => {
+    installSettings(settings({ savedHosts: [hal], connectedHostIds: [hal.id] }));
+    secretGet.mockResolvedValue("host-key");
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockImplementation(
+      (target: { baseUrl: string; apiKey: string | null }, path: string) => {
+        if (path === "/api/capabilities") {
+          return Promise.resolve({
+            gallery: { can_delete: true },
+            expand: target.baseUrl.includes("hal9000")
+              ? { configured: true, model_present: null, backend: "api" }
+              : { configured: true, model_present: true, backend: "local" },
+          } satisfies ServerCapabilities);
+        }
+        return Promise.resolve({ queue_depth: 0, queue_capacity: 8, version: null });
+      },
+    );
+
+    const hosts = useHostsStore();
+    await hosts.init();
+    await hosts.refresh();
+
+    expect(hosts.capabilities.local?.expand).toEqual({
+      configured: true,
+      model_present: true,
+      backend: "local",
+    });
+    expect(hosts.capabilities[hal.id]?.expand).toEqual({
+      configured: true,
+      model_present: null,
+      backend: "api",
+    });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: hal.url, apiKey: "host-key" },
+      "/api/capabilities",
+    );
+  });
+
+  it("keeps an older host's missing expansion capability as unknown and refreshes it later", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(
+        path === "/api/capabilities"
+          ? { gallery: { can_delete: true } }
+          : { queue_depth: 0, queue_capacity: 8, version: null },
+      ),
+    );
+    const hosts = useHostsStore();
+    await hosts.refresh();
+    expect(hosts.capabilities.local?.expand).toBeUndefined();
+
+    apiJsonTo.mockImplementation((_target: unknown, path: string) =>
+      Promise.resolve(
+        path === "/api/capabilities"
+          ? {
+              gallery: { can_delete: true },
+              expand: { configured: true, model_present: false, backend: "local" },
+            }
+          : { queue_depth: 0, queue_capacity: 8, version: null },
+      ),
+    );
+    await hosts.refresh();
+    expect(hosts.capabilities.local?.expand?.model_present).toBe(false);
+  });
+
+  it("disconnect() removes the host capability cache", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.capabilities[hal.id] = {
+      gallery: { can_delete: true },
+      expand: { configured: true, model_present: null, backend: "api" },
+    };
+
+    await hosts.disconnect(hal.id);
+
+    expect(hosts.capabilities[hal.id]).toBeUndefined();
   });
 
   it("resolveRoute(null) auto-routes to the least busy ready host", async () => {

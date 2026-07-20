@@ -120,6 +120,32 @@ describe("batch sequencing", () => {
     expect(plans[0]!.model).toBe(req.model);
   });
 
+  it("maps ordered prompts to seeds with one shared original prompt", () => {
+    const prompts = ["storm-lit lighthouse", "lighthouse through sea mist", "aerial coast"];
+    const plans = planBatchRequests(req, 3, 40, {
+      prompts,
+      originalPrompt: "a lighthouse at dusk",
+    });
+
+    expect(plans).toEqual([
+      { ...req, prompt: prompts[0], original_prompt: req.prompt, seed: 40, batch_size: 1 },
+      { ...req, prompt: prompts[1], original_prompt: req.prompt, seed: 41, batch_size: 1 },
+      { ...req, prompt: prompts[2], original_prompt: req.prompt, seed: 42, batch_size: 1 },
+    ]);
+  });
+
+  it("rejects prompt lists that do not exactly match the normalized batch size", () => {
+    expect(() =>
+      planBatchRequests(req, 3, 7, {
+        prompts: ["only one", "only two"],
+        originalPrompt: req.prompt,
+      }),
+    ).toThrow("Per-item prompt count 2 does not match batch size 3");
+    expect(() => planBatchRequests(req, 2.9, 7, { prompts: ["one", "two", "three"] })).toThrow(
+      "Per-item prompt count 3 does not match batch size 2",
+    );
+  });
+
   it("clamps sub-1 and fractional batch sizes to at least one job", () => {
     expect(planBatchRequests(req, 0, 5)).toHaveLength(1);
     expect(planBatchRequests(req, 2.9, 5).map((p) => p.seed)).toEqual([5, 6]);
@@ -129,6 +155,20 @@ describe("batch sequencing", () => {
     const snapshot = JSON.stringify(req);
     planBatchRequests(req, 3, 7);
     expect(JSON.stringify(req)).toBe(snapshot);
+  });
+
+  it("does not mutate per-item prompt inputs or share request objects", () => {
+    const prompts = ["one", "two"];
+    const promptSnapshot = [...prompts];
+    const plans = planBatchRequests(req, 2, 7, {
+      prompts,
+      originalPrompt: "source",
+    });
+
+    plans[0]!.prompt = "changed after planning";
+    expect(prompts).toEqual(promptSnapshot);
+    expect(plans[1]!.prompt).toBe("two");
+    expect(req.prompt).toBe("a lighthouse at dusk");
   });
 });
 

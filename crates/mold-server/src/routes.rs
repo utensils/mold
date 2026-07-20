@@ -2600,10 +2600,15 @@ async fn delete_history(
 /// Report the feature toggles a client needs to render correctly (hide the
 /// delete button when delete isn't allowed, etc.). No auth required — this
 /// is a read-only introspection endpoint.
-async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
+async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::ServerCapabilities> {
     let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
+    let config = state.config.read().await;
+    let expand_settings = config.expand.clone().with_env_overrides();
+    let expand_model_present =
+        expand_settings.is_local() && config.manifest_model_is_downloaded(&expand_settings.model);
+    let expand = expand_capabilities(&expand_settings, expand_model_present);
 
     Json(mold_core::ServerCapabilities {
         gallery: mold_core::GalleryCapabilities { can_delete: true },
@@ -2619,7 +2624,30 @@ async fn server_capabilities() -> Json<mold_core::ServerCapabilities> {
             can_pause: true,
             can_cancel_all: true,
         },
+        expand: Some(expand),
     })
+}
+
+/// Derive the wire capability without constructing an expander or probing an
+/// external API. `model_present` is supplied by the caller so the feature and
+/// backend permutations remain pure and directly testable.
+fn expand_capabilities(
+    settings: &mold_core::expand::ExpandSettings,
+    model_present: bool,
+) -> mold_core::ExpandCapabilities {
+    if settings.is_local() {
+        mold_core::ExpandCapabilities {
+            configured: cfg!(feature = "expand"),
+            model_present: Some(model_present),
+            backend: mold_core::ExpandBackend::Local,
+        }
+    } else {
+        mold_core::ExpandCapabilities {
+            configured: !settings.backend.trim().is_empty(),
+            model_present: None,
+            backend: mold_core::ExpandBackend::Api,
+        }
+    }
 }
 
 // ── /api/capabilities/chain-limits ───────────────────────────────────────────
@@ -3839,6 +3867,41 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_expand_capability_reports_feature_and_model_facts_separately() {
+        let settings = mold_core::expand::ExpandSettings::default();
+        let missing = expand_capabilities(&settings, false);
+        let present = expand_capabilities(&settings, true);
+
+        assert_eq!(missing.backend, mold_core::ExpandBackend::Local);
+        assert_eq!(missing.configured, cfg!(feature = "expand"));
+        assert_eq!(missing.model_present, Some(false));
+        assert_eq!(present.configured, cfg!(feature = "expand"));
+        assert_eq!(present.model_present, Some(true));
+    }
+
+    #[test]
+    fn api_expand_capability_does_not_claim_external_reachability() {
+        let settings = mold_core::expand::ExpandSettings {
+            backend: "http://localhost:11434".into(),
+            ..Default::default()
+        };
+        let capability = expand_capabilities(&settings, false);
+
+        assert_eq!(capability.backend, mold_core::ExpandBackend::Api);
+        assert!(capability.configured);
+        assert_eq!(capability.model_present, None);
+
+        let unconfigured = mold_core::expand::ExpandSettings {
+            backend: "   ".into(),
+            ..Default::default()
+        };
+        let capability = expand_capabilities(&unconfigured, true);
+        assert_eq!(capability.backend, mold_core::ExpandBackend::Api);
+        assert!(!capability.configured);
+        assert_eq!(capability.model_present, None);
+    }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

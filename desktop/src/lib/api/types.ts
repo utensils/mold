@@ -65,11 +65,21 @@ export interface ServerStatus {
   models_disk?: { total_bytes: number; free_bytes: number } | null;
 }
 
+export type ExpandBackend = "local" | "api";
+
+export interface ExpandCapabilities {
+  configured: boolean;
+  model_present: boolean | null;
+  backend: ExpandBackend;
+}
+
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
   catalog?: { available: boolean; families: string[] } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Absent on older servers means unknown, not unavailable. */
+  expand?: ExpandCapabilities | null;
 }
 
 // ── Models ───────────────────────────────────────────────────────────────

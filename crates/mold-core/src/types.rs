@@ -3152,6 +3152,29 @@ pub struct QueueCapabilities {
     pub can_cancel_all: bool,
 }
 
+/// Prompt-expansion backend category. The API intentionally reports the
+/// category rather than the configured URL so capabilities never disclose
+/// credentials or internal network details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpandBackend {
+    Local,
+    Api,
+}
+
+/// Local facts about prompt expansion on this server. API-backed expansion
+/// does not probe the external service, so `model_present` is `None` there
+/// rather than implying reachability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpandCapabilities {
+    /// An API backend is configured, or local expansion support is compiled.
+    pub configured: bool,
+    /// Whether the configured local model is installed. Unknown/not
+    /// applicable for API backends.
+    pub model_present: Option<bool>,
+    pub backend: ExpandBackend,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -3167,6 +3190,10 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Absent on older servers. Unlike default-false capability groups,
+    /// absence here means unknown so newer clients may still try expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand: Option<ExpandCapabilities>,
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a
@@ -3589,6 +3616,48 @@ mod server_event_tests {
         .unwrap();
         assert!(!caps.queue.can_pause);
         assert!(!caps.queue.can_cancel_all);
+    }
+
+    #[test]
+    fn capabilities_without_expand_field_deserializes_as_unknown() {
+        // Older servers predate expansion capability discovery. Absence must
+        // remain distinguishable from a current server reporting local facts.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(caps.expand.is_none());
+    }
+
+    #[test]
+    fn expansion_capabilities_round_trip_nullable_model_presence() {
+        let local = ExpandCapabilities {
+            configured: true,
+            model_present: Some(false),
+            backend: ExpandBackend::Local,
+        };
+        let api = ExpandCapabilities {
+            configured: true,
+            model_present: None,
+            backend: ExpandBackend::Api,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::json!({
+                "configured": true,
+                "model_present": false,
+                "backend": "local"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&api).unwrap(),
+            serde_json::json!({
+                "configured": true,
+                "model_present": null,
+                "backend": "api"
+            })
+        );
     }
 }
 

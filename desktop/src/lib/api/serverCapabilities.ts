@@ -1,11 +1,13 @@
-import { apiJson } from "./client";
+import { apiJson, apiJsonTo, type ApiTarget } from "./client";
 import type { ServerCapabilities } from "./types";
 
 /**
  * `GET /api/capabilities` — feature toggles for the connected engine.
- * Callers must treat missing groups (e.g. `events` on older servers) as
- * "unavailable" rather than erroring.
+ * Missing expansion capability on an older server means unknown, not
+ * unavailable. An explicit target preserves that host's API key.
  */
-export async function fetchServerCapabilities(): Promise<ServerCapabilities> {
-  return apiJson<ServerCapabilities>("/api/capabilities");
+export async function fetchServerCapabilities(target?: ApiTarget): Promise<ServerCapabilities> {
+  return target
+    ? apiJsonTo<ServerCapabilities>(target, "/api/capabilities")
+    : apiJson<ServerCapabilities>("/api/capabilities");
 }

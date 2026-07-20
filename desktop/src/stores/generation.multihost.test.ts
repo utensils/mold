@@ -106,6 +106,41 @@ describe("generation store multi-host routing", () => {
     expect(options.target?.baseUrl).toBe("http://hal9000:7680");
   });
 
+  it("submits every per-item prompt through the one supplied route", async () => {
+    sseStream.mockResolvedValue(undefined);
+    const store = useGenerationStore();
+    const prompts = ["first variation", "second variation", "third variation"];
+    const { jobs, settled } = store.submitBatch(request(), 3, halRoute, null, {
+      prompts,
+      originalPrompt: "source prompt",
+    });
+    await settled;
+
+    expect(jobs.map((job) => job.prompt)).toEqual(prompts);
+    expect(sseStream).toHaveBeenCalledTimes(3);
+    for (const [, options] of sseStream.mock.calls) {
+      expect(options).toMatchObject({ target: halRoute.target });
+    }
+    expect(
+      sseStream.mock.calls.map(
+        ([, options]) => (options as { body: GenerateRequest }).body.original_prompt,
+      ),
+    ).toEqual(["source prompt", "source prompt", "source prompt"]);
+  });
+
+  it("rejects an inconsistent per-item prompt list before creating or streaming jobs", () => {
+    const store = useGenerationStore();
+
+    expect(() =>
+      store.submitBatch(request(), 3, halRoute, null, {
+        prompts: ["only one prompt"],
+        originalPrompt: "source prompt",
+      }),
+    ).toThrow("Per-item prompt count 1 does not match batch size 3");
+    expect(store.jobs).toHaveLength(0);
+    expect(sseStream).not.toHaveBeenCalled();
+  });
+
   it("snapshots the primary target at submit when no route is given", async () => {
     sseStream.mockResolvedValue(undefined);
     const store = useGenerationStore();
