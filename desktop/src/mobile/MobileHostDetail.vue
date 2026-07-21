@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { apiJsonTo } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { sseStream } from "../lib/api/sse";
 import type {
   DownloadEvent,
@@ -166,7 +167,7 @@ async function loadHost(): Promise<void> {
     startLiveServices(epoch);
   } catch (caught) {
     if (epoch !== loadEpoch) return;
-    error.value = caught instanceof Error ? caught.message : String(caught);
+    error.value = describeTransportError(caught, props.host.name);
     emit("status", { id: props.host.id, status: null });
   } finally {
     if (epoch === loadEpoch) loading.value = false;
@@ -205,7 +206,7 @@ async function unload(name: string): Promise<void> {
       emit("status", { id: props.host.id, status: nextStatus });
     }
   } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : String(caught);
+    error.value = describeTransportError(caught, props.host.name);
   } finally {
     unloading.value.delete(name);
   }

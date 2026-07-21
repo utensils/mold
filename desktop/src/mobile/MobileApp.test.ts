@@ -45,6 +45,18 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   streamableMediaUrl,
   evictMedia,
 }));
+// Keep the real reconciliation logic but collapse its re-attach poll interval
+// so tests never wait out the production cadence.
+vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./mobileGenerationRecovery")>();
+  return {
+    ...original,
+    reconcileInterruptedGenerationJobs: (
+      jobs: Parameters<typeof original.reconcileInterruptedGenerationJobs>[0],
+      options: Parameters<typeof original.reconcileInterruptedGenerationJobs>[1],
+    ) => original.reconcileInterruptedGenerationJobs(jobs, { ...options, pollIntervalMs: 0 }),
+  };
+});
 
 import MobileApp from "./MobileApp.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
@@ -2290,6 +2302,261 @@ describe("MobileApp generation queue", () => {
     await vi.waitFor(() => expect(galleryCalls).toBe(2));
     await vi.waitFor(() => expect(wrapper?.findAll("[data-test='gallery-item']")).toHaveLength(40));
     expect(document.activeElement).toBe(wrapper.get("[data-test='mobile-tab-gallery']").element);
+  });
+});
+
+describe("MobileApp transport error copy", () => {
+  it("humanizes a dead connection when saving a host", async () => {
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      if (apiTarget.baseUrl.includes("render.local")) {
+        return Promise.reject(new TypeError("Load failed"));
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await fieldControl("Address or MagicDNS name").setValue("render.local");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      "Couldn’t reach render.local. Check the connection and try again.",
+    );
+    expect(wrapper.text()).not.toContain("Load failed");
+  });
+
+  it("keeps an empty-bodied auth failure visible with API-key copy", async () => {
+    const { ApiError } = await import("../lib/api/client");
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      if (apiTarget.baseUrl.includes("render.local")) {
+        return Promise.reject(new ApiError("", 401));
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await fieldControl("Address or MagicDNS name").setValue("render.local");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      "render.local didn’t accept the API key. Update it in Machines and try again.",
+    );
+  });
+
+  it("keeps background model-load failures out of the generation status line", async () => {
+    apiJsonTo.mockRejectedValue(new TypeError("Load failed"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const banner = wrapper.get("[data-test='mobile-model-error']");
+    expect(banner.text()).toContain("Couldn’t load generation models from Studio.");
+    expect(banner.text()).toContain("Couldn’t reach Studio. Check the connection and try again.");
+    expect(banner.text()).not.toContain("Load failed");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Ready");
+  });
+
+  it("reloads models automatically when the app returns to the foreground", async () => {
+    let hostReachable = false;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (!hostReachable) return Promise.reject(new TypeError("Load failed"));
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(true);
+
+    hostReachable = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(false);
+    expect(fieldControl("Model").element).toHaveProperty("value", model.name);
+  });
+});
+
+describe("MobileApp foreground resume", () => {
+  const resumedPrint: GalleryImage = {
+    filename: "resumed print.png",
+    timestamp: 1_700_000_100,
+    format: "png",
+    metadata: {
+      prompt: "a ship crossing violet lightning",
+      model: model.name,
+      seed: 77,
+      steps: 28,
+      guidance: 4,
+      width: 768,
+      height: 512,
+    },
+  };
+
+  async function submitSeededPrompt(prompt: string, seed: number): Promise<void> {
+    const liveForm = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.seed = String(seed);
+    // Match resumedPrint's recorded metadata — the reconciler's gallery join
+    // requires dims and steps to agree, exactly as a real host records them.
+    liveForm.width = 768;
+    liveForm.height = 512;
+    liveForm.steps = 28;
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  function killStream(index = 0, message = "Load failed"): void {
+    openStreams[index]!.options.onClose?.(new TypeError(message) as Error);
+    openStreams[index]!.resolve();
+  }
+
+  it("renders the finished print when resuming after the stream died mid-generation", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a ship crossing violet lightning", 77);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    // iOS suspension killed the socket; the print finished server-side.
+    killStream();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    expect(wrapper.text()).not.toContain("Load failed");
+    expect(wrapper.get("img.result-media").attributes("src")).toBe(
+      "https://studio/media/full-video",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation completed.",
+    );
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+  });
+
+  it("clears a zombie queued job and explains the interruption without transport jargon", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "job-9",
+              model: model.name,
+              state: "queued",
+              position: 0,
+              started_at_unix_ms: 0,
+            },
+          ],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a print the suspension orphaned", 41);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    killStream(0, "The network connection was lost.");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
+    const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
+    expect(summary).toBe(
+      "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
+    );
+    expect(summary).not.toContain("network connection was lost");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").classes()).toContain(
+      "error-text",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Generation failed.",
+    );
+  });
+
+  it("re-attaches to a print still developing on the host and completes it", async () => {
+    let queueCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") {
+        queueCalls += 1;
+        return Promise.resolve({
+          entries:
+            queueCalls <= 2
+              ? [{ id: "job-9", model: model.name, state: "running", position: 0 }]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a ship crossing violet lightning", 77);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    killStream();
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
+
+    expect(queueCalls).toBeGreaterThanOrEqual(3);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    expect(wrapper.text()).not.toContain("Load failed");
+  });
+
+  it("renews the promoted result's expired media ticket when returning to the foreground", async () => {
+    streamableMediaUrl
+      .mockResolvedValueOnce("https://studio/media/video?media_token=old&expires=1")
+      .mockResolvedValueOnce("https://studio/media/video?media_token=new&expires=4102444800");
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("renew on resume");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "renew on resume.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 5,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=old");
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=new");
   });
 });
 

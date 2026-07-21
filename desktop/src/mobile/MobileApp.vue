@@ -3,10 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { invoke } from "@tauri-apps/api/core";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import type {
+  CompleteEvent,
   DownloadJob,
   ExpandCapabilities,
   GalleryImage,
@@ -98,6 +100,7 @@ import {
   mobileExpansionRecoveryStaleReason,
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
+import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -223,6 +226,9 @@ const downloadConsumerId = `mobile-generate-${
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }`;
 const progress = ref("Ready");
+/** Whether the status line under Develop currently shows a failure. Set with
+ * `setGenerationStatus` so error styling never depends on string sniffing. */
+const progressIsError = ref(false);
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryLoading = ref(false);
@@ -418,7 +424,10 @@ const latestResultJob = computed(() => {
 });
 const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
 const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
-const resultPreviewError = computed(() => latestResultJob.value?.resultError ?? "");
+const resultPreviewError = computed(() => {
+  const job = latestResultJob.value;
+  return job?.resultError ? describeTransportError(job.resultError, job.hostLabel) : "";
+});
 const developButtonLabel = computed(() =>
   preparingGeneration.value
     ? "Preparing source…"
@@ -493,6 +502,25 @@ const generationStatus = computed(() => {
       return jobStatusCode(active);
   }
 });
+const generationStatusIsError = computed(() => !activeGeneration.value && progressIsError.value);
+
+/**
+ * The status line under Develop shows generation lifecycle and explicit
+ * user-action outcomes only — background poll failures must use their own
+ * surfaces (e.g. the model-load banner), never this slot.
+ */
+function setGenerationStatus(message: string, isError = false): void {
+  progress.value = message;
+  progressIsError.value = isError;
+}
+
+/** Seed/time line for a completed result; the time is omitted when a resumed
+ * reconciliation lost the true duration with the stream. */
+function completionSummary(result: CompleteEvent): string {
+  const timing =
+    result.generation_time_ms > 0 ? `${(result.generation_time_ms / 1000).toFixed(1)}s · ` : "";
+  return `${timing}seed ${result.seed_used}`;
+}
 
 function routeForMobileHost(host: MobileHost): HostRoute {
   return {
@@ -572,7 +600,8 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     hostInput.apiKey = "";
     await refreshModels();
   } catch (error) {
-    hostError.value = error instanceof Error ? error.message : String(error);
+    const label = hostInput.name.trim() || discoveredName || (address ?? hostInput.address).trim();
+    hostError.value = describeTransportError(error, label);
   }
 }
 
@@ -582,7 +611,7 @@ async function discoverHosts(): Promise<void> {
   try {
     discovered.value = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
   } catch (error) {
-    hostError.value = error instanceof Error ? error.message : String(error);
+    hostError.value = describeTransportError(error);
   } finally {
     discovering.value = false;
   }
@@ -732,9 +761,10 @@ async function refreshModels(): Promise<boolean> {
   } catch (error) {
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     host.online = false;
-    const detail = error instanceof Error ? error.message : String(error);
+    // The banner above the model select owns this failure; the generation
+    // status line keeps showing generation state, not background loads.
+    const detail = describeTransportError(error, host.name);
     modelLoadError.value = `Couldn’t load generation models from ${host.name}. ${detail}`;
-    progress.value = detail;
     return false;
   } finally {
     if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
@@ -769,9 +799,11 @@ function loadTemplate(template: GenerationTemplate): void {
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);
   if (selectedEntry) reconcileModelCapabilities(form, selectedEntry);
   const available = generationModels.value.some((model) => model.name === form.model);
-  progress.value = available
-    ? `Loaded ${template.name}`
-    : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`;
+  setGenerationStatus(
+    available
+      ? `Loaded ${template.name}`
+      : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`,
+  );
   const mediaMessage = template.mediaReferences.length
     ? ` Re-add ${formatTemplateMediaReferences(template.mediaReferences)}.`
     : "";
@@ -888,7 +920,7 @@ function setExpansionFailure(
   }
   return missingModel
     ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
-    : `Expansion failed on ${route.label}: ${message}`;
+    : `Expansion failed on ${route.label}: ${describeTransportError(error, route.label)}`;
 }
 
 function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | null {
@@ -932,7 +964,7 @@ function syncExpansionDownloadConsumer(recovery: MobileExpansionRecoveryRecord):
         attempt?.recoveryId === recovery.id &&
         recovery.route.hostId === failedHost.id
       ) {
-        attempt.requestError = cause.message;
+        attempt.requestError = describeTransportError(cause, recovery.route.label);
         releaseExpansionPullLease(recovery);
       }
     },
@@ -1212,8 +1244,7 @@ async function pullExpansionModel(): Promise<void> {
     ) {
       return;
     }
-    expansionPullAttempt.value.requestError =
-      error instanceof Error ? error.message : String(error);
+    expansionPullAttempt.value.requestError = describeTransportError(error, recovery.route.label);
     releaseExpansionPullLease(recovery);
   }
 }
@@ -1266,9 +1297,10 @@ async function retryExpansionAfterPull(): Promise<void> {
     if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
       return;
     }
-    expansionError.value = `Expansion failed on ${recovery.route.label}: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
+    expansionError.value = `Expansion failed on ${recovery.route.label}: ${describeTransportError(
+      error,
+      recovery.route.label,
+    )}`;
   } finally {
     if (!unmounted && retryId === recoveryRetryId) expansionRunning.value = false;
   }
@@ -1303,11 +1335,11 @@ async function prepareGenerationRequest(
             model,
             target,
             onProgress: (message) => {
-              if (isCurrent()) progress.value = message;
+              if (isCurrent()) setGenerationStatus(message);
             },
           }),
         onStatus: (message) => {
-          if (isCurrent()) progress.value = message;
+          if (isCurrent()) setGenerationStatus(message);
         },
       },
     );
@@ -1414,7 +1446,7 @@ async function generate(): Promise<void> {
     request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
   } catch (error) {
     if (!ownsPreparedSubmission()) return;
-    progress.value = error instanceof Error ? error.message : String(error);
+    setGenerationStatus(describeTransportError(error, route.label), true);
     generationAnnouncement.value = `Couldn’t prepare the source image. ${progress.value}`;
     releasePreparedSubmission();
     return;
@@ -1426,7 +1458,7 @@ async function generate(): Promise<void> {
     return;
   }
   if (guardedSubmission && JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity) {
-    progress.value = "The generation inputs changed while the source was being prepared.";
+    setGenerationStatus("The generation inputs changed while the source was being prepared.");
     generationAnnouncement.value = `${progress.value} Review the current inputs before developing.`;
     releasePreparedSubmission();
     return;
@@ -1467,13 +1499,13 @@ async function generate(): Promise<void> {
 
   const chainRouting = decideGenerateRequestRouting(request, draft.family);
   if (chainRouting.kind === "reject") {
-    progress.value = chainRouting.reason;
+    setGenerationStatus(chainRouting.reason);
     generationAnnouncement.value = chainRouting.reason;
     releasePreparedSubmission();
     return;
   }
   if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
-    progress.value = "These options can’t be preserved during long-video chaining.";
+    setGenerationStatus("These options can’t be preserved during long-video chaining.");
     generationAnnouncement.value = `${progress.value} Remove the highlighted options or reduce Frames to 97 or fewer.`;
     releasePreparedSubmission();
     return;
@@ -1518,10 +1550,26 @@ async function generate(): Promise<void> {
   ) {
     quickExpansionSnapshot.value = null;
   }
-  progress.value = "Queued";
+  setGenerationStatus("Queued");
   generationAnnouncement.value = "";
-  void settled.then((jobs) => {
+  void settled.then(async (jobs) => {
     if (unmounted || jobs.length === 0) return;
+    // iOS suspension kills every held SSE socket: jobs that settled with a
+    // dead-transport error are re-queried against their frozen submission
+    // route (finished prints render, still-running jobs re-attach, zombies
+    // are cleared) BEFORE any summary copy is composed, so raw transport
+    // text never reaches the status line or the announcement channel.
+    await reconcileInterruptedGenerationJobs(jobs, {
+      target: { ...route.target },
+      hostLabel: route.label,
+      chain: chainRouting.kind === "chain",
+      refreshResultUrl: (clientId) =>
+        void generation.refreshRemoteResultUrl(clientId).catch(() => {
+          // The reactive job carries the directed, user-visible error.
+        }),
+      isActive: () => !unmounted,
+    });
+    if (unmounted) return;
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
@@ -1531,12 +1579,18 @@ async function generate(): Promise<void> {
       candidate.error?.includes("remote cancellation was not confirmed"),
     );
     const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
+    const failedError = failed?.error ? describeTransportError(failed.error, route.label) : null;
     const failedVariations = preparedSubmission
       ? jobs.flatMap((candidate, index) => {
           if (!candidate.error || isCancelledError(candidate.error)) return [];
           const prompt =
             candidate.prompt.length > 120 ? `${candidate.prompt.slice(0, 117)}…` : candidate.prompt;
-          return [`Variation ${index + 1}, “${prompt}”, failed: ${candidate.error}`];
+          return [
+            `Variation ${index + 1}, “${prompt}”, failed: ${describeTransportError(
+              candidate.error,
+              route.label,
+            )}`,
+          ];
         })
       : [];
     const preparedFailureSummary = failedVariations.join(" ");
@@ -1548,31 +1602,37 @@ async function generate(): Promise<void> {
     if (latestCompleted?.result) {
       latestResultClientId.value = latestCompleted.clientId;
       if (latestCompleted.resultError) {
-        progress.value = latestCompleted.resultError;
-        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${latestCompleted.resultError}`;
+        const previewDetail = describeTransportError(latestCompleted.resultError, route.label);
+        setGenerationStatus(previewDetail, true);
+        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${previewDetail}`;
       } else {
-        progress.value = `${completed.length > 1 ? `${completed.length} prints · ` : ""}${(
-          latestCompleted.result.generation_time_ms / 1000
-        ).toFixed(1)}s · seed ${latestCompleted.result.seed_used}`;
+        setGenerationStatus(
+          `${completed.length > 1 ? `${completed.length} prints · ` : ""}${completionSummary(
+            latestCompleted.result,
+          )}`,
+        );
         generationAnnouncement.value =
           completed.length === 1 && jobs.length === 1
             ? "Generation completed."
             : `${completed.length} of ${jobs.length} generations completed.`;
       }
-      if (unconfirmedCancellation?.error || failed?.error) {
-        progress.value = [
-          `${completed.length} of ${jobs.length} completed`,
-          failed?.error,
-          unconfirmedCancellation?.error,
-        ]
-          .filter(Boolean)
-          .join(" · ");
+      if (unconfirmedCancellation?.error || failedError) {
+        setGenerationStatus(
+          [
+            `${completed.length} of ${jobs.length} completed`,
+            failedError,
+            unconfirmedCancellation?.error,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          true,
+        );
         generationAnnouncement.value = [
           `${completed.length} generations completed.`,
-          failed?.error
+          failedError
             ? preparedSubmission
               ? `${failedCount} failed. ${preparedFailureSummary}`
-              : `${failedCount} failed. ${failed.error}`
+              : `${failedCount} failed. ${failedError}`
             : "",
           unconfirmedCancellation?.error
             ? `Cancellation failed. ${unconfirmedCancellation.error}`
@@ -1582,13 +1642,16 @@ async function generate(): Promise<void> {
           .join(" ");
       }
       if (tab.value === "gallery") void refreshGallery();
-    } else if (unconfirmedCancellation?.error || failed?.error) {
-      progress.value = [failed?.error, unconfirmedCancellation?.error].filter(Boolean).join(" · ");
+    } else if (unconfirmedCancellation?.error || failedError) {
+      setGenerationStatus(
+        [failedError, unconfirmedCancellation?.error].filter(Boolean).join(" · "),
+        true,
+      );
       generationAnnouncement.value = [
-        failed?.error
+        failedError
           ? preparedSubmission
             ? `Generation failed. ${preparedFailureSummary}`
-            : `Generation failed. ${failed.error}`
+            : `Generation failed. ${failedError}`
           : "",
         unconfirmedCancellation?.error
           ? `Cancellation failed. ${unconfirmedCancellation.error}`
@@ -1597,7 +1660,7 @@ async function generate(): Promise<void> {
         .filter(Boolean)
         .join(" ");
     } else if (cancelled) {
-      progress.value = "Cancelled";
+      setGenerationStatus("Cancelled");
       generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
     }
     // Only terminal jobs whose callbacks have run are eligible: multiple
@@ -1617,18 +1680,19 @@ async function cancelGeneration(job: Job): Promise<void> {
     await generation.cancel(job.clientId);
     if (job.status === "complete" && job.result) {
       latestResultClientId.value = job.clientId;
-      progress.value = `${(job.result.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result.seed_used}`;
+      setGenerationStatus(completionSummary(job.result));
       generationAnnouncement.value = "Generation completed.";
       if (tab.value === "gallery") void refreshGallery();
     } else if (job.error && !isCancelledError(job.error)) {
-      progress.value = job.error;
-      generationAnnouncement.value = `Generation failed. ${job.error}`;
+      const detail = describeTransportError(job.error, job.hostLabel);
+      setGenerationStatus(detail, true);
+      generationAnnouncement.value = `Generation failed. ${detail}`;
     } else {
-      progress.value = "Cancelled";
+      setGenerationStatus("Cancelled");
       generationAnnouncement.value = "Generation cancelled.";
     }
   } catch (error) {
-    progress.value = error instanceof Error ? error.message : String(error);
+    setGenerationStatus(describeTransportError(error, job.hostLabel), true);
     generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
   }
 }
@@ -1642,7 +1706,7 @@ function renewGeneratedResult(force: boolean): void {
     .then(() => {
       if (latestResultClientId.value !== job.clientId || job.resultError || !job.resultUrl) return;
       if (force) resultMediaLoadKey.value += 1;
-      progress.value = `${(job.result!.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result!.seed_used}`;
+      setGenerationStatus(completionSummary(job.result!));
       if (force || job.resultUrl !== previousUrl) {
         generationAnnouncement.value = "Result preview refreshed.";
       }
@@ -1802,9 +1866,11 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
-    progress.value = reuse.substitutedModel
-      ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
-      : "Prompt settings restored";
+    setGenerationStatus(
+      reuse.substitutedModel
+        ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
+        : "Prompt settings restored",
+    );
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -1840,17 +1906,17 @@ async function useSelectedPrintAsSource(): Promise<void> {
     const base64 = await blobToBase64(blob);
     if (qwenEdit) {
       form.imageAttachments = [base64, ...form.imageAttachments];
-      progress.value = "Added gallery print as the edit target";
+      setGenerationStatus("Added gallery print as the edit target");
     } else {
       form.sourceImage = base64;
       form.sourceImageName = print.filename;
-      progress.value = "Gallery print selected as source";
+      setGenerationStatus("Gallery print selected as source");
     }
     selectedPrint.value = null;
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
-    reusePrintError.value = error instanceof Error ? error.message : String(error);
+    reusePrintError.value = describeTransportError(error, print.hostName);
   } finally {
     usingPrintAsSource.value = false;
   }
@@ -1994,9 +2060,37 @@ watch(tab, (next) => {
   if (next !== "hosts") hostDetailId.value = "";
 });
 
+// One failed model load must not become a manual-Retry dead end: the 10s
+// probe already self-heals `host.online`, so a false→true transition on the
+// selected host re-runs the (epoch-guarded) model load automatically.
+watch(
+  () => selectedHost.value?.online ?? false,
+  (online, wasOnline) => {
+    if (online && !wasOnline && modelLoadError.value && !loadingModels.value) {
+      void refreshModels();
+    }
+  },
+);
+
+/**
+ * iOS froze this WebView and tore down every socket while the app was
+ * backgrounded. On return: probe hosts immediately (instead of waiting out
+ * the 10s cadence), recover a failed model list, renew the promoted result's
+ * media ticket if it aged out, and refresh the Library if it is on screen.
+ * Interrupted generation streams settle through their own reconciliation in
+ * the submit path's settled handler.
+ */
+function handleForegroundResume(): void {
+  if (unmounted || document.visibilityState === "hidden") return;
+  probeHosts();
+  if (modelLoadError.value && !loadingModels.value) void refreshModels();
+  renewGeneratedResult(false);
+  if (tab.value === "gallery") void refreshGallery();
+}
+
 watch(resultPreviewError, (error) => {
   if (!error) return;
-  progress.value = error;
+  setGenerationStatus(error, true);
   generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${error}`;
 });
 
@@ -2014,6 +2108,8 @@ onMounted(async () => {
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
+  document.addEventListener("visibilitychange", handleForegroundResume);
+  window.addEventListener("pageshow", handleForegroundResume);
   if (selectedHost.value) {
     await Promise.all([
       refreshModels(),
@@ -2034,6 +2130,8 @@ onBeforeUnmount(() => {
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
   clearExpansionRecovery();
+  document.removeEventListener("visibilitychange", handleForegroundResume);
+  window.removeEventListener("pageshow", handleForegroundResume);
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
@@ -2412,7 +2510,7 @@ onBeforeUnmount(() => {
           </section>
           <div
             class="status-line"
-            :class="{ 'error-text': generationStatus.toLowerCase().includes('error') }"
+            :class="{ 'error-text': generationStatusIsError }"
             data-test="mobile-generation-summary"
           >
             {{ generationStatus }}

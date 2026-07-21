@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import type { ApiTarget } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { fetchLoras } from "../lib/api/loras";
 import type { LoraInfo } from "../lib/api/types";
 import { MAX_LORA_STACK, generationCapabilitiesForFamily } from "../lib/capabilities";
@@ -39,7 +40,7 @@ async function load(): Promise<void> {
   } catch (cause) {
     if (token === loadToken) {
       available.value = [];
-      error.value = cause instanceof Error ? cause.message : String(cause);
+      error.value = describeTransportError(cause);
     }
   } finally {
     if (token === loadToken) loading.value = false;

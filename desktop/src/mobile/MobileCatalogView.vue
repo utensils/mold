@@ -10,6 +10,7 @@ import {
   watch,
 } from "vue";
 import { apiFetchTo, ApiError, type ApiTarget } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { fetchCatalogDetail, fetchCatalogFamilies, searchCatalog } from "../lib/api/catalog";
 import {
   catalogFetchCaption,
@@ -288,8 +289,8 @@ function announce(message: string, isError = false): void {
   announcementIsError.value = isError;
 }
 
-function errorMessage(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+function errorMessage(cause: unknown, hostName?: string): string {
+  return describeTransportError(cause, hostName);
 }
 
 function setInert(element: HTMLElement | null, inert: boolean): void {
@@ -389,7 +390,7 @@ async function runSearch(reset: boolean): Promise<void> {
     }
   } catch (cause) {
     if (epoch !== searchEpoch) return;
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    error.value = errorMessage(cause, selectedHost.value?.name);
     hasMore.value = false;
   } finally {
     if (epoch === searchEpoch) loading.value = false;
@@ -486,8 +487,8 @@ function syncDownloadStreams(): void {
       if (!mounted) return;
       announce(
         phase === "closed"
-          ? `Download monitoring stopped on ${host.name}: ${cause.message}`
-          : `Could not monitor downloads on ${host.name}: ${errorMessage(cause)}`,
+          ? `Download monitoring stopped on ${host.name}: ${errorMessage(cause, host.name)}`
+          : `Could not monitor downloads on ${host.name}: ${errorMessage(cause, host.name)}`,
         true,
       );
     },
@@ -499,7 +500,10 @@ async function cancelDownload(row: DownloadRow): Promise<void> {
     await mobileDownloads.cancel(row.host, row.job);
     announce(`Cancelling ${row.job.model}.`);
   } catch (cause) {
-    announce(errorMessage(cause), true);
+    announce(
+      `Could not cancel ${row.job.model} on ${row.host.name}: ${errorMessage(cause, row.host.name)}`,
+      true,
+    );
   }
 }
 
@@ -540,7 +544,7 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
     announce(
       alreadyQueued
         ? `${entry.name} is already queued on ${host.name}.`
-        : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entry.name} on ${host.name}: ${errorMessage(cause)}`,
+        : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entry.name} on ${host.name}: ${errorMessage(cause, host.name)}`,
       !alreadyQueued,
     );
   }
@@ -632,7 +636,10 @@ async function changeLoadedState(load: boolean): Promise<void> {
     emit("models-changed", host.id);
     await refreshModels();
   } catch (cause) {
-    announce(errorMessage(cause), true);
+    announce(
+      `Could not ${load ? "load" : "unload"} ${entry.name} on ${host.name}: ${errorMessage(cause, host.name)}`,
+      true,
+    );
   } finally {
     if (epoch === detailEpoch && detailEntry.value === entry) detailBusy.value = "";
   }
@@ -659,7 +666,12 @@ async function removeInstalled(): Promise<void> {
     await runSearch(true);
   } catch (cause) {
     const onGpu = cause instanceof ApiError && cause.status === 409;
-    announce(onGpu ? `${entry.name} is on the GPU. Unload it first.` : errorMessage(cause), true);
+    announce(
+      onGpu
+        ? `${entry.name} is on the GPU. Unload it first.`
+        : `Could not remove ${entry.name} from ${host.name}: ${errorMessage(cause, host.name)}`,
+      true,
+    );
   } finally {
     if (epoch === detailEpoch && detailEntry.value === entry) detailBusy.value = "";
   }
