@@ -519,3 +519,51 @@ export async function postCatalogDownload(
 export function looksLikeCatalogId(input: string): boolean {
   return input.startsWith("cv:") || input.startsWith("hf:");
 }
+
+// ─── Installed-model management ─────────────────────────────────────────────
+// Thin wrappers over the server's model routes, consumed by the Models
+// workspace detail drawer (Load / Unload / Delete).
+
+/// Response of `DELETE /api/models/:model` — what was deleted, what was
+/// kept for other models, and how many bytes were actually freed on disk.
+/// Mirrors `mold_core::ModelRemovalResponse`.
+export interface ModelRemovalResult {
+  removed: string[];
+  kept: { name: string; kept_for: string[] }[];
+  freed_bytes: number;
+}
+
+/// Load a downloaded model into GPU memory (`POST /api/models/load`).
+export async function loadModel(model: string, gpu?: number): Promise<void> {
+  const body: { model: string; gpu?: number } = { model };
+  if (gpu !== undefined) body.gpu = gpu;
+  const res = await fetch(`${base}/api/models/load`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST /api/models/load failed: ${res.status}`);
+}
+
+/// Unload a model (or the active model when `model` is omitted) from GPU
+/// memory (`DELETE /api/models/unload`).
+export async function unloadModel(model?: string): Promise<void> {
+  const res = await fetch(`${base}/api/models/unload`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(model ? { model } : {}),
+  });
+  if (!res.ok)
+    throw new Error(`DELETE /api/models/unload failed: ${res.status}`);
+}
+
+/// Delete a downloaded model's on-disk files (`DELETE /api/models/:model`).
+/// Rejects with a 409-derived error when the model is currently loaded.
+export async function deleteModel(model: string): Promise<ModelRemovalResult> {
+  const res = await fetch(`${base}/api/models/${encodeURIComponent(model)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok)
+    throw new Error(`DELETE /api/models/${model} failed: ${res.status}`);
+  return (await res.json()) as ModelRemovalResult;
+}

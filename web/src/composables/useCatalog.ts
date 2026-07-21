@@ -1,16 +1,50 @@
 import { computed, ref, watch } from "vue";
 import {
+  deleteModel,
   fetchCatalogEntry,
   fetchCatalogFamilies,
   fetchCatalogSearch,
+  fetchModelComponents,
+  fetchModels,
+  loadModel,
   postCatalogDownload,
+  unloadModel,
 } from "../api";
 import { useDownloads } from "./useDownloads";
 import type {
   CatalogEntryWire,
   CatalogFamilyCount,
   CatalogListParams,
+  ModelComponentStatus,
+  ModelInfoExtended,
 } from "../types";
+
+/** One selectable pull target inside the model detail drawer. Catalog rows
+ * resolve to a single variant today; the drawer supports N so future
+ * quant/format variant sets slot straight in. */
+export interface ModelVariant {
+  id: string;
+  label: string;
+}
+
+/** Unified detail payload the model drawer renders. A live catalog row
+ * (Discover) carries its wire entry + pull variants; an installed model
+ * (Installed) carries its `/api/models` row + fetched components. */
+export type ModelDetail =
+  | { kind: "catalog"; entry: CatalogEntryWire; variants: ModelVariant[] }
+  | {
+      kind: "installed";
+      model: ModelInfoExtended;
+      components: ModelComponentStatus[];
+    };
+
+export type ModelsTab = "installed" | "discover";
+
+/** Single variant a catalog row resolves to. Label leans on the file format
+ * since the live search wire exposes one downloadable form per row. */
+function catalogVariants(entry: CatalogEntryWire): ModelVariant[] {
+  return [{ id: entry.id, label: entry.file_format }];
+}
 
 const DEBOUNCE_MS = 250;
 const PAGE_SIZE = 48;
@@ -31,7 +65,16 @@ function build() {
   const loading = ref(false);
   const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
-  const detail = ref<CatalogEntryWire | null>(null);
+  const detail = ref<ModelDetail | null>(null);
+
+  // ── Installed models (the Installed tab) ──────────────────────────────
+  const tab = ref<ModelsTab>("installed");
+  const installed = ref<ModelInfoExtended[]>([]);
+  const installedLoading = ref(false);
+  const installedError = ref<string | null>(null);
+  // The default tab follows whether anything is installed — but only until
+  // the user picks a tab themselves, after which their choice is sticky.
+  let tabTouched = false;
 
   // hasMore: server-reported total wins; if absent (older server), fall
   // back to "the last page came back full" so we keep fetching until a
@@ -109,11 +152,20 @@ function build() {
     // e.g. a future deep-link path.
     const cached = entries.value.find((e) => e.id === id);
     if (cached) {
-      detail.value = cached;
+      detail.value = {
+        kind: "catalog",
+        entry: cached,
+        variants: catalogVariants(cached),
+      };
       return;
     }
     try {
-      detail.value = await fetchCatalogEntry(id);
+      const entry = await fetchCatalogEntry(id);
+      detail.value = {
+        kind: "catalog",
+        entry,
+        variants: catalogVariants(entry),
+      };
     } catch {
       // 404 (live row not in DB, deep link to a stale id) or transient
       // network — keep `detail` null so the drawer stays closed instead of
@@ -122,8 +174,86 @@ function build() {
     }
   }
 
+  /** Open the drawer for an installed model. Components load asynchronously
+   * from `/api/models/:model/components`; the drawer renders immediately and
+   * fills the Components chips once the fetch resolves. */
+  async function openInstalledDetail(model: ModelInfoExtended) {
+    detail.value = { kind: "installed", model, components: [] };
+    try {
+      const resp = await fetchModelComponents(model.name);
+      if (
+        detail.value?.kind === "installed" &&
+        detail.value.model.name === model.name
+      ) {
+        detail.value = { ...detail.value, components: resp.components };
+      }
+    } catch {
+      // Leave components empty — the tiles + name still render.
+    }
+  }
+
   function closeDetail() {
     detail.value = null;
+  }
+
+  function setTab(next: ModelsTab) {
+    tabTouched = true;
+    tab.value = next;
+  }
+
+  async function refreshInstalled() {
+    installedLoading.value = true;
+    installedError.value = null;
+    try {
+      installed.value = await fetchModels();
+      // First load with no explicit user choice: land on Installed when the
+      // user has models, otherwise open straight into Discover.
+      if (!tabTouched) {
+        tab.value = installed.value.length > 0 ? "installed" : "discover";
+      }
+    } catch (e: unknown) {
+      installedError.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      installedLoading.value = false;
+    }
+  }
+
+  // Re-sync the open installed detail from the freshly fetched list so the
+  // drawer's loaded state / footprint reflect the action just taken.
+  function syncInstalledDetail(name: string) {
+    const updated = installed.value.find((m) => m.name === name);
+    if (
+      updated &&
+      detail.value?.kind === "installed" &&
+      detail.value.model.name === name
+    ) {
+      detail.value = { ...detail.value, model: updated };
+    }
+  }
+
+  async function loadInstalled(name: string) {
+    await loadModel(name);
+    await refreshInstalled();
+    syncInstalledDetail(name);
+  }
+
+  async function unloadInstalled(name: string) {
+    await unloadModel(name);
+    await refreshInstalled();
+    syncInstalledDetail(name);
+  }
+
+  async function deleteInstalled(name: string) {
+    const result = await deleteModel(name);
+    // The model's files are gone — drop the drawer and refresh the shelf.
+    if (
+      detail.value?.kind === "installed" &&
+      detail.value.model.name === name
+    ) {
+      detail.value = null;
+    }
+    await refreshInstalled();
+    return result;
   }
 
   function canDownload(entry: Pick<CatalogEntryWire, "engine_phase">): boolean {
@@ -158,6 +288,17 @@ function build() {
     closeDetail,
     canDownload,
     startDownload,
+    // Installed tab + unified detail actions
+    tab,
+    setTab,
+    installed,
+    installedLoading,
+    installedError,
+    refreshInstalled,
+    openInstalledDetail,
+    loadInstalled,
+    unloadInstalled,
+    deleteInstalled,
   };
 }
 

@@ -114,7 +114,10 @@ describe("useCatalog", () => {
     const id = cat.entries.value[0].id;
     (globalThis.fetch as any).mockClear();
     await cat.openDetail(id);
-    expect(cat.detail.value?.id).toBe(id);
+    expect(cat.detail.value?.kind).toBe("catalog");
+    expect(
+      cat.detail.value?.kind === "catalog" ? cat.detail.value.entry.id : null,
+    ).toBe(id);
     const detailCalls = (globalThis.fetch as any).mock.calls.filter(
       (c: any[]) =>
         (c[0] as string).startsWith("/api/catalog/") &&
@@ -169,7 +172,9 @@ describe("useCatalog", () => {
       throw new Error(`unexpected fetch: ${url}`);
     });
     await cat.openDetail(fallbackId);
-    expect(cat.detail.value?.id).toBe(fallbackId);
+    expect(
+      cat.detail.value?.kind === "catalog" ? cat.detail.value.entry.id : null,
+    ).toBe(fallbackId);
   });
 
   it("openDetail leaves detail null when the fallback fetch 404s", async () => {

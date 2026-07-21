@@ -59,6 +59,10 @@ function setKind(k: KindFilter | undefined) {
   cat.setFilter({ kind: k });
 }
 
+function setNsfw(on: boolean) {
+  cat.setFilter({ include_nsfw: on || undefined });
+}
+
 function clearSearch() {
   searchLocal.value = "";
   cat.setFilter({ q: undefined });
@@ -239,5 +243,19 @@ function clearSearch() {
         {{ opt.label }}
       </option>
     </select>
+
+    <!-- Include NSFW -->
+    <label
+      class="flex items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3.5 py-1.5 text-[13px] font-medium text-ink-200"
+    >
+      <input
+        type="checkbox"
+        class="h-3.5 w-3.5 accent-brand-500"
+        aria-label="Include NSFW"
+        :checked="cat.filter.value.include_nsfw ?? false"
+        @change="setNsfw(($event.target as HTMLInputElement).checked)"
+      />
+      Include NSFW
+    </label>
   </div>
 </template>

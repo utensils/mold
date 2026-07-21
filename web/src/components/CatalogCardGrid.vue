@@ -39,6 +39,10 @@ watch(sentinel, attach);
 function openCard(id: string) {
   void cat.openDetail(id);
 }
+
+function pullCard(id: string) {
+  void cat.startDownload(id);
+}
 </script>
 
 <template>
@@ -78,17 +82,14 @@ function openCard(id: string) {
 
     <!-- Grid -->
     <template v-else>
-      <div
-        class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
-      >
-        <button
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <CatalogCard
           v-for="entry in cat.entries.value"
           :key="entry.id"
-          class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/60"
-          @click="openCard(entry.id)"
-        >
-          <CatalogCard :entry="entry" />
-        </button>
+          :entry="entry"
+          @open="openCard(entry.id)"
+          @pull="pullCard(entry.id)"
+        />
       </div>
 
       <div

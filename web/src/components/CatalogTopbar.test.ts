@@ -108,6 +108,16 @@ describe("CatalogTopbar", () => {
     );
   });
 
+  it("checking Include NSFW sets include_nsfw filter", async () => {
+    const w = mount(CatalogTopbar);
+    const box = w.find("input[type=checkbox]");
+    expect(box.exists()).toBe(true);
+    await box.setValue(true);
+    expect(mockSetFilter).toHaveBeenCalledWith(
+      expect.objectContaining({ include_nsfw: true }),
+    );
+  });
+
   it("clicking the kind 'All' chip clears the kind filter", async () => {
     mockFilter.value = { kind: "lora" };
     const w = mount(CatalogTopbar);
