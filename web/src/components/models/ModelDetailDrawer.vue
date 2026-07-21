@@ -16,7 +16,15 @@ import { requestConfirm, toast } from "../../lib/toasts";
 
 const cat = useCatalog();
 
-const open = computed(() => cat.detail.value != null);
+// The drawer opens for content AND for the loading / error non-content states
+// so a Discover row whose detail fetch is slow or failing never shows a blank
+// panel (spec G4).
+const open = computed(
+  () =>
+    cat.detail.value != null ||
+    cat.detailLoadingId.value != null ||
+    cat.detailError.value != null,
+);
 
 // Phone surfaces get the full SheetPanel; everything else the right drawer.
 const isPhone = ref(false);
@@ -97,7 +105,10 @@ const footprintBytes = computed<number | null>(() => {
       (d.model.size_gb ? d.model.size_gb * 1_000_000_000 : null)
     );
   }
-  const primary = d.entry.download_recipe.files.reduce(
+  // Defensive optional chaining: a malformed entry (null download_recipe /
+  // files) must never throw here — a render exception is exactly what blanks
+  // the whole drawer.
+  const primary = (d.entry.download_recipe?.files ?? []).reduce(
     (sum, f) => sum + (f.size_bytes ?? 0),
     0,
   );
@@ -230,10 +241,35 @@ function onClose() {
     title="Model details"
     @close="onClose"
   >
-    <div v-if="cat.detail.value" class="md">
+    <div
+      v-if="cat.detailLoadingId.value"
+      class="md md--state"
+      data-test="detail-loading"
+    >
+      <div class="md__spinner" aria-hidden="true" />
+      <p class="md__state-msg">loading model details…</p>
+    </div>
+    <div
+      v-else-if="cat.detailError.value"
+      class="md md--state"
+      data-test="detail-error"
+    >
+      <div class="md__name">Model details</div>
+      <p class="md__state-msg">{{ cat.detailError.value.message }}</p>
+      <button
+        type="button"
+        class="md__ghost"
+        data-test="detail-retry"
+        @click="cat.retryDetail(cat.detailError.value.id)"
+      >
+        <Icon name="refresh" :size="14" />
+        Try again
+      </button>
+    </div>
+    <div v-else-if="cat.detail.value" class="md">
       <span class="md__media">{{ mediaLabel }}</span>
-      <div class="md__name">{{ name }}</div>
-      <div class="md__fam">{{ family }}</div>
+      <div class="md__name">{{ name || "Untitled model" }}</div>
+      <div v-if="family" class="md__fam">{{ family }}</div>
       <p v-if="description" class="md__desc">{{ description }}</p>
 
       <div class="md__tiles">
@@ -567,5 +603,44 @@ function onClose() {
 .md__ghost:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+
+/* ── Non-content states (loading / error) — never a blank panel ────────── */
+.md--state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding-top: 8px;
+}
+.md--state .md__ghost {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.md__state-msg {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+.md__spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--ce);
+  border-top-color: var(--safelight);
+  animation: md-spin 0.7s linear infinite;
+}
+@keyframes md-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .md__spinner {
+    animation: none;
+  }
 }
 </style>

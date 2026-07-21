@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /*
  * Settings workspace (spec §04/§06, prototype desktop Settings). Appearance
- * (theme family + dark/light on the shared lib/theme refs), account tokens and
- * the default scheduler (POST /api/settings/set), and an About card sourced
- * from GET /api/status. Set-once prefs only; per-generation knobs stay in
- * Create's Advanced.
+ * (theme family + dark/light on the shared lib/theme refs), account tokens
+ * (browser-stored, forwarded per catalog request — see accountsStore), and an
+ * About card sourced from GET /api/status. Set-once prefs only; per-generation
+ * knobs stay in Create's Advanced.
  */
 import { computed, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
@@ -14,6 +14,14 @@ import SegmentedControl, {
 import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
+import {
+  clearCivitaiToken,
+  clearHfToken,
+  getAccountTokens,
+  maskToken,
+  setCivitaiToken,
+  setHfToken,
+} from "../lib/accountsStore";
 
 const familyOptions: SegmentOption<ThemeFamily>[] = [
   { value: "mold", label: "Mold" },
@@ -32,26 +40,47 @@ function setAppearance(value: Theme) {
   theme.value = value;
 }
 
-// Account + generation prefs share the PreferencesModal contract.
-type SchedulerName = "default" | "ddim" | "euler-ancestral" | "unipc";
-const schedulerOptions: SchedulerName[] = [
-  "default",
-  "ddim",
-  "euler-ancestral",
-  "unipc",
-];
+// ── Account tokens (browser-stored, forwarded per catalog request) ──────
+// The saved (masked) state, reflected on load and after every save/clear.
+const saved = ref(getAccountTokens());
+const hfMasked = computed(() => maskToken(saved.value.hfToken));
+const civitaiMasked = computed(() => maskToken(saved.value.civitaiToken));
 
-const hfToken = ref("");
-const civitaiToken = ref("");
-const defaultScheduler = ref<SchedulerName>("default");
+// Draft inputs, only shown while entering/replacing a token.
+const hfDraft = ref("");
+const civitaiDraft = ref("");
+const editingHf = ref(false);
+const editingCivitai = ref(false);
 
-async function saveSetting(key: string, value: string): Promise<void> {
-  await fetch("/api/settings/set", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ key, value }),
-  });
-  toast("success", "saved");
+function saveHf() {
+  const value = hfDraft.value.trim();
+  if (!value) return;
+  setHfToken(value);
+  saved.value = getAccountTokens();
+  hfDraft.value = "";
+  editingHf.value = false;
+  toast("success", "Hugging Face token saved in this browser");
+}
+function removeHf() {
+  clearHfToken();
+  saved.value = getAccountTokens();
+  hfDraft.value = "";
+  editingHf.value = false;
+}
+function saveCivitai() {
+  const value = civitaiDraft.value.trim();
+  if (!value) return;
+  setCivitaiToken(value);
+  saved.value = getAccountTokens();
+  civitaiDraft.value = "";
+  editingCivitai.value = false;
+  toast("success", "Civitai token saved in this browser");
+}
+function removeCivitai() {
+  clearCivitaiToken();
+  saved.value = getAccountTokens();
+  civitaiDraft.value = "";
+  editingCivitai.value = false;
 }
 
 // About — server version + processing summary.
@@ -89,12 +118,32 @@ const version = computed(() => status.value?.version ?? "—");
 
     <p class="kicker">Accounts</p>
     <CardSurface class="settings__card">
+      <!-- Hugging Face -->
       <div class="row">
         <label class="row__label" for="hf_token">Hugging Face token</label>
-        <div class="field">
+        <div v-if="hfMasked && !editingHf" class="field" data-test="hf-saved">
+          <code class="token-mask" data-test="hf-mask">{{ hfMasked }}</code>
+          <button
+            type="button"
+            class="btn"
+            data-test="replace-hf"
+            @click="editingHf = true"
+          >
+            Replace
+          </button>
+          <button
+            type="button"
+            class="btn btn--ghost"
+            data-test="clear-hf"
+            @click="removeHf"
+          >
+            Clear
+          </button>
+        </div>
+        <div v-else class="field">
           <input
             id="hf_token"
-            v-model="hfToken"
+            v-model="hfDraft"
             name="hf_token"
             type="password"
             placeholder="hf_…"
@@ -105,18 +154,54 @@ const version = computed(() => status.value?.version ?? "—");
             type="button"
             class="btn"
             data-test="save-hf"
-            @click="saveSetting('huggingface.token', hfToken)"
+            :disabled="!hfDraft.trim()"
+            @click="saveHf"
           >
             Save
           </button>
+          <button
+            v-if="editingHf"
+            type="button"
+            class="btn btn--ghost"
+            @click="editingHf = false"
+          >
+            Cancel
+          </button>
         </div>
       </div>
+
+      <!-- Civitai -->
       <div class="row">
         <label class="row__label" for="civitai_token">Civitai token</label>
-        <div class="field">
+        <div
+          v-if="civitaiMasked && !editingCivitai"
+          class="field"
+          data-test="civitai-saved"
+        >
+          <code class="token-mask" data-test="civitai-mask">{{
+            civitaiMasked
+          }}</code>
+          <button
+            type="button"
+            class="btn"
+            data-test="replace-civitai"
+            @click="editingCivitai = true"
+          >
+            Replace
+          </button>
+          <button
+            type="button"
+            class="btn btn--ghost"
+            data-test="clear-civitai"
+            @click="removeCivitai"
+          >
+            Clear
+          </button>
+        </div>
+        <div v-else class="field">
           <input
             id="civitai_token"
-            v-model="civitaiToken"
+            v-model="civitaiDraft"
             name="civitai_token"
             type="password"
             placeholder="cv_…"
@@ -127,32 +212,26 @@ const version = computed(() => status.value?.version ?? "—");
             type="button"
             class="btn"
             data-test="save-civitai"
-            @click="saveSetting('civitai.token', civitaiToken)"
+            :disabled="!civitaiDraft.trim()"
+            @click="saveCivitai"
           >
             Save
           </button>
+          <button
+            v-if="editingCivitai"
+            type="button"
+            class="btn btn--ghost"
+            @click="editingCivitai = false"
+          >
+            Cancel
+          </button>
         </div>
       </div>
-    </CardSurface>
 
-    <p class="kicker">Generation</p>
-    <CardSurface class="settings__card">
-      <div class="row">
-        <label class="row__label" for="default_scheduler">
-          Default scheduler
-        </label>
-        <select
-          id="default_scheduler"
-          v-model="defaultScheduler"
-          name="default_scheduler"
-          class="select"
-          @change="saveSetting('generate.scheduler', defaultScheduler)"
-        >
-          <option v-for="s in schedulerOptions" :key="s" :value="s">
-            {{ s }}
-          </option>
-        </select>
-      </div>
+      <p class="settings__note">
+        Tokens are stored in this browser only and sent solely with catalog
+        (model discovery) requests — never placed in a URL.
+      </p>
     </CardSurface>
 
     <p class="kicker">About</p>
@@ -277,6 +356,42 @@ const version = computed(() => status.value?.version ?? "—");
 .btn:focus-visible {
   outline: 2px solid var(--safelight);
   outline-offset: 2px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--ghost {
+  color: var(--ink-3);
+}
+.btn--ghost:hover {
+  color: var(--stop);
+  background: transparent;
+}
+
+.token-mask {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--ink-2);
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+}
+
+.settings__note {
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  line-height: 1.5;
 }
 
 /* About list — rows inside an unpadded card. */

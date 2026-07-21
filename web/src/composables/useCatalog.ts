@@ -66,6 +66,12 @@ function build() {
   const loadingMore = ref(false);
   const errorMsg = ref<string | null>(null);
   const detail = ref<ModelDetail | null>(null);
+  // Detail drawer non-content states (G4: the drawer is never blank). While a
+  // non-cached row's `/api/catalog/:id` fetch is in flight the drawer shows a
+  // loading state keyed on that id; a failure shows a retryable error instead
+  // of silently closing.
+  const detailLoadingId = ref<string | null>(null);
+  const detailError = ref<{ id: string; message: string } | null>(null);
 
   // ── Installed models (the Installed tab) ──────────────────────────────
   const tab = ref<ModelsTab>("installed");
@@ -150,8 +156,10 @@ function build() {
     // download_recipe, …), so prefer the in-memory entry and only fall back
     // to the API when the user opens an id that isn't in the current page —
     // e.g. a future deep-link path.
+    detailError.value = null;
     const cached = entries.value.find((e) => e.id === id);
     if (cached) {
+      detailLoadingId.value = null;
       detail.value = {
         kind: "catalog",
         entry: cached,
@@ -159,19 +167,35 @@ function build() {
       };
       return;
     }
+    // Not on the current page — open the drawer in a loading state while the
+    // DB-backed `/api/catalog/:id` fetch resolves, rather than opening blank.
+    detail.value = null;
+    detailLoadingId.value = id;
     try {
       const entry = await fetchCatalogEntry(id);
+      if (detailLoadingId.value !== id) return; // superseded by another open
+      detailLoadingId.value = null;
       detail.value = {
         kind: "catalog",
         entry,
         variants: catalogVariants(entry),
       };
     } catch {
-      // 404 (live row not in DB, deep link to a stale id) or transient
-      // network — keep `detail` null so the drawer stays closed instead of
-      // wedging on stale data.
-      detail.value = null;
+      if (detailLoadingId.value !== id) return;
+      detailLoadingId.value = null;
+      // 404 (live row not in DB) / 502 (upstream) / transient network — show a
+      // retryable error in the drawer instead of a blank panel or a silent
+      // close the user can't tell apart from a mis-click.
+      detailError.value = {
+        id,
+        message: "Couldn't load this model's details.",
+      };
     }
+  }
+
+  /** Retry the last errored detail open. */
+  function retryDetail(id: string) {
+    void openDetail(id);
   }
 
   /** Open the drawer for an installed model. Components load asynchronously
@@ -194,6 +218,8 @@ function build() {
 
   function closeDetail() {
     detail.value = null;
+    detailLoadingId.value = null;
+    detailError.value = null;
   }
 
   function setTab(next: ModelsTab) {
@@ -281,10 +307,13 @@ function build() {
     loadingMore,
     errorMsg,
     detail,
+    detailLoadingId,
+    detailError,
     refresh,
     loadMore,
     setFilter,
     openDetail,
+    retryDetail,
     closeDetail,
     canDownload,
     startDownload,

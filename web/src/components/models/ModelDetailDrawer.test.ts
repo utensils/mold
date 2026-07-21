@@ -64,6 +64,9 @@ const catalogDetail = (
 ): ModelDetail => ({ kind: "catalog", entry, variants });
 
 const mockDetail = ref<ModelDetail | null>(null);
+const mockDetailLoadingId = ref<string | null>(null);
+const mockDetailError = ref<{ id: string; message: string } | null>(null);
+const mockRetryDetail = vi.fn();
 const mockCloseDetail = vi.fn();
 const mockStartDownload = vi.fn();
 const mockCanDownload = vi.fn(
@@ -78,6 +81,9 @@ const mockDelete = vi
 vi.mock("../../composables/useCatalog", () => ({
   useCatalog: () => ({
     detail: mockDetail,
+    detailLoadingId: mockDetailLoadingId,
+    detailError: mockDetailError,
+    retryDetail: mockRetryDetail,
     closeDetail: mockCloseDetail,
     startDownload: mockStartDownload,
     canDownload: mockCanDownload,
@@ -99,6 +105,46 @@ describe("ModelDetailDrawer", () => {
     vi.clearAllMocks();
     mockConfirm.mockResolvedValue(true);
     mockDetail.value = null;
+    mockDetailLoadingId.value = null;
+    mockDetailError.value = null;
+  });
+
+  describe("never-blank states (G4)", () => {
+    it("shows a loading state while a non-cached detail fetch is in flight", () => {
+      mockDetailLoadingId.value = "cv:123";
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test='detail-loading']").exists()).toBe(true);
+    });
+
+    it("shows a retryable error instead of a blank panel", async () => {
+      mockDetailError.value = {
+        id: "cv:123",
+        message: "Couldn't load this model's details.",
+      };
+      const w = mount(ModelDetailDrawer);
+      const err = w.find("[data-test='detail-error']");
+      expect(err.exists()).toBe(true);
+      expect(err.text()).toContain("Couldn't load");
+      await w.get("[data-test='detail-retry']").trigger("click");
+      expect(mockRetryDetail).toHaveBeenCalledWith("cv:123");
+    });
+
+    it("never crashes the render on a malformed entry (null download_recipe)", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          name: "Malformed Model",
+          // Force the shape the type says can't happen but the wire sometimes
+          // does — the drawer must render, not throw and blank out.
+          download_recipe: null as unknown as {
+            needs_token: null;
+            files: [];
+          },
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      expect(w.find(".md").exists()).toBe(true);
+      expect(w.text()).toContain("Malformed Model");
+    });
   });
 
   describe("catalog (Discover)", () => {

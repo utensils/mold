@@ -24,6 +24,7 @@ import type {
   QueueListing,
 } from "./types";
 import { postSseJsonStream, type StreamError } from "./lib/apiStream";
+import { catalogAuthHeaders } from "./lib/accountsStore";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
@@ -471,7 +472,9 @@ export async function fetchCatalogSearch(
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/search?${sp.toString()}`);
+  const r = await fetch(`/api/catalog/search?${sp.toString()}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/search ${r.status}`);
   return r.json();
 }
@@ -488,19 +491,25 @@ export async function fetchCatalogInstalled(params: {
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/installed?${sp.toString()}`);
+  const r = await fetch(`/api/catalog/installed?${sp.toString()}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/installed ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
-  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
-  const r = await fetch(`/api/catalog/families`);
+  const r = await fetch(`/api/catalog/families`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
   return r.json();
 }
@@ -525,6 +534,7 @@ export async function postCatalogDownload(
 ): Promise<CatalogDownloadResponse> {
   const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
     method: "POST",
+    headers: catalogAuthHeaders(),
   });
   if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
   return r.json();
