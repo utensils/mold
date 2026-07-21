@@ -37,10 +37,13 @@ pub enum JobLifecycle {
 
 /// One row in the `GET /api/queue` response.
 ///
-/// `position` is the 0-based FIFO index at the time of the snapshot — 0 is at
-/// the head (about to be dispatched, or already running on a worker), N-1 is
-/// the most recently submitted. Position is derived from insertion order, so
-/// it shifts as earlier jobs finish and drop out.
+/// `position` is the 0-based index in the registry's dispatch-priority order
+/// at the time of the snapshot — 0 is at the head (about to be dispatched, or
+/// already running on a worker), N-1 is last in line. It starts as insertion
+/// order but a `PATCH /api/queue/:id {position}` reorder moves a job within it,
+/// and it shifts as earlier jobs finish and drop out. The dispatch loops align
+/// their lookahead buffer to this order, so it reflects real execution order,
+/// not just the reported snapshot.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct JobEntry {
     pub id: String,
@@ -302,7 +305,11 @@ impl JobRegistry {
     }
 
     /// Move a still-queued job to be the `position`-th queued entry (0-based)
-    /// among the queued jobs — the ordering the dispatcher consumes FIFO.
+    /// among the queued jobs. This order is authoritative for dispatch: the
+    /// single- and multi-GPU loops align their lookahead buffer to
+    /// [`queued_ids_in_order`](Self::queued_ids_in_order) before picking, so a
+    /// reorder changes real execution order, not just the `GET /api/queue`
+    /// snapshot.
     ///
     /// `position` is clamped into the queued range, so a caller can pass a
     /// large number to mean "send to the back". Running jobs are ignored for
@@ -394,8 +401,27 @@ impl JobRegistry {
         }
     }
 
+    /// The ids of currently-queued jobs, in dispatch-priority order — the same
+    /// order [`reorder_queued`](Self::reorder_queued) maintains and `GET
+    /// /api/queue` reports. Running jobs are excluded (they've left the
+    /// reorderable set).
+    ///
+    /// The dispatch loops call this each iteration to align their lookahead
+    /// buffer to the registry, which is what makes the registry the single
+    /// source of truth for order: a `PATCH /api/queue/:id {position}` reorder
+    /// changes real dispatch order, not just the snapshot.
+    pub fn queued_ids_in_order(&self) -> Vec<String> {
+        let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        entries
+            .iter()
+            .filter(|e| e.state == JobLifecycle::Queued)
+            .map(|e| e.id.clone())
+            .collect()
+    }
+
     /// Snapshot the registry as a wire-shaped listing. Positions are assigned
-    /// in insertion order at snapshot time.
+    /// in the registry's dispatch-priority order at snapshot time (insertion
+    /// order until a `reorder_queued` moves a job).
     pub fn snapshot(&self) -> QueueListing {
         let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let out = entries
