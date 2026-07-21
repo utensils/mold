@@ -2589,8 +2589,8 @@ describe("MobileApp gallery", () => {
 
     const hostsTab = wrapper
       .findAll("button.mobile-tab")
-      .find((button) => button.text() === "Hosts");
-    if (!hostsTab) throw new Error("Missing Hosts tab");
+      .find((button) => button.text() === "Machines");
+    if (!hostsTab) throw new Error("Missing Machines tab");
     await hostsTab.trigger("click");
     const studioRow = wrapper
       .findAll(".host-row")

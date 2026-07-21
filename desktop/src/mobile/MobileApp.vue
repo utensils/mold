@@ -70,6 +70,7 @@ import {
 } from "../stores/generation";
 import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
+import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
@@ -155,6 +156,48 @@ const seedValid = ref(true);
 const parameterValid = ref(true);
 const sourceValid = ref(true);
 const resolutionValid = ref(true);
+const advancedSheetOpen = ref(false);
+
+/** Count of advanced settings that differ from their defaults — drives the
+ * "Advanced" trigger badge and the sheet header badge. */
+const advancedActiveCount = computed(() => {
+  let count = 0;
+  if (form.negativePrompt.trim()) count += 1;
+  if (form.sourceImage || form.controlImage || form.imageAttachments.length) count += 1;
+  if (form.loras.length) count += 1;
+  if (form.upscaleModel) count += 1;
+  if (form.scheduler !== "default") count += 1;
+  if (form.cfgPlus) count += 1;
+  return count;
+});
+
+function openAdvancedSheet(): void {
+  advancedSheetOpen.value = true;
+}
+
+function closeAdvancedSheet(): void {
+  advancedSheetOpen.value = false;
+}
+
+/** Restore only the advanced-tier fields to their defaults; prompt, model,
+ * dimensions, steps, guidance, seed, and batch are left untouched. */
+function resetAdvancedSettings(): void {
+  const defaults = newGenerateForm();
+  form.negativePrompt = defaults.negativePrompt;
+  form.scheduler = defaults.scheduler;
+  form.cfgPlus = defaults.cfgPlus;
+  form.upscaleModel = defaults.upscaleModel;
+  form.loras = [];
+  form.strength = defaults.strength;
+  form.sourceImage = defaults.sourceImage;
+  form.sourceImageName = defaults.sourceImageName;
+  form.imageAttachments = [];
+  form.sourceFit = { mode: "pad-repaint" };
+  form.maskImage = defaults.maskImage;
+  form.controlImage = defaults.controlImage;
+  form.controlModel = defaults.controlModel;
+  form.controlScale = defaults.controlScale;
+}
 const preparingGeneration = ref(false);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
@@ -2013,7 +2056,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <template v-else>
-          <h1 class="section-title">Generate</h1>
+          <h1 class="section-title">Create</h1>
           <p class="section-note">Develop on {{ selectedHost.name }}</p>
           <label v-if="hosts.length > 1" class="field">
             <span>Host</span>
@@ -2133,33 +2176,6 @@ onBeforeUnmount(() => {
             @discard="discardPreparedBatch"
             @generate="generate"
           />
-          <label v-if="form.model && caps.supportsNegativePrompt" class="field">
-            <span>Negative prompt</span>
-            <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
-          </label>
-
-          <details
-            v-if="form.model && caps.supportsImg2img"
-            class="mobile-native-disclosure"
-            :open="
-              !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
-              caps.sourceImageMode === 'qwen-edit'
-            "
-            data-test="mobile-source-disclosure"
-          >
-            <summary>
-              <span>{{ sourceSectionTitle }}</span>
-              <small>{{ sourceSectionSummary }}</small>
-            </summary>
-            <MobileSourceControls
-              :form="form"
-              :target="selectedTarget"
-              :control-models="controlModels"
-              :upscalers="upscalers"
-              @validity-change="sourceValid = $event"
-            />
-          </details>
-
           <p
             v-if="mobileMediaBudgetError"
             class="mobile-generate-validation"
@@ -2215,26 +2231,77 @@ onBeforeUnmount(() => {
             :last-seed="generation.lastSeedUsed"
             @validity-change="seedValid = $event"
           />
-          <label class="field"
-            ><span>Format</span
-            ><select v-model="form.outputFormat" class="control">
-              <option v-for="format in outputFormats" :key="format" :value="format">
-                {{ format.toUpperCase() }}
-              </option>
-            </select></label
-          >
 
-          <MobileGenerateParameters
-            :form="form"
-            :upscalers="upscalers"
-            @validity-change="parameterValid = $event"
-          />
-          <MobileLoraControls
-            v-if="selectedTarget"
-            :form="form"
-            :target="selectedTarget"
-            @append-word="appendPromptWord"
-          />
+          <button
+            class="mobile-advanced-trigger"
+            type="button"
+            data-test="mobile-open-advanced"
+            @click="openAdvancedSheet"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            <span>Advanced (sampler, LoRA, source)</span>
+            <span
+              v-if="advancedActiveCount > 0"
+              class="mobile-advanced-trigger-badge"
+              data-test="mobile-advanced-trigger-count"
+              >{{ advancedActiveCount }}</span
+            >
+          </button>
+
+          <MobileAdvancedSheet
+            :open="advancedSheetOpen"
+            :count="advancedActiveCount"
+            @close="closeAdvancedSheet"
+            @reset="resetAdvancedSettings"
+          >
+            <MobileGenerateParameters
+              :form="form"
+              :upscalers="upscalers"
+              @validity-change="parameterValid = $event"
+            />
+            <label v-if="form.model && caps.supportsNegativePrompt" class="field">
+              <span>Negative prompt</span>
+              <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
+            </label>
+            <details
+              v-if="form.model && caps.supportsImg2img"
+              class="mobile-native-disclosure"
+              :open="
+                !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
+                caps.sourceImageMode === 'qwen-edit'
+              "
+              data-test="mobile-source-disclosure"
+            >
+              <summary>
+                <span>{{ sourceSectionTitle }}</span>
+                <small>{{ sourceSectionSummary }}</small>
+              </summary>
+              <MobileSourceControls
+                :form="form"
+                :target="selectedTarget"
+                :control-models="controlModels"
+                :upscalers="upscalers"
+                @validity-change="sourceValid = $event"
+              />
+            </details>
+            <MobileLoraControls
+              v-if="selectedTarget"
+              :form="form"
+              :target="selectedTarget"
+              @append-word="appendPromptWord"
+            />
+            <label class="field"
+              ><span>Format</span
+              ><select v-model="form.outputFormat" class="control">
+                <option v-for="format in outputFormats" :key="format" :value="format">
+                  {{ format.toUpperCase() }}
+                </option>
+              </select></label
+            >
+          </MobileAdvancedSheet>
+
           <MobileTemplates :form="form" :host-id="selectedHost.id" @load="loadTemplate" />
 
           <div class="mobile-estimate">
@@ -2333,7 +2400,7 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="tab === 'gallery'">
-        <h1 class="section-title">Gallery</h1>
+        <h1 class="section-title">Library</h1>
         <p class="section-note">Prints from every saved host</p>
         <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
         <div v-if="galleryLoading" class="empty-state">Loading prints…</div>
@@ -2380,7 +2447,7 @@ onBeforeUnmount(() => {
           @status="updateHostStatus"
         />
         <template v-else>
-          <h1 class="section-title">Hosts</h1>
+          <h1 class="section-title">Machines</h1>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
           <button
             class="secondary-button"
@@ -2514,7 +2581,10 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-generate"
         @click="tab = 'generate'"
       >
-        Generate
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" />
+        </svg>
+        <span>Create</span>
       </button>
       <button
         class="mobile-tab"
@@ -2523,7 +2593,13 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-gallery"
         @click="tab = 'gallery'"
       >
-        Gallery
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="3" width="7.5" height="7.5" rx="1.5" />
+          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" />
+          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" />
+          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" />
+        </svg>
+        <span>Library</span>
       </button>
       <button
         class="mobile-tab"
@@ -2532,7 +2608,11 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-catalog"
         @click="openCatalog()"
       >
-        Catalog
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3l8.5 4.3-8.5 4.3L3.5 7.3z" />
+          <path d="M3.5 12L12 16.3 20.5 12" />
+        </svg>
+        <span>Models</span>
       </button>
       <button
         class="mobile-tab"
@@ -2541,7 +2621,11 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-hosts"
         @click="tab = 'hosts'"
       >
-        Hosts
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="7" rx="2" />
+          <rect x="3" y="13" width="18" height="7" rx="2" />
+        </svg>
+        <span>Machines</span>
       </button>
     </nav>
   </main>

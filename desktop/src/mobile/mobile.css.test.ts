@@ -61,6 +61,45 @@ describe("mobile navigation", () => {
     expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);
   });
 
+  it("gives every tab a Mold Studio icon column and a 10px monospace caption", () => {
+    const tab = css.match(/\.mobile-tab\s*\{([^}]*)\}/s);
+    const icon = css.match(/\.mobile-tab svg\s*\{([^}]*)\}/s);
+    expect(tab?.[1]).toMatch(/flex-direction:\s*column\s*;/);
+    expect(tab?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(tab?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(icon?.[1]).toMatch(/width:\s*22px\s*;/);
+  });
+});
+
+describe("mobile advanced sheet", () => {
+  it("is a full-screen overlay that only becomes visible when opened", () => {
+    const sheet = css.match(/\.mobile-advanced-sheet\s*\{([^}]*)\}/s);
+    const open = css.match(/\.mobile-advanced-sheet\.is-open\s*\{([^}]*)\}/s);
+    expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
+    expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+  });
+
+  it("scrolls its own body with the pinned mobile containment invariants", () => {
+    const body = css.match(/\.mobile-advanced-sheet-body\s*\{([^}]*)\}/s);
+    expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
+    expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(body?.[1]).toContain("env(safe-area-inset-left)");
+    expect(body?.[1]).toContain("env(safe-area-inset-right)");
+    expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
+  });
+
+  it("keeps the advanced trigger, close, and reset controls at least 44px", () => {
+    const trigger = css.match(/\.mobile-advanced-trigger\s*\{([^}]*)\}/s);
+    const close = css.match(/\.mobile-advanced-sheet-close\s*\{([^}]*)\}/s);
+    const reset = css.match(/\.mobile-advanced-sheet-reset\s*\{([^}]*)\}/s);
+    expect(Number(trigger?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(close?.[1]?.match(/min-width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(close?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(reset?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+  });
+
   it("keeps four primary tabs and gives Settings a full-size header control", () => {
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
     const settingsControls = css.match(
