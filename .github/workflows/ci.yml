@@ -60,9 +60,11 @@ jobs:
               - 'nix/**'
               - '.github/workflows/ci.yml'
             release:
+              - 'Dockerfile'
               - 'release-plz.toml'
               - 'scripts/release/**'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
+              - 'scripts/tests/docker-web-context.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - '.github/workflows/release-plz.yml'
               - '.github/workflows/ci.yml'
@@ -77,6 +79,8 @@ jobs:
         run: bash scripts/tests/release-sync-pr.sh
       - name: Test CI coverage disk guard
         run: bash scripts/tests/ci-coverage-disk-guard.sh
+      - name: Test Docker web build context
+        run: bash scripts/tests/docker-web-context.sh
 
   docs:
     needs: changes
