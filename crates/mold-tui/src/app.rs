@@ -940,11 +940,6 @@ pub enum Popup {
     MachineConnect {
         form: crate::hosts::ConnectForm,
     },
-    /// Stepped connect-a-machine flow (Machines workspace):
-    /// Url → optional ApiKey → Testing → saved or Failed with retry.
-    MachineConnect {
-        form: crate::hosts::ConnectForm,
-    },
     SeedInput {
         input: String,
     },
