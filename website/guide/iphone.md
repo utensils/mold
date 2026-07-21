@@ -18,7 +18,7 @@ is reachable beyond localhost:
 MOLD_API_KEY='choose-a-long-secret' mold serve --bind 0.0.0.0 --port 7680
 ```
 
-Open **Hosts** on the iPhone and use one of these paths:
+Open **Machines** on the iPhone and use one of these paths:
 
 - Tap **Discover nearby** to browse `_mold._tcp` services on the current LAN.
   Allow Local Network access when iOS asks.
@@ -45,11 +45,13 @@ Bonjour discovery is LAN-local; Tailscale hosts are normally added by name.
 Mold uses the installed Tailscale network and does not manage tailnet login,
 ACLs, DNS, or certificates.
 
-## Generate
+## Create
 
 Choose a host and one of its installed generation models. The form adapts to
 the selected model family and uses the same request contract and model defaults
-as desktop.
+as desktop. The primary controls stay on the main screen; deeper options open in
+a full-screen **Advanced** sheet, and prompt **style** presets compose at submit
+without rewriting your prompt text.
 
 The mobile composer includes:
 
@@ -89,20 +91,20 @@ The same frozen host is used for expansion-model pulls, source preprocessing,
 and every sibling. Missing-model recovery stays inline with Connecting,
 Starting, Queued, percentage/bytes/files/ETA Pulling, Ready, and failure or
 cancellation retry states. The original inputs and route remain one immutable
-recovery record, and an attempt lease prevents a newer Catalog credential from
-redirecting the pull. Compatible Catalog work already in Starting is joined;
+recovery record, and an attempt lease prevents a newer Models credential from
+redirecting the pull. Compatible Models work already in Starting is joined;
 every terminal, stale, superseded, or aborted attempt releases the lease before
 Retry reacquires the same frozen route. Editing/removing reviewed work cancels
 a pending replacement. Siblings remain independently cancellable and keep
 deterministic seeds, the source prompt, and durable batch position through
 long-video chains. A partial result names each failed variation and reviewed
 prompt, plus any separate unconfirmed-cancellation caveat, while keeping
-successful prints. Gallery shows **Batch N of M** and the source prompt when
+successful prints. Library shows **Batch N of M** and the source prompt when
 that provenance is present; prints from older servers remain unchanged.
 
-## Gallery
+## Library
 
-Gallery merges prints from every saved host, newest first. Unavailable hosts
+Library merges prints from every saved host, newest first. Unavailable hosts
 are reported without hiding media from hosts that did respond.
 
 Tap a tile to open the full-screen viewer:
@@ -121,15 +123,15 @@ Authenticated hosts issue a short-lived read-only media ticket for the selected
 file. The app never puts a long-lived API key in a video URL or buffers an
 entire video into phone memory.
 
-## Catalog
+## Models
 
-Catalog combines installed models with live Hugging Face and Civitai results.
+Models combines installed models with live Hugging Face and Civitai results.
 You can search, filter All/Images/Video, filter by source or family, inspect
 download contents and installed components, and include NSFW entries
 explicitly.
 
-The host selector controls where Catalog browses. Pulling a model can target a
-different ready host without changing the host selected in Generate. With more
+The host selector controls where Models browses. Pulling a model can target a
+different ready host without changing the host selected in Create. With more
 than one target available, Mold opens a host picker.
 
 Pull buttons reflect the server state immediately:
@@ -153,8 +155,8 @@ Tap a saved host to inspect its current state. The detail screen shows:
 - queued/active model downloads with progress; and
 - the models installed on that host.
 
-From the same screen you can rename or retry the host, select it for Generate,
-unload a model, open its Catalog, or forget it. Forgetting a host also deletes
+From the same screen you can rename or retry the host, select it for Create,
+unload a model, open it in Models, or forget it. Forgetting a host also deletes
 its API key from the iOS Keychain.
 
 ## Settings and themes
@@ -162,7 +164,7 @@ its API key from the iOS Keychain.
 Open Settings from the sliders button in the header. Mobile settings currently
 cover:
 
-- **Color family:** Mold or Safelight
+- **Color family:** the Mold Studio theme families, Mold or Safelight
 - **Appearance:** System, Dark, or Light
 - **Remote hosts:** saved-host count and a shortcut to manage them
 - **About:** app version, remote-only processing, and TestFlight updates
@@ -175,7 +177,7 @@ status-bar content remains readable. Themes change the app chrome but never
 recolor generated photos or videos.
 
 The app intentionally prevents WebKit input-focus and double-tap page
-magnification and suppresses rubber-band scrolling. The gallery's horizontal
+magnification and suppresses rubber-band scrolling. The Library's horizontal
 swipe navigation remains enabled. iOS system-level accessibility Zoom is
 separate from WebView page zoom.
 
@@ -186,7 +188,7 @@ changes pass the iOS workflow on `main`. The pipeline validates the bundled
 mobile `index.html`, Mold icon catalog, native archive, App Store Connect
 processing, and internal tester access before it is considered complete.
 
-The initial iPhone release focuses on remote Generate, Gallery, Catalog, Hosts,
+The initial iPhone release focuses on remote Create, Library, Models, Machines,
 and appearance settings. Use desktop or the CLI for a local engine, the full
 Chains authoring/jobs workspace, RunPod provisioning, engine configuration, and
 desktop Stable/Nightly self-update controls.

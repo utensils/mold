@@ -39,8 +39,8 @@ mold server discover
 
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
 output, or `--timeout-secs N` to browse longer on a busy network. The desktop
-app shows the same list under Settings → Hosts with a one-click **Add** button.
-The iPhone app's **Hosts → Discover nearby** uses Apple's native Bonjour browser
+app shows the same list in its **Machines** workspace with a one-click **Add**
+button. The iPhone app's **Machines → Discover nearby** uses Apple's native Bonjour browser
 for the same service and asks for Local Network permission. It also accepts a
 manual IP address, hostname, HTTPS URL, or Tailscale MagicDNS name.
 
@@ -130,7 +130,7 @@ That distinction matters if your laptop has little disk space or no GPU.
 | -------------- | --------------------------------------------- |
 | GPU host       | Runs `mold serve`, stores model files         |
 | Laptop         | Runs `mold run`, `mold list`, `mold ps`       |
-| iPhone         | Remote Generate, Gallery, Catalog, and Hosts  |
+| iPhone         | Remote Create, Library, Models, and Machines  |
 | Discord worker | Runs `mold discord` or `mold serve --discord` |
 | OpenClaw host  | Uses mold via `MOLD_HOST`                     |
 

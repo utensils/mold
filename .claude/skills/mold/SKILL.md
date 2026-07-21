@@ -122,10 +122,11 @@ mold run flux-dev:bf16 "epic shot" \
   --lora dramatic-lighting.safetensors --lora-scale 0.4
 ```
 
-**Catalog browse:** the desktop's single **Catalog** view stacks installed
+**Models browse:** the desktop's single **Models** workspace (Installed +
+Discover segments) stacks installed
 models above the live catalog with **All / Images / Video** media chips and
 Grid / Table layouts; active downloads pin to the top with a source glyph and
-target host. The Installed shelf merges every ready host with host badges and
+target host. The Installed segment merges every ready host with host badges and
 host-routed actions; host detail mirrors that host's active pulls. Rows label
 primary weights separately from the footprint including shared runtime files.
 Curated manifest variants replace ambiguous multi-checkpoint Hugging Face
@@ -140,13 +141,13 @@ lazy async decoding and per-card layout/paint containment instead of
 source-resolution preview images.
 Entries without working preview art use a local model-family mark instead of a
 blank card or another image request.
-The catalog section proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
+The Discover segment proxies live HF + Civitai searches (filter by **LoRAs** to narrow).
 Install with `mold pull cv:<id>` / `mold pull hf:<author>/<repo>` or Pull in
-the Catalog. With several ready desktop hosts, Pull asks for the destination. Remote
+the Models workspace. With several ready desktop hosts, Pull asks for the destination. Remote
 desktop catalog requests can carry request-scoped HF/Civitai fallback tokens;
 server env tokens retain precedence and forwarded values are not persisted.
-Once installed, the LoRA appears in the **Generate → Settings → LoRA**
-dropdown for any compatible model family. The CLI no longer ships a `mold catalog`
+Once installed, the LoRA appears in the **Create → LoRA**
+picker for any compatible model family. The CLI no longer ships a `mold catalog`
 subcommand — every read is live, no scan to run.
 
 **MCP / REST discovery:** `GET /api/loras?model=<name>` and the MCP
@@ -160,8 +161,8 @@ with the request preserving visual stack order. Civitai LoRAs ship trigger
 phrases (`trainedWords`); they render as click-to-insert chips beside the
 selected LoRA — clicking a chip appends the phrase to the active prompt.
 
-**Generate web UI:** the Generate tab only lists downloaded standalone
-generation models; the Catalog tab is the install/repair surface for missing
+**Create web UI:** the Create tab only lists downloaded standalone
+generation models; the Models tab is the install/repair surface for missing
 models and companions. The controls rail mirrors placement controls, exposes
 family-specific schedulers, uses installed upscaler dropdowns, shows
 server-derived peak-memory estimates, reports component readiness via
@@ -738,7 +739,7 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded
 - `GET /api/gallery` · `POST /api/gallery/media-token` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
-- `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target — active pulls pin to the top of the Catalog view with a source glyph and target host — so progress, completion refresh, and cancellation stay routed to the correct server.
+- `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target — active pulls pin to the top of the Models view with a source glyph and target host — so progress, completion refresh, and cancellation stay routed to the correct server.
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
@@ -885,9 +886,9 @@ services.mold.discord = {
 
 ## Desktop App
 
-The native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It auto-detects a running server on `localhost:7680` or embeds an authenticated Metal server bound to the LAN and advertised over mDNS. That local server is permanently the app's own engine (**This device**); remote servers are host-list entries managed in **Settings → Hosts** (This-device card with a copyable persistent API key, Add host, Connected, Remembered, and network discovery), deduplicated by each server's stable instance UUID with display names that follow the server hostname — old remote-primary installs migrate into the list automatically. Clicking a host in the sidebar opens a detail view with live GPU/CPU/RAM telemetry, models-disk usage, queue state, and that host's installed models. Generate uses the union of models installed on every connected host and shows the first-model pull screen only after all hosts report none, so remote-only models route without a local download. Dropping a PNG/JPEG anywhere in Generate attaches it as the family-appropriate source, and embedded Mold metadata restores its settings first. Composer Up/Down recall merges prompt history from all ready hosts and includes a just-submitted remote prompt immediately. Chains uses the same all-host union for video models and keeps limits, creation, job actions, events, and previews on the selected model's host. The app covers the generation workspace (live "Develop" progress), unified multi-host galleries/history/jobs, the single Catalog model view with pinned parallel cancellable pulls, the chains editing bench, full RunPod pod and network-volume lifecycle management, full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), and provenance-tagged settings, with a ⌘K command palette. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
+The native macOS desktop app (Tauri 2 + Vue 3) lives in `desktop/`. It auto-detects a running server on `localhost:7680` or embeds an authenticated Metal server bound to the LAN and advertised over mDNS. That local server is permanently the app's own engine (**This device**); remote servers are host-list entries managed in the **Machines** workspace (This-device card with a copyable persistent API key, Add host, Connected, Remembered, and network discovery), deduplicated by each server's stable instance UUID with display names that follow the server hostname — old remote-primary installs migrate into the list automatically. Clicking a host in Machines opens a detail view with live GPU/CPU/RAM telemetry, models-disk usage, queue state, and that host's installed models. Create uses the union of models installed on every connected host and shows the first-model pull screen only after all hosts report none, so remote-only models route without a local download. Dropping a PNG/JPEG anywhere in Create attaches it as the family-appropriate source, and embedded Mold metadata restores its settings first. Composer Up/Down recall merges prompt history from all ready hosts and includes a just-submitted remote prompt immediately. Chains (inside Create) uses the same all-host union for video models and keeps limits, creation, job actions, events, and previews on the selected model's host. The five workspaces are Create (live "Develop" progress), Library (the unified multi-host gallery with its Runs + Prompts History drawer), Models (the single install/repair workspace with pinned parallel cancellable pulls), Machines (host list, per-host detail, the shared reorderable queue, and full RunPod pod and network-volume lifecycle management), and Settings; plus full-resolution image clipboard copy, persistent 80–130% whole-app scaling (⌘+/⌘−/⌘0), provenance-tagged settings, a StatusPopover at the collapsible sidebar's foot, and a ⌘K command palette. The chains editing bench lives inside Create. RunPod volume selection persists; volume-backed launches force Secure Cloud in the volume's datacenter and omit the redundant workspace disk.
 
-Desktop and iPhone Generate use Batch as the prompt-expansion count. Batch 1 keeps quick Expand/undo and freezes one concrete route through the next Generate/Develop. Batch N greater than 1 prepares exactly N editable, non-empty prompts on that host before queuing anything; the same frozen route is used for every sibling with the source prompt retained as provenance. Prepared siblings carry additive `batch_id`, one-based `batch_index`, and `batch_count` through long-video chains, completion, and Gallery metadata. Edits are valid work. Source/model/family/host/count changes preserve the set as stale and block generation until refresh or discard. Never silently resize, reroute, fall back, or erase a prepared set, including through missing-model pull/resume. Expansion-model recovery stays inside Generate for both batch modes, follows the returned job ID (or a newly observed exact-model row from older timing), and renders Connecting, Starting, Queued, Pulling details, Ready, failure, and cancellation without redirecting to Catalog. Desktop reads `useDownloadsStore`; iPhone shares `useMobileDownloadsStore` with Catalog and freezes the selected remote host ID, URL, Keychain key, and server instance in one immutable record without importing desktop-primary stores. Its exact-route lease belongs only to one pull attempt: it joins a compatible Catalog POST already in Starting, releases after every terminal/error/stale/superseded/aborted path, and is reacquired by Retry. Editing/removing reviewed work supersedes a pending replacement. Unique view consumer IDs prevent remount teardown races, and partial prepared failures name their one-based variation plus reviewed prompt alongside any unconfirmed-cancellation caveat while successful prints remain available.
+Desktop and iPhone Create use Batch as the prompt-expansion count. Batch 1 keeps quick Expand/undo and freezes one concrete route through the next Generate/Develop. Batch N greater than 1 prepares exactly N editable, non-empty prompts on that host before queuing anything; the same frozen route is used for every sibling with the source prompt retained as provenance. Prepared siblings carry additive `batch_id`, one-based `batch_index`, and `batch_count` through long-video chains, completion, and Library metadata. Edits are valid work. Source/model/family/host/count changes preserve the set as stale and block generation until refresh or discard. Never silently resize, reroute, fall back, or erase a prepared set, including through missing-model pull/resume. Expansion-model recovery stays inside Create for both batch modes, follows the returned job ID (or a newly observed exact-model row from older timing), and renders Connecting, Starting, Queued, Pulling details, Ready, failure, and cancellation without redirecting to Models. Desktop reads `useDownloadsStore`; iPhone shares `useMobileDownloadsStore` with the Models view and freezes the selected remote host ID, URL, Keychain key, and server instance in one immutable record without importing desktop-primary stores. Its exact-route lease belongs only to one pull attempt: it joins a compatible Models POST already in Starting, releases after every terminal/error/stale/superseded/aborted path, and is reacquired by Retry. Editing/removing reviewed work supersedes a pending replacement. Unique view consumer IDs prevent remount teardown races, and partial prepared failures name their one-based variation plus reviewed prompt alongside any unconfirmed-cancellation caveat while successful prints remain available.
 
 Signed builds also expose **Settings → Updates** with persisted **Stable** and **Nightly** channels. Startup performs a best-effort check only; available updates appear in a persistent app banner and as a native notification while backgrounded, the menu and Settings offer the same manual check, and nothing downloads or installs until the user chooses **Update and restart**. Stable follows tagged releases through the public `mold-desktop-stable.json` manifest. Nightly follows signed, notarized builds from desktop-relevant `main` commits through the rolling `mold-desktop-nightly.json` manifest. Before touching the installed app, Tauri verifies the Minisign signature and Mold fully extracts the archive to temporary storage, binds the bundle ID/version to the manifest, runs strict Apple signature and Gatekeeper checks, validates the running bundle and install location, and proves the bundle can be replaced. Only then does Mold atomically exchange the staged and installed bundles with macOS `RENAME_SWAP` and restart. There is no post-launch watchdog or automatic rollback: the update either passes preflight and installs or fails while the running version remains installed. Selecting Stable from a newer Nightly does not downgrade immediately; it waits for a newer stable version.
 
@@ -895,25 +896,26 @@ Maintainer note: updater publishing additionally requires the GitHub Actions sec
 
 The iPhone companion is a separate, remote-only Tauri shell in
 `apps/mobile/src-tauri`, with its shared Vue entry in `desktop/src/mobile`. Its
-primary tabs are Generate, Gallery, Catalog, and Hosts, with a header-pushed
+primary tabs are Create, Library, Models, and Machines, with a header-pushed
 Settings screen. It accepts IP/DNS/HTTPS and Tailscale MagicDNS names and uses
 Apple DNS-SD to discover `_mold._tcp`. Host metadata stays in WebView storage;
 API keys stay in the iOS Keychain.
 
-Generate shares desktop's capability/request logic, prompt tools/templates,
+Create shares desktop's capability/request logic, prompt tools/templates,
 independently cancellable batch queue, source/edit/mask/ControlNet/LoRA inputs,
-resolution/seed controls, estimates, and image/video parameters. Gallery merges
+resolution/seed controls, estimates, a full-screen Advanced sheet, prompt style
+presets that compose at submit, and image/video parameters. Library merges
 all saved hosts, streams native video through short-lived exact-path media
 tickets, swipes between full-screen prints, and exposes Use as prompt/source.
 Host detail shows telemetry, models-disk, queue, downloads, and installed
-models. Catalog merges installed/live results, lets Pull target a different host
-without changing Generate, and immediately shows Connecting → Starting → Queued
+models. Models merges installed/live results, lets Pull target a different host
+without changing Create, and immediately shows Connecting → Starting → Queued
 → Pulling N% while preventing duplicate/racing requests.
 
-Settings persists Mold/Safelight × System/Dark/Light, defaults fresh installs
+Settings persists the Mold Studio families (Mold/Safelight) × System/Dark/Light, defaults fresh installs
 to Safelight + System while retaining valid saved choices, and synchronizes
 UIKit's appearance/status bar. Preserve safe areas, 44pt controls, 16px editable text,
-disabled document zoom and overscroll bounce, plus the gallery's scoped swipe.
+disabled document zoom and overscroll bounce, plus the Library's scoped swipe.
 The TestFlight workflow runs after eligible successful iOS `main` CI (no cron),
 waits for App Store Connect `VALID`, and verifies the `Mold Internal` tester
 membership. See `apps/mobile/README.md` for the complete developer and release

@@ -32,35 +32,35 @@ mold run "a cat" --no-expand
 
 ## Native prepared batches
 
-In the desktop and iPhone Generate workspaces, the Batch control also sets the
+In the desktop and iPhone Create workspaces, the Batch control also sets the
 expansion count. Batch 1 keeps the quick **Expand** rewrite and undo, with the
 host route frozen through the next Generate or Develop. Batch 2 or greater
 uses **Prepare N variations** and opens an inline review workspace before any
 generation request is queued. Each prompt can be edited or removed; the whole
 set can be regenerated or discarded.
 
-Mold resolves the selected Generate host before expansion and keeps that exact
+Mold resolves the selected Create host before expansion and keeps that exact
 route for every sibling. It rejects responses that do not contain exactly N
 non-empty prompts. Changing the source prompt, model, host, or Batch count keeps
 the reviewed prompts visible but blocks generation until you refresh or discard
 them. A missing expansion model is pulled on the named host without falling
-back to another machine. Generate keeps that recovery inline for both quick and
+back to another machine. Create keeps that recovery inline for both quick and
 prepared expansion: it shows Connecting, Starting, Queued, live percentage,
 bytes, current file, ETA, and an explicit Retry expansion action when Ready.
 Failed or cancelled pulls can be retried on the same host without losing the
 prompt or reviewed set. On iPhone, each pull attempt temporarily leases the
-frozen route, joins compatible Catalog work already in Starting, and releases
+frozen route, joins compatible Models work already in Starting, and releases
 on terminal, stale, or superseded outcomes; Retry reacquires the route from the
 same immutable recovery record. Editing or removing reviewed prompts cancels a
 pending replacement instead of letting it overwrite the newer set.
 Each prepared sibling records a durable batch ID and its one-based position in
-the Gallery details panel, together with the source prompt when present.
+the Library details panel, together with the source prompt when present.
 
 On iPhone, the concrete route includes the selected host ID, endpoint,
 Keychain-supplied API key, and server instance. The touch workspace uses 44pt
 actions and 16px editors, confirms a two-to-one collapse, guards deferred source
 preprocessing, and restores focus only while the replaced control still owns it.
-Catalog and Generate share one mobile download authority, so an expansion pull
+Models and Create share one mobile download authority, so an expansion pull
 cannot open a competing stream or drift to another host. When failures and an
 unconfirmed cancellation coexist, the accessible outcome announces both.
 

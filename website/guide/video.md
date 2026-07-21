@@ -83,7 +83,7 @@ fade_frames = 12
 
 ### Web composer
 
-The web UI at `/generate` has a **Script** mode toggle. Switch to Script mode for a card-based editor where each stage gets its own prompt, frame count, and transition selector. Supports drag-reorder, per-stage prompt expansion, and TOML import/export.
+The web UI at `/create` has a **Script** mode toggle. Switch to Script mode for a card-based editor where each stage gets its own prompt, frame count, and transition selector. Supports drag-reorder, per-stage prompt expansion, and TOML import/export.
 
 ### TUI script mode
 
