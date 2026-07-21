@@ -1,0 +1,24 @@
+/* Mold Studio type — three OFL variable fonts, bundled in-app (never fetched). */
+
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("./bricolage-grotesque/BricolageGrotesque-VF.ttf") format("truetype-variations");
+  font-weight: 200 800;
+  font-stretch: 75% 100%;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("./schibsted-grotesk/SchibstedGrotesk-VF.ttf") format("truetype-variations");
+  font-weight: 400 900;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Martian Mono";
+  src: url("./martian-mono/MartianMono-VF.ttf") format("truetype-variations");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-display: block;
+}

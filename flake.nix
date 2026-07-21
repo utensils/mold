@@ -321,7 +321,17 @@
           mold-web = pkgs.stdenv.mkDerivation {
             pname = "mold-web";
             version = "0.10.0";
-            src = ./web;
+            # The SPA imports the shared Mold Studio design system from ui/
+            # (tokens, fonts, primitives), so the source tree carries both
+            # directories with the app rooted in web/.
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.unions [
+                ./web
+                ./ui
+              ];
+            };
+            sourceRoot = "source/web";
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
               bunNix = ./web/bun.nix;
@@ -359,7 +369,15 @@
           mold-desktop-web = pkgs.stdenv.mkDerivation {
             pname = "mold-desktop-web";
             version = workspaceVersion;
-            src = ./desktop;
+            # Same shared-ui layout as mold-web: desktop/ + ui/ side by side.
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.unions [
+                ./desktop
+                ./ui
+              ];
+            };
+            sourceRoot = "source/desktop";
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
               bunNix = ./desktop/bun.nix;

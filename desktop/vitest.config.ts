@@ -7,7 +7,9 @@ export default mergeConfig(
     test: {
       environment: "happy-dom",
       globals: false,
-      include: ["src/**/*.test.ts"],
+      // The shared design-system primitives (../ui) are tested here so the
+      // desktop CI gate covers them; they have no test runner of their own.
+      include: ["src/**/*.test.ts", "../ui/**/*.test.ts"],
     },
   }),
 );

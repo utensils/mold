@@ -1,8 +1,11 @@
 import { existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
+
+const uiDir = fileURLToPath(new URL("../ui", import.meta.url));
 
 export default defineConfig({
   plugins: [
@@ -29,7 +32,18 @@ export default defineConfig({
   ],
   clearScreen: false,
   root: ".",
-  server: { host: "0.0.0.0", port: 1431, strictPort: true },
+  resolve: {
+    alias: {
+      "@ui": uiDir,
+      vue: fileURLToPath(new URL("./node_modules/vue", import.meta.url)),
+    },
+  },
+  server: {
+    host: "0.0.0.0",
+    port: 1431,
+    strictPort: true,
+    fs: { allow: [".", uiDir] },
+  },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
     target: "safari17",

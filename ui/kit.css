@@ -1,0 +1,61 @@
+/*
+ * Mold Studio — shared kit styles: the few global effects every surface uses.
+ * Imported after tokens.css. Component-specific styles live in the Vue
+ * primitives themselves (scoped, token-var driven).
+ */
+
+/* Developing shimmer — 1.6s loop (spec §09). Apply to placeholder tiles. */
+@keyframes ms-shimmer {
+  from {
+    background-position: 220% 0;
+  }
+  to {
+    background-position: -220% 0;
+  }
+}
+
+.ms-shimmer {
+  background-color: var(--print);
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in srgb, var(--safelight) 20%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 220% 100%;
+  animation: ms-shimmer 1.6s ease-in-out infinite;
+}
+
+/* Entrance for overlays/results — never applied to core chrome. */
+@keyframes ms-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.ms-fade-up {
+  animation: ms-fade-up var(--dur-slow) var(--ease);
+}
+
+/* Keyboard focus: 2px accent ring, offset from the control, never removed. */
+.ms-focus,
+:where(.ms-kit) :focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-shimmer {
+    animation: none;
+    background-image: none;
+    background-color: color-mix(in srgb, var(--safelight) 8%, var(--print));
+  }
+  .ms-fade-up {
+    animation: none;
+  }
+}

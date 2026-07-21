@@ -14,11 +14,22 @@ import tailwindcss from "@tailwindcss/vite";
 declare const process: { env: Record<string, string | undefined> };
 const apiTarget = process.env.MOLD_API_ORIGIN ?? "http://localhost:7680";
 
+// Shared Mold Studio design system (tokens + primitives) outside this root;
+// `vue` is pinned to this app's copy so ui/ sources resolve it.
+const uiDir = new URL("../ui", import.meta.url).pathname;
+
 export default defineConfig({
   plugins: [vue(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@ui": uiDir,
+      vue: new URL("./node_modules/vue", import.meta.url).pathname,
+    },
+  },
   server: {
     host: "0.0.0.0",
     port: 5174,
+    fs: { allow: [".", uiDir] },
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
       "/health": { target: apiTarget, changeOrigin: true },

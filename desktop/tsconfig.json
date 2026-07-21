@@ -19,12 +19,15 @@
     "useDefineForClassFields": true,
     "types": ["vite/client"],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@ui/*": ["../ui/*"]
     }
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.vue",
+    "../ui/**/*.ts",
+    "../ui/**/*.vue",
     "vite.config.ts",
     "vite.mobile.config.ts",
     "vitest.config.ts"
