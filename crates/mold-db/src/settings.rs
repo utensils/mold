@@ -26,6 +26,10 @@ pub const TUI_LAST_NEGATIVE: &str = "tui.last_negative";
 pub const TUI_NEGATIVE_COLLAPSED: &str = "tui.negative_collapsed";
 pub const TUI_VIEW_MODE: &str = "tui.view_mode";
 pub const TUI_GALLERY_COLUMNS: &str = "tui.gallery_columns";
+pub const TUI_DEFAULT_FORMAT: &str = "tui.default_format";
+pub const TUI_REDUCE_MOTION: &str = "tui.reduce_motion";
+pub const TUI_SHOW_TIMELINE: &str = "tui.show_timeline";
+pub const TUI_CONFIRM_DESTRUCTIVE: &str = "tui.confirm_destructive";
 /// Sentinel marking that the legacy `tui-session.json` + `prompt-history.jsonl`
 /// import has already run. Idempotent on subsequent launches.
 pub const TUI_MIGRATED_FROM_JSON: &str = "tui.migrated_from_json";

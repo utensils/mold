@@ -147,7 +147,7 @@ scripts/tui-uat.sh quit
 | Library | 2 | `┌ Library` | All-machines print grid (local + connected server + every Machines host, deduped by filename) + Details side panel on wide terminals; header hint `{n} prints [· host \| · all machines] [· k hosts offline]` |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
 | Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
-| Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme picker + config values |
+| Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme cards + Preferences + config values |
 | Chain | c (from Create) | `┌ Stages` | Chain composer — a Create sub-mode, Esc returns to compose |
 
 ## Key Bindings Reference
@@ -166,7 +166,7 @@ scripts/tui-uat.sh quit
 
 **Machines:** j/k = select row, Enter = set generation target (again = back to Auto), Tab = host list ↔ detail lanes, c = connect a machine (stepped URL → API key → test popup), d = forget host (confirm; deletes its saved API key), r = refresh, x = cancel selected queued job (detail focus, confirm). Persisted keys for `db-get`: `tui.hosts.v1` (JSON registry), `tui.generate_target` (`auto`|`local`|`host:<id>`), `tui.host_key.<id>`.
 
-**Settings:** j/k = navigate, +/- = adjust values
+**Settings:** j/k = navigate, +/- = adjust values, Tab = flip Appearance ↔ Configuration focus. On the Appearance theme-card grid, Up/Down move by card rows (Down past the bottom row enters Configuration) and Left/Right/+/- cycle presets linearly with live apply — `theme-set` relies on the linear `+` cycle and the `theme · <slug>` header hint. The Configuration list starts with a DB-backed Preferences section (`tui.default_format`, `tui.reduce_motion`, `tui.show_timeline`, `tui.confirm_destructive`); with `tui.confirm_destructive` off, destructive actions skip the Confirm popup.
 
 ## Known Quirks
 
@@ -225,6 +225,25 @@ scripts/tui-uat.sh db-assert tui.last_prompt "a test prompt"
 scripts/tui-uat.sh screenshot /tmp/uat-persistence.png
 scripts/tui-uat.sh quit
 rm -rf "$MOLD_HOME"                            # tmp dir cleanup is manual
+```
+
+## Example: Preferences Toggles
+
+The Preferences rows sit at the top of the Configuration list (row order:
+Format, Reduce Motion, Show Timeline, Confirmations) and persist the moment
+they flip — no quit needed. Bools store as `1`/`0`.
+
+```bash
+trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
+scripts/tui-uat.sh launch --fresh --local
+scripts/tui-uat.sh view settings
+scripts/tui-uat.sh settings-focus configuration   # lands on the Format row
+scripts/tui-uat.sh send j                          # down to Reduce Motion
+scripts/tui-uat.sh send +                          # toggle on
+scripts/tui-uat.sh db-assert tui.reduce_motion 1
+scripts/tui-uat.sh send +                          # toggle back off
+scripts/tui-uat.sh db-assert tui.reduce_motion 0
+scripts/tui-uat.sh quit
 ```
 
 ## Example: Per-Model Preferences UAT (#264) — full param coverage

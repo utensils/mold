@@ -12,6 +12,7 @@ mod hosts;
 mod model_info;
 mod motion;
 mod palette;
+mod prefs;
 mod session;
 #[cfg(test)]
 pub(crate) mod test_env;

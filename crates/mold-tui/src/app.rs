@@ -1016,6 +1016,11 @@ pub struct ModelsState {
 /// Identifies a single config field in the Settings view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsKey {
+    // Preferences (DB-backed, see crate::prefs)
+    PrefDefaultFormat,
+    PrefReduceMotion,
+    PrefShowTimeline,
+    PrefConfirmDestructive,
     // General
     DefaultModel,
     ModelsDir,
@@ -1130,6 +1135,11 @@ pub struct SettingsState {
     pub theme_preset: crate::ui::theme::ThemePreset,
     /// Which pane (Appearance vs Configuration) holds focus.
     pub focus: SettingsFocus,
+    /// Columns in the last-rendered theme card grid — set by the
+    /// Appearance renderer so ↑/↓ move by exactly one visual row (same
+    /// pattern as `GalleryState::grid_cols`). 0 until first render;
+    /// navigation clamps it to at least 1.
+    pub appearance_cols: usize,
     /// When true, `save_config()` skips writing to disk (used in tests).
     #[cfg(test)]
     pub skip_save: bool,
@@ -1231,6 +1241,9 @@ pub struct App {
     /// Sticky generation target (persisted at `tui.generate_target`).
     pub target: crate::hosts::GenTarget,
     pub settings: SettingsState,
+    /// DB-backed user preferences (Settings → Preferences), loaded once
+    /// at boot and persisted per-key on toggle.
+    pub prefs: crate::prefs::TuiPrefs,
     pub script: crate::ui::script_composer::ScriptComposerState,
     pub config: Config,
     pub server_url: Option<String>,
@@ -1387,7 +1400,14 @@ impl App {
             }
         };
 
+        // Boot-time user preferences (Settings → Preferences).
+        let prefs = crate::prefs::TuiPrefs::load();
+
         let mut params = GenerateParams::from_config(&config);
+        // `tui.default_format` seeds a fresh session's Format param; the
+        // session / per-model overlays below still win when they carry a
+        // saved format.
+        params.format = prefs.default_format;
         params.inference_mode = initial_mode;
         // Store the server URL in params.host so it's visible/editable
         if let Some(ref url) = server_url {
@@ -1555,6 +1575,7 @@ impl App {
                     ..Default::default()
                 }
             },
+            prefs,
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
@@ -3047,6 +3068,15 @@ impl App {
             Action::FocusPrev if self.active_view == View::Create => {
                 self.generate.focus = self.generate.focus.prev(self.generate.negative_visible());
             }
+            Action::FocusNext | Action::FocusPrev if self.active_view == View::Settings => {
+                // Two panes → next and prev are the same flip. Tab is the
+                // deterministic way to leave the Appearance card grid
+                // without moving (and live-applying) the theme selection.
+                self.settings.focus = match self.settings.focus {
+                    SettingsFocus::Appearance => SettingsFocus::Configuration,
+                    SettingsFocus::Configuration => SettingsFocus::Appearance,
+                };
+            }
             Action::FocusNext | Action::FocusPrev if self.active_view == View::Machines => {
                 use crate::hosts::MachinesFocus;
                 self.machines.focus = match self.machines.focus {
@@ -3402,10 +3432,10 @@ impl App {
                 if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
                     let filename = entry.filename();
                     let machines = entry.owning_origins().len();
-                    self.popup = Some(Popup::Confirm {
-                        message: delete_confirm_message(&filename, machines),
-                        on_confirm: ConfirmAction::DeleteGalleryImage,
-                    });
+                    self.request_confirm(
+                        delete_confirm_message(&filename, machines),
+                        ConfirmAction::DeleteGalleryImage,
+                    );
                 }
             }
             Action::FilterLibrary
@@ -3455,10 +3485,7 @@ impl App {
                     }
 
                     let message = self.build_remove_model_message(&name);
-                    self.popup = Some(Popup::Confirm {
-                        message,
-                        on_confirm: ConfirmAction::RemoveModel(name),
-                    });
+                    self.request_confirm(message, ConfirmAction::RemoveModel(name));
                 }
             }
             Action::MachinesConnect => {
@@ -3510,10 +3537,10 @@ impl App {
             Action::ScriptAddAfter => self.script.add_stage_after(),
             Action::ScriptAddBefore => self.script.add_stage_before(),
             Action::ScriptDelete if self.script.script.stages.len() > 1 => {
-                self.popup = Some(Popup::Confirm {
-                    message: format!("Delete stage {}?", self.script.selected + 1,),
-                    on_confirm: ConfirmAction::DeleteScriptStage,
-                });
+                self.request_confirm(
+                    format!("Delete stage {}?", self.script.selected + 1),
+                    ConfirmAction::DeleteScriptStage,
+                );
             }
             Action::ScriptCycleTransition => self.script.cycle_transition(),
             Action::ScriptSave => self.script.open_save_dialog(),
@@ -4111,6 +4138,27 @@ impl App {
         lines.join("\n")
     }
 
+    /// Whether destructive actions must ask before dispatching —
+    /// the `tui.confirm_destructive` preference.
+    pub fn needs_confirm(&self) -> bool {
+        self.prefs.confirm_destructive
+    }
+
+    /// Gate a destructive action behind the Confirm popup. Every
+    /// `ConfirmAction` site must route through here (never build
+    /// `Popup::Confirm` directly) so `tui.confirm_destructive = off`
+    /// dispatches immediately — and future actions get the gate for free.
+    pub fn request_confirm(&mut self, message: String, on_confirm: ConfirmAction) {
+        if self.needs_confirm() {
+            self.popup = Some(Popup::Confirm {
+                message,
+                on_confirm,
+            });
+        } else {
+            self.handle_confirm_action(on_confirm);
+        }
+    }
+
     /// Dispatch a confirmed popup action.
     fn handle_confirm_action(&mut self, action: ConfirmAction) {
         match action {
@@ -4312,6 +4360,34 @@ impl App {
     #[allow(clippy::vec_init_then_push)]
     pub fn build_settings_rows(&self) -> Vec<SettingsRow> {
         let mut rows = Vec::new();
+
+        // ── Preferences (DB-backed, top of the list per the mock's
+        //    APPEARANCE / PREFERENCES stacked sections) ────────────
+        rows.push(SettingsRow::SectionHeader {
+            name: "Preferences".into(),
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::PrefDefaultFormat,
+            label: "Format",
+            field_type: SettingsFieldType::Toggle {
+                options: vec!["png", "jpeg"],
+            },
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::PrefReduceMotion,
+            label: "Reduce Motion",
+            field_type: SettingsFieldType::Bool,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::PrefShowTimeline,
+            label: "Show Timeline",
+            field_type: SettingsFieldType::Bool,
+        });
+        rows.push(SettingsRow::Field {
+            key: SettingsKey::PrefConfirmDestructive,
+            label: "Confirmations",
+            field_type: SettingsFieldType::Bool,
+        });
 
         // ── General ─────────────────────────────────────────────
         rows.push(SettingsRow::SectionHeader {
@@ -4599,6 +4675,26 @@ impl App {
             .and_then(|name| cfg.models.get(name));
 
         match key {
+            // Preferences (DB-backed)
+            SettingsKey::PrefDefaultFormat => self.prefs.default_format_slug().to_string(),
+            SettingsKey::PrefReduceMotion => if self.prefs.reduce_motion {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
+            SettingsKey::PrefShowTimeline => if self.prefs.show_timeline {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
+            SettingsKey::PrefConfirmDestructive => if self.prefs.confirm_destructive {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
             SettingsKey::DefaultModel => cfg.default_model.clone(),
             SettingsKey::ModelsDir => cfg.models_dir.clone(),
             SettingsKey::OutputDir => cfg
@@ -4717,13 +4813,31 @@ impl App {
 
     /// Navigate up (delta=-1) or down (delta=1) in the settings list, skipping headers.
     ///
-    /// When focus is on the Appearance pane, Up is a no-op and Down hands
-    /// focus to the Configuration list. When focus is on Configuration and
-    /// Up is pressed at the first field, focus returns to Appearance.
+    /// When focus is on the Appearance card grid, Up/Down move the theme
+    /// selection by one visual row (live-applying, like Left/Right's
+    /// linear cycle): Down below the bottom row hands focus to the
+    /// Configuration list, Up above the top row is a no-op. When focus is
+    /// on Configuration and Up is pressed at the first field, focus
+    /// returns to Appearance.
     fn settings_navigate(&mut self, delta: i32) {
         if self.settings.focus == SettingsFocus::Appearance {
+            use crate::ui::theme::ThemePreset;
+            let cols = self.settings.appearance_cols.max(1);
+            let idx = ThemePreset::ALL
+                .iter()
+                .position(|p| *p == self.settings.theme_preset)
+                .unwrap_or(0);
             if delta > 0 {
-                self.settings.focus = SettingsFocus::Configuration;
+                let below = idx + cols;
+                if below < ThemePreset::ALL.len() {
+                    self.apply_theme_preset(ThemePreset::ALL[below]);
+                } else {
+                    // Walked off the bottom of the card grid → enter the
+                    // Configuration list.
+                    self.settings.focus = SettingsFocus::Configuration;
+                }
+            } else if idx >= cols {
+                self.apply_theme_preset(ThemePreset::ALL[idx - cols]);
             }
             return;
         }
@@ -4897,6 +5011,17 @@ impl App {
         let value = options[next].to_string();
 
         match key {
+            SettingsKey::PrefDefaultFormat => {
+                // DB-backed preference — persist immediately, no
+                // config.toml write.
+                self.prefs.default_format = if value == "jpeg" {
+                    OutputFormat::Jpeg
+                } else {
+                    OutputFormat::Png
+                };
+                self.prefs.save_key(mold_db::settings::TUI_DEFAULT_FORMAT);
+                return;
+            }
             SettingsKey::T5Variant => {
                 self.config.t5_variant = if value == "auto" { None } else { Some(value) };
             }
@@ -4924,6 +5049,27 @@ impl App {
     }
 
     fn settings_toggle_bool(&mut self, key: SettingsKey) {
+        // Preference bools live in the DB, not config.toml — flip and
+        // persist immediately (like theme changes), skipping save_config.
+        match key {
+            SettingsKey::PrefReduceMotion => {
+                self.prefs.reduce_motion = !self.prefs.reduce_motion;
+                self.prefs.save_key(mold_db::settings::TUI_REDUCE_MOTION);
+                return;
+            }
+            SettingsKey::PrefShowTimeline => {
+                self.prefs.show_timeline = !self.prefs.show_timeline;
+                self.prefs.save_key(mold_db::settings::TUI_SHOW_TIMELINE);
+                return;
+            }
+            SettingsKey::PrefConfirmDestructive => {
+                self.prefs.confirm_destructive = !self.prefs.confirm_destructive;
+                self.prefs
+                    .save_key(mold_db::settings::TUI_CONFIRM_DESTRUCTIVE);
+                return;
+            }
+            _ => {}
+        }
         match key {
             SettingsKey::EmbedMetadata => self.config.embed_metadata = !self.config.embed_metadata,
             SettingsKey::ExpandEnabled => self.config.expand.enabled = !self.config.expand.enabled,
@@ -7062,6 +7208,7 @@ mod tests {
                 skip_save: true,
                 ..Default::default()
             },
+            prefs: crate::prefs::TuiPrefs::default(),
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
@@ -7677,7 +7824,7 @@ mod tests {
         let mut app = make_settings_test_app();
         app.active_view = View::Settings;
         app.settings.focus = SettingsFocus::Configuration;
-        app.settings.row_index = 1; // Model (first editable field)
+        app.settings.row_index = find_settings_row(&app, SettingsKey::DefaultModel);
         app.dispatch_action(Action::Confirm);
         assert!(
             app.popup.is_some(),
@@ -7722,11 +7869,87 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn settings_navigate_down_from_appearance_enters_configuration() {
+    async fn settings_navigate_down_from_bottom_card_row_enters_configuration() {
+        use crate::ui::theme::ThemePreset;
         let mut app = make_settings_test_app();
         app.settings.focus = SettingsFocus::Appearance;
+        app.settings.appearance_cols = 4;
+        // Studio Dark (index 0) → Down walks the grid one row at a time:
+        // 0 → 4 (Mocha) → 8 (Tokyo) → off the bottom → Configuration.
+        app.settings_navigate(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
+        assert_eq!(app.settings.focus, SettingsFocus::Appearance);
+        app.settings_navigate(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Tokyo);
         app.settings_navigate(1);
         assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+        // The selection stays where it was when focus moved on.
+        assert_eq!(app.settings.theme_preset, ThemePreset::Tokyo);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_navigate_up_moves_selection_a_row_and_stops_at_top() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings.appearance_cols = 4;
+        app.apply_theme_preset(ThemePreset::Tokyo); // index 8, row 2
+        app.settings_navigate(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::Mocha); // index 4
+        app.settings_navigate(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark); // index 0
+                                                                        // Top row: Up is a no-op — focus and selection both hold.
+        app.settings_navigate(-1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
+        assert_eq!(app.settings.focus, SettingsFocus::Appearance);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_navigate_appearance_live_applies_the_row_moves() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings.appearance_cols = 4;
+        app.settings_navigate(1);
+        // Row movement is a selection change → the running theme follows
+        // immediately, exactly like Left/Right's linear cycle.
+        let expected = ThemePreset::Mocha.build();
+        assert_eq!(app.theme.bg, expected.bg);
+        assert_eq!(app.theme.accent, expected.accent);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_tab_flips_focus_without_moving_the_theme_selection() {
+        use crate::ui::theme::ThemePreset;
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings.appearance_cols = 4;
+        let before = app.settings.theme_preset;
+        app.dispatch_action(Action::FocusNext);
+        assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+        app.dispatch_action(Action::FocusNext);
+        assert_eq!(app.settings.focus, SettingsFocus::Appearance);
+        app.dispatch_action(Action::FocusPrev);
+        assert_eq!(app.settings.focus, SettingsFocus::Configuration);
+        // Unlike ↓, Tab never touches (or live-applies) the selection.
+        assert_eq!(app.settings.theme_preset, before);
+        assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_navigate_appearance_tolerates_unset_cols() {
+        use crate::ui::theme::ThemePreset;
+        // Before the first render `appearance_cols` is 0 — navigation
+        // must clamp to 1 column rather than panic or freeze.
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Appearance;
+        app.settings.appearance_cols = 0;
+        app.settings_navigate(1);
+        assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
     }
 
     // ── Codex P2: Alt-key bypass from prompt textarea ─────────────
@@ -8573,6 +8796,231 @@ mod tests {
         app.settings_confirm();
         assert_eq!(app.config.t5_variant, Some("fp16".into()));
         assert!(app.popup.is_none());
+    }
+
+    // ── Preferences rows (Settings redesign) ───────────────────────
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_rows_start_with_the_preferences_section() {
+        let app = make_settings_test_app();
+        let rows = app.build_settings_rows();
+        assert!(
+            matches!(&rows[0], SettingsRow::SectionHeader { name } if name == "Preferences"),
+            "first row must be the Preferences header"
+        );
+        // The four preference fields follow in mock order, before General.
+        let keys: Vec<SettingsKey> = rows
+            .iter()
+            .take(5)
+            .filter_map(|r| match r {
+                SettingsRow::Field { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                SettingsKey::PrefDefaultFormat,
+                SettingsKey::PrefReduceMotion,
+                SettingsKey::PrefShowTimeline,
+                SettingsKey::PrefConfirmDestructive,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_pref_display_values_reflect_prefs() {
+        let mut app = make_settings_test_app();
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefDefaultFormat),
+            "png"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefReduceMotion),
+            "off"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefShowTimeline),
+            "on"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefConfirmDestructive),
+            "on"
+        );
+        app.prefs.default_format = OutputFormat::Jpeg;
+        app.prefs.reduce_motion = true;
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefDefaultFormat),
+            "jpeg"
+        );
+        assert_eq!(
+            app.settings_display_value(&SettingsKey::PrefReduceMotion),
+            "on"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_increment_toggles_pref_bools_without_touching_config() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.row_index = find_settings_row(&app, SettingsKey::PrefReduceMotion);
+        app.settings_increment(1);
+        assert!(app.prefs.reduce_motion);
+        app.settings_increment(1);
+        assert!(!app.prefs.reduce_motion);
+        // DB-backed prefs must never trip the config.toml save-error path.
+        assert!(app.settings.save_error.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_increment_cycles_default_format_pref() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.row_index = find_settings_row(&app, SettingsKey::PrefDefaultFormat);
+        app.settings_increment(1);
+        assert_eq!(app.prefs.default_format, OutputFormat::Jpeg);
+        app.settings_increment(1);
+        assert_eq!(app.prefs.default_format, OutputFormat::Png);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_confirm_toggles_pref_bool() {
+        let mut app = make_settings_test_app();
+        app.settings.focus = SettingsFocus::Configuration;
+        app.settings.row_index = find_settings_row(&app, SettingsKey::PrefShowTimeline);
+        app.settings_confirm();
+        assert!(!app.prefs.show_timeline);
+        assert!(app.popup.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn pref_toggle_persists_to_db_immediately() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.settings.focus = SettingsFocus::Configuration;
+            app.settings.row_index = find_settings_row(&app, SettingsKey::PrefReduceMotion);
+            app.settings_increment(1);
+            // Live-apply: the flip is on disk before quit, like theme
+            // changes.
+            let loaded = crate::prefs::TuiPrefs::load();
+            assert!(loaded.reduce_motion);
+        });
+    }
+
+    // ── Confirm gate (`tui.confirm_destructive`) ────────────────────
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn confirm_on_opens_popup_without_dispatching() {
+        let mut app = make_settings_test_app();
+        app.script.add_stage_after();
+        assert_eq!(app.script.script.stages.len(), 2);
+        assert!(app.needs_confirm(), "confirmations default to on");
+        app.dispatch_action(Action::ScriptDelete);
+        assert!(
+            matches!(app.popup, Some(Popup::Confirm { .. })),
+            "confirm popup must open when the preference is on"
+        );
+        assert_eq!(app.script.script.stages.len(), 2, "nothing dispatched yet");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn confirm_off_skips_popup_and_dispatches() {
+        let mut app = make_settings_test_app();
+        app.script.add_stage_after();
+        assert_eq!(app.script.script.stages.len(), 2);
+        app.prefs.confirm_destructive = false;
+        app.dispatch_action(Action::ScriptDelete);
+        assert!(
+            app.popup.is_none(),
+            "confirm-off must not open the Confirm popup"
+        );
+        assert_eq!(
+            app.script.script.stages.len(),
+            1,
+            "the destructive action must dispatch immediately"
+        );
+    }
+
+    // ── `tui.default_format` seeding contract ───────────────────────
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn pref_seeds_format_when_session_has_none() {
+        // Boot order: config defaults → pref seed → session overlay.
+        // With no saved session format, the pref's choice sticks.
+        let prefs = crate::prefs::TuiPrefs {
+            default_format: OutputFormat::Jpeg,
+            ..Default::default()
+        };
+        let mut params = GenerateParams::from_config(&Config::default());
+        params.format = prefs.default_format;
+        let session = crate::session::TuiSession::default();
+        session.apply_non_model_params(&mut params);
+        assert_eq!(params.format, OutputFormat::Jpeg);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn session_format_still_wins_over_pref_seed() {
+        // A saved session / per-model format overlays the pref seed —
+        // the preference only decides *fresh* sessions.
+        let prefs = crate::prefs::TuiPrefs {
+            default_format: OutputFormat::Jpeg,
+            ..Default::default()
+        };
+        let mut params = GenerateParams::from_config(&Config::default());
+        params.format = prefs.default_format;
+        let session = crate::session::TuiSession {
+            format: Some("png".into()),
+            ..Default::default()
+        };
+        session.apply_non_model_params(&mut params);
+        assert_eq!(params.format, OutputFormat::Png);
+    }
+
+    // ── Settings render landmarks + theme hint (UAT contract) ───────
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn settings_render_keeps_panel_titles_and_theme_hint() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = make_settings_test_app();
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                crate::ui::settings::render(frame, &mut app, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        // `scripts/tui-uat.sh` landmarks: the two panel titles…
+        assert!(out.contains(" Appearance "), "{out}");
+        assert!(out.contains(" Configuration "), "{out}");
+        // …and the theme hint `theme · <slug>` its theme-set flow greps.
+        assert!(out.contains("theme · studio-dark"), "{out}");
+        // The Preferences section header renders at the top of the list.
+        assert!(out.contains("Preferences"), "{out}");
+        // The render recorded the card-grid columns for 2-D navigation:
+        // 98 inner cells → 5 columns of 18-wide cards.
+        assert_eq!(app.settings.appearance_cols, 5);
     }
 
     // ── Regression: metadata uses response model, not UI state (#161) ────

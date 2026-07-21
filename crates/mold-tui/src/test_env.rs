@@ -22,6 +22,15 @@ use std::sync::Once;
 static INIT_DISABLE_DB: Once = Once::new();
 fn ensure_db_disabled_by_default() {
     INIT_DISABLE_DB.call_once(|| {
+        // Take the env lock: this Once fires from whichever plain test
+        // constructs an App first, and with enough tests that moment can
+        // land inside another test's isolated-env window (which removed
+        // MOLD_DB_DISABLE for its body). Setting the var mid-window made
+        // the isolated test's next `open_default()` silently return None
+        // — the deterministic session/theme/registry "row exists on disk
+        // but reads back empty" failures. Locking defers the mutation
+        // until no isolated window is active.
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         if std::env::var("MOLD_DB_DISABLE").is_err() {
             std::env::set_var("MOLD_DB_DISABLE", "1");
         }
