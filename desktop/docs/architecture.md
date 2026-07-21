@@ -27,16 +27,25 @@ Navigation covers Generate, Gallery, Catalog, and Hosts; Settings is a pushed
 header destination. Generate reuses the capability matrix and request builder
 for prompt tools, templates, independent batch jobs, source/edit/mask/ControlNet
 inputs, LoRA, resolution/seed controls, estimates, and video/LTX-2 controls.
-Desktop prepared expansion is intentionally view-ephemeral: `GenerateView`
-owns the input snapshot, monotonic request guard, frozen `HostRoute`, and stale
-calculation; `PreparedExpansionBatch.vue` owns inline review and focus behavior;
-`stores/generation.ts` maps the ordered prompts plus shared source provenance and
-durable batch ID/position metadata to one independently cancellable sibling each.
-`ExpansionPullStatus.vue` is shared by quick and prepared expansion while
-`GenerateView` projects only the frozen route's `useDownloadsStore` bucket into
-its lifecycle. Returned job IDs are authoritative; a newly observed exact-model
-in-flight row covers older snapshot/response timing without treating stale
-history or another host's matching pull as completion.
+Native prepared expansion is intentionally view-ephemeral. `GenerateView` and
+`MobileApp` each own their input snapshot, monotonic request guards, frozen
+`HostRoute`, preprocessing revalidation, and stale calculation; their platform
+review components own inline editing, collapse confirmation, and conditional
+focus restoration. `stores/generation.ts` maps the ordered prompts plus shared
+source provenance and durable batch ID/position metadata to one independently
+cancellable sibling each, including auto-chained video requests. Desktop
+projects the route's `useDownloadsStore` bucket; iPhone shares
+`useMobileDownloadsStore` with Catalog and holds an exact selected-host lease
+without initializing desktop-primary state. Returned job IDs are authoritative;
+a newly observed exact-model in-flight row covers older snapshot/response timing
+without treating stale history, another host, or a competing job as completion.
+The iPhone recovery record deep-freezes its original inputs and route-derived
+host. Its attempt lease outranks later Catalog registration only while that pull
+is active, joins a compatible Catalog POST already in Starting, and releases on
+every terminal, error, stale, superseded, or aborted path; Retry reacquires the
+exact route. Prepared edits/removals supersede pending replacement ownership.
+Per-view consumer IDs and synchronous unmount invalidation keep late
+expansion, preprocessing, pull, and retry callbacks from acting on a remount.
 Capability discovery is advisory
 per host and never participates in fallback routing.
 Gallery merges every saved remote host, streams full-size media through a

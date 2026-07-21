@@ -123,12 +123,20 @@ button looking idle.
 The app uses the same HTTP, SSE, model defaults, resolution presets, and
 generation request contract as the desktop app. New installs use the Safelight
 theme family with system appearance, while saved theme choices persist. Generate brings its
-capability-aware controls to touch: prompt expansion, candidates, recent prompts,
-saved templates, batch queueing, source/edit images, masks, ControlNet, LoRA,
+capability-aware controls to touch: Batch 1 prompt expansion with undo, Batch N
+prepared-variation review, recent prompts, saved templates, source/edit images, masks, ControlNet, LoRA,
 schedulers, CFG++, upscaling, and the video/LTX-2 pipeline controls. Estimates
 come from the selected remote host, while orientation, proportional aspect-ratio
 buttons, resolution tiers, and explicit Random/Fixed seed modes keep the common
 choices direct. Every queued print has independent status and cancellation.
+Prepared variations stay bound to the selected host's snapshotted endpoint,
+Keychain credential, and server identity through expansion, any required model
+pull, source preprocessing, and sibling submission. The phone requires exactly
+the visible Batch count, preserves edited work with named stale reasons, and
+shows batch position and source-prompt provenance in Gallery. A missing-model
+pull leases that frozen route only for the attempt, shares a compatible Catalog
+request already in Starting, and returns authority to Catalog on terminal,
+stale, or superseded outcomes without discarding the recovery record.
 Saved results stream from the host instead of crossing the iPhone WebView as
 encoded media; full-screen images swipe between prints, videos retain native
 playback controls, and a still can become the next generation's source image.

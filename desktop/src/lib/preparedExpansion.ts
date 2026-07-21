@@ -46,7 +46,12 @@ export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs 
   hostLabels: ReadonlyMap<string, string>;
   hostTargets?: ReadonlyMap<
     string,
-    { baseUrl: string; apiKey: string | null; kind: HostRoute["kind"] }
+    {
+      baseUrl: string;
+      apiKey: string | null;
+      kind: HostRoute["kind"];
+      instanceId?: string | null;
+    }
   >;
 }
 
@@ -149,7 +154,9 @@ export function preparedExpansionStaleReasons(
       currentTarget &&
       (currentTarget.baseUrl !== batch.route.target.baseUrl ||
         currentTarget.apiKey !== batch.route.target.apiKey ||
-        currentTarget.kind !== batch.route.kind)
+        currentTarget.kind !== batch.route.kind ||
+        (batch.route.instanceId !== undefined &&
+          currentTarget.instanceId !== batch.route.instanceId))
     ) {
       reasons.push(`${batch.route.label}'s connection details changed.`);
     }
@@ -185,7 +192,9 @@ export function quickExpansionStaleReasons(
       target &&
       (target.baseUrl !== snapshot.route.target.baseUrl ||
         target.apiKey !== snapshot.route.target.apiKey ||
-        target.kind !== snapshot.route.kind)
+        target.kind !== snapshot.route.kind ||
+        (snapshot.route.instanceId !== undefined &&
+          target.instanceId !== snapshot.route.instanceId))
     ) {
       reasons.push(`${snapshot.route.label}'s connection details changed.`);
     }

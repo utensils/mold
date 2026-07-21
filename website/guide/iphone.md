@@ -53,7 +53,8 @@ as desktop.
 
 The mobile composer includes:
 
-- prompt expansion with 1, 3, or 5 candidates, undo, and remote prompt history;
+- Batch 1 quick prompt expansion with undo, Batch N prepared-variation review,
+  and remote prompt history;
 - local templates that can be saved, searched, sorted, renamed, loaded, and
   deleted;
 - batch generation as independent queued jobs, each with its own progress and
@@ -74,6 +75,30 @@ seed.
 When several jobs are submitted, the Queue section keeps them visible while
 you continue composing. Mold limits simultaneous streams so generation does
 not starve gallery or download requests.
+
+Batch is also the expansion count. Batch 1 freezes the selected host through
+the next **Develop** while keeping quick undo. Batch 2 or greater first requests
+exactly N non-empty prompts from that host and opens an inline workspace where
+you can edit, intentionally remove, regenerate, refresh, or discard them before
+anything is queued. Reducing two prompts to one requires confirmation. Changes
+to the source prompt, model, family, Batch count, host endpoint, Keychain key,
+or server identity preserve the reviewed work with a specific stale reason and
+block Develop until you choose Refresh or Discard.
+
+The same frozen host is used for expansion-model pulls, source preprocessing,
+and every sibling. Missing-model recovery stays inline with Connecting,
+Starting, Queued, percentage/bytes/files/ETA Pulling, Ready, and failure or
+cancellation retry states. The original inputs and route remain one immutable
+recovery record, and an attempt lease prevents a newer Catalog credential from
+redirecting the pull. Compatible Catalog work already in Starting is joined;
+every terminal, stale, superseded, or aborted attempt releases the lease before
+Retry reacquires the same frozen route. Editing/removing reviewed work cancels
+a pending replacement. Siblings remain independently cancellable and keep
+deterministic seeds, the source prompt, and durable batch position through
+long-video chains. A partial result names each failed variation and reviewed
+prompt, plus any separate unconfirmed-cancellation caveat, while keeping
+successful prints. Gallery shows **Batch N of M** and the source prompt when
+that provenance is present; prints from older servers remain unchanged.
 
 ## Gallery
 

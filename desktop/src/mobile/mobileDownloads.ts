@@ -18,6 +18,10 @@ export interface MobilePendingPull {
   hostId: string;
   jobId: string | null;
   phase: MobilePendingPullPhase;
+  /** Exact server/credential identity that owns an in-flight POST. */
+  targetSignature?: string;
+  /** Present only for an exact frozen Generate recovery lease. */
+  ownerId?: string;
 }
 
 export interface MobilePullStatus {
@@ -66,6 +70,18 @@ interface CancellationRecord {
   promise: Promise<void>;
 }
 
+interface RateSample {
+  at: number;
+  bytes: number;
+}
+
+interface FrozenPullLease {
+  ownerId: string;
+  host: MobileHost;
+  signature: string;
+  jobId: string | null;
+}
+
 const STREAM_OPEN_TIMEOUT_MS = 10_000;
 
 function hostIdentity(host: MobileHost): HostIdentitySnapshot {
@@ -100,6 +116,20 @@ function pullKey(entry: MobileDownloadEntry, hostId: string): string {
   return `${hostId}:${entry.id}`;
 }
 
+function manifestNamesAreCompatible(left: string, right: string): boolean {
+  return (
+    left === right ||
+    (!left.includes(":") && right.startsWith(`${left}:`)) ||
+    (!right.includes(":") && left.startsWith(`${right}:`))
+  );
+}
+
+function pullEntriesAreCompatible(left: MobileDownloadEntry, right: MobileDownloadEntry): boolean {
+  return [left.id, left.name].some((candidate) =>
+    [right.id, right.name].some((other) => manifestNamesAreCompatible(candidate, other)),
+  );
+}
+
 function isTerminal(
   event: DownloadEvent,
 ): event is Extract<DownloadEvent, { type: "job_done" | "job_failed" | "job_cancelled" }> {
@@ -115,12 +145,15 @@ function conflictJobId(cause: unknown): string | null {
 
 export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
   const downloadsByHost = reactive<Record<string, DownloadsState>>({});
+  const rateSamplesByHost = reactive<Record<string, Record<string, RateSample[]>>>({});
   const pendingPulls = reactive(new Map<string, MobilePendingPull>());
 
   const subscriptions = new Map<string, StreamSubscription>();
   const stateIdentityByHost = new Map<string, HostIdentitySnapshot>();
   const terminalJobsByHost = new Map<string, Set<string>>();
   const consumers = new Map<string, ConsumerRegistration>();
+  const frozenPullLeases = new Map<string, FrozenPullLease>();
+  const pendingPullRequests = new WeakMap<MobilePendingPull, Promise<MobilePullResult>>();
   const cancellationPromises = shallowReactive(new Map<string, CancellationRecord[]>());
 
   function notifyEvent(context: MobileDownloadEventContext): void {
@@ -210,6 +243,7 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     else downloadsByHost[hostId] = emptyDownloadsState();
     stateIdentityByHost.delete(hostId);
     terminalJobsByHost.delete(hostId);
+    delete rateSamplesByHost[hostId];
     clearPendingPullsForHost(hostId);
   }
 
@@ -218,6 +252,23 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
       downloadsByHost[host.id] ?? emptyDownloadsState(),
       event,
     );
+
+    const rates = (rateSamplesByHost[host.id] ??= {});
+    if (event.type === "progress") {
+      const samples = (rates[event.id] ??= []);
+      const at = Date.now();
+      samples.push({ at, bytes: event.bytes_done });
+      while (samples.length > 0 && at - samples[0]!.at > 10_000) samples.shift();
+    } else if (isTerminal(event)) {
+      delete rates[event.id];
+    } else if (event.type === "snapshot") {
+      const live = new Set(
+        [...downloadsByHost[host.id]!.activeJobs, ...downloadsByHost[host.id]!.queued].map(
+          (job) => job.id,
+        ),
+      );
+      for (const id of Object.keys(rates)) if (!live.has(id)) delete rates[id];
+    }
 
     let hadSnapshot = terminalJobsByHost.has(host.id);
     let newlySettled: DownloadJob[] = [];
@@ -236,6 +287,12 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
 
     reconcilePendingPulls(host.id, event);
     notifyEvent({ host, event, hadSnapshot, newlySettled });
+    if (isTerminal(event)) {
+      const settledOwners = [...frozenPullLeases.values()]
+        .filter((lease) => lease.host.id === host.id && lease.jobId === event.id)
+        .map((lease) => lease.ownerId);
+      for (const ownerId of settledOwners) releaseFrozenPull(ownerId);
+    }
   }
 
   function ensureSubscription(host: MobileHost): StreamSubscription {
@@ -335,11 +392,29 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     return ensureSubscription(host).ready;
   }
 
+  function etaFor(hostId: string, jobId: string): number | null {
+    const job = downloadsByHost[hostId]?.activeJobs.find((candidate) => candidate.id === jobId);
+    const samples = rateSamplesByHost[hostId]?.[jobId] ?? [];
+    if (!job || samples.length < 2) return null;
+    const first = samples[0]!;
+    const last = samples.at(-1)!;
+    const elapsed = last.at - first.at;
+    const transferred = last.bytes - first.bytes;
+    if (elapsed <= 0 || transferred <= 0) return null;
+    return Math.round(
+      Math.max(0, job.bytes_total - last.bytes) / ((transferred * 1_000) / elapsed),
+    );
+  }
+
   function desiredHosts(): Map<string, MobileHost> {
     const desired = new Map<string, MobileHost>();
     for (const consumer of consumers.values()) {
       for (const host of consumer.hosts.values()) desired.set(host.id, host);
     }
+    // An explicit Generate recovery is stronger than freshness ordering among
+    // ordinary Catalog/host-detail consumers. It owns one exact credential
+    // snapshot until the attempt is released.
+    for (const lease of frozenPullLeases.values()) desired.set(lease.host.id, lease.host);
     return desired;
   }
 
@@ -412,14 +487,30 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     }
   }
 
-  async function startPull(
+  async function startPullInternal(
     entry: MobileDownloadEntry,
     host: MobileHost,
+    ownerId?: string,
   ): Promise<MobilePullResult> {
     // Consumers can hold different snapshots of one host while credentials
     // rotate. The authority's latest lease owns both monitoring and the POST;
     // only lease-free direct callers may supply their target verbatim.
-    if (pullStatusForHost(entry, host.id)) return { kind: "existing" };
+    if (!ownerId && pullStatusForHost(entry, host.id)) return { kind: "existing" };
+    if (ownerId) {
+      const signature = hostSignature(host);
+      const shared = [...pendingPulls.values()].find(
+        (pending) =>
+          pending.hostId === host.id &&
+          pending.phase === "starting" &&
+          pending.targetSignature === signature &&
+          pullEntriesAreCompatible(entry, {
+            id: pending.entryId,
+            name: pending.entryName,
+          }),
+      );
+      const request = shared ? pendingPullRequests.get(shared) : undefined;
+      if (request) return request;
+    }
     const key = pullKey(entry, host.id);
     const pending = reactive<MobilePendingPull>({
       entryId: entry.id,
@@ -427,33 +518,99 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
       hostId: host.id,
       jobId: null,
       phase: "connecting",
+      ...(ownerId ? { ownerId } : {}),
     });
     pendingPulls.set(key, pending);
 
-    try {
-      const pullHost = await awaitWinningStream(host, key, pending);
-      if (pendingPulls.get(key) !== pending) return { kind: "adopted" };
-      pending.phase = "starting";
-      let jobId: string | null;
-      let kind: "started" | "conflict" = "started";
+    const request = (async (): Promise<MobilePullResult> => {
       try {
-        jobId = await startCatalogDownload(entry.id, mobileHostTarget(pullHost), false);
+        const pullHost = await awaitWinningStream(host, key, pending);
+        if (pendingPulls.get(key) !== pending) return { kind: "adopted" };
+        if (ownerId) {
+          const lease = frozenPullLeases.get(host.id);
+          if (
+            lease?.ownerId !== ownerId ||
+            lease.signature !== hostSignature(host) ||
+            hostSignature(pullHost) !== lease.signature
+          ) {
+            throw new Error(`The frozen download route for ${host.name} changed.`);
+          }
+        }
+        pending.targetSignature = hostSignature(pullHost);
+        pending.phase = "starting";
+        let jobId: string | null;
+        let kind: "started" | "conflict" = "started";
+        try {
+          jobId = await startCatalogDownload(entry.id, mobileHostTarget(pullHost), false);
+        } catch (cause) {
+          const existingJobId = conflictJobId(cause);
+          if (!existingJobId || pendingPulls.get(key) !== pending) throw cause;
+          jobId = existingJobId;
+          kind = "conflict";
+        }
+        if (pendingPulls.get(key) === pending) {
+          if (jobId === null) throw new Error(`${pullHost.name} did not return a download job.`);
+          pending.jobId = jobId;
+          reconcilePendingPulls(host.id);
+        }
+        return jobId === null ? { kind: "adopted" } : { kind, jobId };
       } catch (cause) {
-        const existingJobId = conflictJobId(cause);
-        if (!existingJobId || pendingPulls.get(key) !== pending) throw cause;
-        jobId = existingJobId;
-        kind = "conflict";
+        if (pendingPulls.get(key) === pending) pendingPulls.delete(key);
+        throw cause;
       }
-      if (pendingPulls.get(key) === pending) {
-        if (jobId === null) throw new Error(`${pullHost.name} did not return a download job.`);
-        pending.jobId = jobId;
-        reconcilePendingPulls(host.id);
-      }
-      return jobId === null ? { kind: "adopted" } : { kind, jobId };
-    } catch (cause) {
-      if (pendingPulls.get(key) === pending) pendingPulls.delete(key);
-      throw cause;
+    })();
+    pendingPullRequests.set(pending, request);
+    return request;
+  }
+
+  function startPull(entry: MobileDownloadEntry, host: MobileHost): Promise<MobilePullResult> {
+    return startPullInternal(entry, host);
+  }
+
+  function startPullFrozen(
+    entry: MobileDownloadEntry,
+    host: MobileHost,
+    ownerId: string,
+  ): Promise<MobilePullResult> {
+    const existing = frozenPullLeases.get(host.id);
+    const signature = hostSignature(host);
+    if (existing && (existing.ownerId !== ownerId || existing.signature !== signature)) {
+      return Promise.reject(
+        new Error(`Another frozen download attempt already owns ${host.name}.`),
+      );
     }
+    frozenPullLeases.set(host.id, {
+      ownerId,
+      host: { ...host },
+      signature,
+      jobId: null,
+    });
+    syncSubscriptions();
+    return startPullInternal(entry, host, ownerId)
+      .then((result) => {
+        const lease = frozenPullLeases.get(host.id);
+        if (lease?.ownerId === ownerId) {
+          lease.jobId =
+            result.kind === "started" || result.kind === "conflict"
+              ? result.jobId
+              : (jobsForHost(host.id).find((job) => pullJobMatches(entry, job))?.id ?? null);
+        }
+        return result;
+      })
+      .catch((cause) => {
+        releaseFrozenPull(ownerId);
+        throw cause;
+      });
+  }
+
+  function releaseFrozenPull(ownerId: string): void {
+    for (const [hostId, lease] of frozenPullLeases) {
+      if (lease.ownerId === ownerId) frozenPullLeases.delete(hostId);
+    }
+    for (const [key, pending] of pendingPulls) {
+      if (pending.ownerId === ownerId) pendingPulls.delete(key);
+    }
+    syncSubscriptions();
   }
 
   function isCancelling(host: MobileHost, jobId: string): boolean {
@@ -498,8 +655,11 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     registerConsumer,
     unregisterConsumer,
     ensureDownloadStream,
+    etaFor,
     pullStatusForHost,
     startPull,
+    startPullFrozen,
+    releaseFrozenPull,
     cancel,
     isCancelling,
   };

@@ -115,6 +115,26 @@ describe("prepared expansion lifecycle", () => {
     ).toEqual(["Studio 4090's connection details changed."]);
   });
 
+  it("marks a changed frozen host instance identity stale", () => {
+    const batch = createPreparedExpansionBatch(
+      inputs,
+      { ...route, instanceId: "server-A" },
+      ["one", "two", "three"],
+      1,
+    );
+
+    expect(
+      preparedExpansionStaleReasons(batch, {
+        ...inputs,
+        readyHostIds: new Set([route.hostId]),
+        hostLabels: new Map([[route.hostId, route.label]]),
+        hostTargets: new Map([
+          [route.hostId, { ...route.target, kind: route.kind, instanceId: "server-B" }],
+        ]),
+      }),
+    ).toEqual(["Studio 4090's connection details changed."]);
+  });
+
   it("lets only the newest request apply and invalidates a discarded request", () => {
     const guard = new PreparationRequestGuard();
     const first = guard.begin();

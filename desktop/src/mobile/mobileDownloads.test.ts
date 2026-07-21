@@ -294,6 +294,38 @@ describe("mobile download authority", () => {
     });
   });
 
+  it("derives exact-host ETA from the shared progress stream", () => {
+    const store = useMobileDownloadsStore();
+    const now = vi.spyOn(Date, "now");
+    store.registerConsumer("generate", [studio]);
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify(
+        snapshot([
+          {
+            ...queuedJob("eta-job", "qwen3-expand:q8"),
+            status: "active",
+            bytes_done: 100,
+            bytes_total: 1_000,
+          },
+        ]),
+      ),
+    );
+    now.mockReturnValueOnce(1_000);
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({ type: "progress", id: "eta-job", files_done: 0, bytes_done: 100 }),
+    );
+    now.mockReturnValueOnce(2_000);
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({ type: "progress", id: "eta-job", files_done: 0, bytes_done: 300 }),
+    );
+
+    expect(store.etaFor(studio.id, "eta-job")).toBe(4);
+    now.mockRestore();
+  });
+
   it("prefers the returned job id over a competing same-name job", async () => {
     const store = useMobileDownloadsStore();
     startCatalogDownload.mockResolvedValue("our-job");
@@ -395,6 +427,167 @@ describe("mobile download authority", () => {
       { baseUrl: studio.baseUrl, apiKey: "rotated-key" },
       false,
     );
+  });
+
+  it("keeps a frozen Generate pull on its exact credentials despite a competing Catalog lease", async () => {
+    const store = useMobileDownloadsStore();
+    const expansion = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+    const rotated = { ...studio, apiKey: "catalog-rotated-key" };
+    store.registerConsumer("catalog", [rotated]);
+    expect(streams[0]!.target.apiKey).toBe("catalog-rotated-key");
+
+    const pull = store.startPullFrozen(expansion, studio, "generate-attempt-1");
+    expect(streams[0]!.signal.aborted).toBe(true);
+    expect(streams[1]!.target).toEqual({
+      baseUrl: studio.baseUrl,
+      apiKey: studio.apiKey,
+    });
+
+    store.registerConsumer("catalog", [rotated]);
+    expect(streams).toHaveLength(2);
+    expect(streams[1]!.signal.aborted).toBe(false);
+    streams[1]!.onEvent("download", JSON.stringify(snapshot()));
+    await expect(pull).resolves.toEqual({ kind: "started", jobId: "download-1" });
+    expect(startCatalogDownload).toHaveBeenCalledWith(
+      expansion.id,
+      { baseUrl: studio.baseUrl, apiKey: studio.apiKey },
+      false,
+    );
+
+    store.releaseFrozenPull("generate-attempt-1");
+    expect(streams[1]!.signal.aborted).toBe(true);
+    expect(streams[2]!.target.apiKey).toBe("catalog-rotated-key");
+  });
+
+  it.each([
+    ["connection", "connect"],
+    ["POST", "post"],
+  ] as const)(
+    "releases a failed frozen %s attempt back to Catalog and reacquires only for Retry",
+    async (_label, failure) => {
+      const store = useMobileDownloadsStore();
+      const expansion = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+      const rotated = { ...studio, apiKey: "catalog-rotated-key" };
+      store.registerConsumer("catalog", [rotated]);
+
+      if (failure === "post") startCatalogDownload.mockRejectedValue(new Error("POST denied"));
+      const first = store.startPullFrozen(expansion, studio, "generate-attempt-1");
+      expect(streams.at(-1)!.target.apiKey).toBe(studio.apiKey);
+      if (failure === "connect") streams.at(-1)!.onOpenError?.(new Error("stream denied"));
+      else streams.at(-1)!.onEvent("download", JSON.stringify(snapshot()));
+      await expect(first).rejects.toThrow(failure === "connect" ? "stream denied" : "POST denied");
+
+      expect(streams.at(-1)!.target.apiKey).toBe("catalog-rotated-key");
+      startCatalogDownload.mockRejectedValue(new Error("retry denied"));
+      const retry = store.startPullFrozen(expansion, studio, "generate-attempt-1");
+      expect(streams.at(-1)!.target.apiKey).toBe(studio.apiKey);
+      streams.at(-1)!.onEvent("download", JSON.stringify(snapshot()));
+      await expect(retry).rejects.toThrow("retry denied");
+      expect(streams.at(-1)!.target.apiKey).toBe("catalog-rotated-key");
+    },
+  );
+
+  it.each([
+    ["job_done", "completed"],
+    ["job_failed", "failed"],
+    ["job_cancelled", "cancelled"],
+  ] as const)("releases a frozen lease after terminal %s", async (type, _status) => {
+    const store = useMobileDownloadsStore();
+    const expansion = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+    const rotated = { ...studio, apiKey: "catalog-rotated-key" };
+    store.registerConsumer("catalog", [rotated]);
+    const pull = store.startPullFrozen(expansion, studio, "generate-terminal");
+    streams.at(-1)!.onEvent("download", JSON.stringify(snapshot()));
+    await expect(pull).resolves.toEqual({ kind: "started", jobId: "download-1" });
+    const event: DownloadEvent =
+      type === "job_done"
+        ? { type, id: "download-1", model: expansion.id }
+        : type === "job_failed"
+          ? { type, id: "download-1", error: "disk full" }
+          : { type, id: "download-1" };
+    streams.at(-1)!.onEvent("download", JSON.stringify(event));
+
+    expect(streams.at(-1)!.target.apiKey).toBe("catalog-rotated-key");
+  });
+
+  it("joins an exact compatible Catalog POST already in Starting", async () => {
+    const store = useMobileDownloadsStore();
+    const expansion = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+    const response = deferred<string | null>();
+    startCatalogDownload.mockReturnValue(response.promise);
+    store.registerConsumer("catalog", [studio]);
+    const catalogPull = store.startPull(expansion, studio);
+    streams[0]!.onEvent("download", JSON.stringify(snapshot()));
+    await flushPromises();
+    expect(store.pendingPulls.get(`${studio.id}:${expansion.id}`)?.phase).toBe("starting");
+
+    const generatePull = store.startPullFrozen(expansion, studio, "generate-join");
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+    response.resolve("shared-exact-job");
+    await expect(catalogPull).resolves.toEqual({ kind: "started", jobId: "shared-exact-job" });
+    await expect(generatePull).resolves.toEqual({ kind: "started", jobId: "shared-exact-job" });
+    expect(store.pendingPulls.get(`${studio.id}:${expansion.id}`)?.jobId).toBe("shared-exact-job");
+
+    streams[0]!.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "shared-exact-job",
+        model: expansion.id,
+        position: 0,
+      } satisfies DownloadEvent),
+    );
+    expect(store.pullStatusForHost(expansion, studio.id)?.phase).toBe("queued");
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares the exact 409 job ID when Generate joins a starting Catalog POST", async () => {
+    const store = useMobileDownloadsStore();
+    const expansion = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+    const response = deferred<string | null>();
+    startCatalogDownload.mockReturnValue(response.promise);
+    store.registerConsumer("catalog", [studio]);
+    const catalogPull = store.startPull(expansion, studio);
+    streams[0]!.onEvent("download", JSON.stringify(snapshot()));
+    await flushPromises();
+
+    const generatePull = store.startPullFrozen(expansion, studio, "generate-join-409");
+    response.reject(new ApiError("already queued", 409, { id: "shared-conflict-job" }));
+    await expect(catalogPull).resolves.toEqual({
+      kind: "conflict",
+      jobId: "shared-conflict-job",
+    });
+    await expect(generatePull).resolves.toEqual({
+      kind: "conflict",
+      jobId: "shared-conflict-job",
+    });
+    expect(store.pendingPulls.get(`${studio.id}:${expansion.id}`)?.jobId).toBe(
+      "shared-conflict-job",
+    );
+    expect(startCatalogDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a different-model frozen pull isolated from a starting Catalog POST", async () => {
+    const store = useMobileDownloadsStore();
+    const catalogEntry = { id: "qwen3-expand:q8", name: "qwen3-expand:q8" };
+    const generateEntry = { id: "other-expand:q8", name: "other-expand:q8" };
+    const catalogResponse = deferred<string | null>();
+    const generateResponse = deferred<string | null>();
+    startCatalogDownload
+      .mockReturnValueOnce(catalogResponse.promise)
+      .mockReturnValueOnce(generateResponse.promise);
+    store.registerConsumer("catalog", [studio]);
+    const catalogPull = store.startPull(catalogEntry, studio);
+    streams[0]!.onEvent("download", JSON.stringify(snapshot()));
+    await flushPromises();
+
+    const generatePull = store.startPullFrozen(generateEntry, studio, "generate-isolated");
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledTimes(2);
+    catalogResponse.resolve("catalog-job");
+    generateResponse.resolve("generate-job");
+    await expect(catalogPull).resolves.toEqual({ kind: "started", jobId: "catalog-job" });
+    await expect(generatePull).resolves.toEqual({ kind: "started", jobId: "generate-job" });
   });
 
   it("keeps direct caller routing when no consumer lease exists", async () => {

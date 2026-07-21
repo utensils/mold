@@ -295,7 +295,7 @@ Important fields:
 | `placement`                                         | per-request device placement override; persisted defaults use `/api/config/model/:name/placement`                                                |
 | `cfg_plus`                                          | CFG++ guidance for supported SD-family scheduler paths                                                                                           |
 | `embed_metadata`                                    | override config/env metadata embedding for this request                                                                                          |
-| `batch_id`, `batch_index`, `batch_count`            | optional prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata                |
+| `batch_id`, `batch_index`, `batch_count`            | optional native prepared-batch identity plus one-based sibling position/total; copied unchanged into complete-event and Gallery metadata         |
 | `upscale_model`                                     | post-generation Real-ESRGAN model applied before returning images                                                                                |
 
 When `upscale_model` is set, the server gallery retains both artifacts as

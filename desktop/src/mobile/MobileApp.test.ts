@@ -1,5 +1,5 @@
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
-import { createPinia } from "pinia";
+import { createPinia, type Pinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
 import type { GalleryImage, ModelEntry, ServerStatus } from "../lib/api/types";
@@ -13,6 +13,8 @@ const {
   streamableMediaUrl,
   evictMedia,
   applySourceFitPreprocess,
+  expandPrompt,
+  startCatalogDownload,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -21,6 +23,8 @@ const {
   streamableMediaUrl: vi.fn(),
   evictMedia: vi.fn(),
   applySourceFitPreprocess: vi.fn(),
+  expandPrompt: vi.fn(),
+  startCatalogDownload: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -31,6 +35,11 @@ vi.mock("../lib/api/client", async (importOriginal) => ({
 }));
 vi.mock("../lib/api/sse", () => ({ sseStream }));
 vi.mock("../lib/sourceFitPreprocess", () => ({ applySourceFitPreprocess }));
+vi.mock("../lib/api/expand", () => ({ expandPrompt }));
+vi.mock("../lib/api/catalog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/catalog")>()),
+  startCatalogDownload,
+}));
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
   streamableMediaUrl,
@@ -40,6 +49,7 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
 import MobileApp from "./MobileApp.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
+import { useMobileDownloadsStore } from "./mobileDownloads";
 
 installMemoryLocalStorage();
 
@@ -101,10 +111,10 @@ const openStreams: Array<{
   resolve: () => void;
 }> = [];
 
-function mountMobileApp(): VueWrapper {
+function mountMobileApp(pinia: Pinia = createPinia()): VueWrapper {
   return mount(MobileApp, {
     attachTo: document.body,
-    global: { plugins: [createPinia()] },
+    global: { plugins: [pinia] },
   });
 }
 
@@ -170,6 +180,15 @@ beforeEach(() => {
       changed: false,
     }),
   );
+  expandPrompt.mockReset().mockImplementation((prompt: string, options: { variations?: number }) =>
+    Promise.resolve({
+      expanded: Array.from(
+        { length: options.variations ?? 1 },
+        (_, index) => `${prompt} · prepared ${index + 1}`,
+      ),
+    }),
+  );
+  startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -587,7 +606,7 @@ describe("MobileApp generation queue", () => {
     ).toBe(false);
   });
 
-  it("expands Batch into separately queued and cancellable requests", async () => {
+  it("prepares Batch for review, then queues edited siblings with provenance", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
 
@@ -598,7 +617,24 @@ describe("MobileApp generation queue", () => {
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
     await flushPromises();
 
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "three variations of a storm",
+      { variations: 3, modelFamily: model.family },
+      target,
+    );
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(0);
+    expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
+      "Review 3 variations",
+    );
+    const editors = wrapper.findAll(".mobile-prepared-editor");
+    await editors[1]?.setValue("an edited middle storm");
+    const developPrepared = wrapper.get("[data-test='mobile-develop-prepared']");
+    (developPrepared.element as HTMLButtonElement).focus();
+    await developPrepared.trigger("click");
+    await flushPromises();
+
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
+    expect(document.activeElement).toBe(fieldControl("Prompt").element);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
       "Develop 3 prints (+3 queued)",
     );
@@ -609,6 +645,777 @@ describe("MobileApp generation queue", () => {
       firstSeed,
       firstSeed + 1,
     ]);
+    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+      "three variations of a storm · prepared 1",
+      "an edited middle storm",
+    ]);
+    expect(openStreams.map((stream) => stream.options.body.original_prompt)).toEqual([
+      "three variations of a storm",
+      "three variations of a storm",
+    ]);
+    expect(openStreams[0]?.options.body.batch_id).toEqual(expect.any(String));
+    expect(openStreams.map((stream) => stream.options.body.batch_index)).toEqual([1, 2]);
+    expect(openStreams.map((stream) => stream.options.body.batch_count)).toEqual([3, 3]);
+  });
+
+  it("identifies a failed middle prepared sibling by variation and reviewed prompt", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three weather studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    const editors = wrapper.findAll(".mobile-prepared-editor");
+    await editors[0]!.setValue("clear dawn");
+    await editors[1]!.setValue("middle thunderstorm");
+    await editors[2]!.setValue("quiet dusk");
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("first"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 1,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(openStreams).toHaveLength(3);
+    openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
+    openStreams[1]!.resolve();
+    openStreams[2]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("third"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 3,
+        generation_time_ms: 700,
+        model: model.name,
+      }),
+    );
+    openStreams[2]!.resolve();
+    await flushPromises();
+
+    const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
+    expect(liveSummary).toContain("Variation 2, “middle thunderstorm”");
+    expect(liveSummary).toContain("host ran out of memory");
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+  });
+
+  it("composes prepared sibling failures with an unconfirmed cancellation caveat", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three mixed outcomes");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    const editors = wrapper.findAll(".mobile-prepared-editor");
+    await editors[0]!.setValue("successful dawn");
+    await editors[1]!.setValue("failed middle storm");
+    await editors[2]!.setValue("cancelled dusk");
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("first"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 1,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(openStreams).toHaveLength(3);
+    const cancelRow = wrapper
+      .findAll("[data-test='mobile-generation-job']")
+      .find((row) => row.text().includes("cancelled dusk"))!;
+    await cancelRow.get("[data-test='mobile-generation-cancel']").trigger("click");
+    await flushPromises();
+    openStreams[2]!.resolve();
+    openStreams[1]!.options.onEvent("error", JSON.stringify({ message: "host ran out of memory" }));
+    openStreams[1]!.resolve();
+    await flushPromises();
+
+    const liveSummary = wrapper.findAll(".sr-only[aria-live='polite']")[1]!.text();
+    expect(liveSummary).toContain("Variation 2, “failed middle storm”");
+    expect(liveSummary).toContain("host ran out of memory");
+    expect(liveSummary).toContain("Cancellation failed");
+    expect(liveSummary).toContain("remote cancellation was not confirmed");
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
+  });
+
+  it("rejects late or malformed exact-N expansion responses without replacing the form", async () => {
+    let resolveExpansion!: (value: { expanded: string[] }) => void;
+    expandPrompt.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveExpansion = resolve;
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("original source");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await fieldControl("Prompt").setValue("newer source");
+    resolveExpansion({ expanded: ["one", "two", "three"] });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-expansion-error']").text()).toContain(
+      "changed while expansion was running",
+    );
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("newer source");
+
+    expandPrompt.mockResolvedValueOnce({ expanded: ["one", "  ", "three"] });
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+    expect(wrapper.get("[data-test='mobile-expansion-error']").text()).toContain(
+      "Prompt 2 was empty",
+    );
+  });
+
+  it("invalidates quick Batch 1 submission when Undo wins deferred preprocessing", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementationOnce(
+      (input: { source: string | null; mask: string | null }) =>
+        new Promise((resolve) => {
+          finishPreprocess = () =>
+            resolve({ source: input.source, mask: input.mask, changed: false });
+        }),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await fieldControl("Prompt").setValue("small lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toContain("prepared 1");
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    finishPreprocess();
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("small lighthouse");
+  });
+
+  it("lets Discard cancel a prepared batch while source preprocessing is pending", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementationOnce(
+      (input: { source: string | null; mask: string | null }) =>
+        new Promise((resolve) => {
+          finishPreprocess = () =>
+            resolve({ source: input.source, mask: input.mask, changed: false });
+        }),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two wet-plate portraits");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-discard-prepared']").attributes("disabled"),
+    ).toBeUndefined();
+    await wrapper.get("[data-test='mobile-discard-prepared']").trigger("click");
+    finishPreprocess();
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(0);
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+  });
+
+  it("unlocks preserved prepared work after preprocessing fails and allows retry", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    applySourceFitPreprocess.mockRejectedValueOnce(new Error("upscaler unavailable"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two preserved portraits");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toContain(
+      "upscaler unavailable",
+    );
+    const editor = wrapper.findAll(".mobile-prepared-editor")[0]!;
+    expect(editor.attributes("disabled")).toBeUndefined();
+    expect(
+      wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
+    ).toBeUndefined();
+    await editor.setValue("edited after preprocessing failed");
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(2);
+    expect(openStreams[0]!.options.body.prompt).toBe("edited after preprocessing failed");
+  });
+
+  it("does not steal focus when delayed prepared submission finishes after the user moves", async () => {
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementationOnce(
+      (input: { source: string | null; mask: string | null }) =>
+        new Promise((resolve) => {
+          finishPreprocess = () =>
+            resolve({ source: input.source, mask: input.mask, changed: false });
+        }),
+    );
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two quiet portraits");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    const developPrepared = wrapper.get("[data-test='mobile-develop-prepared']");
+    (developPrepared.element as HTMLButtonElement).focus();
+    await developPrepared.trigger("click");
+    await flushPromises();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    finishPreprocess();
+    await flushPromises();
+
+    expect(document.activeElement).toBe(outside);
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+    expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(2);
+  });
+
+  it("keeps a missing expansion-model pull inline on the exact selected host", async () => {
+    expandPrompt
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      )
+      .mockResolvedValueOnce({ expanded: ["a lighthouse after the storm"] });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-pull-expansion']").text()).toContain(
+      "Pull expansion model",
+    );
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("qwen3-expand:q8");
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("Studio");
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream");
+    expect(downloadStream).toBeDefined();
+    expect(downloadStream?.options.target).toEqual(target);
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    expect(startCatalogDownload).toHaveBeenCalledWith("qwen3-expand:q8", target, false);
+
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "started",
+        id: "expansion-job",
+        files_total: 2,
+        bytes_total: 1_000,
+      }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "progress",
+        id: "expansion-job",
+        files_done: 1,
+        bytes_done: 500,
+        current_file: "model.safetensors",
+      }),
+    );
+    await flushPromises();
+    expect(wrapper.get("[role='progressbar']").attributes("aria-valuenow")).toBe("50");
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("model.safetensors");
+
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-retry-expansion']").text()).toBe("Retry expansion");
+    await wrapper.get("[data-test='mobile-retry-expansion']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse after the storm",
+    );
+    expect(wrapper.get("[data-test='mobile-prompt-expand']").text()).toBe("Expand");
+    expect(
+      wrapper.get("[data-test='mobile-prompt-expand']").attributes("disabled"),
+    ).toBeUndefined();
+  });
+
+  it.each(["edit", "remove"] as const)(
+    "keeps prepared work when a %s supersedes a pending missing-model replacement",
+    async (action) => {
+      const pinia = createPinia();
+      const downloads = useMobileDownloadsStore(pinia);
+      const release = vi.spyOn(downloads, "releaseFrozenPull");
+      wrapper = mountMobileApp(pinia);
+      await flushPromises();
+      await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+      await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+      await fieldControl("Prompt").setValue("three preserved studies");
+      await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+      await flushPromises();
+
+      expandPrompt.mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      );
+      await wrapper.get("[data-test='mobile-regenerate-prepared']").trigger("click");
+      await flushPromises();
+      downloads.registerConsumer("catalog", [
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          apiKey: "catalog-rotated-key",
+          hostname: "studio",
+          version: "0.18.0",
+          instanceId: "studio-id",
+          online: true,
+        },
+      ]);
+      await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+      await flushPromises();
+      const downloadStream = openStreams
+        .filter((stream) => stream.path === "/api/downloads/stream")
+        .at(-1)!;
+      expect(downloadStream.options.target?.apiKey).toBe(target.apiKey);
+      downloadStream.options.onEvent(
+        "download",
+        JSON.stringify({
+          type: "snapshot",
+          listing: { active_jobs: [], queued: [], history: [] },
+        }),
+      );
+      await flushPromises();
+
+      if (action === "edit") {
+        await wrapper.findAll(".mobile-prepared-editor")[0]!.setValue("my newer reviewed edit");
+      } else {
+        await wrapper.findAll("[data-test='mobile-prepared-remove']")[2]!.trigger("click");
+      }
+      await flushPromises();
+
+      expect(release).toHaveBeenCalled();
+      expect(
+        openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options
+          .target?.apiKey,
+      ).toBe("catalog-rotated-key");
+      expect(wrapper.find(".mobile-expansion-pull").exists()).toBe(false);
+      expect(wrapper.get("[data-test='mobile-prepared-expansion']").text()).toContain(
+        "Pending replacement cancelled",
+      );
+      if (action === "edit") {
+        expect(
+          (wrapper.findAll(".mobile-prepared-editor")[0]!.element as HTMLTextAreaElement).value,
+        ).toBe("my newer reviewed edit");
+        expect(wrapper.findAll(".mobile-prepared-editor")).toHaveLength(3);
+      } else {
+        expect(wrapper.findAll(".mobile-prepared-editor")).toHaveLength(2);
+      }
+      downloadStream.options.onEvent(
+        "download",
+        JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+      );
+      await flushPromises();
+      expect(wrapper.find(".mobile-expansion-pull").exists()).toBe(false);
+    },
+  );
+
+  it("aborts missing-model retry when form identity changes during the pull", async () => {
+    expandPrompt.mockRejectedValueOnce(
+      new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+    );
+    const pinia = createPinia();
+    const downloads = useMobileDownloadsStore(pinia);
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await fieldControl("Prompt").setValue("frozen lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    downloads.registerConsumer("catalog", [
+      {
+        id: "studio-id",
+        name: "Studio",
+        baseUrl: target.baseUrl,
+        apiKey: "catalog-rotated-key",
+        hostname: "studio",
+        version: "0.18.0",
+        instanceId: "studio-id",
+        online: true,
+      },
+    ]);
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams
+      .filter((stream) => stream.path === "/api/downloads/stream")
+      .at(-1)!;
+    expect(downloadStream.options.target?.apiKey).toBe(target.apiKey);
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    await fieldControl("Prompt").setValue("newer lighthouse");
+    expect(
+      openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options.target
+        ?.apiKey,
+    ).toBe("catalog-rotated-key");
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledTimes(1);
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("newer lighthouse");
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("inputs changed");
+    expect(wrapper.find("[data-test='mobile-retry-expansion']").exists()).toBe(false);
+  });
+
+  it("rejects a late recovery expansion when inputs change before commit", async () => {
+    let resolveRetry!: (value: { expanded: string[] }) => void;
+    expandPrompt
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("frozen harbor");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream")!;
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-retry-expansion']").trigger("click");
+    await flushPromises();
+    await fieldControl("Prompt").setValue("new harbor input");
+    resolveRetry({ expanded: ["late expanded harbor"] });
+    await flushPromises();
+
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("new harbor input");
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("inputs changed");
+  });
+
+  it("restores prompt focus when stale Batch N refresh explicitly becomes Batch 1", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
+    const refresh = wrapper.get("[data-test='mobile-refresh-prepared']");
+    (refresh.element as HTMLButtonElement).focus();
+    await refresh.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+    expect(document.activeElement).toBe(fieldControl("Prompt").element);
+  });
+
+  it("does not steal outside focus when delayed Batch N to Batch 1 refresh completes", async () => {
+    let resolveRefresh!: (value: { expanded: string[] }) => void;
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("two delayed studies");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-decrement']").trigger("click");
+    expandPrompt.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    const refresh = wrapper.get("[data-test='mobile-refresh-prepared']");
+    (refresh.element as HTMLButtonElement).focus();
+    await refresh.trigger("click");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    resolveRefresh({ expanded: ["one delayed study"] });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(false);
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it("revokes deferred expansion and preprocessing authority on unmount", async () => {
+    let resolveExpansion!: (value: { expanded: string[] }) => void;
+    expandPrompt.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveExpansion = resolve;
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("late expansion");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    wrapper.unmount();
+    wrapper = null;
+    resolveExpansion({ expanded: ["late one", "late two"] });
+    await flushPromises();
+    expect(openStreams).toHaveLength(0);
+
+    const imageModel: ModelEntry = { ...model, name: "flux:image", family: "flux" };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([imageModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    let finishPreprocess!: () => void;
+    applySourceFitPreprocess.mockImplementationOnce(
+      (input: { source: string | null; mask: string | null }) =>
+        new Promise((resolve) => {
+          finishPreprocess = () =>
+            resolve({ source: input.source, mask: input.mask, changed: false });
+        }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    const liveForm = wrapper.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.sourceImage = btoa("source");
+    liveForm.sourceImageName = "source.png";
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("late preprocess");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    wrapper.unmount();
+    wrapper = null;
+    finishPreprocess();
+    await flushPromises();
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
+  });
+
+  it("keeps a remounted Generate download consumer safe from the old instance", async () => {
+    const pinia = createPinia();
+    const downloads = useMobileDownloadsStore(pinia);
+    const register = vi.spyOn(downloads, "registerConsumer");
+    const unregister = vi.spyOn(downloads, "unregisterConsumer");
+    let rejectOldExpansion!: (reason: unknown) => void;
+    expandPrompt.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectOldExpansion = reject;
+      }),
+    );
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await fieldControl("Prompt").setValue("old expansion");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    wrapper.unmount();
+    wrapper = null;
+    const oldConsumerId = unregister.mock.calls.at(-1)![0];
+
+    expandPrompt.mockRejectedValueOnce(
+      new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+    );
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await fieldControl("Prompt").setValue("new expansion");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const newConsumerId = register.mock.calls.at(-1)![0];
+    expect(newConsumerId).not.toBe("mobile-generate");
+    expect(newConsumerId).not.toBe(oldConsumerId);
+    const newStream = openStreams.find((stream) => stream.path === "/api/downloads/stream")!;
+    const unregisterCount = unregister.mock.calls.length;
+
+    rejectOldExpansion(new Error("local expand model not found, run: mold pull qwen3-expand:q8"));
+    await flushPromises();
+    expect(unregister.mock.calls).toHaveLength(unregisterCount);
+    expect(newStream.options.signal.aborted).toBe(false);
+  });
+
+  it("revokes a frozen pull and prevents a deferred retry from acting after unmount", async () => {
+    const pinia = createPinia();
+    const downloads = useMobileDownloadsStore(pinia);
+    const release = vi.spyOn(downloads, "releaseFrozenPull");
+    const unregister = vi.spyOn(downloads, "unregisterConsumer");
+    let resolveRetry!: (value: { expanded: string[] }) => void;
+    expandPrompt
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRetry = resolve;
+          }),
+      );
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await fieldControl("Prompt").setValue("unmounted retry");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream")!;
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    downloadStream.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-retry-expansion']").trigger("click");
+    await flushPromises();
+
+    wrapper.unmount();
+    wrapper = null;
+    const releaseCount = release.mock.calls.length;
+    const unregisterCount = unregister.mock.calls.length;
+    expect(downloadStream.options.signal.aborted).toBe(true);
+    resolveRetry({ expanded: ["late retry result"] });
+    await flushPromises();
+
+    expect(release.mock.calls).toHaveLength(releaseCount);
+    expect(unregister.mock.calls).toHaveLength(unregisterCount);
+    expect(openStreams.filter((stream) => stream.path === "/api/generate/stream")).toHaveLength(0);
   });
 
   it("uses an explicit mobile seed mode and submits the fixed value", async () => {

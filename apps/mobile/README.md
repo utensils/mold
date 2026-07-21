@@ -42,8 +42,9 @@ instead.
 The primary tabs are Generate, Gallery, Catalog, and Hosts. Settings is a
 pushed screen opened from the header.
 
-- **Generate** supports model-aware image and video controls, prompt expansion
-  and history, local templates, independent batch jobs, source/edit images,
+- **Generate** supports model-aware image and video controls, Batch 1 quick
+  expansion/undo, Batch N prepared-variation review, remote prompt history,
+  local templates, independently cancellable siblings, source/edit images,
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,
   target-host estimates, proportional resolution choices, and explicit Random
   or Fixed seeds.
@@ -68,6 +69,26 @@ pushed screen opened from the header.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
 overscroll. The gallery viewer keeps its scoped horizontal swipe gesture.
+
+Prepared expansion always snapshots the selected remote host ID, endpoint,
+Keychain-provided key, and server instance. Batch N requires exactly N non-empty
+prompts before its inline review workspace appears; edits and specifically named
+stale work remain local until explicit approval, refresh, collapse, or discard.
+`useMobileDownloadsStore` is the sole Catalog/Generate pull authority and keeps
+missing-model Connecting/Starting/Queued/Pulling/Ready/error recovery on that
+frozen host. Generate retains one immutable input/route recovery record and an
+attempt-scoped lease that temporarily outranks ordinary Catalog credentials;
+compatible Catalog and Generate pulls already in `Starting` share one POST and
+returned job ID. Terminal, failed, stale, superseded, and aborted attempts
+release back to Catalog while preserving the record for an exact-route Retry.
+Editing or removing reviewed work supersedes a pending replacement;
+view-unique consumer IDs and unmount guards revoke deferred work without
+touching a remounted view. Approved siblings preserve order, deterministic seeds,
+`original_prompt`, and `batch_id`/`batch_index`/`batch_count` through normal and
+long-video requests. Partial failures announce each one-based variation and its
+reviewed prompt together with any separate unconfirmed-cancellation warning
+while successful prints remain. Gallery shows the sibling
+position and source prompt when those optional metadata fields are present.
 
 The initial mobile scope does not include a local engine, the desktop Chains
 editor and durable-jobs workspace, RunPod provisioning, desktop engine

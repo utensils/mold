@@ -88,6 +88,9 @@ export interface HostRoute {
   label: string;
   kind: "local" | "remote";
   target: ApiTarget;
+  /** Optional stable server identity used by remote-only clients to detect
+   * when one saved endpoint now reaches a different Mold installation. */
+  instanceId?: string | null;
 }
 
 /**

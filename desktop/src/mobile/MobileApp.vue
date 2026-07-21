@@ -3,9 +3,17 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { invoke } from "@tauri-apps/api/core";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { expandPrompt } from "../lib/api/expand";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
-import type { GalleryImage, GenerateRequest, ModelEntry, ServerStatus } from "../lib/api/types";
+import type {
+  DownloadJob,
+  ExpandCapabilities,
+  GalleryImage,
+  GenerateRequest,
+  ModelEntry,
+  ServerStatus,
+} from "../lib/api/types";
 import {
   buildGenerationEstimateRequest,
   decideGenerateRequestRouting,
@@ -30,7 +38,26 @@ import {
   stepsValidationError,
 } from "../lib/generateValidation";
 import { blobToBase64, isStillImageFile } from "../lib/image";
+import { parseMissingExpandModel } from "../lib/expandErrors";
+import {
+  expansionPullJobMatchesModel,
+  resolveExpansionPullStatus,
+  type ExpansionPullPhase,
+  type ExpansionPullView,
+} from "../lib/expansionPull";
+import type { DownloadsState } from "../lib/downloads";
+import {
+  PreparationRequestGuard,
+  createPreparedExpansionBatch,
+  preparedExpansionStaleReasons,
+  quickExpansionStaleReasons,
+  validateExpandedPrompts,
+  type PreparedExpansionBatch as PreparedExpansionBatchState,
+  type PreparedExpansionInputs,
+  type QuickExpansionSnapshot,
+} from "../lib/preparedExpansion";
 import { isGenerationModel } from "../stores/models";
+import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "../lib/sourceFit";
@@ -44,11 +71,13 @@ import {
 import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import MobileCatalogView from "./MobileCatalogView.vue";
+import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
 import MobileGenerateParameters from "./MobileGenerateParameters.vue";
 import MobileHostDetail from "./MobileHostDetail.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobilePromptTools from "./MobilePromptTools.vue";
+import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
@@ -59,6 +88,12 @@ import {
   updateMobileSettings as persistMobileSettings,
   type MobileSettings,
 } from "./settings";
+import { useMobileDownloadsStore } from "./mobileDownloads";
+import {
+  createMobileExpansionRecovery,
+  mobileExpansionRecoveryStaleReason,
+  type MobileExpansionRecoveryRecord,
+} from "./mobileExpansionRecovery";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -79,6 +114,18 @@ interface PendingGalleryPrint extends GalleryImage {
   hostId: string;
   hostName: string;
   target: ApiTarget;
+}
+
+interface MobileExpansionPullAttempt {
+  id: number;
+  recoveryId: number;
+  phase: Exclude<ExpansionPullPhase, "missing">;
+  jobId: string | null;
+  observedJobId: string | null;
+  baselineJobIds: string[];
+  allowExistingInFlight: boolean;
+  requestError: string | null;
+  terminalJob: DownloadJob | null;
 }
 
 const STORAGE_KEY = "mold.mobile.hosts.v1";
@@ -102,12 +149,33 @@ const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
 const loadingModels = ref(false);
 const modelLoadError = ref("");
+const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const form = reactive<GenerateForm>(newGenerateForm());
 const seedValid = ref(true);
 const parameterValid = ref(true);
 const sourceValid = ref(true);
 const resolutionValid = ref(true);
 const preparingGeneration = ref(false);
+const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
+const expansionRunning = ref(false);
+const expansionError = ref("");
+const expansionRecovery = ref<MobileExpansionRecoveryRecord | null>(null);
+const expansionPullAttempt = ref<MobileExpansionPullAttempt | null>(null);
+const quickExpansionOriginal = ref<string | null>(null);
+const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
+const preparedSubmitting = ref(false);
+const preparationGuard = new PreparationRequestGuard();
+const submissionGuard = new PreparationRequestGuard();
+let expansionPullRequestId = 0;
+let expansionRecoveryId = 0;
+let submissionUiId = 0;
+let recoveryRetryId = 0;
+let unmounted = false;
+const downloadConsumerId = `mobile-generate-${
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}`;
 const progress = ref("Ready");
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
@@ -138,6 +206,7 @@ const hostProbes = new Map<
   { epoch: number; controller: AbortController; timeout: ReturnType<typeof setTimeout> }
 >();
 const generation = useGenerationStore();
+const mobileDownloads = useMobileDownloadsStore();
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
@@ -159,6 +228,62 @@ const selectedTarget = computed<ApiTarget | null>(() => {
   return host ? mobileHostTarget(host) : null;
 });
 const caps = computed(() => generationCapabilitiesForFamily(form.family));
+const effectiveBatchSize = computed(() =>
+  caps.value.forcesBatchSizeOne ? 1 : Math.max(1, Math.floor(form.batchSize)),
+);
+const selectedRoute = computed<HostRoute | null>(() => {
+  const host = selectedHost.value;
+  return host ? routeForMobileHost(host) : null;
+});
+const expansionMissingModel = computed(() => {
+  const recovery = expansionRecovery.value;
+  return recovery ? { model: recovery.model, route: recovery.route, host: recovery.host } : null;
+});
+const preparedStaleReasons = computed(() => {
+  const batch = preparedBatch.value;
+  if (!batch) return [];
+  return preparedExpansionStaleReasons(batch, {
+    sourcePrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    requestedCount: effectiveBatchSize.value,
+    selectedHostPolicy: selectedHostId.value || null,
+    readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
+    hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
+    hostTargets: new Map(
+      hosts.value.map((host) => [
+        host.id,
+        {
+          ...mobileHostTarget(host),
+          kind: "remote" as const,
+          instanceId: host.instanceId ?? null,
+        },
+      ]),
+    ),
+  });
+});
+const quickStaleReasons = computed(() => {
+  const snapshot = quickExpansionSnapshot.value;
+  if (!snapshot) return [];
+  return quickExpansionStaleReasons(snapshot, {
+    expandedPrompt: form.prompt,
+    model: form.model,
+    family: form.family,
+    selectedHostPolicy: selectedHostId.value || null,
+    readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
+    hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
+    hostTargets: new Map(
+      hosts.value.map((host) => [
+        host.id,
+        {
+          ...mobileHostTarget(host),
+          kind: "remote" as const,
+          instanceId: host.instanceId ?? null,
+        },
+      ]),
+    ),
+  });
+});
 const generationModels = computed(() =>
   models.value.filter((model) => model.downloaded && isGenerationModel(model)),
 );
@@ -220,6 +345,49 @@ const developButtonLabel = computed(() =>
         queuedJobs.value.length > 0 ? ` (+${queuedJobs.value.length} queued)` : ""
       }`,
 );
+const expansionPullBucket = computed<DownloadsState>(() => {
+  const route = expansionRecovery.value?.route;
+  return route
+    ? (mobileDownloads.downloadsByHost[route.hostId] ?? {
+        activeJobs: [],
+        queued: [],
+        history: [],
+      })
+    : { activeJobs: [], queued: [], history: [] };
+});
+const expansionPullStatus = computed<ExpansionPullView | null>(() => {
+  const missing = expansionMissingModel.value;
+  if (!missing) return null;
+  const attempt = expansionPullAttempt.value;
+  const recovery = expansionRecovery.value;
+  if (!attempt || !recovery || attempt.recoveryId !== recovery.id) {
+    return { kind: "missing", job: null };
+  }
+  const pending = mobileDownloads.pendingPulls.get(`${recovery.route.hostId}:${recovery.model}`);
+  return resolveExpansionPullStatus({
+    model: recovery.model,
+    phase: pending?.phase ?? attempt.phase,
+    jobId: attempt.jobId,
+    observedJobId: attempt.observedJobId,
+    baselineJobIds: attempt.baselineJobIds,
+    allowExistingInFlight: attempt.allowExistingInFlight,
+    activeJobs: expansionPullBucket.value.activeJobs,
+    queued: expansionPullBucket.value.queued,
+    history: attempt.terminalJob
+      ? [
+          attempt.terminalJob,
+          ...expansionPullBucket.value.history.filter((job) => job.id !== attempt.terminalJob?.id),
+        ]
+      : expansionPullBucket.value.history,
+    requestError: attempt.requestError,
+  });
+});
+const expansionPullEtaSeconds = computed(() => {
+  const attempt = expansionPullAttempt.value;
+  const recovery = expansionRecovery.value;
+  const job = expansionPullStatus.value?.job;
+  return attempt && recovery && job ? mobileDownloads.etaFor(recovery.route.hostId, job.id) : null;
+});
 const queueAnnouncement = computed(() => {
   const count = queuedJobs.value.length;
   return count === 0
@@ -244,6 +412,16 @@ const generationStatus = computed(() => {
       return jobStatusCode(active);
   }
 });
+
+function routeForMobileHost(host: MobileHost): HostRoute {
+  return {
+    hostId: host.id,
+    label: host.name,
+    kind: "remote",
+    target: { ...mobileHostTarget(host) },
+    instanceId: host.instanceId ?? null,
+  };
+}
 
 function loadHosts(): MobileHost[] {
   try {
@@ -441,14 +619,19 @@ async function refreshModels(): Promise<boolean> {
   models.value = [];
   modelsHostId.value = "";
   try {
-    const [status, entries] = await Promise.all([
+    const [status, entries, capabilities] = await Promise.all([
       apiJsonTo<ServerStatus>(target, "/api/status"),
       apiJsonTo<ModelEntry[]>(target, "/api/models"),
+      apiJsonTo<{ expand?: ExpandCapabilities | null }>(target, "/api/capabilities").catch(
+        () => null,
+      ),
     ]);
-    if (epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     host.online = true;
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
+    host.instanceId = status.instance_id ?? host.instanceId;
+    expandCapabilities[hostId] = capabilities?.expand;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
     // the main Model select uses `generationModels` so those tools can never
     // become the active generation model.
@@ -462,7 +645,7 @@ async function refreshModels(): Promise<boolean> {
     }
     return true;
   } catch (error) {
-    if (epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
+    if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     host.online = false;
     const detail = error instanceof Error ? error.message : String(error);
     modelLoadError.value = `Couldn’t load generation models from ${host.name}. ${detail}`;
@@ -512,12 +695,496 @@ function loadTemplate(template: GenerationTemplate): void {
     : `Template loaded. Re-add host-specific LoRAs and auxiliary models.${mediaMessage}`;
 }
 
+function expansionInputs(count: number): PreparedExpansionInputs {
+  return {
+    sourcePrompt: form.prompt.trim(),
+    model: form.model,
+    family: form.family,
+    requestedCount: count,
+    selectedHostPolicy: selectedHostId.value || null,
+  };
+}
+
+function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean {
+  if (!host || !host.online || host.id !== route.hostId) return false;
+  const target = mobileHostTarget(host);
+  return (
+    target.baseUrl === route.target.baseUrl &&
+    target.apiKey === route.target.apiKey &&
+    (route.instanceId === undefined || (host.instanceId ?? null) === route.instanceId)
+  );
+}
+
+interface ReplacementFocusOwnership {
+  preparedRoot: HTMLElement | null;
+  pullRoot: HTMLElement | null;
+  owned: boolean;
+}
+
+function captureReplacementFocus(replacePrepared: boolean): ReplacementFocusOwnership {
+  const preparedRoot = replacePrepared
+    ? document.querySelector<HTMLElement>("[data-test='mobile-prepared-expansion']")
+    : null;
+  const pullRoot = document.querySelector<HTMLElement>(".mobile-expansion-pull");
+  const active = document.activeElement;
+  return {
+    preparedRoot,
+    pullRoot,
+    owned: !!active && (!!preparedRoot?.contains(active) || !!pullRoot?.contains(active)),
+  };
+}
+
+function restoreReplacementFocus(
+  ownership: ReplacementFocusOwnership,
+  target: "prompt" | "prepared",
+): void {
+  const active = document.activeElement;
+  const restore =
+    ownership.owned &&
+    (active === document.body ||
+      (!!active &&
+        (!!ownership.preparedRoot?.contains(active) || !!ownership.pullRoot?.contains(active))));
+  if (!restore) return;
+  void nextTick(() => {
+    if (unmounted) return;
+    if (target === "prompt") {
+      document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus();
+    } else {
+      document
+        .querySelector<HTMLTextAreaElement>("[data-test='mobile-prepared-expansion'] textarea")
+        ?.focus();
+    }
+  });
+}
+
+function clearExpansionRecovery(invalidateRetry = true): void {
+  const recovery = expansionRecovery.value;
+  if (invalidateRetry) recoveryRetryId += 1;
+  expansionPullRequestId += 1;
+  expansionPullAttempt.value = null;
+  expansionRecovery.value = null;
+  if (recovery) releaseExpansionPullLease(recovery);
+  else mobileDownloads.unregisterConsumer(downloadConsumerId);
+}
+
+function releaseExpansionPullLease(recovery: MobileExpansionRecoveryRecord): void {
+  mobileDownloads.releaseFrozenPull(recovery.leaseId);
+  mobileDownloads.unregisterConsumer(downloadConsumerId);
+}
+
+function markExpansionRecoveryStale(recovery: MobileExpansionRecoveryRecord, reason: string): void {
+  expansionError.value = reason;
+  const attempt = expansionPullAttempt.value;
+  if (attempt?.recoveryId === recovery.id) attempt.requestError = reason;
+  releaseExpansionPullLease(recovery);
+}
+
+function setExpansionFailure(
+  error: unknown,
+  inputs: PreparedExpansionInputs,
+  route: HostRoute,
+  requestToken: number,
+  replacePrepared: boolean,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const missingModel = parseMissingExpandModel(message);
+  clearExpansionRecovery();
+  if (missingModel) {
+    const id = ++expansionRecoveryId;
+    expansionRecovery.value = createMobileExpansionRecovery({
+      id,
+      leaseId: `${downloadConsumerId}:recovery-${id}`,
+      model: missingModel,
+      inputs,
+      route,
+      requestToken,
+      replacePrepared,
+    });
+  }
+  return missingModel
+    ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
+    : `Expansion failed on ${route.label}: ${message}`;
+}
+
+function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | null {
+  return mobileExpansionRecoveryStaleReason(recovery, {
+    inputs: expansionInputs(recovery.inputs.requestedCount),
+    currentHost: hosts.value.find((host) => host.id === recovery.route.hostId),
+    tokenCurrent:
+      !unmounted &&
+      expansionRecovery.value?.id === recovery.id &&
+      preparationGuard.isCurrent(recovery.requestToken),
+  });
+}
+
+function syncExpansionDownloadConsumer(recovery: MobileExpansionRecoveryRecord): void {
+  const host = { ...recovery.host };
+  mobileDownloads.registerConsumer(downloadConsumerId, [host], {
+    onEvent: ({ event }) => {
+      if (
+        event.type !== "job_done" &&
+        event.type !== "job_failed" &&
+        event.type !== "job_cancelled"
+      ) {
+        return;
+      }
+      const attempt = expansionPullAttempt.value;
+      if (
+        expansionRecovery.value?.id !== recovery.id ||
+        attempt?.recoveryId !== recovery.id ||
+        (attempt.jobId !== event.id && attempt.observedJobId !== event.id)
+      ) {
+        return;
+      }
+      const bucket = mobileDownloads.downloadsByHost[recovery.route.hostId];
+      attempt.terminalJob = bucket?.history.find((job) => job.id === event.id) ?? null;
+      releaseExpansionPullLease(recovery);
+    },
+    onStreamError: (failedHost, cause) => {
+      const attempt = expansionPullAttempt.value;
+      if (
+        expansionRecovery.value?.id === recovery.id &&
+        attempt?.recoveryId === recovery.id &&
+        recovery.route.hostId === failedHost.id
+      ) {
+        attempt.requestError = cause.message;
+      }
+    },
+  });
+}
+
+function commitExpandedPrompts(
+  inputs: PreparedExpansionInputs,
+  route: HostRoute,
+  prompts: string[],
+  requestToken: number,
+  replacePrepared: boolean,
+  focus: ReplacementFocusOwnership,
+): void {
+  if (inputs.requestedCount === 1) {
+    quickExpansionOriginal.value = inputs.sourcePrompt;
+    form.prompt = prompts[0]!;
+    form.originalPrompt = inputs.sourcePrompt;
+    quickExpansionSnapshot.value = {
+      requestToken,
+      originalPrompt: inputs.sourcePrompt,
+      expandedPrompt: prompts[0]!,
+      model: inputs.model,
+      family: inputs.family,
+      selectedHostPolicy: inputs.selectedHostPolicy,
+      route: { ...route, target: { ...route.target } },
+    };
+    if (replacePrepared) preparedBatch.value = null;
+    clearExpansionRecovery(false);
+    if (replacePrepared) restoreReplacementFocus(focus, "prompt");
+    return;
+  }
+  preparedBatch.value = createPreparedExpansionBatch(inputs, route, prompts, requestToken);
+  quickExpansionSnapshot.value = null;
+  clearExpansionRecovery(false);
+  if (replacePrepared) restoreReplacementFocus(focus, "prepared");
+}
+
+async function expandForCurrentBatch(
+  replacePrepared = false,
+  routeOverride: HostRoute | null = null,
+): Promise<void> {
+  const count = effectiveBatchSize.value;
+  const inputs = expansionInputs(count);
+  const host = routeOverride
+    ? hosts.value.find((candidate) => candidate.id === routeOverride.hostId)
+    : selectedHost.value;
+  const route = routeOverride ?? selectedRoute.value;
+  const replacementFocus = captureReplacementFocus(replacePrepared);
+  if (
+    !inputs.sourcePrompt ||
+    !inputs.model ||
+    !host ||
+    !route ||
+    expansionRunning.value ||
+    (preparedBatch.value && count === 1 && !replacePrepared)
+  ) {
+    return;
+  }
+  if (!sameFrozenHost(route, host)) {
+    expansionError.value = `${route.label} isn't reachable with the frozen connection. Expansion will not fall back.`;
+    return;
+  }
+  if (expandCapabilities[route.hostId]?.configured === false) {
+    expansionError.value = `Prompt expansion isn't configured on ${route.label}. Configure that host before retrying.`;
+    clearExpansionRecovery();
+    return;
+  }
+
+  clearExpansionRecovery();
+  submissionGuard.invalidate();
+  const token = preparationGuard.begin();
+  expansionRunning.value = true;
+  expansionError.value = "";
+  try {
+    const response = await expandPrompt(
+      inputs.sourcePrompt,
+      {
+        variations: count,
+        ...(inputs.family ? { modelFamily: inputs.family } : {}),
+      },
+      route.target,
+    );
+    if (!preparationGuard.isCurrent(token)) return;
+    const prompts = validateExpandedPrompts(response.expanded, count);
+    const currentHost = hosts.value.find((candidate) => candidate.id === route.hostId);
+    const current = expansionInputs(count);
+    if (
+      current.sourcePrompt !== inputs.sourcePrompt ||
+      current.model !== inputs.model ||
+      current.family !== inputs.family ||
+      current.requestedCount !== inputs.requestedCount ||
+      current.selectedHostPolicy !== inputs.selectedHostPolicy ||
+      !sameFrozenHost(route, currentHost)
+    ) {
+      expansionError.value =
+        "The prompt, model, Batch, or host changed while expansion was running. Expand again with the current inputs.";
+      return;
+    }
+    commitExpandedPrompts(inputs, route, prompts, token, replacePrepared, replacementFocus);
+  } catch (error) {
+    if (!preparationGuard.isCurrent(token)) return;
+    expansionError.value = setExpansionFailure(error, inputs, route, token, replacePrepared);
+  } finally {
+    if (!unmounted && preparationGuard.isCurrent(token)) expansionRunning.value = false;
+  }
+}
+
+function restoreQuickExpansion(): void {
+  if (quickExpansionOriginal.value === null) return;
+  submissionGuard.invalidate();
+  preparationGuard.invalidate();
+  form.prompt = quickExpansionOriginal.value;
+  form.originalPrompt = null;
+  quickExpansionOriginal.value = null;
+  quickExpansionSnapshot.value = null;
+  expansionError.value = "";
+  clearExpansionRecovery();
+  expansionRunning.value = false;
+  preparedSubmitting.value = false;
+  preparingGeneration.value = false;
+  submissionUiId += 1;
+}
+
+function editPreparedPrompt(payload: { id: string; text: string }): void {
+  if (preparedSubmitting.value || expansionRunning.value) return;
+  supersedePreparedReplacement();
+  submissionGuard.invalidate();
+  const prompt = preparedBatch.value?.prompts.find((candidate) => candidate.id === payload.id);
+  if (prompt) prompt.text = payload.text;
+}
+
+function removePreparedPrompt(id: string): void {
+  const batch = preparedBatch.value;
+  if (!batch || batch.prompts.length <= 2 || preparedSubmitting.value || expansionRunning.value)
+    return;
+  supersedePreparedReplacement();
+  submissionGuard.invalidate();
+  batch.prompts = batch.prompts.filter((prompt) => prompt.id !== id);
+  batch.requestedCount = batch.prompts.length;
+  form.batchSize = batch.prompts.length;
+}
+
+function supersedePreparedReplacement(): void {
+  if (!expansionRecovery.value?.replacePrepared) return;
+  preparationGuard.invalidate();
+  clearExpansionRecovery();
+  expansionRunning.value = false;
+  expansionError.value = "Pending replacement cancelled; your reviewed variations were kept.";
+}
+
+function collapsePreparedBatch(removedId: string): void {
+  const batch = preparedBatch.value;
+  if (!batch || batch.prompts.length !== 2 || preparedSubmitting.value || expansionRunning.value)
+    return;
+  const remaining = batch.prompts.find((prompt) => prompt.id !== removedId);
+  if (!remaining) return;
+  const preparedRoot = document.querySelector<HTMLElement>(
+    "[data-test='mobile-prepared-expansion']",
+  );
+  const restoreFocus = !!preparedRoot?.contains(document.activeElement);
+  preparationGuard.invalidate();
+  submissionGuard.invalidate();
+  submissionUiId += 1;
+  preparedBatch.value = null;
+  expansionRunning.value = false;
+  preparedSubmitting.value = false;
+  preparingGeneration.value = false;
+  expansionError.value = "";
+  clearExpansionRecovery();
+  form.batchSize = 1;
+  form.prompt = remaining.text;
+  form.originalPrompt = batch.sourcePrompt;
+  quickExpansionOriginal.value = batch.sourcePrompt;
+  quickExpansionSnapshot.value = null;
+  if (restoreFocus) {
+    void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+  }
+}
+
+function discardPreparedBatch(): void {
+  const preparedRoot = document.querySelector<HTMLElement>(
+    "[data-test='mobile-prepared-expansion']",
+  );
+  const restoreFocus = !!preparedRoot?.contains(document.activeElement);
+  preparationGuard.invalidate();
+  submissionGuard.invalidate();
+  submissionUiId += 1;
+  preparedBatch.value = null;
+  expansionRunning.value = false;
+  preparedSubmitting.value = false;
+  preparingGeneration.value = false;
+  expansionError.value = "";
+  clearExpansionRecovery();
+  if (restoreFocus) {
+    void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+  }
+}
+
+async function pullExpansionModel(): Promise<void> {
+  const recovery = expansionRecovery.value;
+  if (!recovery || expansionRunning.value) return;
+  releaseExpansionPullLease(recovery);
+  const stale = recoveryStaleReason(recovery);
+  if (stale) {
+    markExpansionRecoveryStale(recovery, stale);
+    return;
+  }
+  const bucket = mobileDownloads.downloadsByHost[recovery.route.hostId] ?? {
+    activeJobs: [],
+    queued: [],
+    history: [],
+  };
+  const attempt: MobileExpansionPullAttempt = {
+    id: ++expansionPullRequestId,
+    recoveryId: recovery.id,
+    phase: "connecting",
+    jobId: null,
+    observedJobId: null,
+    baselineJobIds: [...bucket.activeJobs, ...bucket.queued, ...bucket.history].map(
+      (job) => job.id,
+    ),
+    allowExistingInFlight: false,
+    requestError: null,
+    terminalJob: null,
+  };
+  expansionPullAttempt.value = attempt;
+  syncExpansionDownloadConsumer(recovery);
+  try {
+    const result = await mobileDownloads.startPullFrozen(
+      { id: recovery.model, name: recovery.model },
+      { ...recovery.host },
+      recovery.leaseId,
+    );
+    if (
+      unmounted ||
+      expansionPullAttempt.value?.id !== attempt.id ||
+      expansionRecovery.value?.id !== recovery.id
+    ) {
+      return;
+    }
+    const changed = recoveryStaleReason(recovery);
+    if (changed) {
+      markExpansionRecoveryStale(recovery, changed);
+      return;
+    }
+    if (result.kind === "started" || result.kind === "conflict") {
+      expansionPullAttempt.value.jobId = result.jobId;
+    } else {
+      expansionPullAttempt.value.allowExistingInFlight = true;
+      const state = mobileDownloads.downloadsByHost[recovery.route.hostId];
+      expansionPullAttempt.value.observedJobId = state
+        ? ([...state.activeJobs, ...state.queued].find((job) =>
+            expansionPullJobMatchesModel(job, recovery.model),
+          )?.id ?? null)
+        : null;
+    }
+    expansionPullAttempt.value.phase = "starting";
+  } catch (error) {
+    if (
+      unmounted ||
+      expansionPullAttempt.value?.id !== attempt.id ||
+      expansionRecovery.value?.id !== recovery.id
+    ) {
+      return;
+    }
+    expansionPullAttempt.value.requestError =
+      error instanceof Error ? error.message : String(error);
+    releaseExpansionPullLease(recovery);
+  }
+}
+
+async function retryExpansionAfterPull(): Promise<void> {
+  const recovery = expansionRecovery.value;
+  const attempt = expansionPullAttempt.value;
+  if (!recovery || !attempt || attempt.recoveryId !== recovery.id || expansionRunning.value) return;
+  const stale = recoveryStaleReason(recovery);
+  if (stale) {
+    markExpansionRecoveryStale(recovery, stale);
+    return;
+  }
+  if (expansionPullStatus.value?.kind !== "ready") {
+    expansionError.value = `${recovery.model} is not ready on ${recovery.route.label}.`;
+    return;
+  }
+
+  const retryId = ++recoveryRetryId;
+  const focus = captureReplacementFocus(recovery.replacePrepared);
+  expansionRunning.value = true;
+  expansionError.value = "";
+  try {
+    const response = await expandPrompt(
+      recovery.inputs.sourcePrompt,
+      {
+        variations: recovery.inputs.requestedCount,
+        ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
+      },
+      recovery.route.target,
+    );
+    if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
+      return;
+    }
+    const changed = recoveryStaleReason(recovery);
+    if (changed) {
+      markExpansionRecoveryStale(recovery, changed);
+      return;
+    }
+    const prompts = validateExpandedPrompts(response.expanded, recovery.inputs.requestedCount);
+    commitExpandedPrompts(
+      { ...recovery.inputs },
+      { ...recovery.route, target: { ...recovery.route.target } },
+      prompts,
+      recovery.requestToken,
+      recovery.replacePrepared,
+      focus,
+    );
+  } catch (error) {
+    if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
+      return;
+    }
+    expansionError.value = `Expansion failed on ${recovery.route.label}: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  } finally {
+    if (!unmounted && retryId === recoveryRetryId) expansionRunning.value = false;
+  }
+}
+
 function revokeObjectUrl(url: string): void {
   URL.revokeObjectURL(url);
   objectUrls.delete(url);
 }
 
-async function prepareGenerationRequest(target: ApiTarget, draft: GenerateForm) {
+async function prepareGenerationRequest(
+  target: ApiTarget,
+  draft: GenerateForm,
+  isCurrent: () => boolean = () => true,
+) {
   const draftCaps = generationCapabilitiesForFamily(draft.family);
   if (draftCaps.supportsImg2img && draftCaps.sourceImageMode === "single" && draft.sourceImage) {
     const result = await applySourceFitPreprocess(
@@ -536,9 +1203,13 @@ async function prepareGenerationRequest(target: ApiTarget, draft: GenerateForm) 
             image,
             model,
             target,
-            onProgress: (message) => (progress.value = message),
+            onProgress: (message) => {
+              if (isCurrent()) progress.value = message;
+            },
           }),
-        onStatus: (message) => (progress.value = message),
+        onStatus: (message) => {
+          if (isCurrent()) progress.value = message;
+        },
       },
     );
     draft.sourceImage = result.source;
@@ -550,10 +1221,57 @@ async function prepareGenerationRequest(target: ApiTarget, draft: GenerateForm) 
 }
 
 async function generate(): Promise<void> {
-  const host = selectedHost.value;
-  const target = selectedTarget.value;
+  const prepared = preparedBatch.value;
+  if (effectiveBatchSize.value > 1 && !prepared) {
+    await expandForCurrentBatch();
+    return;
+  }
+  if (
+    prepared &&
+    (preparedStaleReasons.value.length > 0 ||
+      prepared.prompts.some((prompt) => !prompt.text.trim()))
+  ) {
+    return;
+  }
+  if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
+    expansionError.value = `${quickStaleReasons.value.join(" ")} Undo or expand again before developing.`;
+    return;
+  }
+
+  const preparedSubmission = prepared
+    ? {
+        batchId: prepared.batchId,
+        promptIds: prepared.prompts.map((prompt) => prompt.id),
+        prompts: prepared.prompts.map((prompt) => prompt.text.trim()),
+        originalPrompt: prepared.sourcePrompt,
+        route: { ...prepared.route, target: { ...prepared.route.target } },
+      }
+    : null;
+  const preparedSection = preparedSubmission
+    ? document.querySelector<HTMLElement>("[data-test='mobile-prepared-expansion']")
+    : null;
+  const preparedSubmissionOwnedFocus = !!preparedSection?.contains(document.activeElement);
+  const quickSubmission = !preparedSubmission
+    ? quickExpansionSnapshot.value
+      ? {
+          requestToken: quickExpansionSnapshot.value.requestToken,
+          route: {
+            ...quickExpansionSnapshot.value.route,
+            target: { ...quickExpansionSnapshot.value.route.target },
+          },
+        }
+      : null
+    : null;
+  const host = preparedSubmission
+    ? hosts.value.find((candidate) => candidate.id === preparedSubmission.route.hostId)
+    : quickSubmission
+      ? hosts.value.find((candidate) => candidate.id === quickSubmission.route.hostId)
+      : selectedHost.value;
+  const route = preparedSubmission?.route ?? quickSubmission?.route ?? selectedRoute.value;
+  const target = route?.target ?? null;
   if (
     !host ||
+    !route ||
     !target ||
     !form.prompt.trim() ||
     !selectedModelAvailable.value ||
@@ -569,51 +1287,138 @@ async function generate(): Promise<void> {
 
   const draft = cloneGenerateForm(form);
   const draftCaps = generationCapabilitiesForFamily(draft.family);
-  const batchSize = draftCaps.forcesBatchSizeOne ? 1 : draft.batchSize;
+  const batchSize = preparedSubmission
+    ? preparedSubmission.prompts.length
+    : draftCaps.forcesBatchSizeOne
+      ? 1
+      : draft.batchSize;
+  const guardedSubmission = !!preparedSubmission || !!quickSubmission;
+  const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
+  const token = submissionGuard.begin();
+  const uiId = ++submissionUiId;
+  const ownsPreparedSubmission = () =>
+    !unmounted &&
+    uiId === submissionUiId &&
+    submissionGuard.isCurrent(token) &&
+    (!preparedSubmission || preparedBatch.value?.batchId === preparedSubmission.batchId);
+  const releasePreparedSubmission = () => {
+    if (ownsPreparedSubmission()) preparedSubmitting.value = false;
+  };
   let request: GenerateRequest;
   preparingGeneration.value = true;
+  preparedSubmitting.value = !!preparedSubmission;
   try {
-    request = await prepareGenerationRequest(target, draft);
+    request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
   } catch (error) {
+    if (!ownsPreparedSubmission()) return;
     progress.value = error instanceof Error ? error.message : String(error);
     generationAnnouncement.value = `Couldn’t prepare the source image. ${progress.value}`;
+    releasePreparedSubmission();
     return;
   } finally {
-    preparingGeneration.value = false;
+    if (!unmounted && uiId === submissionUiId) preparingGeneration.value = false;
+  }
+
+  if (!submissionGuard.isCurrent(token)) {
+    return;
+  }
+  if (guardedSubmission && JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity) {
+    progress.value = "The generation inputs changed while the source was being prepared.";
+    generationAnnouncement.value = `${progress.value} Review the current inputs before developing.`;
+    releasePreparedSubmission();
+    return;
+  }
+  if (
+    !sameFrozenHost(
+      route,
+      hosts.value.find((candidate) => candidate.id === route.hostId),
+    )
+  ) {
+    expansionError.value = `${route.label}'s connection details changed. Refresh or undo before developing.`;
+    releasePreparedSubmission();
+    return;
+  }
+  if (preparedSubmission) {
+    const current = preparedBatch.value;
+    const unchanged =
+      current?.batchId === preparedSubmission.batchId &&
+      current.prompts.length === preparedSubmission.prompts.length &&
+      current.prompts.every(
+        (prompt, index) =>
+          prompt.id === preparedSubmission.promptIds[index] &&
+          prompt.text.trim() === preparedSubmission.prompts[index],
+      );
+    if (!unchanged || preparedStaleReasons.value.length > 0) {
+      releasePreparedSubmission();
+      return;
+    }
+  } else if (quickSubmission) {
+    if (
+      quickExpansionSnapshot.value?.requestToken !== quickSubmission.requestToken ||
+      quickStaleReasons.value.length > 0
+    ) {
+      releasePreparedSubmission();
+      return;
+    }
   }
 
   const chainRouting = decideGenerateRequestRouting(request, draft.family);
   if (chainRouting.kind === "reject") {
     progress.value = chainRouting.reason;
     generationAnnouncement.value = chainRouting.reason;
+    releasePreparedSubmission();
     return;
   }
   if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
     progress.value = "These options can’t be preserved during long-video chaining.";
     generationAnnouncement.value = `${progress.value} Remove the highlighted options or reduce Frames to 97 or fewer.`;
+    releasePreparedSubmission();
     return;
   }
 
-  // Exactly like desktop: snapshot the request and host for this tap. The
-  // shared store expands Batch into individually queued, cancellable jobs.
+  const requestOptions = preparedSubmission
+    ? {
+        prompts: preparedSubmission.prompts,
+        originalPrompt: preparedSubmission.originalPrompt,
+        batchId: preparedSubmission.batchId,
+      }
+    : {};
   const { settled } = generation.submitBatch(
     request,
     batchSize,
     {
-      hostId: host.id,
-      label: host.name,
+      hostId: route.hostId,
+      label: route.label,
       kind: "remote",
-      target: { ...target },
+      target: { ...route.target },
       mirrorRemoteOutput: false,
       retainEncodedResult: false,
       metadataOnlyCompletion: true,
     },
     chainRouting,
+    requestOptions,
   );
+  releasePreparedSubmission();
+  if (preparedSubmission) {
+    const active = document.activeElement;
+    const restoreFocus =
+      preparedSubmissionOwnedFocus &&
+      (active === document.body || (!!active && !!preparedSection?.contains(active)));
+    preparedBatch.value = null;
+    if (restoreFocus) {
+      void nextTick(() => document.querySelector<HTMLTextAreaElement>("#mobile-prompt")?.focus());
+    }
+  }
+  if (
+    quickSubmission &&
+    quickExpansionSnapshot.value?.requestToken === quickSubmission.requestToken
+  ) {
+    quickExpansionSnapshot.value = null;
+  }
   progress.value = "Queued";
   generationAnnouncement.value = "";
   void settled.then((jobs) => {
-    if (jobs.length === 0) return;
+    if (unmounted || jobs.length === 0) return;
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
@@ -623,6 +1428,18 @@ async function generate(): Promise<void> {
       candidate.error?.includes("remote cancellation was not confirmed"),
     );
     const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
+    const failedVariations = preparedSubmission
+      ? jobs.flatMap((candidate, index) => {
+          if (!candidate.error || isCancelledError(candidate.error)) return [];
+          const prompt =
+            candidate.prompt.length > 120 ? `${candidate.prompt.slice(0, 117)}…` : candidate.prompt;
+          return [`Variation ${index + 1}, “${prompt}”, failed: ${candidate.error}`];
+        })
+      : [];
+    const preparedFailureSummary = failedVariations.join(" ");
+    const failedCount = jobs.filter(
+      (candidate) => candidate.error && !isCancelledError(candidate.error),
+    ).length;
     const cancelled = jobs.find((candidate) => isCancelledError(candidate.error));
 
     if (latestCompleted?.result) {
@@ -639,23 +1456,43 @@ async function generate(): Promise<void> {
             ? "Generation completed."
             : `${completed.length} of ${jobs.length} generations completed.`;
       }
-      if (unconfirmedCancellation?.error) {
-        progress.value = `${completed.length} of ${jobs.length} completed · ${unconfirmedCancellation.error}`;
-        generationAnnouncement.value = `${completed.length} generations completed; cancellation failed. ${unconfirmedCancellation.error}`;
-      } else if (failed?.error) {
-        const failedCount = jobs.filter(
-          (candidate) => candidate.error && !isCancelledError(candidate.error),
-        ).length;
-        progress.value = `${completed.length} of ${jobs.length} completed · ${failed.error}`;
-        generationAnnouncement.value = `${completed.length} generations completed; ${failedCount} failed. ${failed.error}`;
+      if (unconfirmedCancellation?.error || failed?.error) {
+        progress.value = [
+          `${completed.length} of ${jobs.length} completed`,
+          failed?.error,
+          unconfirmedCancellation?.error,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        generationAnnouncement.value = [
+          `${completed.length} generations completed.`,
+          failed?.error
+            ? preparedSubmission
+              ? `${failedCount} failed. ${preparedFailureSummary}`
+              : `${failedCount} failed. ${failed.error}`
+            : "",
+          unconfirmedCancellation?.error
+            ? `Cancellation failed. ${unconfirmedCancellation.error}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
       }
       if (tab.value === "gallery") void refreshGallery();
-    } else if (unconfirmedCancellation?.error) {
-      progress.value = unconfirmedCancellation.error;
-      generationAnnouncement.value = `Cancellation failed. ${unconfirmedCancellation.error}`;
-    } else if (failed?.error) {
-      progress.value = failed.error;
-      generationAnnouncement.value = `Generation failed. ${failed.error}`;
+    } else if (unconfirmedCancellation?.error || failed?.error) {
+      progress.value = [failed?.error, unconfirmedCancellation?.error].filter(Boolean).join(" · ");
+      generationAnnouncement.value = [
+        failed?.error
+          ? preparedSubmission
+            ? `Generation failed. ${preparedFailureSummary}`
+            : `Generation failed. ${failed.error}`
+          : "",
+        unconfirmedCancellation?.error
+          ? `Cancellation failed. ${unconfirmedCancellation.error}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
     } else if (cancelled) {
       progress.value = "Cancelled";
       generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
@@ -977,6 +1814,78 @@ watch(selectedHostId, (id, previousId) => {
   else localStorage.removeItem(SELECTED_KEY);
 });
 
+watch(
+  () => {
+    const attempt = expansionPullAttempt.value;
+    const recovery = expansionRecovery.value;
+    if (
+      !attempt ||
+      !recovery ||
+      attempt.recoveryId !== recovery.id ||
+      attempt.jobId ||
+      attempt.observedJobId
+    ) {
+      return "";
+    }
+    const bucket = mobileDownloads.downloadsByHost[recovery.route.hostId];
+    return bucket
+      ? [...bucket.activeJobs, ...bucket.queued]
+          .map((job) => `${job.id}:${job.model}:${job.catalog_id ?? ""}`)
+          .join("|")
+      : "";
+  },
+  () => {
+    const attempt = expansionPullAttempt.value;
+    const recovery = expansionRecovery.value;
+    if (
+      !attempt ||
+      !recovery ||
+      attempt.recoveryId !== recovery.id ||
+      attempt.jobId ||
+      attempt.observedJobId
+    ) {
+      return;
+    }
+    const bucket = mobileDownloads.downloadsByHost[recovery.route.hostId];
+    const match = bucket
+      ? [...bucket.activeJobs, ...bucket.queued].find(
+          (job) =>
+            expansionPullJobMatchesModel(job, recovery.model) &&
+            (attempt.allowExistingInFlight || !attempt.baselineJobIds.includes(job.id)),
+        )
+      : undefined;
+    if (match) attempt.observedJobId = match.id;
+  },
+  { flush: "sync" },
+);
+
+watch(
+  () => {
+    const recovery = expansionRecovery.value;
+    const attempt = expansionPullAttempt.value;
+    if (!recovery || !attempt || attempt.recoveryId !== recovery.id) return "";
+    const host = hosts.value.find((candidate) => candidate.id === recovery.route.hostId);
+    return [
+      form.prompt,
+      form.model,
+      form.batchSize,
+      selectedHostId.value,
+      host?.online ?? false,
+      host?.baseUrl ?? "",
+      host?.apiKey ?? "",
+      host?.instanceId ?? "",
+    ].join("\u0000");
+  },
+  () => {
+    const recovery = expansionRecovery.value;
+    const attempt = expansionPullAttempt.value;
+    if (!recovery || !attempt || attempt.recoveryId !== recovery.id) return;
+    const stale = recoveryStaleReason(recovery);
+    if (stale) markExpansionRecoveryStale(recovery, stale);
+  },
+  { flush: "sync" },
+);
+
 watch(tab, (next) => {
   if (next === "gallery") void refreshGallery();
   if (next !== "hosts") hostDetailId.value = "";
@@ -998,6 +1907,7 @@ onMounted(async () => {
       .catch(() => {});
   }
   await hydrateApiKeys();
+  if (unmounted) return;
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
@@ -1014,6 +1924,13 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  unmounted = true;
+  preparationGuard.invalidate();
+  submissionGuard.invalidate();
+  submissionUiId += 1;
+  recoveryRetryId += 1;
+  expansionPullRequestId += 1;
+  clearExpansionRecovery();
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
@@ -1151,7 +2068,57 @@ onBeforeUnmount(() => {
               placeholder="Describe the print…"
             />
           </label>
-          <MobilePromptTools v-if="selectedTarget" :form="form" :target="selectedTarget" />
+          <MobilePromptTools
+            v-if="selectedTarget"
+            :form="form"
+            :target="selectedTarget"
+            :running="expansionRunning"
+            :can-undo="quickExpansionOriginal !== null"
+            :blocked="!!preparedBatch"
+            @expand="expandForCurrentBatch()"
+            @undo="restoreQuickExpansion"
+          />
+          <p
+            v-if="quickStaleReasons.length"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-quick-expansion-stale"
+          >
+            {{ quickStaleReasons.join(" ") }} Undo or expand again before developing.
+          </p>
+          <p
+            v-if="expansionError && !expansionMissingModel && !preparedBatch"
+            class="mobile-generate-validation"
+            role="alert"
+            data-test="mobile-expansion-error"
+          >
+            {{ expansionError }}
+          </p>
+          <MobileExpansionPullStatus
+            v-if="expansionMissingModel && expansionPullStatus"
+            :model="expansionMissingModel.model"
+            :host-label="expansionMissingModel.route.label"
+            :error="expansionError"
+            :status="expansionPullStatus"
+            :eta-seconds="expansionPullEtaSeconds"
+            @pull="pullExpansionModel"
+            @retry-expansion="retryExpansionAfterPull"
+          />
+          <MobilePreparedExpansionBatch
+            v-if="preparedBatch"
+            :batch="preparedBatch"
+            :stale-reasons="preparedStaleReasons"
+            :preparing="expansionRunning"
+            :error="expansionMissingModel ? '' : expansionError"
+            :submitting="preparedSubmitting"
+            @edit="editPreparedPrompt"
+            @remove="removePreparedPrompt"
+            @collapse="collapsePreparedBatch"
+            @regenerate="expandForCurrentBatch(true, preparedBatch.route)"
+            @refresh="expandForCurrentBatch(true)"
+            @discard="discardPreparedBatch"
+            @generate="generate"
+          />
           <label v-if="form.model && caps.supportsNegativePrompt" class="field">
             <span>Negative prompt</span>
             <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
@@ -1260,6 +2227,7 @@ onBeforeUnmount(() => {
             <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
           </div>
           <button
+            v-if="!preparedBatch"
             class="primary-button"
             type="button"
             :disabled="

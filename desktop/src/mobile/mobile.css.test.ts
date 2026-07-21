@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync("src/mobile/mobile.css", "utf8");
 const mobileHtml = readFileSync("index.mobile.html", "utf8");
+const preparedComponent = readFileSync("src/mobile/MobilePreparedExpansionBatch.vue", "utf8");
+const pullComponent = readFileSync("src/mobile/MobileExpansionPullStatus.vue", "utf8");
 
 describe("mobile viewport scaling", () => {
   it("disables iPhone page and double-tap zoom without document gesture handlers", () => {
@@ -23,6 +25,18 @@ describe("mobile editable controls", () => {
     );
 
     expect(editables?.[1]).toMatch(/font-size:\s*16px\s*;/);
+  });
+
+  it("keeps prepared editors at 16px and their actions at least 44pt", () => {
+    expect(preparedComponent).toMatch(/\.mobile-prepared-editor\s*\{[^}]*font-size:\s*16px/s);
+    expect(preparedComponent).toMatch(/\.mobile-touch-action\s*\{[^}]*min-height:\s*44px/s);
+    expect(pullComponent).toMatch(/\.mobile-touch-action\s*\{[^}]*min-height:\s*44px/s);
+  });
+
+  it("removes expansion progress motion when reduced motion is requested", () => {
+    expect(pullComponent).toMatch(
+      /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*transition:\s*none/,
+    );
   });
 });
 
