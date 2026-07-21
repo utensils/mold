@@ -45,6 +45,14 @@ fn configure_pragmas(conn: &Connection, path: &Path) {
     if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
         tracing::warn!(error = %e, "metadata DB synchronous pragma failed");
     }
+    // Wait out short lock contention instead of surfacing SQLITE_BUSY.
+    // Multiple processes share this file (TUI + `mold serve` + CLI), and
+    // most read paths treat an error as "no value" — without a timeout a
+    // reader that lands on a checkpoint or schema lock silently loses
+    // settings it would have found a few milliseconds later.
+    if let Err(e) = conn.busy_timeout(std::time::Duration::from_millis(5000)) {
+        tracing::warn!(error = %e, "metadata DB busy_timeout failed");
+    }
     if let Err(e) = conn.pragma_update(None, "foreign_keys", "ON") {
         tracing::warn!(error = %e, "metadata DB foreign_keys pragma failed");
     }
@@ -459,6 +467,34 @@ fn scheduler_from_str(s: &str) -> Option<Scheduler> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_timeout_pragma_is_set_on_open() {
+        // Regression: without a busy timeout, concurrent access from a
+        // second process (TUI + `mold serve` sharing mold.db) surfaces
+        // SQLITE_BUSY instantly, and most read paths swallow the error
+        // as "no value" — observed as settings silently reading back
+        // empty under contention.
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-db-busy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = MetadataDb::open(&tmp.join("mold.db")).unwrap();
+        let timeout: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000, "busy_timeout must be pinned at 5000ms");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
     use super::*;
     use crate::record::GenerationRecord;
     use mold_core::OutputMetadata;
