@@ -833,9 +833,11 @@ onMounted(async () => {
 <style scoped>
 .gal {
   position: relative;
+  width: 100%;
   max-width: 1800px;
   margin: 0 auto;
   padding: 22px 20px 160px;
+  box-sizing: border-box;
 }
 
 .gal__head {
