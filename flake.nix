@@ -314,27 +314,29 @@
           };
 
           # Web gallery SPA (Vue 3 + Vite + Tailwind v4). Built via bun2nix so
-          # the `node_modules` cache is reproducibly derived from `web/bun.lock`.
+          # the `node_modules` cache is reproducibly derived from the root bun.lock.
           # Output layout: `$out/index.html` + `$out/assets/...` — consumed at
           # Rust compile time via `MOLD_WEB_DIST`, then embedded into the
           # `mold` binary by `rust-embed` (see `crates/mold-server/build.rs`).
           mold-web = pkgs.stdenv.mkDerivation {
             pname = "mold-web";
             version = "0.10.0";
-            # The SPA imports the shared Mold Studio design system from ui/
-            # (tokens, fonts, primitives), so the source tree carries both
-            # directories with the app rooted in web/.
+            # Keep the workspace root so Bun can link @mold/studio and @mold/ui.
             src = lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [
+                ./package.json
+                ./bun.lock
+                ./desktop/package.json
                 ./web
+                ./studio
                 ./ui
               ];
             };
-            sourceRoot = "source/web";
+            sourceRoot = "source";
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
-              bunNix = ./web/bun.nix;
+              bunNix = ./bun.nix;
             };
             # Keep the install path fully offline and platform-stable. Do not rely
             # on bun2nix hook defaults here: bun2nix revs have differed on whether
@@ -354,13 +356,13 @@
             dontRunLifecycleScripts = true;
             buildPhase = ''
               runHook preBuild
-              bun run build
+              bun run build:web
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              cp -R dist/. $out/
+              cp -R web/dist/. $out/
               runHook postInstall
             '';
           };
@@ -369,18 +371,22 @@
           mold-desktop-web = pkgs.stdenv.mkDerivation {
             pname = "mold-desktop-web";
             version = workspaceVersion;
-            # Same shared-ui layout as mold-web: desktop/ + ui/ side by side.
+            # Same root workspace layout as mold-web.
             src = lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [
+                ./package.json
+                ./bun.lock
                 ./desktop
+                ./web/package.json
+                ./studio
                 ./ui
               ];
             };
-            sourceRoot = "source/desktop";
+            sourceRoot = "source";
             nativeBuildInputs = [ pkgs.bun2nix.hook ];
             bunDeps = pkgs.bun2nix.fetchBunDeps {
-              bunNix = ./desktop/bun.nix;
+              bunNix = ./bun.nix;
             };
             bunInstallFlags = [
               "--linker=isolated"
@@ -389,13 +395,13 @@
             dontRunLifecycleScripts = true;
             buildPhase = ''
               runHook preBuild
-              bun run build
+              bun run build:desktop
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              cp -R dist/. $out/
+              cp -R desktop/dist/. $out/
               runHook postInstall
             '';
           };
@@ -1115,8 +1121,8 @@
                     stale=$(lsof -ti tcp:1430 || true)
                     [ -z "$stale" ] || kill -9 $stale 2>/dev/null || true
                   fi
-                  cd desktop
                   bun install --frozen-lockfile
+                  cd desktop
                   cargo tauri dev --features ${desktopFeature} "$@"
                 '';
               }
@@ -1131,8 +1137,8 @@
                     # shellcheck disable=SC1091
                     source .secrets/signing.env
                   fi
-                  cd desktop
                   bun install --frozen-lockfile
+                  cd desktop
                   ${
                     if isLinux then
                       ''
@@ -1173,8 +1179,8 @@
                           exit 1
                         fi
                       done
-                      cd desktop
                       bun install --frozen-lockfile
+                      cd desktop
                       cargo tauri build --features metal --bundles app,dmg "$@"
                       cd ..
                       app="desktop/src-tauri/target/release/bundle/macos/Mold.app"
@@ -1197,8 +1203,8 @@
                   ${desktopSetup}
                   cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
                   cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
-                  cd desktop
                   bun install --frozen-lockfile
+                  cd desktop
                   bunx vue-tsc -b
                   bun run fmt:check
                 '';
@@ -1211,8 +1217,8 @@
                   set -euo pipefail
                   ${desktopSetup}
                   cargo test --manifest-path desktop/src-tauri/Cargo.toml "$@"
-                  cd desktop
                   bun install --frozen-lockfile
+                  cd desktop
                   bun run test
                 '';
               }
@@ -1222,18 +1228,17 @@
                 help = "frontend-only Vite dev server (pair with a running `serve`)";
                 command = ''
                   set -euo pipefail
-                  cd desktop
                   bun install --frozen-lockfile
+                  cd desktop
                   bun run dev "$@"
                 '';
               }
               {
                 category = "desktop";
-                name = "desktop-bun-lock";
-                help = "regenerate desktop/bun.nix from bun.lock (bun2nix)";
+                name = "frontend-bun-lock";
+                help = "regenerate the root bun.lock and bun.nix frontend dependency set";
                 command = ''
                   set -euo pipefail
-                  cd desktop
                   bun install
                   bun2nix -o bun.nix
                 '';
@@ -1272,6 +1277,8 @@
               enable = true;
               edition = "2021";
             };
+            # The standalone iOS crate is Rust 2024 and has its own cargo-fmt CI gate.
+            settings.formatter.rustfmt.excludes = [ "apps/mobile/src-tauri/**/*.rs" ];
           };
         };
     };

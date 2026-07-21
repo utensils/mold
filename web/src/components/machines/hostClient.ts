@@ -7,8 +7,8 @@
  *
  * mold servers ship permissive CORS by default, so the browser can reach other
  * hosts directly — no proxy. All helpers are typed against src/types.ts, with a
- * few additive fields (`instance_id`, `models_disk`, `queue_paused`, queue
- * capabilities) that older web types predate.
+ * current additive fields (`instance_id`, `models_disk`, `queue_paused`, queue
+ * capabilities).
  */
 import { onBeforeUnmount, ref, type Ref } from "vue";
 import type {
@@ -19,6 +19,7 @@ import type {
   ServerStatus,
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
+import { parseCurrentServerStatus } from "@studio/api/client";
 
 /** Total/free bytes of the filesystem backing a host's models dir. */
 export interface HostDiskUsage {
@@ -26,7 +27,7 @@ export interface HostDiskUsage {
   free_bytes: number;
 }
 
-/** `/api/status` with the fields newer servers add (older web types predate). */
+/** Current `/api/status` shape required by the web client. */
 export interface HostStatus extends ServerStatus {
   instance_id?: string | null;
   models_disk?: HostDiskUsage | null;
@@ -81,8 +82,10 @@ async function send(
   }
 }
 
-export function hostStatus(host: HostEntry, signal?: AbortSignal) {
-  return getJson<HostStatus>(host, "/api/status", signal);
+export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
+  const value = await getJson<unknown>(host, "/api/status", signal);
+  parseCurrentServerStatus(value);
+  return value as HostStatus;
 }
 
 /** One host's gallery (`GET /api/gallery`), with its `x-api-key`. Used by the
@@ -175,18 +178,6 @@ export function moveQueueJob(
   return send(host, `/api/queue/${encodeURIComponent(id)}`, "PATCH", {
     position,
   });
-}
-
-export function cancelAllQueue(host: HostEntry): Promise<void> {
-  return send(host, "/api/queue", "DELETE");
-}
-
-export function pauseQueue(host: HostEntry): Promise<void> {
-  return send(host, "/api/queue/pause", "POST");
-}
-
-export function resumeQueue(host: HostEntry): Promise<void> {
-  return send(host, "/api/queue/resume", "POST");
 }
 
 export interface HostPoll {

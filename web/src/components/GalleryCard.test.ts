@@ -24,7 +24,7 @@ const item: GalleryImage = {
   },
 };
 
-describe("GalleryCard visibility", () => {
+describe("GalleryCard", () => {
   beforeEach(() => {
     (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
   });
@@ -33,11 +33,11 @@ describe("GalleryCard visibility", () => {
     delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   });
 
-  it("does not render a reveal overlay when legacy hide props are present", () => {
+  it("renders the current print metadata", () => {
     const wrapper = mount(GalleryCard, {
-      props: { item, hideMode: true, revealed: false },
+      props: { item },
     });
 
-    expect(wrapper.text()).not.toContain("Reveal");
+    expect(wrapper.text()).toContain("visible image");
   });
 });

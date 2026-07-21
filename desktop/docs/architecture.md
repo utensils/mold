@@ -118,13 +118,20 @@ resolver = "2"
 
 **Machines UI (no modes):** there is no connection switcher — the built-in/local engine is permanently the internal primary (**This device**) and every remote server is a list entry managed in the Machines workspace (This-device card, Add host, Connected, Remembered, On your network). Hosts dedupe by the server's instance UUID (`/api/status.instance_id`, mDNS `id` TXT record) with display names from the server's hostname; a one-shot Rust boot migration (`settings::migrate_remote_primary`) re-homes old remote-primary installs into the host list, carrying the API key into the per-host secret slot and pinning the generation target. Routing is generation-time only: the Host selector's Auto / Most capable / sticky pick covers every connected host. LTX-2 is CUDA-only: the local Metal engine grays out `ltx2` (drive from `/api/status` gpus backend + family capability map); remote CUDA hosts get it enabled.
 
-## 3. Frontend stack — DECISION: Vue 3.5 + TS strict + Vite 7 + Tailwind v4 + Pinia + TanStack Query/Virtual + fetch-event-source
+## 3. Frontend stack — one shared Vue workspace
 
-**Pick (and why Vue again despite "don't copy the design"):** the mandate is new _design_, not new _framework_. Vue 3.5 lets us port two hard-won assets verbatim: the per-family capability matrix (`web/src/lib/generateCapabilities.ts` — the exact enable/disable logic for 11 families × 10 capabilities) and the typed API-layer knowledge in `web/src/lib/api.ts`/`useCatalog.ts`. It keeps one frontend language across the repo (Vue/Vite/Tailwind v4/vue-tsc/vitest all already proven in `web/` and in the bun2nix build). React would buy nothing here and cost a parallel toolchain. **No component library** — fully custom design system (tokens + primitives), per the "fully new, beautifully designed" mandate.
+Web, desktop, and iPhone use the private repo-root Bun workspace and its single
+exact `bun.lock` / generated `bun.nix`. `ui/` contains design tokens and
+low-level primitives. `studio/` is browser-safe and contains current-version
+wire contracts, explicit `ApiTarget` transport, platform-adapter interfaces,
+Pinia state, and reusable domain logic. `web/` and `desktop/` provide routing,
+navigation, native bridges, and the few presentation differences required by
+the Mold Studio spec. Tauri imports and legacy normalization may not enter
+`studio/`; an architecture test enforces that boundary.
 
-- **Bundler:** Vite 7 (`^7.1`), `@vitejs/plugin-vue ^6`, dev server on **port 1430** (avoid web/'s 5173 and Aethon's 1420).
-- **Styling:** Tailwind v4 (`^4.2`, `@tailwindcss/vite`) with a custom token layer (CSS variables for surface/ink/accent, light+dark). The compact three-pane layout is shared; macOS uses overlay traffic-light chrome and Linux uses native decorations. Shortcut labels and primary modifiers are selected at build time.
-- **State:** Pinia `^3` for app/session state (connection, generation form, queue mirror, composer drafts). **Server state via `@tanstack/vue-query ^5`** (gallery, models, catalog search with its 5-min server cache, chain jobs, settings) — gives retries, cache invalidation on SSE events, and stale-while-revalidate for the gallery.
+- **Bundler:** exactly pinned Vite 7 and `@vitejs/plugin-vue`, with desktop dev on **port 1430**.
+- **Styling:** exactly pinned Tailwind v4 with the shared Mold Studio token layer. macOS uses overlay traffic-light chrome and Linux uses native decorations.
+- **State:** Pinia is the common state model. Server state is reduced explicitly from HTTP snapshots and SSE events; TanStack Query is not part of the workspace.
 - **Virtualized gallery:** `@tanstack/vue-virtual ^3` — virtualize rows of a CSS-grid (justified thumbnails, 256px server thumbs), `useVirtualizer` with dynamic row height. Thousands of items stay smooth.
 - **Video:** native `<video>` pointed at `GET /api/gallery/image/:filename` — the endpoint already supports HTTP Range (206), which WKWebView requires for scrubbing. Thumbnails/GIF previews from the existing endpoints. Loading `http://127.0.0.1` media from the `tauri://` origin is permitted by the CSP below.
 - **SSE:** `@microsoft/fetch-event-source ^2.0.1` for **everything** — required because (a) `/api/generate/stream`, `/api/upscale/stream`, `/api/generate/chain/stream` are **POST**-SSE, and (b) native `EventSource` cannot send the `X-Api-Key` header even for the GET streams (`/api/resources/stream`, `/api/downloads/stream`, `/api/chain-jobs/:id/events`, `/api/events`). One `sse.ts` helper wraps auth, abort, retry-with-snapshot semantics, and the `/api/queue` polling reconciler (zombie-card dead-lettering, same trick the SPA uses via the `Queued{id}` correlation event).
@@ -213,14 +220,14 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 The shared devshell exposes cross-platform desktop helpers:
 
-| Command            | Runs                                                                                                                                     |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `desktop-dev`      | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri as `Mold - dev` with Metal on macOS or CUDA on Linux |
-| `desktop-build`    | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only         |
-| `desktop-check`    | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                                      |
-| `desktop-test`     | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                                  |
-| `desktop-ui`       | Runs the frontend-only Vite server against a running `mold serve`                                                                        |
-| `desktop-bun-lock` | Refreshes the Nix-pinned Bun dependency lock after `desktop/bun.lock` changes                                                            |
+| Command             | Runs                                                                                                                                     |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `desktop-dev`       | Installs locked frontend dependencies, clears a stale Vite listener, and runs Tauri as `Mold - dev` with Metal on macOS or CUDA on Linux |
+| `desktop-build`     | Builds the macOS application bundle or the native Linux desktop package and AppImage; optional signing secrets remain macOS-only         |
+| `desktop-check`     | Runs Rust formatting and warning-denied clippy plus frontend format and type checks                                                      |
+| `desktop-test`      | Runs the CPU-only Rust test suite, embedded-engine boot test, and frontend Vitest suite                                                  |
+| `desktop-ui`        | Runs the frontend-only Vite server against a running `mold serve`                                                                        |
+| `frontend-bun-lock` | Refreshes the repo-root Bun lock and Nix dependency set for every frontend target                                                        |
 
 The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
@@ -435,7 +442,7 @@ pub async fn get_connection(state: tauri::State<'_, AppState>) -> Result<Connect
 }
 ```
 
-**Frontend deps (`desktop/package.json`):** vue `^3.5`, vue-router `^4.5`, pinia `^3`, `@tanstack/vue-query ^5`, `@tanstack/vue-virtual ^3`, `@microsoft/fetch-event-source ^2.0.1`, `@tauri-apps/api ^2`, `@tauri-apps/plugin-dialog ^2`, `-opener ^2`, `-notification ^2`, `-clipboard-manager ^2`, `-window-state ^2`, `-process ^2`; dev: `@tauri-apps/cli ^2`, vite `^7.1`, `@vitejs/plugin-vue ^6`, tailwindcss `^4.2` + `@tailwindcss/vite ^4.2`, typescript `^5.9`, vue-tsc `^3`, vitest `^4`, `@vue/test-utils ^2.4`, `@testing-library/vue ^8`, happy-dom, prettier.
+**Frontend deps:** exact browser-safe versions are owned by the root `package.json` and `bun.lock`: Vue, Vue Router, Pinia, Vite, Tailwind, TypeScript, Vitest, Vue Test Utils, happy-dom, Prettier, `smol-toml`, fetch-event-source, and the retained shared UI packages. `desktop/package.json` owns only the Tauri API, plugins, and CLI required by the native shell. TanStack Query and unused Tauri plugins are intentionally absent.
 
 ### Critical Files for Implementation
 

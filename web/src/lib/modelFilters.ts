@@ -4,12 +4,7 @@ export type ModelFilterMode = "all" | "any" | "not";
 export type DownloadedFilter = "any" | "downloaded" | "missing";
 export type SizeBucket = "small" | "medium" | "large" | "xlarge";
 export type ModelSortKey =
-  | "name"
-  | "family"
-  | "size"
-  | "quantization"
-  | "downloaded"
-  | "variantRank";
+  "name" | "family" | "size" | "quantization" | "downloaded" | "variantRank";
 
 export interface ModelFilterState {
   mode: ModelFilterMode;

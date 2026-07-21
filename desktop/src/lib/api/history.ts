@@ -92,11 +92,6 @@ export async function clearHistoryOn(target: ApiTarget, keep?: number): Promise<
   await apiFetchTo(target, `/api/history${suffix}`, { method: "DELETE" });
 }
 
-/** Clear the primary connection's prompt log (single-host callers). */
-export async function clearHistory(keep?: number): Promise<void> {
-  await clearHistoryOn(currentTarget(), keep);
-}
-
 /**
  * Which hosts a Clear should hit under the active chip filter: the one
  * filtered host, or every given (history-capable) host when "all".

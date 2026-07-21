@@ -9,7 +9,7 @@ import type { GenerateForm } from "../../lib/generateForm";
 import type { GenerateRequest } from "../../lib/api/types";
 import type { ApiTarget } from "../../lib/api/client";
 import { autoGrowRows } from "../../lib/autogrow";
-import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../../lib/promptCycler";
+import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "@studio/lib/promptCycler";
 import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 /**

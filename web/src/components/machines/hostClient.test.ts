@@ -16,6 +16,14 @@ function ok(data: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => data };
 }
 
+const currentStatus = {
+  version: "0.20.2",
+  instance_id: "instance-1",
+  hostname: "studio",
+  queue_depth: 0,
+  gpu_info: { backend: "cuda" },
+};
+
 const remote: HostEntry = {
   id: "192-168-1-20-7680",
   name: "Studio",
@@ -39,7 +47,7 @@ afterEach(() => {
 
 describe("hostClient auth + requests", () => {
   it("attaches the x-api-key header for keyed hosts and hits the host origin", async () => {
-    fetchMock.mockResolvedValueOnce(ok({ version: "0.16.0" }));
+    fetchMock.mockResolvedValueOnce(ok(currentStatus));
     await hostStatus(remote);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("http://192.168.1.20:7680/api/status");
@@ -49,7 +57,7 @@ describe("hostClient auth + requests", () => {
   });
 
   it("omits the auth header for a keyless host", async () => {
-    fetchMock.mockResolvedValueOnce(ok({ version: "0.16.0" }));
+    fetchMock.mockResolvedValueOnce(ok(currentStatus));
     await hostStatus(keyless);
     const init = fetchMock.mock.calls[0]![1] as RequestInit;
     expect(

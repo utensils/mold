@@ -1,0 +1,31 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "include": ["files", "dependencies", "exports"],
+  "ignoreExportsUsedInFile": true,
+  "ignoreBinaries": ["gh"],
+  "ignoreDependencies": ["@mold/studio", "@mold/ui", "tailwindcss"],
+  "ignoreFiles": ["docs/**", "website/**", "result*", "result*/**"],
+  "workspaces": {
+    "studio": {
+      "entry": ["index.ts", "**/*.test.ts"],
+      "project": ["**/*.{ts,vue}"]
+    },
+    "ui": {
+      "entry": ["**/*.test.ts", "components/**/*.vue", "icons.ts", "theme.ts"],
+      "project": ["**/*.{ts,vue}"]
+    },
+    "web": {
+      "entry": ["src/main.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.{ts,vue}"]
+    },
+    "desktop": {
+      "entry": [
+        "src/main.ts",
+        "src/mobile/main.ts",
+        "src/**/*.test.ts",
+        "vite.mobile.config.ts"
+      ],
+      "project": ["src/**/*.{ts,vue}"]
+    }
+  }
+}

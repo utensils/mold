@@ -61,7 +61,7 @@ import {
 } from "../lib/generateValidation";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless } from "../lib/sourceFit";
+import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";

@@ -27,7 +27,7 @@ Examples include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
 ### Web UI
 
 1. Start the server with `mold serve`.
-2. Open `http://localhost:7680/catalog`.
+2. Open `http://localhost:7680/models`.
 3. Search or filter by family, kind, source, rating, and downloads. Catalog
    searches include NSFW rows by default.
 4. Click **Install** on the entry you want.

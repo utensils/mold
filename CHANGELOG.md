@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The default TUI theme is now Studio Dark** (previously Catppuccin Mocha), matching the desktop, web, and iPhone default look. A persisted `tui.theme` choice is honored unchanged; unknown or missing slugs now resolve to Studio Dark. Mocha and the other six legacy presets remain selectable, and `studio` / `safelight` are accepted as slug aliases for the dark variants.
 - **Dracula's focused-panel border is now purple** (its accent hue) instead of cyan; the cyan moved to Dracula's new info role. Every preset now uses one hue for focus, selection, and primary action.
-
+- **Web and Tauri now share one frontend workspace.** Repo-root `bun.lock` and `bun.nix` pin the exact Vue 3, Pinia, Vite 7, Tailwind v4, TypeScript, Vitest, and formatting toolchain for `studio/`, `ui/`, `web/`, and `desktop/`. The browser-safe `studio/` package owns explicit-target HTTP contracts, platform adapters, Pinia runtime state, prompt cycling, and source fitting; Tauri-only packages remain in `desktop/`. Web now uses the canonical `/create`, `/library`, `/models`, `/machines`, and `/settings` routes, rejects incompatible current-server shapes with an upgrade error, and no longer accepts retired routes or persisted form/job schemas. Knip and architecture gates prevent dead modules, duplicate locks, and Tauri imports from entering the shared package.
 ### Fixed
 
 - **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.

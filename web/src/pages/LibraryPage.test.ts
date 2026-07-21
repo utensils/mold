@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent } from "vue";
-import GalleryPage from "./GalleryPage.vue";
+import LibraryPage from "./LibraryPage.vue";
 import {
   requestConfirm,
   resetNotifications,
@@ -144,7 +144,7 @@ const LightboxStub = defineComponent({
 });
 
 function mountPage() {
-  return mount(GalleryPage, {
+  return mount(LibraryPage, {
     global: {
       stubs: {
         GalleryGrid: GalleryGridStub,
@@ -162,7 +162,7 @@ async function mounted() {
   return wrapper;
 }
 
-describe("GalleryPage", () => {
+describe("LibraryPage", () => {
   beforeEach(() => {
     localStorage.clear();
     resetNotifications();
@@ -311,7 +311,7 @@ describe("GalleryPage", () => {
   });
 });
 
-describe("GalleryPage multi-host identity", () => {
+describe("LibraryPage multi-host identity", () => {
   const STUDIO = {
     id: "studio-7680",
     name: "studio",

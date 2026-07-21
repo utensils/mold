@@ -89,7 +89,7 @@ describe("reconcileRound (pure)", () => {
     expect(job.state).toBe("running");
   });
 
-  it("skips jobs that never captured a serverId (legacy server / pre-handshake)", () => {
+  it("skips jobs before the queued-event handshake captures a serverId", () => {
     // Without a serverId the reconciler can't tell server-side reality
     // from "we never had an id." Skipping is the safe default — the L2
     // staleness badge and the L1 silent-close fix cover those cases.
