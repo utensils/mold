@@ -1076,7 +1076,7 @@
               {
                 category = "ios";
                 name = "ios-dev";
-                help = "run the iPhone app with Tauri hot reload";
+                help = "run the iPhone app with Tauri hot reload (defaults to an iPhone simulator)";
                 command = "./scripts/ios.sh dev \"$@\"";
               }
               {

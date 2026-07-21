@@ -6,6 +6,10 @@ MOBILE="$ROOT/apps/mobile/src-tauri"
 ACTION="${1:-dev}"
 shift || true
 
+# pick_device / device_udid (simulator selection, tested by
+# scripts/tests/ios-sim-pick.sh).
+source "$ROOT/scripts/ios-sim.sh"
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "Mold iOS commands require macOS and Xcode." >&2
   exit 1
@@ -39,7 +43,30 @@ case "$ACTION" in
     "$ROOT/scripts/generate-ios-icons.sh"
     ;;
   check) cargo check --target aarch64-apple-ios-sim "$@" ;;
-  dev) cargo tauri ios dev "$@" ;;
+  dev)
+    # Zero-arg default: pick a simulator by name so the Tauri CLI never
+    # grabs a plugged-in iPhone (a provisioning device build) or prompts.
+    # Pass a device name to target hardware; MOLD_IOS_DEVICE overrides the
+    # preferred simulator.
+    if [[ $# -eq 0 ]]; then
+      device="$(pick_device)"
+      if [[ -z "$device" ]]; then
+        echo "error: no available iPhone simulator (xcrun simctl list devices available)" >&2
+        exit 1
+      fi
+      # The CLI installs without booting — a Shutdown target fails deploy
+      # with SimError 405 ("Unable to lookup in current state"). Pre-boot
+      # the exact UDID the CLI will resolve the name to.
+      udid="$(device_udid "$device")"
+      if [[ -n "$udid" ]]; then
+        echo "==> booting $device ($udid)"
+        xcrun simctl boot "$udid" 2>/dev/null || true # already booted is fine
+        open -a Simulator
+      fi
+      set -- "$device"
+    fi
+    cargo tauri ios dev "$@"
+    ;;
   run)
     prepare_build
     cargo tauri ios run "$@"

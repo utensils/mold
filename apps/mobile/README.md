@@ -120,11 +120,17 @@ Enter the Nix development shell on macOS. Xcode and CocoaPods are required.
 
 ```bash
 nix develop
-ios-dev        # Tauri hot reload on an iPhone or simulator
+ios-dev        # Tauri hot reload — defaults to an iPhone simulator
 ios-run        # production-mode run on a selected device or simulator
 ios-check      # Rust check for aarch64-apple-ios-sim
 ios-build      # signed App Store Connect archive/export
 ```
+
+With no arguments `ios-dev` boots an iPhone simulator and deploys there, even
+when a physical iPhone is plugged in (Tauri's own picker would otherwise grab
+the phone and start a provisioning device build). It prefers `iPhone 17 Pro`,
+falls back to the first available iPhone, and `MOLD_IOS_DEVICE` overrides the
+preference. Pass a device name to target hardware: `ios-dev "James’s iPhone"`.
 
 The underlying script also exposes setup and a deterministic simulator build:
 
