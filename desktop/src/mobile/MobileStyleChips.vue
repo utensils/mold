@@ -29,7 +29,7 @@ function pick(id: string): void {
     >
       <span class="mobile-style-kicker">Style</span>
       <span
-        class="mobile-style-chip"
+        class="mobile-style-value"
         :aria-pressed="modelValue !== ''"
         data-test="mobile-style-active"
         >{{ stylePresetLabel(modelValue) }}</span

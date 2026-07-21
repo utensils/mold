@@ -799,6 +799,27 @@ textarea.control {
   margin-top: 12px;
 }
 
+/* Collapsed-head value indicator: the head button is the 44pt tap target, so
+   the value stays a compact kit-Chip-sized pill (a 44pt min-height here gets
+   blockified by the flex head and renders as an egg beside the kicker). */
+.mobile-style-value {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mobile-style-value[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
 .mobile-style-chip {
   min-height: 44px;
   border: 1px solid var(--control-edge);

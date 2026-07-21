@@ -112,6 +112,25 @@ describe("mobile advanced sheet", () => {
   });
 });
 
+describe("mobile style row", () => {
+  it("renders the collapsed head value as a compact pill, not a 44pt tap chip", () => {
+    const styleComponent = readFileSync("src/mobile/MobileStyleChips.vue", "utf8");
+    // The head button is itself the 44pt tap target; its value indicator must
+    // use the compact class — reusing .mobile-style-chip blockifies the span
+    // to 44pt inside the flex head and balloons it into an egg beside STYLE.
+    expect(styleComponent).toMatch(/data-test="mobile-style-active"/);
+    expect(styleComponent).toMatch(/class="mobile-style-value"/);
+    const value = css.match(/\.mobile-style-value\s*\{([^}]*)\}/s);
+    expect(value?.[1]).not.toMatch(/min-height/);
+    expect(value?.[1]).toMatch(/border-radius:\s*var\(--radius-pill\)\s*;/);
+    // The whole-row head keeps the 44pt target; expanded presets stay 44pt.
+    const head = css.match(/\.mobile-style-head\s*\{([^}]*)\}/s);
+    expect(head?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    const chip = css.match(/\.mobile-style-chip\s*\{([^}]*)\}/s);
+    expect(chip?.[1]).toMatch(/min-height:\s*44px\s*;/);
+  });
+});
+
 describe("mobile safe areas", () => {
   it("keeps the shell inside the dynamic viewport and clears both landscape notches", () => {
     const shell = css.match(/\.mobile-shell\s*\{([^}]*)\}/s);
