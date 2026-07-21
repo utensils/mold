@@ -1027,6 +1027,9 @@ pub struct App {
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
+    /// Studio motion effects (workspace fade, completion sweep) — gated
+    /// behind reduce-motion; see `crate::motion`.
+    pub motion: crate::motion::MotionState,
     pub theme: Theme,
     pub popup: Option<Popup>,
     pub should_quit: bool,
@@ -1360,6 +1363,7 @@ impl App {
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
+            motion: crate::motion::MotionState::from_env_and_prefs(),
             picker,
             theme: initial_preset.build(),
             popup: None,
@@ -2742,7 +2746,12 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::SwitchView(view) => {
+                let switched = self.active_view != view;
                 self.active_view = view;
+                if switched {
+                    self.motion
+                        .trigger_workspace_fade(self.layout.content, self.theme.bg);
+                }
                 if view == View::Machines {
                     // Entering Machines polls immediately instead of
                     // waiting out the background cadence.
@@ -2753,14 +2762,24 @@ impl App {
             Action::ViewNext => {
                 let i = self.active_view.index();
                 self.active_view = View::ALL[(i + 1) % View::ALL.len()];
+                self.motion
+                    .trigger_workspace_fade(self.layout.content, self.theme.bg);
             }
             Action::ViewPrev => {
                 let i = self.active_view.index();
                 self.active_view = View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()];
+                self.motion
+                    .trigger_workspace_fade(self.layout.content, self.theme.bg);
             }
             Action::ChainEnter => {
+                let switched =
+                    self.active_view != View::Create || self.create_mode != CreateMode::Chain;
                 self.active_view = View::Create;
                 self.create_mode = CreateMode::Chain;
+                if switched {
+                    self.motion
+                        .trigger_workspace_fade(self.layout.content, self.theme.bg);
+                }
             }
             Action::ChainExit => {
                 self.create_mode = CreateMode::Compose;
@@ -5009,6 +5028,21 @@ impl App {
                         Some(saved_path.clone())
                     };
 
+                    // Sweep the caption row in under the finished print —
+                    // caption only, never the image cells (graphics
+                    // protocols are escape-sequence passthrough).
+                    if self.generate.batch_remaining == 0 {
+                        let p = self.layout.preview;
+                        if p.height > 0 {
+                            let caption = ratatui::layout::Rect {
+                                y: p.y + p.height - 1,
+                                height: 1,
+                                ..p
+                            };
+                            self.motion.trigger_completion_sweep(caption, self.theme.bg);
+                        }
+                    }
+
                     self.generate.progress.push_log(ProgressLogEntry {
                         message: if saved_name.is_empty() {
                             format!(
@@ -6755,6 +6789,7 @@ mod tests {
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
+            motion: crate::motion::MotionState::new(false),
             picker,
             theme: crate::ui::theme::Theme::default(),
             popup: None,

@@ -453,6 +453,15 @@ cargo build --release -p mold-ai --features metal,preview,discord,expand,tui
 
 The Nix flake, pre-built releases, and Docker images include the TUI by default.
 
+## Motion
+
+Switching workspaces fades the new content in and a finished print sweeps
+its caption row — the TUI's only two animations, matching the design
+system's restraint budget. Turn them off with the **Reduce motion**
+preference in Settings (persisted as `tui.reduce_motion`) or the
+`MOLD_TUI_NO_MOTION=1` environment variable (useful for scripted terminal
+captures).
+
 ## Theme
 
 The TUI ships eleven theme presets, selectable live from **Settings →

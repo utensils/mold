@@ -76,6 +76,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.popup.is_some() {
         popup::render(frame, app);
     }
+
+    // ── Motion post-processing (last: effects recolor the frame) ─
+    app.motion.process(frame.buffer_mut(), area);
 }
 
 /// Render an upscale progress bar at the bottom of the gallery area.

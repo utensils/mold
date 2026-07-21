@@ -58,6 +58,8 @@ scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `mo
 
 **`--fresh`** creates a tmp MOLD_HOME and injects it into the TUI's env — zero chance of clobbering the user's real `~/.mold/` state. The isolated directory persists across `quit` so you can relaunch with `--env MOLD_HOME=$(mktemp -d)/…` or reuse the path from `status` to validate persistence.
 
+**Motion**: launch with `--env MOLD_TUI_NO_MOTION=1` when a scenario asserts on exact screen content immediately after a workspace switch — tachyonfx transitions recolor cells for ~160/320 ms and can race a capture.
+
 **`db-*` commands** refuse to write to the user's real DB without `--force`. Use `--fresh` for any test that mutates state.
 
 ## How to Run a UAT Session

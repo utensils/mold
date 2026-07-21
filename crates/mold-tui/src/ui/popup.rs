@@ -935,6 +935,7 @@ mod tests {
         let mut app = App {
             active_view: crate::action::View::Library,
             create_mode: crate::app::CreateMode::default(),
+            motion: crate::motion::MotionState::new(false),
             generate: crate::app::GenerateState {
                 prompt: tui_textarea::TextArea::default(),
                 negative_prompt: tui_textarea::TextArea::default(),
