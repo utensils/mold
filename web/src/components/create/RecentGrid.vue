@@ -69,7 +69,7 @@ function tileAlt(item: GalleryImage): string {
 
     <RouterLink
       v-if="overflow > 0"
-      to="/"
+      to="/library"
       class="recent__more"
       data-test="recent-view-all"
     >

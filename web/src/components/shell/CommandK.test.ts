@@ -68,7 +68,7 @@ describe("CommandK", () => {
   it("offers navigation, action, and theme commands", async () => {
     const wrapper = await openPalette();
     const ids = items(wrapper).map((i) => i.id);
-    expect(ids).toContain("go-gallery");
+    expect(ids).toContain("go-library");
     expect(ids).toContain("go-machines");
     expect(ids).toContain("go-settings");
     expect(ids).toContain("action-new-print");

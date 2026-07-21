@@ -46,7 +46,6 @@ jobs:
           key: mold-testflight-ios
       - name: Install dependencies
         run: |
-          cd desktop
           bun install --frozen-lockfile
           cargo install tauri-cli --version 2.11.4 --locked
       - name: Install App Store Connect key

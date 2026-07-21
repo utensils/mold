@@ -7,25 +7,26 @@ function makeRouter() {
 }
 
 describe("router", () => {
-  it("redirects the legacy /generate path to create", async () => {
+  it("does not recognize the retired /generate path", async () => {
     const router = makeRouter();
     await router.push("/generate");
-    expect(router.currentRoute.value.name).toBe("create");
-    expect(router.currentRoute.value.path).toBe("/create");
+    expect(router.currentRoute.value.name).toBe("not-found");
   });
 
-  it("redirects the legacy /catalog path to models", async () => {
+  it("does not recognize the retired /catalog path", async () => {
     const router = makeRouter();
     await router.push("/catalog");
-    expect(router.currentRoute.value.name).toBe("models");
-    expect(router.currentRoute.value.path).toBe("/models");
+    expect(router.currentRoute.value.name).toBe("not-found");
   });
 
   it("maps the Mold Studio destinations to workspace route names", async () => {
     const router = makeRouter();
 
     await router.push("/");
-    expect(router.currentRoute.value.name).toBe("gallery");
+    expect(router.currentRoute.value.name).toBe("create");
+
+    await router.push("/library");
+    expect(router.currentRoute.value.name).toBe("library");
 
     await router.push("/create");
     expect(router.currentRoute.value.name).toBe("create");
@@ -37,7 +38,7 @@ describe("router", () => {
     expect(router.currentRoute.value.name).toBe("machines");
 
     await router.push("/machines/studio-01");
-    expect(router.currentRoute.value.name).toBe("machine-detail");
+    expect(router.currentRoute.value.name).toBe("host-detail");
     expect(router.currentRoute.value.params.id).toBe("studio-01");
 
     await router.push("/settings");

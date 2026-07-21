@@ -103,14 +103,9 @@ function build() {
   // the user picks a tab themselves, after which their choice is sticky.
   let tabTouched = false;
 
-  // hasMore: server-reported total wins; if absent (older server), fall
-  // back to "the last page came back full" so we keep fetching until a
-  // short page signals end-of-stream.
-  const hasMore = computed(() => {
-    if (total.value !== null) return entries.value.length < total.value;
-    if (entries.value.length === 0) return false;
-    return entries.value.length % PAGE_SIZE === 0;
-  });
+  const hasMore = computed(
+    () => total.value !== null && entries.value.length < total.value,
+  );
 
   // `modality` is the one filter the server has no parameter for — Axum
   // drops it, so the Image/Video chips narrowed nothing. Every entry carries

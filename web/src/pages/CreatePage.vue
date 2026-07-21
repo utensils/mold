@@ -57,7 +57,7 @@ import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import {
   maskPaddingRectangles,
   resolveSourceFitTransform,
-} from "../lib/sourceFit";
+} from "@studio/lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import { useHostRouting } from "../composables/useHostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
@@ -209,7 +209,7 @@ const expandStyleDirective = computed(() =>
 );
 const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
-// Drawer state (mirrors GalleryPage).
+// Drawer state (mirrors LibraryPage).
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 

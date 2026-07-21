@@ -1,4 +1,4 @@
-import type { OutputMetadata, Scheduler } from "../types";
+import type { OutputMetadata } from "../types";
 
 /** Short relative time like "3m", "2h", "4d", "3w", or a date for older items. */
 export function formatRelativeTime(unixSeconds: number): string {
@@ -14,41 +14,9 @@ export function formatRelativeTime(unixSeconds: number): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function formatAbsoluteTime(unixSeconds: number): string {
-  if (!unixSeconds) return "";
-  const d = new Date(unixSeconds * 1000);
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
 export function formatResolution(meta: OutputMetadata): string {
   if (meta.width && meta.height) return `${meta.width}×${meta.height}`;
   return "";
-}
-
-/** 1.23 MB / 845 KB style. */
-export function formatFileSize(bytes: number): string {
-  if (!bytes) return "";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-}
-
-/** Normalize the `scheduler` enum — it can serialize as a string or object. */
-export function formatScheduler(s: Scheduler | null | undefined): string {
-  if (!s) return "";
-  if (typeof s === "string") return s;
-  return Object.keys(s)[0] ?? "";
 }
 
 /** Trim `flux-dev:q8` → `flux-dev` when we only want the family name. */
