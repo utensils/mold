@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-21
+
 ### Added
 
 - `POST /api/expand` accepts an additive optional `style` field naming a visual style for the expansion. The server passes it to the expander as a natural-language system directive so style cues are woven into the expanded prompt rather than suffixed to it; requests without the field behave exactly as before.
@@ -1048,7 +1050,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/utensils/mold/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/utensils/mold/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/utensils/mold/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
