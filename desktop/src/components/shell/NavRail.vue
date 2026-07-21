@@ -188,12 +188,12 @@ function hostMenu(host: HostView): MenuEntry[] {
     });
   }
   entries.push({
-    label: "View gallery",
+    label: "View in library",
     action: () => {
       // Direct set: pushing an unchanged ?host= query is a no-op navigation,
       // so the view's watcher alone can't re-apply the filter.
       useGalleryStore().filter = host.id;
-      void router.push({ path: "/gallery", query: { host: host.id } });
+      void router.push({ path: "/library", query: { host: host.id } });
     },
   });
   entries.push({ separator: true });
@@ -241,19 +241,17 @@ interface Destination {
   route: string;
   label: string;
   icon: IconName;
-  key: string;
 }
 
-// The eight destinations are unchanged; only markup and icons are new.
-// Settings is pinned separately at the bottom.
+// Five destinations (spec §04). Chains fold into Create, History into
+// Library's drawer, Jobs/RunPod into Machines — all still reachable by
+// deep-link and the command palette. Settings is pinned separately at the
+// bottom. ⌘1–⌘4 track this order (see lib/shortcuts).
 const destinations: Destination[] = [
-  { route: "/generate", label: "Generate", icon: "create", key: shortcutLabel("1") },
-  { route: "/gallery", label: "Gallery", icon: "library", key: shortcutLabel("2") },
-  { route: "/chains", label: "Chains", icon: "chain", key: shortcutLabel("3") },
-  { route: "/models", label: "Catalog", icon: "models", key: shortcutLabel("4") },
-  { route: "/history", label: "History", icon: "history", key: shortcutLabel("5") },
-  { route: "/jobs", label: "Jobs", icon: "sliders", key: shortcutLabel("6") },
-  { route: "/runpod", label: "RunPod", icon: "cloud", key: "" },
+  { route: "/create", label: "Create", icon: "create" },
+  { route: "/library", label: "Library", icon: "library" },
+  { route: "/models", label: "Models", icon: "models" },
+  { route: "/machines", label: "Machines", icon: "machines" },
 ];
 
 function isActive(path: string): boolean {
@@ -305,13 +303,13 @@ function jobMenu(job: Job): MenuEntry[] {
           steps: job.total,
           guidance: job.guidance,
         });
-        void router.push("/generate");
+        void router.push("/create");
       },
     },
     {
-      label: "Show in Gallery",
+      label: "Show in library",
       disabled: job.status !== "complete",
-      action: () => void router.push("/gallery"),
+      action: () => void router.push("/library"),
     },
     { separator: true },
     {
@@ -367,7 +365,7 @@ function jobMenu(job: Job): MenuEntry[] {
           :key="job.clientId"
           href="#"
           class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-          @click.prevent="router.push('/generate')"
+          @click.prevent="router.push('/create')"
           @contextmenu.prevent="contextMenu.open($event, jobMenu(job))"
         >
           <span
@@ -405,9 +403,9 @@ function jobMenu(job: Job): MenuEntry[] {
       <p v-else class="px-3 text-caption text-ink-3">nothing developing</p>
     </template>
 
-    <!-- hosts -->
+    <!-- machines: ambient host status + quick nav to /machines/:id -->
     <div v-if="!collapsed" class="mt-5 mb-1.5 flex items-center gap-2 px-3">
-      <span class="rail-kicker">Hosts</span>
+      <span class="rail-kicker">Machines</span>
       <div class="h-px flex-1 border-t border-edge" />
     </div>
     <div v-else class="mt-4 mb-1 h-px border-t border-edge" />

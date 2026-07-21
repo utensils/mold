@@ -78,27 +78,54 @@ function prefillModel(model: string, prompt = "") {
     steps: form.steps,
     guidance: form.guidance,
   });
-  go("/generate");
+  go("/create");
 }
 
 const staticCommands = computed<Command[]>(() => {
   const cmds: Command[] = [
-    { id: "nav-generate", title: "Go to Generate", run: () => go("/generate") },
-    { id: "nav-gallery", title: "Go to Gallery", run: () => go("/gallery") },
-    { id: "nav-chains", title: "Go to Chains", run: () => go("/chains") },
+    {
+      id: "nav-create",
+      title: "Go to Create",
+      // "generate" keeps the pre-rename muscle memory working.
+      keywords: ["generate", "compose"],
+      run: () => go("/create"),
+    },
+    {
+      id: "nav-library",
+      title: "Go to Library",
+      keywords: ["gallery", "prints"],
+      run: () => go("/library"),
+    },
     {
       id: "nav-models",
-      title: "Go to Catalog",
-      // "models" keeps the pre-rename muscle memory working.
+      title: "Go to Models",
+      // "catalog" keeps the pre-rename muscle memory working.
       keywords: ["models", "catalog"],
       run: () => go("/models"),
     },
-    { id: "nav-history", title: "Go to History", run: () => go("/history") },
+    {
+      id: "nav-machines",
+      title: "Go to Machines",
+      keywords: ["hosts", "jobs", "gpu"],
+      run: () => go("/machines"),
+    },
+    {
+      id: "nav-chain",
+      title: "Compose chain",
+      keywords: ["chains", "multi-prompt", "storyboard"],
+      run: () => go("/create/chain"),
+    },
+    {
+      id: "nav-history",
+      title: "Open history",
+      keywords: ["runs", "prompts", "recent"],
+      run: () => go("/library?panel=history"),
+    },
     {
       id: "nav-runpod",
       title: "Manage RunPod GPUs",
       keywords: ["cloud", "gpu", "instance"],
-      run: () => go("/runpod"),
+      run: () => go("/machines/runpod"),
     },
     { id: "nav-settings", title: "Go to Settings", run: () => go("/settings") },
     {
@@ -107,7 +134,7 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["clear", "compose"],
       run: () => {
         ui.newGeneration();
-        go("/generate");
+        go("/create");
       },
     },
     {
@@ -115,7 +142,7 @@ const staticCommands = computed<Command[]>(() => {
       title: "Randomize seed",
       run: () => {
         ui.randomizeSeed();
-        go("/generate");
+        go("/create");
       },
     },
     // No "Switch to built-in engine" command: the built-in engine is always
@@ -297,8 +324,8 @@ const galleryCommands = computed<Command[]>(() => {
     .map((e) => ({
       id: `print-${e.sourceKey}-${e.item.filename}`,
       title: e.item.metadata.prompt || e.item.filename,
-      subtitle: `${e.item.metadata.model} · gallery`,
-      run: () => go(`/gallery?print=${encodeURIComponent(e.item.filename)}`),
+      subtitle: `${e.item.metadata.model} · library`,
+      run: () => go(`/library?print=${encodeURIComponent(e.item.filename)}`),
     }));
 });
 

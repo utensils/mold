@@ -2,19 +2,22 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
+import Icon from "@ui/components/Icon.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
+import HistoryDrawer from "../components/library/HistoryDrawer.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import HostFilterChips from "../components/shell/HostFilterChips.vue";
 import { layoutJustifiedRows } from "../lib/gallery/layout";
 import { galleryMediaPath, isVideoItem, mediaPath } from "../lib/gallery/media";
 import { applySelectionClick } from "../lib/gallery/selection";
-import { formatBytes } from "../lib/format";
 import { apiFetch, apiFetchTo, type ApiTarget } from "../lib/api/client";
 import { useGalleryStore, type GalleryKindFilter, type MergedPrint } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useComposerStore } from "../stores/composer";
+import { useGenerateFormStore } from "../stores/generateForm";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useToastStore } from "../stores/toasts";
 import { inTauri, ipc } from "../lib/ipc";
@@ -34,6 +37,7 @@ const gallery = useGalleryStore();
 const hosts = useHostsStore();
 const models = useModelStore();
 const composer = useComposerStore();
+const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
 
@@ -41,12 +45,39 @@ const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
 const targetFor = (entry: MergedPrint): ApiTarget | null => gallery.targetOf(entry.sourceKey);
 
+// ── NEW badges ──────────────────────────────────────────────────────────────
+// A print not seen as of the last Library visit wears a NEW badge. Snapshot the
+// pre-visit "seen" set (and whether we've ever visited) at setup so this
+// visit's badges survive `markLibrarySeen` below; the very first visit only
+// establishes the baseline and shows nothing new.
+const freshBaseline = new Set(gallery.seenFilenames);
+const hadVisited = gallery.libraryVisited;
+const isFresh = (entry: MergedPrint) => hadVisited && !freshBaseline.has(entry.item.filename);
+// Mark the current prints seen once they've loaded, so re-opening clears NEW.
+watch(
+  () => gallery.loaded,
+  (loaded) => {
+    if (loaded) gallery.markLibrarySeen();
+  },
+  { immediate: true },
+);
+
+// ── Header labels ────────────────────────────────────────────────────────────
+const scopeLabel = computed(() =>
+  gallery.filter === "all"
+    ? "all hosts"
+    : (gallery.sources.find((s) => s.key === gallery.filter)?.label ?? "all hosts"),
+);
+const countLabel = computed(() => {
+  const n = gallery.filtered.length;
+  return `${n} ${n === 1 ? "print" : "prints"} · ${scopeLabel.value}`;
+});
+
 /** Reveal works for files on this Mac: the IPC bucket, or a local-kind
  *  (built-in/external) engine whose output dir is this machine's. */
 const canReveal = (entry: MergedPrint) =>
   entry.sourceKey === "local" || gallery.hostFor(entry.sourceKey)?.kind === "local";
 
-/** Prints on a remote host can be pulled into this Mac's gallery. */
 /** Copyable to this Mac: a remote-origin tile with no local copy yet (by
  *  filename or byte identity). The menu item stays visible and grays out
  *  once a local copy exists. */
@@ -163,7 +194,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
         // Full metadata → full-fidelity restore (negative prompt, LoRAs,
         // scheduler, video params, …) via `applyPrefillToForm`.
         composer.set({ metadata: m });
-        void router.push("/generate");
+        void router.push("/create");
       },
     },
     {
@@ -221,6 +252,20 @@ const confirmingSingleDelete = ref<{ sourceKey: string; filename: string } | nul
 const lightboxOpen = ref(false);
 const rowHeight = ref(180);
 
+// ── History drawer ──────────────────────────────────────────────────────────
+// Open state lives in the URL (?panel=history) so the retired /history route
+// and the command palette can deep-link straight into it; the header button
+// toggles the same param, and closing clears it.
+const historyOpen = computed(() => route.query.panel === "history");
+function openHistory() {
+  void router.push({ path: "/library", query: { ...route.query, panel: "history" } });
+}
+function closeHistory() {
+  const query = { ...route.query };
+  delete query.panel;
+  void router.replace({ path: "/library", query });
+}
+
 // ── Search + media-kind chips ──────────────────────────────────────────────
 const SEARCH_DEBOUNCE_MS = 200;
 const searchInput = ref(gallery.query);
@@ -234,11 +279,12 @@ watch(searchInput, (value) => {
   }, SEARCH_DEBOUNCE_MS);
 });
 
-const kindChips = computed(() => [
-  { key: "image", label: "Images", count: gallery.kindCounts.image },
-  { key: "video", label: "Video", count: gallery.kindCounts.video },
+const kindOptions = computed(() => [
+  { value: "all" as GalleryKindFilter, label: "All" },
+  { value: "image" as GalleryKindFilter, label: "Images" },
+  { value: "video" as GalleryKindFilter, label: "Video" },
 ]);
-const setKind = (value: string) => (gallery.mediaKind = value as GalleryKindFilter);
+const setKind = (value: GalleryKindFilter) => (gallery.mediaKind = value);
 
 // ── Bulk select mode ───────────────────────────────────────────────────────
 // Selection is keyed by print identity (filename — the merged grid's
@@ -419,11 +465,13 @@ function onKeydown(e: KeyboardEvent) {
     searchEl.value?.focus();
     return;
   }
+  // The history drawer owns the keyboard while it's open.
+  if (historyOpen.value) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "Delete" || e.key === "Backspace") {
     // WebKit treats an unhandled Backspace/Delete as history-back. Keep the
     // native editing behavior in text fields, but always claim it elsewhere
-    // in Gallery so deleting a print can never navigate to Generate.
+    // in Library so deleting a print can never navigate to Create.
     if (allowsNativeContextMenu(e.target as Element | null)) return;
     e.preventDefault();
     if (e.repeat) return;
@@ -486,8 +534,29 @@ async function removeSelected() {
   if (entry) await removeEntry(entry);
 }
 
-// Deep link: /gallery?host=<bucket key> pre-picks a chip ("local" = This
-// Mac's key in every mode). Plain /gallery keeps the session filter.
+/**
+ * "Use as source" from the lightbox — load this print's bytes into the Create
+ * composer as the img2img source (raw base64, the form's contract) and open
+ * Create. Deliberately does NOT touch `composer.prefill`, so GenerateView's
+ * prefill watcher can't clobber the source we just attached.
+ */
+async function useSelectedAsSource() {
+  const entry = selectedEntry.value;
+  if (!entry) return;
+  try {
+    const base64 = await fetchItemBase64(entry);
+    generateForm.form.sourceImage = base64;
+    generateForm.form.sourceImageName = entry.item.filename;
+    lightboxOpen.value = false;
+    toasts.push("Loaded as source");
+    void router.push("/create");
+  } catch (error) {
+    toasts.push(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+// Deep link: /library?host=<bucket key> pre-picks a chip ("local" = This
+// Mac's key in every mode). Plain /library keeps the session filter.
 watch(
   () => route.query.host,
   (host) => {
@@ -500,7 +569,7 @@ watch(
   { immediate: true },
 );
 
-// Deep link: /gallery?print=<filename> (a ⌘K gallery result) reveals that
+// Deep link: /library?print=<filename> (a ⌘K library result) reveals that
 // print — filters reset so it can't be hidden, then selection + lightbox
 // open once the buckets deliver it. One-shot: the param drops after use so
 // closing the lightbox doesn't re-open it.
@@ -556,47 +625,78 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex h-full flex-col">
-    <header class="border-edge flex h-11 items-center gap-3 border-b px-4">
-      <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
-        Gallery
+    <header class="flex h-[52px] shrink-0 items-center gap-3 border-b border-edge px-6">
+      <span class="font-display text-[17px] font-semibold text-ink" style="font-stretch: 92%">
+        Library
       </span>
-      <span class="data-mono text-caption text-ink-3">
-        {{ gallery.filtered.length }} prints · {{ formatBytes(gallery.totalBytes) }}
+      <span class="data-mono text-caption text-ink-3">{{ countLabel }}</span>
+      <span v-if="gallery.firstError" class="text-caption text-stop">
+        {{ gallery.firstError }}
       </span>
       <HostFilterChips
         v-if="gallery.chipCounts.length > 1"
         v-model="gallery.filter"
-        class="ml-2"
+        class="ml-1"
         :chips="gallery.chipCounts"
         :all-count="gallery.merged.length"
       />
-      <HostFilterChips
-        :chips="kindChips"
+
+      <div class="flex-1" />
+
+      <SegmentedControl
         :model-value="gallery.mediaKind"
-        :all-count="gallery.kindCounts.all"
-        aria-label="Media kind"
+        :options="kindOptions"
+        label="Media kind"
         @update:model-value="setKind"
       />
-      <span v-if="gallery.firstError" class="text-caption text-stop">
-        {{ gallery.firstError }}
-      </span>
-      <input
-        ref="searchEl"
-        v-model="searchInput"
-        data-selectable
-        type="search"
-        placeholder="Search prints…"
-        aria-label="Search prints"
-        class="border-edge ml-auto h-7 w-48 rounded-control border bg-bath px-2 text-body text-ink placeholder:text-ink-3"
-      />
+
+      <label
+        class="flex h-[34px] w-[180px] items-center gap-2 rounded-chrome border border-ce bg-bench px-2.5"
+      >
+        <Icon name="search" :size="14" class="shrink-0 text-ink-3" />
+        <input
+          ref="searchEl"
+          v-model="searchInput"
+          data-selectable
+          type="search"
+          placeholder="Search prompts…"
+          aria-label="Search prints"
+          class="min-w-0 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3"
+        />
+      </label>
+
       <button
         type="button"
-        class="border-edge h-7 shrink-0 rounded-control border px-2.5 text-caption transition-colors duration-100"
-        :class="selectMode ? 'border-safelight text-safelight' : 'text-ink-2 hover:text-ink'"
+        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
+        title="History"
+        aria-label="Open history"
+        @click="openHistory"
+      >
+        <Icon name="history" :size="17" />
+      </button>
+      <button
+        type="button"
+        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome transition-colors duration-100"
+        :class="
+          selectMode
+            ? 'bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] text-safelight'
+            : 'text-ink-3 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink'
+        "
         :aria-pressed="selectMode"
+        title="Select"
+        aria-label="Toggle select mode"
         @click="setSelectMode(!selectMode)"
       >
-        Select
+        <Icon name="check" :size="17" />
+      </button>
+      <button
+        type="button"
+        class="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink"
+        title="Refresh"
+        aria-label="Refresh library"
+        @click="gallery.fetchAll()"
+      >
+        <Icon name="refresh" :size="17" />
       </button>
     </header>
 
@@ -614,8 +714,8 @@ onUnmounted(() => {
             ? 'Generations saved on this Mac will appear here.'
             : 'Generate one and it lands here.'
         "
-        action="Go to Generate"
-        @action="router.push('/generate')"
+        action="Go to Create"
+        @action="router.push('/create')"
       />
       <div v-else :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }">
         <div
@@ -632,7 +732,7 @@ onUnmounted(() => {
             v-for="laid in rows[vrow.index]?.items ?? []"
             :key="`${laid.entry.sourceKey}::${laid.item.filename}`"
             type="button"
-            class="group relative shrink-0 overflow-hidden rounded-media border transition-shadow duration-100"
+            class="ms-lib-tile group relative shrink-0 overflow-hidden rounded-[9px] border"
             :class="
               (selectMode ? bulkSelection.has(laid.item.filename) : isSelected(laid.entry))
                 ? 'border-transparent ring-2 ring-safelight'
@@ -659,6 +759,15 @@ onUnmounted(() => {
               :video="gallery.mediaSourceOf(laid.entry.sourceKey) === 'local' && isVideo(laid.item)"
               :alt="laid.item.metadata.prompt"
             />
+            <!-- NEW badge (top-left) — hidden while selecting, where the
+                 checkbox owns that corner. -->
+            <span
+              v-if="!selectMode && isFresh(laid.entry)"
+              data-test="new-badge"
+              class="ms-lib-new absolute top-2 left-2"
+            >
+              New
+            </span>
             <span
               v-if="isVideo(laid.item)"
               class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
@@ -796,6 +905,34 @@ onUnmounted(() => {
       @prev="moveSelection(-1)"
       @next="moveSelection(1)"
       @delete="removeSelected"
+      @use-source="useSelectedAsSource"
     />
+
+    <HistoryDrawer :open="historyOpen" @close="closeHistory" />
   </div>
 </template>
+
+<style scoped>
+.ms-lib-tile {
+  transition:
+    transform var(--dur-quick) var(--ease),
+    box-shadow var(--dur-quick) var(--ease);
+}
+
+.ms-lib-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+}
+
+.ms-lib-new {
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: var(--safelight);
+  color: var(--on-accent);
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+</style>

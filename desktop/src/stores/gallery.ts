@@ -131,6 +131,14 @@ export const useGalleryStore = defineStore("gallery", {
     /** Session-only text query over filename/model/prompt. The view owns
      *  debouncing; the store only holds the settled value. */
     query: "" as string,
+    /** Filenames the Library grid has already shown to the user. A print not
+     *  in this set (once the Library has been opened at least once) wears a
+     *  NEW badge — "developed since your last Library visit". Session-scoped;
+     *  the view snapshots it on open, then calls `markLibrarySeen`. */
+    seenFilenames: new Set<string>(),
+    /** Whether the Library has been opened this session — nothing is NEW on the
+     *  very first visit (that visit only establishes the baseline). */
+    libraryVisited: false,
   }),
   getters: {
     /**
@@ -336,6 +344,14 @@ export const useGalleryStore = defineStore("gallery", {
     ensureBucket(key: string): GalleryBucket {
       if (!this.buckets[key]) this.buckets[key] = emptyBucket();
       return this.buckets[key]!;
+    },
+    /** Record every currently-known print as seen. Called by the Library view
+     *  on open (after its prints load) so the NEW badges shown this visit are
+     *  gone next time. The view snapshots the pre-visit set first, so marking
+     *  seen here never erases the badges the user is looking at right now. */
+    markLibrarySeen() {
+      for (const entry of this.merged) this.seenFilenames.add(entry.item.filename);
+      this.libraryVisited = true;
     },
     /** Drop buckets whose source disappeared; their cached media goes too. */
     syncBuckets() {

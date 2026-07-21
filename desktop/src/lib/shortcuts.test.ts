@@ -18,14 +18,17 @@ const key = (k: string, mods: Partial<Parameters<typeof resolveShellShortcut>[0]
 const resolveMacShortcut = (event: ReturnType<typeof key>) => resolveShellShortcut(event, "macos");
 
 describe("resolveShellShortcut", () => {
-  it("maps ⌘1–⌘6 and ⌘, to the six screens plus settings", () => {
-    expect(resolveMacShortcut(key("1"))).toEqual({ kind: "navigate", route: "/generate" });
-    expect(resolveMacShortcut(key("2"))).toEqual({ kind: "navigate", route: "/gallery" });
-    expect(resolveMacShortcut(key("3"))).toEqual({ kind: "navigate", route: "/chains" });
-    expect(resolveMacShortcut(key("4"))).toEqual({ kind: "navigate", route: "/models" });
-    expect(resolveMacShortcut(key("5"))).toEqual({ kind: "navigate", route: "/history" });
-    expect(resolveMacShortcut(key("6"))).toEqual({ kind: "navigate", route: "/jobs" });
+  it("maps ⌘1–⌘4 and ⌘, to the five destinations", () => {
+    expect(resolveMacShortcut(key("1"))).toEqual({ kind: "navigate", route: "/create" });
+    expect(resolveMacShortcut(key("2"))).toEqual({ kind: "navigate", route: "/library" });
+    expect(resolveMacShortcut(key("3"))).toEqual({ kind: "navigate", route: "/models" });
+    expect(resolveMacShortcut(key("4"))).toEqual({ kind: "navigate", route: "/machines" });
     expect(resolveMacShortcut(key(","))).toEqual({ kind: "navigate", route: "/settings" });
+  });
+
+  it("keeps ⌘5 and ⌘6 as hidden transitional aliases to Library and Machines", () => {
+    expect(resolveMacShortcut(key("5"))).toEqual({ kind: "navigate", route: "/library" });
+    expect(resolveMacShortcut(key("6"))).toEqual({ kind: "navigate", route: "/machines" });
   });
 
   it("maps ⌘\\ to sidebar toggle and ⌘K to the command palette", () => {
@@ -78,8 +81,10 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("k"), "unknown")).toBeNull();
   });
 
-  it("covers every navigation route exactly once", () => {
-    expect(new Set(Object.values(NAV_ROUTES)).size).toBe(7);
+  it("resolves to the five destinations (⌘5/⌘6 alias onto two of them)", () => {
+    expect(new Set(Object.values(NAV_ROUTES))).toEqual(
+      new Set(["/create", "/library", "/models", "/machines", "/settings"]),
+    );
   });
 });
 

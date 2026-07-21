@@ -83,10 +83,10 @@ function onKeydown(e: KeyboardEvent) {
     }
     case "new-generation":
       ui.newGeneration();
-      void router.push("/generate");
+      void router.push("/create");
       break;
     case "randomize-seed":
-      if (route === "/generate") ui.randomizeSeed();
+      if (route === "/create") ui.randomizeSeed();
       break;
     case "copy-seed":
       ui.copySeed();

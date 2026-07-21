@@ -1,41 +1,38 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 // `meta.title` names the active workspace in the unified titlebar
-// ("Mold Studio — {title}"). The 8 destinations are unchanged; only the
-// chrome that frames them is new.
+// ("Mold Studio — {title}"). The information architecture collapses to five
+// destinations — Create, Library, Models, Machines, Settings — with every
+// legacy path kept as a redirect so deep-links and a persisted last-route keep
+// resolving to their new home.
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", redirect: "/generate" },
+    { path: "/", redirect: "/create" },
     {
-      path: "/generate",
-      name: "generate",
-      meta: { title: "Generate" },
+      path: "/create",
+      name: "create",
+      meta: { title: "Create" },
       component: () => import("./views/GenerateView.vue"),
     },
     {
-      path: "/gallery",
-      name: "gallery",
-      meta: { title: "Gallery" },
-      component: () => import("./views/GalleryView.vue"),
+      // Multi-prompt chains are authored inside Create; the view is unchanged.
+      path: "/create/chain",
+      name: "chains",
+      meta: { title: "Create" },
+      component: () => import("./views/ChainsView.vue"),
     },
     {
-      path: "/chains",
-      name: "chains",
-      meta: { title: "Chains" },
-      component: () => import("./views/ChainsView.vue"),
+      path: "/library",
+      name: "library",
+      meta: { title: "Library" },
+      component: () => import("./views/LibraryView.vue"),
     },
     {
       path: "/models",
       name: "models",
-      meta: { title: "Catalog" },
+      meta: { title: "Models" },
       component: () => import("./views/ModelsView.vue"),
-    },
-    {
-      path: "/history",
-      name: "history",
-      meta: { title: "History" },
-      component: () => import("./views/HistoryView.vue"),
     },
     {
       path: "/jobs",
@@ -63,14 +60,21 @@ export const router = createRouter({
       meta: { title: "Host" },
       component: () => import("./views/HostDetailView.vue"),
     },
-    // Legacy routes fold into Machines so existing links/deep-links keep working.
-    { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
-    { path: "/runpod", redirect: "/machines/runpod" },
     {
       path: "/settings",
       name: "settings",
       meta: { title: "Settings" },
       component: () => import("./views/SettingsView.vue"),
     },
+    // Legacy paths fold into the five destinations so existing links,
+    // deep-links, and a persisted last-route keep working. `router.replace`
+    // during restore runs these redirects too (restoring "/gallery" lands on
+    // "/library", "/history" opens the Library history drawer).
+    { path: "/generate", redirect: "/create" },
+    { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
+    { path: "/chains", redirect: "/create/chain" },
+    { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
+    { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
+    { path: "/runpod", redirect: "/machines/runpod" },
   ],
 });

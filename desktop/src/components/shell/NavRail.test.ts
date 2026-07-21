@@ -14,22 +14,12 @@ const stub = { template: "<div />" };
 function makeRouter(): Router {
   return createRouter({
     history: createMemoryHistory(),
-    routes: [
-      "/generate",
-      "/gallery",
-      "/chains",
-      "/models",
-      "/history",
-      "/jobs",
-      "/runpod",
-      "/settings",
-      "/machines",
-      "/machines/:id",
-      "/hosts/:id",
-    ].map((path) => ({
-      path,
-      component: stub,
-    })),
+    routes: ["/create", "/library", "/models", "/settings", "/machines", "/machines/:id"].map(
+      (path) => ({
+        path,
+        component: stub,
+      }),
+    ),
   });
 }
 
@@ -53,7 +43,7 @@ async function mountAt(path: string) {
 
 describe("NavRail hosts section", () => {
   it("shows connected hosts with status and queue depth", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
     conn.status = "ready";
@@ -77,7 +67,7 @@ describe("NavRail hosts section", () => {
   });
 
   it("left-click on a host row navigates to its detail page", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
     conn.status = "ready";
@@ -99,10 +89,13 @@ describe("NavRail hosts section", () => {
     await rows[0]!.trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/machines/local");
+    // The section is now headed "Machines" — the ambient status of the
+    // Machines workspace, not a separate Hosts concept.
+    expect(wrapper.find("[data-test='hosts-section']").exists()).toBe(true);
   });
 
   it("shows an empty message when nothing is connected or detected", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     await flushPromises();
     expect(wrapper.get("[data-test='hosts-section']").text()).toContain("No hosts");
   });
@@ -110,7 +103,7 @@ describe("NavRail hosts section", () => {
 
 describe("NavRail host context menu", () => {
   async function mountWithHosts() {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     const conn = useConnectionStore();
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
     conn.status = "ready";
@@ -140,38 +133,38 @@ describe("NavRail host context menu", () => {
     await rows[1]!.trigger("contextmenu");
     const labels = menuLabels();
     expect(labels).toContain("Set as generation target");
-    expect(labels).toContain("View gallery");
+    expect(labels).toContain("View in library");
     expect(labels).toContain("Open web UI");
     expect(labels).toContain("Copy URL");
     expect(labels).toContain("Rename…");
     expect(labels).toContain("Disconnect");
     expect(labels).toContain("Forget");
     expect(labels).not.toContain("Reconnect");
-    // View gallery sits right under the routing entry.
-    expect(labels.indexOf("View gallery")).toBe(labels.indexOf("Set as generation target") + 1);
+    // View in library sits right under the routing entry.
+    expect(labels.indexOf("View in library")).toBe(labels.indexOf("Set as generation target") + 1);
   });
 
-  it("View gallery deep-links to the host-filtered gallery", async () => {
+  it("View in library deep-links to the host-filtered library", async () => {
     const { wrapper } = await mountWithHosts();
     const rows = wrapper.findAll("[data-test='host-row']");
     await rows[1]!.trigger("contextmenu");
     const entry = useContextMenuStore()
       .entries.filter((e): e is MenuItem => !("separator" in e))
-      .find((e) => e.label === "View gallery");
+      .find((e) => e.label === "View in library");
     entry?.action?.();
     await flushPromises();
     const route = router.currentRoute.value;
-    expect(route.path).toBe("/gallery");
+    expect(route.path).toBe("/library");
     expect(route.query.host).toBe("hal9000-7680");
   });
 
-  it("the local primary gets View gallery too, keyed by its host id", async () => {
+  it("the local primary gets View in library too, keyed by its host id", async () => {
     const { wrapper } = await mountWithHosts();
     const rows = wrapper.findAll("[data-test='host-row']");
     await rows[0]!.trigger("contextmenu");
     const entry = useContextMenuStore()
       .entries.filter((e): e is MenuItem => !("separator" in e))
-      .find((e) => e.label === "View gallery");
+      .find((e) => e.label === "View in library");
     expect(entry).toBeDefined();
     entry?.action?.();
     await flushPromises();
@@ -237,7 +230,7 @@ describe("NavRail detected hosts", () => {
     vi.spyOn(ipc, "secretGet").mockImplementation((name) =>
       Promise.resolve(name === "remote-api-key.hal9000-7680" ? "stored-key" : null),
     );
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     await flushPromises();
     const hosts = useHostsStore();
     const connect = vi.spyOn(hosts, "connect").mockResolvedValue({
@@ -257,7 +250,7 @@ describe("NavRail detected hosts", () => {
     await flushPromises();
     expect(connect).toHaveBeenCalledWith("http://192.168.1.50:7680", "stored-key", "hal9000");
     // Not bounced to Settings for a key the app already holds.
-    expect(router.currentRoute.value.path).toBe("/generate");
+    expect(router.currentRoute.value.path).toBe("/create");
   });
 
   it("right-click on a detected (disconnected) host opens a context menu", async () => {
@@ -273,7 +266,7 @@ describe("NavRail detected hosts", () => {
         isThisMachine: false,
       },
     ]);
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     await flushPromises();
     await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
     const labels = useContextMenuStore()
@@ -313,7 +306,7 @@ describe("NavRail detected hosts", () => {
       ],
     });
     const forget = vi.spyOn(ipc, "forgetRemoteHost").mockResolvedValue([]);
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     await flushPromises();
     await wrapper.get("[data-test='detected-host-row']").trigger("contextmenu");
     const menu = useContextMenuStore();
@@ -330,33 +323,28 @@ describe("NavRail detected hosts", () => {
 
 describe("NavRail a11y", () => {
   it("labels the primary navigation landmark", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     expect(wrapper.get("nav").attributes("aria-label")).toBe("Primary");
   });
 
   it("marks the active nav item with aria-current=page", async () => {
-    const wrapper = await mountAt("/gallery");
+    const wrapper = await mountAt("/library");
     // Destinations render as @ui NavItem buttons now, not RouterLink anchors.
     const buttons = wrapper.findAll("button");
-    const gallery = buttons.find((b) => b.text().includes("Gallery"));
-    const generate = buttons.find((b) => b.text().includes("Generate"));
-    expect(gallery?.attributes("aria-current")).toBe("page");
-    expect(generate?.attributes("aria-current")).toBeUndefined();
+    const library = buttons.find((b) => b.text().includes("Library"));
+    const create = buttons.find((b) => b.text().includes("Create"));
+    expect(library?.attributes("aria-current")).toBe("page");
+    expect(create?.attributes("aria-current")).toBeUndefined();
   });
 
-  it("keeps all eight destinations", async () => {
-    const wrapper = await mountAt("/generate");
-    for (const label of [
-      "Generate",
-      "Gallery",
-      "Chains",
-      "Catalog",
-      "History",
-      "Jobs",
-      "RunPod",
-      "Settings",
-    ]) {
+  it("collapses to the five destinations plus Settings", async () => {
+    const wrapper = await mountAt("/create");
+    for (const label of ["Create", "Library", "Models", "Machines", "Settings"]) {
       expect(wrapper.text()).toContain(label);
+    }
+    // The folded destinations are gone from the rail (still deep-linkable).
+    for (const label of ["Generate", "Gallery", "Chains", "Catalog", "History", "RunPod"]) {
+      expect(wrapper.text()).not.toContain(label);
     }
   });
 });
@@ -368,23 +356,23 @@ describe("NavRail collapse", () => {
   }
 
   it("expands to 210px with visible labels by default", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     expect(wrapper.get("nav").attributes("style")).toContain("210px");
-    expect(wrapper.text()).toContain("Generate");
+    expect(wrapper.text()).toContain("Create");
     // Gradient wordmark shows when expanded.
     expect(wrapper.find(".ms-wordmark").exists()).toBe(true);
   });
 
   it("collapses to a 62px icon rail with labels and wordmark hidden", async () => {
-    const wrapper = await mountAt("/generate");
+    const wrapper = await mountAt("/create");
     setCollapsed(true);
     await flushPromises();
     expect(wrapper.get("nav").attributes("style")).toContain("62px");
     // Icon-only: nav labels and the wordmark are gone.
-    expect(wrapper.text()).not.toContain("Generate");
+    expect(wrapper.text()).not.toContain("Create");
     expect(wrapper.find(".ms-wordmark").exists()).toBe(false);
     // Destinations are still present as accessible icon buttons.
     const buttons = wrapper.findAll("button");
-    expect(buttons.some((b) => b.attributes("aria-label") === "Generate")).toBe(true);
+    expect(buttons.some((b) => b.attributes("aria-label") === "Create")).toBe(true);
   });
 });

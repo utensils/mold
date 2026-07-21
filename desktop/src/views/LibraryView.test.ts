@@ -47,7 +47,7 @@ vi.mock("../lib/ipc", () => ({
   },
 }));
 
-import GalleryView from "./GalleryView.vue";
+import LibraryView from "./LibraryView.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useContextMenuStore, type MenuEntry } from "../stores/contextMenu";
 import { useGalleryStore } from "../stores/gallery";
@@ -84,15 +84,23 @@ const prints: GalleryImage[] = [
   },
 ];
 
-async function mountView(remotePrint?: GalleryImage) {
+const stub = { template: "<div />" };
+// Named + prop-declaring stub so `getComponent({ name })` resolves it and the
+// `open` prop is forwarded.
+const historyDrawerStub = { name: "HistoryDrawer", props: ["open"], template: "<div />" };
+
+async function mountView(
+  remotePrint?: GalleryImage,
+  seed?: (gallery: ReturnType<typeof useGalleryStore>) => void,
+) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: "/gallery", component: { template: "<div />" } },
-      { path: "/generate", component: { template: "<div />" } },
+      { path: "/library", component: stub },
+      { path: "/create", component: stub },
     ],
   });
-  await router.push("/gallery");
+  await router.push("/library");
 
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -124,13 +132,15 @@ async function mountView(remotePrint?: GalleryImage) {
     };
   }
   localGalleryList.mockResolvedValue([...prints]);
+  seed?.(gallery);
 
-  const wrapper = mount(GalleryView, {
+  const wrapper = mount(LibraryView, {
     global: {
       plugins: [pinia, router],
       stubs: {
-        AuthedMedia: { template: "<div />" },
-        HostFilterChips: { template: "<div />" },
+        AuthedMedia: stub,
+        HostFilterChips: stub,
+        HistoryDrawer: historyDrawerStub,
       },
     },
   });
@@ -143,7 +153,7 @@ beforeEach(() => {
   apiFetchTo.mockResolvedValue(new Response());
 });
 
-describe("GalleryView delete keyboard handling", () => {
+describe("LibraryView delete keyboard handling", () => {
   it.each(["Delete", "Backspace"])(
     "prevents %s navigation and requires a second press before deleting",
     async (key) => {
@@ -158,7 +168,7 @@ describe("GalleryView delete keyboard handling", () => {
       expect(wrapper.get('[data-test="single-delete-confirm"]').text()).toContain(
         "Delete first.png?",
       );
-      expect(router.currentRoute.value.path).toBe("/gallery");
+      expect(router.currentRoute.value.path).toBe("/library");
 
       const second = new KeyboardEvent("keydown", { key, cancelable: true });
       expect(window.dispatchEvent(second)).toBe(false);
@@ -166,7 +176,7 @@ describe("GalleryView delete keyboard handling", () => {
 
       expect(localGalleryDelete).toHaveBeenCalledWith("first.png");
       expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual(["second.png"]);
-      expect(router.currentRoute.value.path).toBe("/gallery");
+      expect(router.currentRoute.value.path).toBe("/library");
       wrapper.unmount();
     },
   );
@@ -230,7 +240,7 @@ describe("GalleryView delete keyboard handling", () => {
     wrapper.unmount();
   });
 
-  it("leaves Backspace native while the gallery search field is being edited", async () => {
+  it("leaves Backspace native while the library search field is being edited", async () => {
     const { wrapper } = await mountView();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true }));
     const search = wrapper.get("input[type='search']").element as HTMLInputElement;
@@ -240,6 +250,61 @@ describe("GalleryView delete keyboard handling", () => {
     expect(search.dispatchEvent(event)).toBe(true);
     expect(localGalleryDelete).not.toHaveBeenCalled();
     expect(wrapper.find('[data-test="single-delete-confirm"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+describe("LibraryView header + NEW badges", () => {
+  it("titles the workspace Library and counts prints across all hosts", async () => {
+    const { wrapper } = await mountView();
+    const header = wrapper.get("header");
+    expect(header.text()).toContain("Library");
+    expect(header.text()).toContain("2 prints · all hosts");
+    wrapper.unmount();
+  });
+
+  it("badges prints unseen since the last visit, then marks them seen", async () => {
+    const { wrapper, gallery } = await mountView(undefined, (g) => {
+      // A prior visit that had only seen second.png.
+      g.libraryVisited = true;
+      g.seenFilenames = new Set(["second.png"]);
+    });
+
+    const tiles = wrapper.findAll("button").filter((b) => b.text().includes("· S "));
+    const fresh = tiles.find((b) => b.text().includes("S 1"));
+    const stale = tiles.find((b) => b.text().includes("S 2"));
+    expect(fresh!.find('[data-test="new-badge"]').exists()).toBe(true);
+    expect(stale!.find('[data-test="new-badge"]').exists()).toBe(false);
+
+    // Opening the Library marks everything currently shown as seen.
+    expect(gallery.seenFilenames.has("first.png")).toBe(true);
+    expect(gallery.seenFilenames.has("second.png")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("shows nothing as new on the very first visit (baseline only)", async () => {
+    const { wrapper, gallery } = await mountView();
+    expect(wrapper.findAll('[data-test="new-badge"]')).toHaveLength(0);
+    expect(gallery.libraryVisited).toBe(true);
+    wrapper.unmount();
+  });
+});
+
+describe("LibraryView history drawer", () => {
+  it("opens the history drawer when ?panel=history is present", async () => {
+    const { wrapper, router } = await mountView();
+    expect(wrapper.getComponent({ name: "HistoryDrawer" }).props("open")).toBe(false);
+    await router.push({ path: "/library", query: { panel: "history" } });
+    await flushPromises();
+    expect(wrapper.getComponent({ name: "HistoryDrawer" }).props("open")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("the header History button deep-links to ?panel=history", async () => {
+    const { wrapper, router } = await mountView();
+    await wrapper.get('[aria-label="Open history"]').trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.query.panel).toBe("history");
     wrapper.unmount();
   });
 });

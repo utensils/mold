@@ -7,8 +7,8 @@ const fetchHistoryAll = vi
   .fn()
   .mockResolvedValue({ entries: [], supportedHostIds: [], unreachableHostIds: [] });
 const clearHistoryOn = vi.fn().mockResolvedValue(undefined);
-vi.mock("../lib/api/history", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/api/history")>();
+vi.mock("../../lib/api/history", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/api/history")>();
   return {
     ...actual,
     fetchHistory: vi.fn().mockResolvedValue([]),
@@ -17,7 +17,7 @@ vi.mock("../lib/api/history", async (importOriginal) => {
     clearHistoryOn: (...a: unknown[]) => clearHistoryOn(...a),
   };
 });
-vi.mock("../lib/api/client", () => ({
+vi.mock("../../lib/api/client", () => ({
   ApiError: class ApiError extends Error {},
   apiFetch: vi.fn().mockRejectedValue(new Error("no network in tests")),
   apiJson: vi.fn().mockRejectedValue(new Error("no network in tests")),
@@ -25,18 +25,17 @@ vi.mock("../lib/api/client", () => ({
   apiJsonTo: vi.fn(),
   currentTarget: () => ({ baseUrl: "http://x", apiKey: null }),
 }));
-vi.mock("../lib/api/sse", () => ({ sseStream: vi.fn() }));
-vi.mock("../lib/ipc", () => ({
+vi.mock("../../lib/ipc", () => ({
   inTauri: () => false,
   ipc: { localGalleryList: vi.fn().mockResolvedValue([]) },
 }));
 
-import HistoryView from "./HistoryView.vue";
-import { useConnectionStore } from "../stores/connection";
-import { useGalleryStore } from "../stores/gallery";
-import { useHostsStore } from "../stores/hosts";
-import { useComposerStore } from "../stores/composer";
-import type { GalleryImage } from "../lib/api/types";
+import HistoryDrawer from "./HistoryDrawer.vue";
+import { useConnectionStore } from "../../stores/connection";
+import { useGalleryStore } from "../../stores/gallery";
+import { useHostsStore } from "../../stores/hosts";
+import { useComposerStore } from "../../stores/composer";
+import type { GalleryImage } from "../../lib/api/types";
 
 const stub = { template: "<div />" };
 
@@ -58,13 +57,13 @@ function run(filename: string, prompt: string, timestamp: number): GalleryImage 
 
 let router: Router;
 
-async function mountView({ extra = false } = {}) {
+async function mountDrawer({ extra = false } = {}) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: "/", component: stub },
-      { path: "/generate", component: stub },
-      { path: "/gallery", component: stub },
+      { path: "/create", component: stub },
+      { path: "/library", component: stub },
     ],
   });
   const pinia = createPinia();
@@ -100,7 +99,8 @@ async function mountView({ extra = false } = {}) {
       loaded: true,
     };
   }
-  const wrapper = mount(HistoryView, {
+  const wrapper = mount(HistoryDrawer, {
+    props: { open: true },
     global: { plugins: [pinia, router], stubs: { AuthedMedia: stub } },
   });
   await flushPromises();
@@ -121,9 +121,9 @@ beforeEach(() => {
   clearHistoryOn.mockResolvedValue(undefined);
 });
 
-describe("HistoryView runs", () => {
+describe("HistoryDrawer runs", () => {
   it("shows past runs with thumbnails and full metadata", async () => {
-    const wrapper = await mountView();
+    const wrapper = await mountDrawer();
     const rows = wrapper.findAll("[data-test='run-row']");
     expect(rows).toHaveLength(2);
     expect(rows[0]!.text()).toContain("a lighthouse at dusk");
@@ -134,7 +134,7 @@ describe("HistoryView runs", () => {
   });
 
   it("reuses a run's full settings including the seed", async () => {
-    const wrapper = await mountView();
+    const wrapper = await mountDrawer();
     await wrapper.get("[data-test='run-row']").trigger("click");
     await flushPromises();
     const composer = useComposerStore();
@@ -144,11 +144,11 @@ describe("HistoryView runs", () => {
       width: 1024,
       height: 768,
     });
-    expect(router.currentRoute.value.path).toBe("/generate");
+    expect(router.currentRoute.value.path).toBe("/create");
   });
 
   it("filters runs by prompt text", async () => {
-    const wrapper = await mountView();
+    const wrapper = await mountDrawer();
     await wrapper.get("input[type='search']").setValue("owl");
     await flushPromises();
     const rows = wrapper.findAll("[data-test='run-row']");
@@ -157,7 +157,7 @@ describe("HistoryView runs", () => {
   });
 
   it("loads the prompt log only when that tab is opened", async () => {
-    const wrapper = await mountView();
+    const wrapper = await mountDrawer();
     expect(fetchHistoryAll).not.toHaveBeenCalled();
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
@@ -165,15 +165,15 @@ describe("HistoryView runs", () => {
   });
 });
 
-describe("HistoryView multi-host", () => {
+describe("HistoryDrawer multi-host", () => {
   it("shows no host chips with a single source", async () => {
-    const wrapper = await mountView();
+    const wrapper = await mountDrawer();
     expect(wrapper.find("[role='tablist']").exists()).toBe(false);
     expect(wrapper.findAll("[data-test='host-badge']")).toHaveLength(0);
   });
 
   it("shows filter chips and per-row host chips when several hosts are live", async () => {
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     expect(wrapper.find("[role='tablist']").exists()).toBe(true);
     const rows = wrapper.findAll("[data-test='run-row']");
     expect(rows).toHaveLength(3);
@@ -182,7 +182,7 @@ describe("HistoryView multi-host", () => {
   });
 
   it("the chip filter narrows the runs list and hides row chips", async () => {
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     useGalleryStore().filter = "okra-7680";
     await flushPromises();
     const rows = wrapper.findAll("[data-test='run-row']");
@@ -199,7 +199,7 @@ describe("HistoryView multi-host", () => {
       ],
       supportedHostIds: ["local", "okra-7680"],
     });
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     const targets = fetchHistoryAll.mock.calls[0]![0] as Array<{ hostId: string }>;
@@ -218,7 +218,7 @@ describe("HistoryView multi-host", () => {
       ],
       supportedHostIds: ["local", "okra-7680"],
     });
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     useGalleryStore().filter = "okra-7680";
@@ -234,7 +234,7 @@ describe("HistoryView multi-host", () => {
       supportedHostIds: [],
       unreachableHostIds: [],
     });
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("Prompt history isn't available");
@@ -244,7 +244,7 @@ describe("HistoryView multi-host", () => {
       supportedHostIds: ["local"],
       unreachableHostIds: [],
     });
-    const other = await mountView({ extra: true });
+    const other = await mountDrawer({ extra: true });
     await other.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     expect(other.text()).not.toContain("Prompt history isn't available");
@@ -258,7 +258,7 @@ describe("HistoryView multi-host", () => {
       ],
       supportedHostIds: ["local", "okra-7680"],
     });
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     useGalleryStore().filter = "okra-7680";
@@ -278,7 +278,7 @@ describe("HistoryView multi-host", () => {
       ],
       supportedHostIds: ["local", "okra-7680"],
     });
-    const wrapper = await mountView({ extra: true });
+    const wrapper = await mountDrawer({ extra: true });
     await wrapper.get("[data-test='tab-prompts']").trigger("click");
     await flushPromises();
     await wrapper.get("[data-test='clear-history']").trigger("click");
