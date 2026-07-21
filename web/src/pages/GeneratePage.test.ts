@@ -256,6 +256,34 @@ describe("GeneratePage layout and behavior", () => {
     }
   });
 
+  it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises(); // onMounted registers the mold:new-print listener
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 2;
+    await nextTick();
+
+    // Fan the batch out into variations so there's review state to clear.
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-count"),
+    ).toBe("2");
+
+    window.dispatchEvent(new CustomEvent("mold:new-print"));
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("");
+    // The selected model survives — New print is a fresh canvas, not a reset.
+    expect(form.state.value.model).toBe("flux-dev:q4");
+    // Variations cleared → the variations canvas gives way to the cold-start guide.
+    expect(wrapper.find("[data-test='result-canvas']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
+  });
+
   it("renders the submitted durable chain job card from useChainJobStream", async () => {
     chainJobDetailRef.value = {
       id: "job-1",

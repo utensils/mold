@@ -72,6 +72,13 @@ function pickStyle(id: string) {
   emit("update:stylePreset", props.stylePreset === id ? null : id);
 }
 
+// Let the parent focus the prompt bed (⌘K "New print" starts here).
+defineExpose({
+  focus() {
+    textarea.value?.focus();
+  },
+});
+
 // Autogrow up to ~8 lines, tracking external prompt changes (Expand, Recreate).
 watch(
   () => props.prompt,

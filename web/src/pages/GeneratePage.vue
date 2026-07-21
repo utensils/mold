@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { requestChoice, toast } from "../lib/toasts";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
@@ -284,6 +291,27 @@ const showColdStart = computed(
 
 function selectModel(model: ModelInfoExtended) {
   form.applyModelDefaults(model);
+}
+
+const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
+
+// ⌘K "New print" (spec §06): start a fresh print without leaving Create.
+// Reset the advanced knobs to the current model's defaults, clear the prompt,
+// source media, and any in-flight expansion/variation review, but KEEP the
+// selected model, then focus the prompt. Never nukes the persisted model.
+function onNewPrint() {
+  const model = currentModel.value;
+  if (model) form.applyModelDefaults(model);
+  form.state.value.prompt = "";
+  form.state.value.stylePreset = null;
+  form.state.value.imageAttachments = [];
+  form.state.value.maskImage = null;
+  form.state.value.controlImage = null;
+  variations.value = [];
+  prevPrompt.value = null;
+  composerError.value = null;
+  preprocessingStatus.value = null;
+  void nextTick(() => composerCardRef.value?.focus?.());
 }
 
 // ── Shape / summary projections ───────────────────────────────────────
@@ -798,12 +826,14 @@ onMounted(async () => {
     const first = installedModels.value[0];
     if (first) form.applyModelDefaults(first);
   }
+  window.addEventListener("mold:new-print", onNewPrint);
   startAutoRefresh();
 });
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
   phoneQuery?.removeEventListener?.("change", syncPhone);
+  window.removeEventListener("mold:new-print", onNewPrint);
   queue.stop();
 });
 </script>
@@ -924,6 +954,7 @@ onBeforeUnmount(() => {
 
         <template v-else>
           <ComposerCard
+            ref="composerCardRef"
             v-model:prompt="form.state.value.prompt"
             v-model:style-preset="form.state.value.stylePreset"
             :aspect-label="aspectLabel"

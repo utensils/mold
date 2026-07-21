@@ -70,6 +70,33 @@ describe("undoableAction", () => {
     expect(undo).toHaveBeenCalledOnce();
     expect(commit).not.toHaveBeenCalled();
   });
+
+  it("commits exactly once when the toast is dismissed manually mid-window", () => {
+    const state = useNotifications();
+    const commit = vi.fn();
+    const undo = vi.fn();
+    undoableAction({ text: "Print deleted", undo, commit });
+    // Closing the toast early via ✕ means "done with the undo offer" → commit.
+    dismissToast(state.toasts[0]!.id);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(undo).not.toHaveBeenCalled();
+    // The window elapsing afterward must not commit a second time.
+    vi.advanceTimersByTime(10_000);
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it("does not commit after an undo, even if the toast is later dismissed", () => {
+    const state = useNotifications();
+    const commit = vi.fn();
+    const undo = vi.fn();
+    undoableAction({ text: "Print deleted", undo, commit });
+    const id = state.toasts[0]!.id;
+    runToastAction(id); // Undo
+    dismissToast(id); // idempotent no-op — must not resurrect the commit
+    vi.advanceTimersByTime(10_000);
+    expect(undo).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+  });
 });
 
 describe("requestConfirm", () => {

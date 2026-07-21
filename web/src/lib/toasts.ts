@@ -15,6 +15,10 @@ export interface Toast {
   text: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** Fired once when the toast leaves the shelf for any reason other than its
+   * action — timeout or manual ✕. undoableAction uses it to commit the pending
+   * change (dismiss = "done looking at the undo offer"). */
+  onDismiss?: () => void;
 }
 
 export interface DialogChoice {
@@ -60,12 +64,18 @@ export function dismissToast(id: string): void {
     timers.delete(id);
   }
   const index = state.toasts.findIndex((t) => t.id === id);
-  if (index !== -1) state.toasts.splice(index, 1);
+  if (index === -1) return;
+  const [entry] = state.toasts.splice(index, 1);
+  // Both the timeout and the manual ✕ route through here; fire onDismiss so a
+  // reversible action commits on either. runToastAction runs the action first,
+  // so its onDismiss handler is expected to be a no-op after an undo.
+  entry?.onDismiss?.();
 }
 
 export interface ToastOptions {
   actionLabel?: string;
   onAction?: () => void;
+  onDismiss?: () => void;
   /** ms; errors are sticky by default (0 = sticky). */
   timeout?: number;
 }
@@ -79,6 +89,7 @@ export function toast(
   const entry: Toast = { id, kind, text };
   if (options.actionLabel) entry.actionLabel = options.actionLabel;
   if (options.onAction) entry.onAction = options.onAction;
+  if (options.onDismiss) entry.onDismiss = options.onDismiss;
   state.toasts.push(entry);
   const timeout = options.timeout ?? (kind === "error" ? 0 : 5000);
   if (timeout > 0) {
@@ -106,26 +117,24 @@ export function undoableAction(options: {
   commit: () => void | Promise<void>;
   windowMs?: number;
 }): void {
-  let undone = false;
-  const id = toast("info", options.text, {
+  // Exactly one of undo/commit runs, exactly once. Clicking Undo undoes;
+  // otherwise the change commits — whether the window elapsed (auto-dismiss)
+  // or the user closed the toast early (manual ✕). Dismissing is "I'm done
+  // with the undo offer", not "forget this ever happened", so a dismissed
+  // delete must still delete rather than stranding a hidden-but-undeleted row.
+  let settled = false;
+  const finish = (undone: boolean) => {
+    if (settled) return;
+    settled = true;
+    if (undone) options.undo();
+    else void options.commit();
+  };
+  toast("info", options.text, {
     actionLabel: "Undo",
-    onAction: () => {
-      undone = true;
-      options.undo();
-    },
+    onAction: () => finish(true),
+    onDismiss: () => finish(false),
     timeout: options.windowMs ?? 6000,
   });
-  const timer = timers.get(id);
-  if (timer) {
-    clearTimeout(timer);
-    timers.set(
-      id,
-      setTimeout(() => {
-        dismissToast(id);
-        if (!undone) void options.commit();
-      }, options.windowMs ?? 6000),
-    );
-  }
 }
 
 export interface ConfirmOptions {

@@ -50,6 +50,13 @@ function isFirstQueued(id: string): boolean {
 function isLastQueued(id: string): boolean {
   return queuedIds.value[queuedIds.value.length - 1] === id;
 }
+
+// The reorder PATCH indexes `position` among QUEUED jobs only, so the target
+// must be derived from this job's slot in the queued subset — not `position`,
+// which counts running jobs too and would be off-by-N once anything is running.
+function queuedIndexOf(id: string): number {
+  return queuedIds.value.indexOf(id);
+}
 </script>
 
 <template>
@@ -101,7 +108,7 @@ function isLastQueued(id: string): boolean {
               data-test="queue-up"
               :disabled="dimmed || isFirstQueued(entry.id)"
               aria-label="Move up"
-              @click="emit('move', entry.id, entry.position - 1)"
+              @click="emit('move', entry.id, queuedIndexOf(entry.id) - 1)"
             >
               <Icon name="chevron-up" :size="14" />
             </button>
@@ -111,7 +118,7 @@ function isLastQueued(id: string): boolean {
               data-test="queue-down"
               :disabled="dimmed || isLastQueued(entry.id)"
               aria-label="Move down"
-              @click="emit('move', entry.id, entry.position + 1)"
+              @click="emit('move', entry.id, queuedIndexOf(entry.id) + 1)"
             >
               <Icon name="chevron-down" :size="14" />
             </button>

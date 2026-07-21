@@ -33,7 +33,13 @@ const ctx: CommandContext = {
     void router.push(path);
   },
   runModel: (name) => {
-    form.state.value.model = name;
+    // Apply the model's full defaults (family, dimensions, family-gated fields,
+    // LoRA reset) exactly like the Create page's model rail. Setting only
+    // `model` would leave stale family state behind — e.g. a Qwen-edit → FLUX
+    // swap could still emit edit_images from the old family.
+    const model = models.value.find((m) => m.name === name);
+    if (model) form.applyModelDefaults(model);
+    else form.state.value.model = name;
     void router.push("/create");
   },
   openDownloads: () => {
