@@ -85,6 +85,28 @@ export function hostStatus(host: HostEntry, signal?: AbortSignal) {
   return getJson<HostStatus>(host, "/api/status", signal);
 }
 
+/** One host's gallery (`GET /api/gallery`), with its `x-api-key`. Used by the
+ * multi-host gallery merge. Works for the origin too (empty `host.url`). */
+export function hostGallery(host: HostEntry, signal?: AbortSignal) {
+  return getJson<import("../../types").GalleryImage[]>(
+    host,
+    "/api/gallery",
+    signal,
+  );
+}
+
+/** Delete a print on its owning host (`DELETE /api/gallery/image/:filename`). */
+export function hostDeleteGalleryImage(
+  host: HostEntry,
+  filename: string,
+): Promise<void> {
+  return send(
+    host,
+    `/api/gallery/image/${encodeURIComponent(filename)}`,
+    "DELETE",
+  );
+}
+
 export function hostResources(host: HostEntry, signal?: AbortSignal) {
   return getJson<ResourceSnapshot>(host, "/api/resources", signal);
 }

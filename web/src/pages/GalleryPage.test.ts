@@ -30,6 +30,24 @@ vi.mock("../api", () => ({
   thumbnailUrl: (f: string) => `/api/gallery/thumbnail/${f}`,
 }));
 
+// The gallery now merges every host; in tests the origin's list (listGalleryMock)
+// is the single source, tagged as the origin host.
+vi.mock("../lib/multiHostGallery", () => ({
+  fetchMergedGallery: async () => {
+    const list = (await listGalleryMock()) as unknown[];
+    return {
+      entries: list.map((e) => ({
+        ...(e as object),
+        hostId: "origin",
+        hostLabel: "this server",
+      })),
+      reachableHostIds: ["origin"],
+      unreachableHostIds: [],
+      remoteHostCount: 0,
+    };
+  },
+}));
+
 vi.mock("vue-router", () => ({
   useRoute: () => ({ query: {} }),
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
@@ -134,6 +152,13 @@ describe("GalleryPage", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("says 'this server' — not 'all hosts' — when no remotes are connected", async () => {
+    const wrapper = await mounted();
+    const count = wrapper.get("[data-test='gallery-count']").text();
+    expect(count).toContain("this server");
+    expect(count).not.toContain("all hosts");
   });
 
   it("renders every print in the grid by default", async () => {

@@ -14,13 +14,24 @@ import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
-import { deleteGalleryImage, imageUrl, listGallery } from "../api";
+import { deleteGalleryImage, imageUrl } from "../api";
 import { blobToBase64 } from "../lib/base64";
 import { requestConfirm, toast, undoableAction } from "../lib/toasts";
 import {
   applyMetadataToForm,
   useGenerateForm,
 } from "../composables/useGenerateForm";
+import {
+  fetchMergedGallery,
+  type HostGalleryImage,
+} from "../lib/multiHostGallery";
+import {
+  ORIGIN_HOST_ID,
+  getHost,
+  listHosts,
+  originHost,
+} from "../lib/hostRegistry";
+import { hostDeleteGalleryImage } from "../components/machines/hostClient";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
@@ -43,7 +54,11 @@ function loadViewMode(): ViewMode {
   return "grid";
 }
 
-const entries = ref<GalleryImage[]>([]);
+const entries = ref<HostGalleryImage[]>([]);
+// Hosts whose /api/gallery failed this refresh (surfaced, not hidden), and
+// how many non-origin hosts were attempted (drives the honest count line).
+const unreachableHostIds = ref<string[]>([]);
+const remoteHostCount = ref(0);
 const loading = ref(true);
 const errorMessage = ref<string | null>(null);
 const filter = ref<FilterKind>("all");
@@ -203,10 +218,17 @@ function clearSelection() {
   selectionAnchor.value = null;
 }
 
+// Delete routes to the host that owns the print — a remote print is deleted on
+// its host, not the origin.
+function deleteRouted(filename: string): Promise<void> {
+  const entry = entries.value.find((e) => e.filename === filename);
+  const host = entry ? getHost(entry.hostId) : null;
+  if (!host || host.id === ORIGIN_HOST_ID) return deleteGalleryImage(filename);
+  return hostDeleteGalleryImage(host, filename);
+}
+
 async function handleDeleteMany(names: string[]): Promise<number> {
-  const results = await Promise.allSettled(
-    names.map((n) => deleteGalleryImage(n)),
-  );
+  const results = await Promise.allSettled(names.map((n) => deleteRouted(n)));
   const deleted = new Set<string>();
   let failed = 0;
   names.forEach((n, i) => {
@@ -298,15 +320,37 @@ async function refresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
-    const list = await listGallery();
-    entries.value = list;
-    reconcileFresh(list);
+    const merged = await fetchMergedGallery(listHosts());
+    entries.value = merged.entries;
+    unreachableHostIds.value = merged.unreachableHostIds;
+    remoteHostCount.value = merged.remoteHostCount;
+    reconcileFresh(merged.entries);
+    // Only a total wipe-out (no host answered) is an error; one box down just
+    // shows an "unreachable" note while the rest render.
+    if (
+      merged.reachableHostIds.length === 0 &&
+      merged.unreachableHostIds.length > 0
+    ) {
+      errorMessage.value = "Couldn't reach any host's gallery.";
+    }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : String(err);
   } finally {
     loading.value = false;
   }
 }
+
+// Honest count line: "all hosts" only when remotes are actually connected,
+// otherwise "this server". Names the unreachable hosts rather than hiding them.
+const scopeLabel = computed(() =>
+  remoteHostCount.value > 0 ? "all hosts" : "this server",
+);
+const unreachableLabel = computed(() => {
+  const names = unreachableHostIds.value
+    .map((id) => getHost(id)?.name ?? id)
+    .filter((n) => n !== originHost().name);
+  return names.length ? `${names.join(", ")} unreachable` : "";
+});
 
 // ── Lightbox ─────────────────────────────────────────────────────────────────
 const selected = ref<GalleryImage | null>(null);
@@ -403,7 +447,7 @@ async function onLightboxDelete(item: GalleryImage) {
     },
     commit: async () => {
       try {
-        await deleteGalleryImage(item.filename);
+        await deleteRouted(item.filename);
       } catch (err) {
         // Roll the print back into the list so the failure isn't silent.
         const next = entries.value.slice();
@@ -448,7 +492,12 @@ onMounted(async () => {
   <div class="gal">
     <header class="gal__head">
       <h1 class="gal__title">Gallery</h1>
-      <span class="gal__count">{{ total }} prints · all hosts</span>
+      <span class="gal__count" data-test="gallery-count"
+        >{{ total }} prints · {{ scopeLabel
+        }}<span v-if="unreachableLabel" class="gal__unreachable">
+          · {{ unreachableLabel }}</span
+        ></span
+      >
       <span class="gal__flex"></span>
 
       <SegmentedControl

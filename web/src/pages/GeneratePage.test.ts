@@ -342,6 +342,9 @@ function pageStubs() {
       name: "ComposerCard",
       template:
         '<div><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button></div>',
+      // The page calls these through its template ref on submit / new-print;
+      // a stub without them throws an unhandled TypeError mid-run.
+      methods: { record: vi.fn(), focus: vi.fn() },
     },
     ResultCanvas: {
       name: "ResultCanvas",
