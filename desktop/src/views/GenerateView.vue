@@ -84,7 +84,6 @@ import { blobToBase64 } from "../lib/image";
 import { ipc } from "../lib/ipc";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { useGalleryStore } from "../stores/gallery";
-import { fitAspectRatio } from "../lib/fitAspectRatio";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import {
   expansionPullJobMatchesModel,
@@ -200,8 +199,6 @@ async function pullMissingModel() {
 const formStore = useGenerateFormStore();
 const form = formStore.form;
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
-const previewRegion = ref<HTMLDivElement | null>(null);
-const previewFrameSize = ref({ width: 0, height: 0 });
 const advancedOpen = ref(false);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
@@ -436,25 +433,19 @@ const buttonLabel = computed(() =>
 
 const previewWidth = computed(() => job.value?.width ?? form.width);
 const previewHeight = computed(() => job.value?.height ?? form.height);
+/**
+ * The frame sizes itself with pure CSS — no measurement, observers, or
+ * layout races (a JS-measured frame collapsed to 0×0 whenever the region
+ * mounted after the observer, rendering the develop view invisible). The
+ * region is a size container; `min(100cqw, ratio·100cqh)` is the largest
+ * rect of the print's aspect that fits it. Engines without container-query
+ * units drop the invalid width and fall back to the full-width class, where
+ * the media object-contains inside the frame instead.
+ */
 const previewFrameStyle = computed(() => ({
   aspectRatio: `${previewWidth.value} / ${previewHeight.value}`,
-  width: `${previewFrameSize.value.width}px`,
-  height: `${previewFrameSize.value.height}px`,
+  width: `min(100cqw, ${(100 * previewWidth.value) / previewHeight.value}cqh)`,
 }));
-
-let previewResizeObserver: ResizeObserver | null = null;
-
-function resizePreview(width?: number, height?: number) {
-  const rect = previewRegion.value?.getBoundingClientRect();
-  previewFrameSize.value = fitAspectRatio(
-    width ?? rect?.width ?? 0,
-    height ?? rect?.height ?? 0,
-    previewWidth.value,
-    previewHeight.value,
-  );
-}
-
-watch([previewWidth, previewHeight], () => resizePreview());
 
 const edgeCode = computed(() => {
   const j = job.value;
@@ -1279,24 +1270,7 @@ watch(
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
-  resizePreview();
   void listenForNativeImageDrops();
-});
-
-// The preview region only exists while a job renders (v-else-if="job"), so a
-// mount-time observer would never attach — the frame would measure 0×0 and
-// the developing canvas render as a black void. Attach/detach as the element
-// comes and goes, measuring immediately on attach.
-watch(previewRegion, (el) => {
-  previewResizeObserver?.disconnect();
-  previewResizeObserver = null;
-  if (el && typeof ResizeObserver !== "undefined") {
-    previewResizeObserver = new ResizeObserver(([entry]) => {
-      if (entry) resizePreview(entry.contentRect.width, entry.contentRect.height);
-    });
-    previewResizeObserver.observe(el);
-  }
-  if (el) resizePreview();
 });
 
 onBeforeUnmount(() => {
@@ -1305,7 +1279,6 @@ onBeforeUnmount(() => {
   nativeImageDropUnmounted = true;
   stopNativeImageDrop?.();
   document.removeEventListener("pointerdown", onDocumentPointerDown);
-  previewResizeObserver?.disconnect();
 });
 </script>
 
@@ -1381,12 +1354,11 @@ onBeforeUnmount(() => {
                would collapse the frame to 0×0 (an invisible develop view). -->
           <div v-else-if="job" class="flex h-full w-full min-h-0 flex-col items-center">
             <div
-              ref="previewRegion"
               data-test="preview-region"
-              class="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
+              class="grid min-h-0 w-full flex-1 place-items-center self-stretch overflow-hidden [container-type:size]"
             >
               <div
-                class="relative w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                class="relative max-h-full w-full max-w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
                 data-test="preview-frame"
                 :style="previewFrameStyle"
                 @contextmenu="contextMenu.open($event, canvasMenu())"
