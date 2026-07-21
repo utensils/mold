@@ -112,6 +112,10 @@ export interface GenerateForm {
    * (`camera-control:<preset>` or the raw path) at scale 1.0 — exactly what
    * the CLI's `--camera-control` sends; there is no dedicated wire field. */
   cameraControl: string | null;
+  /** Composer style preset id (see `stylePresets.ts`); `""` = none. A
+   * look-and-feel modifier composed into the outgoing prompt at submit — never
+   * mutates the textarea and carries no dedicated wire field. */
+  stylePreset: string;
 }
 
 export function newGenerateForm(): GenerateForm {
@@ -152,6 +156,7 @@ export function newGenerateForm(): GenerateForm {
     temporalUpscale: null,
     audioFile: null,
     cameraControl: null,
+    stylePreset: "",
   };
 }
 

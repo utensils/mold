@@ -2,29 +2,25 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
-  filterModelsForTarget,
   findInstalledModel,
   mergeInstalledModels,
   preferredInstalledModel,
   shouldShowStarterCards,
 } from "../lib/generateModels";
+import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import ProgressRing from "@ui/components/ProgressRing.vue";
 import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
-import ParamPanel from "../components/generate/ParamPanel.vue";
-import LoraStack from "../components/generate/LoraStack.vue";
 import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
-import SourceImageWell from "../components/generate/SourceImageWell.vue";
-import EstimateBadge from "../components/generate/EstimateBadge.vue";
-import ExpandControl from "../components/generate/ExpandControl.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
-import HostSelector from "../components/generate/HostSelector.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
-import SourceGlyph from "../components/generate/SourceGlyph.vue";
-import PanelResizeHandle from "../components/shell/PanelResizeHandle.vue";
-import { modelSource } from "../lib/modelSource";
-import { modelAvailabilityTag, normalizeTargetHost } from "../lib/hosts";
-import { dragWidth } from "../lib/panelResize";
+import CreateHeader from "../components/create/CreateHeader.vue";
+import ActivityStrip from "../components/create/ActivityStrip.vue";
+import ComposerCard from "../components/create/ComposerCard.vue";
+import InspectorPanel from "../components/create/InspectorPanel.vue";
+import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
+import { normalizeTargetHost } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -52,6 +48,7 @@ import {
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
 import { applyPrefillToForm, buildRequest, cloneGenerateForm } from "../lib/generateForm";
+import { composeStylePrompt } from "../lib/stylePresets";
 import { frames8n1Error } from "../lib/chain";
 import {
   advancedVideoValidationError,
@@ -69,10 +66,7 @@ import { upscaleImage } from "../lib/api/upscale";
 import { expandPrompt } from "../lib/api/expand";
 import type { HostRoute } from "../stores/hosts";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
-import { autoGrowRows } from "../lib/autogrow";
-import { PromptCycler, caretOnFirstLine, caretOnLastLine } from "../lib/promptCycler";
 import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
-import { formatGB } from "../lib/format";
 import { randomSeed } from "../stores/generation";
 import type { GenerateRequest, ModelEntry, OutputMetadata } from "../lib/api/types";
 import {
@@ -91,7 +85,6 @@ import { ipc } from "../lib/ipc";
 import { applyDesktopImageDrop } from "../lib/desktopImageDrop";
 import { useGalleryStore } from "../stores/gallery";
 import { fitAspectRatio } from "../lib/fitAspectRatio";
-import { primaryModifierPressed, shortcutLabel } from "../lib/platform";
 import { parseMissingExpandModel } from "../lib/expandErrors";
 import {
   expansionPullJobMatchesModel,
@@ -206,12 +199,14 @@ async function pullMissingModel() {
 // back — this view unmounts on every route change.
 const formStore = useGenerateFormStore();
 const form = formStore.form;
-const promptEl = ref<HTMLTextAreaElement | null>(null);
+const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 const previewRegion = ref<HTMLDivElement | null>(null);
 const previewFrameSize = ref({ width: 0, height: 0 });
-const expandControl = ref<InstanceType<typeof ExpandControl> | null>(null);
-const pickerEl = ref<HTMLDivElement | null>(null);
-const pickerOpen = ref(false);
+const advancedOpen = ref(false);
+const templatesOpen = ref(false);
+const templatesEl = ref<HTMLDivElement | null>(null);
+/** Recent prompts for the composer's ↑/↓ history cycling. */
+const promptHistory = ref<string[]>([]);
 const nativeImageDragOver = ref(false);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
@@ -281,29 +276,8 @@ async function listenForNativeImageDrops() {
 }
 
 function onDocumentPointerDown(event: PointerEvent) {
-  if (!pickerOpen.value || !pickerEl.value) return;
-  if (!event.composedPath().includes(pickerEl.value)) pickerOpen.value = false;
-}
-
-// Live inspector width while dragging its left-edge handle; null follows the
-// persisted preference (appPrefs.generateParamsWidth). Persist only on commit.
-const draftAsideWidth = ref<number | null>(null);
-const asideWidth = computed(() => draftAsideWidth.value ?? appPrefs.generateParamsWidth);
-
-function onAsideResize(dx: number) {
-  draftAsideWidth.value = dragWidth("generateParams", appPrefs.generateParamsWidth, dx, "left");
-}
-
-async function onAsideCommit() {
-  const width = draftAsideWidth.value;
-  if (width === null) return;
-  if (width !== appPrefs.generateParamsWidth) await appPrefs.update({ generateParamsWidth: width });
-  draftAsideWidth.value = null;
-}
-
-function onAsideReset() {
-  draftAsideWidth.value = null;
-  void appPrefs.update({ generateParamsWidth: null });
+  if (!templatesOpen.value || !templatesEl.value) return;
+  if (!event.composedPath().includes(templatesEl.value)) templatesOpen.value = false;
 }
 
 const job = computed(() => generation.active);
@@ -321,7 +295,7 @@ const formValidationError = computed(
     advancedVideoValidationError(form),
 );
 /** Over-budget video frames on a non-chainable model would fail server-side —
- *  ParamPanel shows the reason under Frames; this blocks the submit. */
+ *  the drawer shows the reason under Frames; this blocks the submit. */
 const chainReject = computed(() => {
   if (formValidationError.value) return true;
   if (!caps.value.supportsVideo) return false;
@@ -376,15 +350,8 @@ const estimateTarget = computed(() =>
     : null,
 );
 
-/**
- * What the picker renders: the all-host union under Auto / Most capable,
- * narrowed to the sticky host's installed set when one is picked. The current
- * `form.model` is left alone — `stickyHostMissingModel` already warns that a
- * generate there will auto-pull the weights.
- */
-/** The sticky pick as the Host selector shows it — a ghost host id (removed
- *  or never reconnected) reads as Auto so filtering and tag suppression can
- *  never disagree with the selector (Copilot on #436). */
+/** The sticky pick as the Host selector shows it — a ghost host id (removed or
+ *  never reconnected) reads as Auto so filtering and expansion never disagree. */
 const stickyTarget = computed<string | null>(() =>
   normalizeTargetHost(appPrefs.settings?.generateTargetHost ?? null, hosts.all),
 );
@@ -450,63 +417,9 @@ const quickStaleReasons = computed(() => {
   });
 });
 
-const pickerModels = computed<ModelEntry[]>(() => {
-  const target = stickyTarget.value;
-  const fetched = target && target !== "capable" && (hostModels.byHost[target]?.fetchedAt ?? 0) > 0;
-  return filterModelsForTarget(
-    installedModels.value,
-    target,
-    fetched ? new Set(hostModels.installedOn(target).map((m) => m.name)) : null,
-  );
-});
-
-/**
- * The picker's list: the primary's installed models merged with every model
- * installed on an extra host, grouped by family (primary entries win the
- * dedup so their defaults are used).
- */
-const pickerFamilies = computed<Map<string, ModelEntry[]>>(() => {
-  const byName = new Map<string, ModelEntry>();
-  for (const m of pickerModels.value) byName.set(m.name, m);
-  const groups = new Map<string, ModelEntry[]>();
-  for (const m of byName.values()) {
-    const list = groups.get(m.family) ?? [];
-    list.push(m);
-    groups.set(m.family, list);
-  }
-  return groups;
-});
-
-/** Subtle per-row tag for models that live only on non-primary hosts. */
-function availabilityTag(m: ModelEntry): string | null {
-  if (!hosts.multiHost) return null;
-  // With a sticky host every rendered row is on that host — tags are noise.
-  const target = stickyTarget.value;
-  if (target && target !== "capable") return null;
-  return modelAvailabilityTag(hostModels.hostsFor(m.name), hosts.all);
-}
-
-/**
- * The sticky target host's label when it lacks the selected model (per the
- * last availability snapshot) — the job will auto-pull the weights there.
- */
-const stickyHostMissingModel = computed<string | null>(() => {
-  const sel = stickyTarget.value;
-  if (!sel || sel === "capable" || !form.model) return null;
-  const host = hosts.all.find((h) => h.id === sel);
-  if (!host) return null;
-  const ids = hostModels.hostsFor(form.model);
-  if (ids.length === 0 || ids.includes(sel)) return null;
-  return host.label;
-});
-
-// Availability data is demand-driven: fetch on mount / when the set of ready
-// hosts changes, and force-fresh whenever the picker opens (a model pulled on
-// an extra host by another client shows up the moment the user looks). No
-// global timers.
-watch(pickerOpen, (open) => {
-  if (open) void hostModels.refresh(true);
-});
+// Availability data is demand-driven: fetch when the set of ready hosts
+// changes. immediate so routing is model-aware on the FIRST Generate click.
+// (The inspector's picker force-refreshes on open.)
 watch(
   () =>
     hosts.all
@@ -514,8 +427,6 @@ watch(
       .map((h) => h.id)
       .join("\n"),
   () => void hostModels.refresh(),
-  // immediate: routing must be model-aware on the FIRST Generate click, not
-  // only after the picker has been opened once (peer review on #390).
   { immediate: true },
 );
 
@@ -556,15 +467,11 @@ const edgeCode = computed(() => {
   return [name, s, stepPart, size, time].filter(Boolean).join("  ");
 });
 
-function pickModel(m: ModelEntry) {
-  formStore.applyModel(m);
-  pickerOpen.value = false;
-}
-
 function loadTemplate(template: GenerationTemplate) {
   // Base64 media was stripped on save; buildRequest's pruneRequestForFamily
   // still guards anything the (possibly different) family can't use.
   Object.assign(form, template.form);
+  templatesOpen.value = false;
   if (form.model && !findInstalledModel(installedModels.value, form.model)) {
     toasts.push(`Model "${form.model}" isn't installed — settings applied anyway.`);
   }
@@ -749,7 +656,7 @@ async function expandForCurrentBatch(
           replacementOwnedFocus &&
           (active === document.body || (!!active && preparedSection?.contains(active)));
         preparedBatch.value = null;
-        if (shouldRestoreFocus) void nextTick(() => promptEl.value?.focus());
+        if (shouldRestoreFocus) void nextTick(() => composerRef.value?.focus?.());
       }
       return;
     }
@@ -806,7 +713,7 @@ function collapsePreparedBatch(removedId: string) {
   form.originalPrompt = batch.sourcePrompt;
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
-  void nextTick(() => promptEl.value?.focus());
+  void nextTick(() => composerRef.value?.focus?.());
 }
 
 function discardPreparedBatch() {
@@ -817,7 +724,7 @@ function discardPreparedBatch() {
   expansionError.value = null;
   expansionMissingModel.value = null;
   expansionAttemptHostLabel.value = null;
-  void nextTick(() => promptEl.value?.focus());
+  void nextTick(() => composerRef.value?.focus?.());
 }
 
 async function pullExpansionModel() {
@@ -1073,6 +980,10 @@ async function generate() {
   preparedSubmitting.value = preparedSubmission !== null;
   try {
     const draft = cloneGenerateForm(form);
+    // The composer style preset is a look modifier composed into the outgoing
+    // prompt at submit — the textarea itself is never mutated. Reviewed
+    // prepared prompts ship verbatim, so it only applies to the ordinary path.
+    if (!preparedSubmission) draft.prompt = composeStylePrompt(draft.prompt, draft.stylePreset);
     const draftCaps = generationCapabilitiesForFamily(draft.family);
     const batch = preparedSubmission
       ? preparedSubmission.batch
@@ -1161,7 +1072,7 @@ async function generate() {
       preparedBatch.value = null;
       expansionError.value = null;
       expansionMissingModel.value = null;
-      void nextTick(() => promptEl.value?.focus());
+      void nextTick(() => composerRef.value?.focus?.());
     }
     if (
       !quickSubmission ||
@@ -1169,7 +1080,7 @@ async function generate() {
     ) {
       quickExpansionSnapshot.value = null;
     }
-    cycler.record(preparedSubmission?.originalPrompt ?? request.prompt);
+    composerRef.value?.record?.(preparedSubmission?.originalPrompt ?? request.prompt);
     const done = await settled;
     void loadPromptHistory();
     const ok = done.filter((s) => s.status === "complete").length;
@@ -1216,22 +1127,6 @@ async function generate() {
   }
 }
 
-// ↑/↓ cycle recent prompts (shell-history style) when the caret is on the
-// composer's first/last line, so multi-line editing keeps native arrows.
-const cycler = new PromptCycler();
-
-/** The composer grows with its content (capped) instead of scrolling at 2 rows. */
-function growPrompt() {
-  if (promptEl.value) autoGrowRows(promptEl.value);
-}
-// Programmatic prompt changes (history cycling, expand, templates) resize too.
-watch(
-  () => form.prompt,
-  () => void nextTick(growPrompt),
-  { flush: "post" },
-);
-onMounted(() => growPrompt());
-
 async function loadPromptHistory() {
   try {
     const targets: HistoryHostTarget[] = hosts.all.flatMap((host) =>
@@ -1246,35 +1141,9 @@ async function loadPromptHistory() {
         : [],
     );
     const history = await fetchHistoryAll(targets);
-    cycler.setEntries(history.entries.map((entry) => entry.prompt));
+    promptHistory.value = history.entries.map((entry) => entry.prompt);
   } catch {
     // No history API (older engine / DB off) — arrows just move the caret.
-  }
-}
-
-function cycleHistory(direction: "prev" | "next") {
-  const replacement = direction === "prev" ? cycler.prev(form.prompt) : cycler.next();
-  if (replacement === null) return;
-  form.prompt = replacement;
-  void nextTick(() => {
-    const el = promptEl.value;
-    el?.setSelectionRange(el.value.length, el.value.length);
-  });
-}
-
-function onComposerKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && primaryModifierPressed(e)) {
-    e.preventDefault();
-    void generate();
-  } else if ((e.key === "e" || e.key === "E") && primaryModifierPressed(e)) {
-    e.preventDefault();
-    expandControl.value?.expand();
-  } else if (e.key === "ArrowUp" && promptEl.value && caretOnFirstLine(promptEl.value)) {
-    e.preventDefault();
-    cycleHistory("prev");
-  } else if (e.key === "ArrowDown" && promptEl.value && caretOnLastLine(promptEl.value)) {
-    e.preventDefault();
-    cycleHistory("next");
   }
 }
 
@@ -1319,7 +1188,7 @@ function applyPrefill() {
   if ("metadata" in prefill && prefill.metadata) {
     void restorePrefillSource(prefill.metadata, restoreEpoch);
   }
-  void nextTick(() => promptEl.value?.focus());
+  void nextTick(() => composerRef.value?.focus?.());
 }
 
 /**
@@ -1386,7 +1255,7 @@ watch(
     quickExpansionSnapshot.value = null;
     submissionGuard.invalidate();
     formStore.clearComposer();
-    void nextTick(() => promptEl.value?.focus());
+    void nextTick(() => composerRef.value?.focus?.());
   },
 );
 
@@ -1405,12 +1274,11 @@ watch(
 );
 watch(
   () => ui.expandTick,
-  () => expandControl.value?.expand(),
+  () => composerRef.value?.expand?.(),
 );
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
-  promptEl.value?.focus();
   if (previewRegion.value && typeof ResizeObserver !== "undefined") {
     previewResizeObserver = new ResizeObserver(([entry]) => {
       if (entry) resizePreview(entry.contentRect.width, entry.contentRect.height);
@@ -1434,12 +1302,7 @@ onBeforeUnmount(() => {
 <template>
   <StarterCards v-if="showStarterCards" @browse="router.push('/models')" />
 
-  <div
-    v-else
-    data-test="generate-layout"
-    class="relative grid h-full min-h-0 overflow-hidden"
-    :style="{ gridTemplateColumns: `1fr ${asideWidth}px` }"
-  >
+  <div v-else data-test="generate-layout" class="relative flex h-full min-h-0 overflow-hidden">
     <div
       v-if="nativeImageDragOver"
       data-test="native-image-drop-overlay"
@@ -1448,175 +1311,185 @@ onBeforeUnmount(() => {
       Drop image to load settings and use as source
     </div>
 
-    <!-- Canvas + composer -->
-    <div data-test="generate-workbench" class="flex min-h-0 min-w-0 flex-col overflow-hidden p-6">
-      <div class="flex min-h-0 flex-1 flex-col">
-        <div
-          ref="previewRegion"
-          data-test="preview-region"
-          class="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
-        >
-          <div
-            class="relative w-full overflow-hidden rounded-media border border-control-edge"
-            :class="job ? 'bg-print-surface' : 'bg-empty-surface'"
-            data-test="preview-frame"
-            :style="previewFrameStyle"
-            @contextmenu="job && contextMenu.open($event, canvasMenu())"
+    <!-- Main column: header / canvas / activity / composer -->
+    <div class="flex min-w-0 flex-1 flex-col">
+      <CreateHeader :form="form" />
+
+      <div
+        data-test="generate-workbench"
+        class="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+      >
+        <!-- Templates popover (relocated from the inspector) -->
+        <div ref="templatesEl" class="absolute right-3 top-3 z-20">
+          <button
+            type="button"
+            data-test="templates-toggle"
+            class="border-edge rounded-control border bg-bench/80 px-2.5 py-1 text-caption text-ink-2 backdrop-blur transition-colors hover:text-ink"
+            :aria-expanded="templatesOpen"
+            @click="templatesOpen = !templatesOpen"
           >
-            <video
-              v-if="job?.resultUrl && job.result?.video_frames"
-              :src="job.resultUrl"
-              class="absolute inset-0 h-full w-full object-contain"
-              autoplay
-              loop
-              controls
-            />
-            <img
-              v-else-if="job?.resultUrl"
-              :src="job.resultUrl"
-              alt=""
-              class="absolute inset-0 h-full w-full object-contain transition-opacity duration-500"
-            />
-            <!-- Live latent preview: a tiny PNG upscaled by CSS; the blur
-                 tightens as denoising progresses and the grain resolves
-                 over it, so the print literally develops on the canvas. -->
-            <img
-              v-if="job && job.status !== 'complete' && job.previewUrl"
-              :src="job.previewUrl"
-              alt=""
-              class="absolute inset-0 h-full w-full object-cover"
-              :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
-            />
-            <!-- The grain canvas paints edge-to-edge (temperature wash), so
-                 once previews exist it thins out with progress to reveal
-                 the forming print underneath. -->
-            <DevelopCanvas
-              v-if="job && job.status !== 'complete'"
-              :seed="job.visualSeed"
-              :progress="jobProgress(job)"
-              :phase="jobPhase(job)"
-              class="absolute inset-0"
-              :style="{
-                opacity: job.previewUrl ? String(Math.max(0.18, 1 - jobProgress(job) * 0.9)) : '1',
-              }"
-            />
+            Templates
+          </button>
+          <div
+            v-if="templatesOpen"
+            class="border-edge absolute right-0 mt-1 w-72 rounded-chrome border bg-bench p-3 shadow-raised"
+          >
+            <TemplatesPanel :form="form" @load="loadTemplate" />
+          </div>
+        </div>
+
+        <!-- Canvas -->
+        <div class="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-desk p-7">
+          <!-- Prepared variations review (prototype: this replaces the canvas) -->
+          <PreparedExpansionBatch
+            v-if="preparedBatch"
+            :batch="preparedBatch"
+            :stale-reasons="preparedStaleReasons"
+            :preparing="expansionRunning"
+            :error="expansionError"
+            :pull-status="expansionPullStatus"
+            :pull-model="expansionMissingModel?.model ?? null"
+            :pull-host-label="expansionMissingModel?.route.label ?? null"
+            :pull-eta-seconds="expansionPullEtaSeconds"
+            :active-host-label="expansionAttemptHostLabel"
+            :submitting="preparedSubmitting"
+            class="ms-fade-up w-full max-w-2xl"
+            @edit="editPreparedPrompt"
+            @remove="removePreparedPrompt"
+            @collapse="collapsePreparedBatch"
+            @regenerate="expandForCurrentBatch(true)"
+            @refresh="expandForCurrentBatch(true)"
+            @discard="discardPreparedBatch"
+            @pull="pullExpansionModel"
+            @retry-expansion="retryExpansionAfterPull"
+            @generate="generate"
+          />
+
+          <!-- Developing / result -->
+          <div v-else-if="job" class="flex min-h-0 flex-col items-center">
             <div
-              v-if="!job"
-              data-test="empty-canvas"
-              class="absolute inset-0 flex items-center justify-center p-6 text-center"
+              ref="previewRegion"
+              data-test="preview-region"
+              class="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
             >
-              <div class="flex max-w-64 flex-col items-center">
+              <div
+                class="relative w-full overflow-hidden rounded-media border border-control-edge bg-print-surface"
+                data-test="preview-frame"
+                :style="previewFrameStyle"
+                @contextmenu="contextMenu.open($event, canvasMenu())"
+              >
+                <video
+                  v-if="job?.resultUrl && job.result?.video_frames"
+                  :src="job.resultUrl"
+                  class="absolute inset-0 h-full w-full object-contain"
+                  autoplay
+                  loop
+                  controls
+                />
+                <img
+                  v-else-if="job?.resultUrl"
+                  :src="job.resultUrl"
+                  alt=""
+                  class="absolute inset-0 h-full w-full object-contain transition-opacity duration-500"
+                />
+                <!-- Live latent preview: a tiny PNG upscaled by CSS; the blur
+                     tightens as denoising progresses and the grain resolves
+                     over it, so the print literally develops on the canvas. -->
+                <img
+                  v-if="job && job.status !== 'complete' && job.previewUrl"
+                  :src="job.previewUrl"
+                  alt=""
+                  class="absolute inset-0 h-full w-full object-cover"
+                  :style="{ filter: `blur(${Math.max(2, 14 - 12 * jobProgress(job))}px)` }"
+                />
+                <!-- The grain canvas paints edge-to-edge (temperature wash), so
+                     once previews exist it thins out with progress to reveal
+                     the forming print underneath. -->
+                <DevelopCanvas
+                  v-if="job && job.status !== 'complete'"
+                  :seed="job.visualSeed"
+                  :progress="jobProgress(job)"
+                  :phase="jobPhase(job)"
+                  class="absolute inset-0"
+                  :style="{
+                    opacity: job.previewUrl
+                      ? String(Math.max(0.18, 1 - jobProgress(job) * 0.9))
+                      : '1',
+                  }"
+                />
+                <!-- Grain is the signature; the ring overlays it with the
+                     percent + stage until the first latent preview arrives,
+                     after which the forming print itself takes over. -->
                 <div
-                  class="border-halide/40 mb-4 flex h-20 w-24 items-center justify-center rounded-media border bg-[color-mix(in_srgb,var(--halide)_7%,transparent)]"
-                  aria-hidden="true"
+                  v-if="job && job.status !== 'complete' && !job.previewUrl"
+                  data-test="develop-progress"
+                  class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3"
                 >
-                  <svg
-                    viewBox="0 0 48 40"
-                    class="h-10 w-12 text-halide/70"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                  >
-                    <rect x="4" y="4" width="40" height="32" rx="1" />
-                    <circle cx="33" cy="13" r="3" />
-                    <path d="m9 31 10-11 7 7 5-5 8 9" />
-                  </svg>
+                  <ProgressRing :value="jobProgress(job) * 100" :size="96" show-label />
+                  <span class="edge-code text-safelight">
+                    {{
+                      job.status === "finishing"
+                        ? `fixing — ${job.stage ?? "finishing"}…`
+                        : job.status === "loading"
+                          ? "loading model…"
+                          : "developing…"
+                    }}
+                  </span>
                 </div>
-                <div class="font-display text-display-sm font-semibold text-ink">No print yet</div>
-                <p class="mt-1 text-caption text-ink-2">
-                  Choose a model, describe your print, then generate.
-                </p>
+                <div
+                  v-if="job && (job.status === 'denoising' || job.status === 'finishing')"
+                  class="edge-code absolute bottom-2 left-3"
+                >
+                  <template v-if="job.status === 'denoising'">
+                    {{ job.step }}/{{ job.total }}
+                  </template>
+                  <template v-else>Fixing — {{ job.stage ?? "finishing" }}…</template>
+                </div>
               </div>
             </div>
-            <div
-              v-if="job && (job.status === 'denoising' || job.status === 'finishing')"
-              class="edge-code absolute bottom-2 left-3"
-            >
-              <template v-if="job.status === 'denoising'">{{ job.step }}/{{ job.total }}</template>
-              <template v-else>Fixing — {{ job.stage ?? "finishing" }}…</template>
+
+            <div class="edge-code mt-2 max-w-full truncate" :title="edgeCode">{{ edgeCode }}</div>
+
+            <!-- Batch dots -->
+            <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
+              <span
+                v-for="(s, i) in siblings"
+                :key="i"
+                class="data-mono text-body"
+                :class="siblingDot(s)"
+                :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
+                :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
+              >
+                {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
+              </span>
+              <span class="edge-code ml-1">
+                {{ siblings.filter((s) => s.status === "complete").length }} of
+                {{ siblings.length }}
+              </span>
             </div>
+
+            <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">
+              {{ job.error }}
+            </p>
           </div>
-        </div>
 
-        <div v-if="job" class="edge-code mt-2 truncate" :title="edgeCode">{{ edgeCode }}</div>
-
-        <!-- Batch dots -->
-        <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
-          <span
-            v-for="(s, i) in siblings"
-            :key="i"
-            class="data-mono text-body"
-            :class="siblingDot(s)"
-            :title="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
-            :aria-label="`Variation ${i + 1} of ${siblings.length}: ${s.status}${s.error ? `. ${s.error}` : ''}`"
-          >
-            {{ s.status === "complete" ? "◉" : s.status === "error" ? "◉" : "◎" }}
-          </span>
-          <span class="edge-code ml-1">
-            {{ siblings.filter((s) => s.status === "complete").length }} of {{ siblings.length }}
-          </span>
-        </div>
-
-        <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">{{ job.error }}</p>
-      </div>
-
-      <!-- Composer -->
-      <div
-        data-test="generate-composer"
-        class="mt-4 shrink-0 rounded-chrome border border-control-edge bg-bench p-3 transition-colors duration-100 focus-within:border-safelight"
-      >
-        <textarea
-          ref="promptEl"
-          v-model="form.prompt"
-          data-selectable
-          rows="2"
-          aria-label="Prompt"
-          placeholder="Describe the print — a lighthouse at dusk, kodak portra…"
-          class="w-full resize-none overflow-x-hidden bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
-          @keydown="onComposerKeydown"
-          @input="
-            cycler.reset();
-            growPrompt();
-          "
-        />
-        <div class="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
-          <ExpandControl
-            ref="expandControl"
-            :prompt="form.prompt"
-            :batch-size="effectiveBatchSize"
-            :running="expansionRunning"
-            :host-label="expansionHostLabel"
-            :can-undo="quickExpansionOriginal !== null"
-            :blocked="!!preparedBatch && effectiveBatchSize === 1"
-            @expand="expandForCurrentBatch"
-            @restore="restoreQuickExpansion"
+          <!-- Empty -->
+          <EmptyStateBlock
+            v-else
+            data-test="empty-canvas"
+            brand
+            icon="image"
+            headline="Your print develops here"
+            guidance="Describe an image below, pick a look, and press Generate. Everything runs on your own machine."
           />
-          <div class="flex min-w-0 items-center gap-3">
-            <span
-              v-if="preprocessingStatus"
-              class="truncate text-caption text-ink-3"
-              data-test="preprocessing-status"
-            >
-              {{ preprocessingStatus }}
-            </span>
-            <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
-            <button
-              v-if="effectiveBatchSize === 1"
-              type="button"
-              data-test="generate-button"
-              class="h-9 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105 active:translate-y-px disabled:opacity-60"
-              :disabled="!form.prompt.trim() || !form.model || chainReject || !!preparedBatch"
-              @click="generate"
-            >
-              {{ buttonLabel }}
-              <kbd class="kbd-hint ml-1.5 opacity-80">{{ shortcutLabel("↩") }}</kbd>
-            </button>
-          </div>
         </div>
+
+        <!-- Batch-1 expansion status (prepared batches carry their own inline
+             surfaces; these are the composer-level ones). -->
         <div
           v-if="expansionError && !preparedBatch && !expansionMissingModel"
           role="alert"
-          class="border-stop/45 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
+          class="border-stop/45 mx-5 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
         >
           <span>{{ expansionError }}</span>
         </div>
@@ -1627,138 +1500,52 @@ onBeforeUnmount(() => {
           :error="expansionError"
           :status="expansionPullStatus"
           :eta-seconds="expansionPullEtaSeconds"
+          class="mx-5 mb-2"
           @pull="pullExpansionModel"
           @retry-expansion="retryExpansionAfterPull"
         />
-        <PreparedExpansionBatch
-          v-if="preparedBatch"
-          :batch="preparedBatch"
-          :stale-reasons="preparedStaleReasons"
-          :preparing="expansionRunning"
-          :error="expansionError"
-          :pull-status="expansionPullStatus"
-          :pull-model="expansionMissingModel?.model ?? null"
-          :pull-host-label="expansionMissingModel?.route.label ?? null"
-          :pull-eta-seconds="expansionPullEtaSeconds"
-          :active-host-label="expansionAttemptHostLabel"
-          :submitting="preparedSubmitting"
-          @edit="editPreparedPrompt"
-          @remove="removePreparedPrompt"
-          @collapse="collapsePreparedBatch"
-          @regenerate="expandForCurrentBatch(true)"
-          @refresh="expandForCurrentBatch(true)"
-          @discard="discardPreparedBatch"
-          @pull="pullExpansionModel"
-          @retry-expansion="retryExpansionAfterPull"
+
+        <ActivityStrip />
+
+        <ComposerCard
+          ref="composerRef"
+          data-test="generate-composer"
+          class="shrink-0"
+          :form="form"
+          :effective-batch-size="effectiveBatchSize"
+          :expansion-running="expansionRunning"
+          :expansion-host-label="expansionHostLabel"
+          :can-undo="quickExpansionOriginal !== null"
+          :prepared-blocked="!!preparedBatch && effectiveBatchSize === 1"
+          :has-prepared="!!preparedBatch"
+          :chain-reject="chainReject"
+          :button-label="buttonLabel"
+          :estimate-request="estimateRequest"
+          :estimate-target="estimateTarget"
+          :preprocessing-status="preprocessingStatus"
+          :history="promptHistory"
           @generate="generate"
+          @expand="expandForCurrentBatch()"
+          @restore="restoreQuickExpansion"
         />
       </div>
     </div>
 
-    <!-- Inspector. overflow-x-hidden is load-bearing: with only overflow-y
-         set, any child momentarily wider than the 320px column during a
-         window resize computes overflow-x to auto and grows a horizontal
-         scrollbar under the prompt area. -->
-    <aside class="border-edge overflow-x-hidden overflow-y-auto border-l bg-bench p-4">
-      <HostSelector />
-      <div class="mb-2 flex items-center gap-2">
-        <span class="edge-code">Model</span>
-        <div class="border-edge h-px flex-1 border-t" />
-      </div>
-      <div ref="pickerEl" class="relative">
-        <button
-          type="button"
-          :aria-expanded="pickerOpen"
-          class="border-edge flex min-h-9 w-full items-center justify-between gap-2 rounded-control border bg-bath px-2 py-1.5 text-body text-ink"
-          @click="pickerOpen = !pickerOpen"
-        >
-          <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-            selectedModel?.name ?? "Choose a model"
-          }}</span>
-          <span v-if="selectedModel?.disk_usage_bytes" class="data-mono shrink-0 text-ink-3">
-            {{ formatGB(selectedModel.disk_usage_bytes) }}
-          </span>
-        </button>
-        <div
-          v-if="pickerOpen"
-          data-test="model-picker-menu"
-          class="border-edge absolute z-10 mt-1 max-h-72 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
-        >
-          <template v-for="[family, list] in pickerFamilies" :key="family">
-            <div class="edge-code px-2 pt-2 pb-1">{{ family.toUpperCase() }}</div>
-            <button
-              v-for="m in list"
-              :key="m.name"
-              type="button"
-              class="flex w-full items-start gap-2 px-2 py-1.5 text-left text-body text-ink-2 hover:bg-bath hover:text-ink"
-              @click="pickModel(m)"
-            >
-              <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
-              <span class="min-w-0 flex-1">
-                <span
-                  data-test="model-option-name"
-                  class="block break-all text-ink"
-                  :title="m.name"
-                >
-                  {{ m.name }}
-                </span>
-                <span
-                  v-if="availabilityTag(m)"
-                  data-test="model-availability"
-                  class="edge-code mt-0.5 block break-all whitespace-normal"
-                >
-                  {{ availabilityTag(m) }}
-                </span>
-              </span>
-              <span
-                class="mt-2 h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
-                :title="m.is_loaded ? 'On GPU' : ''"
-              />
-            </button>
-          </template>
-          <button
-            type="button"
-            data-test="browse-catalog"
-            class="border-edge flex w-full items-center border-t px-2 py-2 text-left text-body text-halide hover:bg-bath"
-            @click="
-              pickerOpen = false;
-              void router.push(caps.supportsVideo ? '/models?type=video' : '/models');
-            "
-          >
-            Browse all models →
-          </button>
-        </div>
-      </div>
-      <p v-if="stickyHostMissingModel" class="mt-1.5 text-caption text-ink-3">
-        Not on {{ stickyHostMissingModel }} — will download there.
-      </p>
+    <!-- Inspector (fixed 290px) -->
+    <InspectorPanel
+      :form="form"
+      :last-seed="generation.lastSeedUsed"
+      @open-advanced="advancedOpen = true"
+    />
 
-      <ParamPanel
-        :form="form"
-        :last-seed="generation.lastSeedUsed"
-        :upscalers="models.upscalers"
-        class="mt-5"
-      />
-      <SourceImageWell :form="form" />
-      <LoraStack
-        v-if="caps.supportsLora"
-        :form="form"
-        :model="form.model"
-        @append-word="appendPromptWord"
-      />
-      <TemplatesPanel :form="form" @load="loadTemplate" />
-    </aside>
-
-    <!-- The aside scrolls, so its resize handle lives on the (relative) grid
-         container, pinned to the column boundary and straddling the border. -->
-    <PanelResizeHandle
-      class="absolute inset-y-0 z-10 translate-x-1/2"
-      :style="{ right: `${asideWidth}px` }"
-      label="Resize inspector"
-      @resize="onAsideResize"
-      @commit="onAsideCommit"
-      @reset="onAsideReset"
+    <!-- Advanced drawer -->
+    <AdvancedDrawer
+      :open="advancedOpen"
+      :form="form"
+      :selected-model="selectedModel"
+      :upscalers="models.upscalers"
+      @close="advancedOpen = false"
+      @append-word="appendPromptWord"
     />
 
     <MissingModelDialog

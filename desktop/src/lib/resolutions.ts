@@ -4,6 +4,7 @@
  * manual inputs snap to 16 for the same reason). The manual W/H inputs stay
  * for anything not listed.
  */
+import { ASPECTS, dimsForMp, nearestMp } from "@ui/lib/resolution";
 
 export interface ResolutionPreset {
   label: string;
@@ -124,4 +125,58 @@ export function orientationLabel(
 ): "Landscape" | "Portrait" | "Square" {
   if (width === height) return "Square";
   return width > height ? "Landscape" : "Portrait";
+}
+
+// ── Mold Studio inspector: megapixel + shape projection ─────────────────────
+// The redesigned inspector drives Size with a five-swatch Shape picker (the
+// shared @ui ASPECTS set) and an MP-budget Resolution selector rather than raw
+// W/H. These helpers bridge that @ui vocabulary onto the desktop form, keeping
+// the engines' /16 latent-stride constraint the manual inputs already enforce.
+
+/** /16 latent-stride snap (floored at 64) shared with the manual W/H inputs. */
+function snap16(value: number): number {
+  return Math.max(64, Math.round(value / 16) * 16);
+}
+
+/**
+ * The canonical shape id (from @ui `ASPECTS`) whose ratio matches width/height
+ * within `tolerance` (relative), or null for a size the five swatches can't
+ * represent (e.g. 2:3, 3:2, 21:9). Lets the Shape picker reflect the form's
+ * live dimensions without forcing every bucket onto one of the five shapes.
+ */
+export function aspectIdFor(width: number, height: number, tolerance = 0.075): string | null {
+  if (!(width > 0) || !(height > 0)) return null;
+  const ratio = width / height;
+  let best: { id: string; diff: number } | null = null;
+  for (const aspect of ASPECTS) {
+    const diff = Math.abs(ratio - aspect.ratio) / aspect.ratio;
+    if (!best || diff < best.diff) best = { id: aspect.id, diff };
+  }
+  return best && best.diff <= tolerance ? best.id : null;
+}
+
+/**
+ * Reproject the form's dimensions onto a new megapixel budget at the CURRENT
+ * aspect ratio. Uses @ui `dimsForMp` for the megapixel math, then snaps to the
+ * /16 grid so the result is a runnable size (a no-op on `dimsForMp`'s /64
+ * output, but the constraint the desktop engines actually require).
+ */
+export function applyMp(form: { width: number; height: number }, mp: number): void {
+  if (!(form.width > 0) || !(form.height > 0)) return;
+  const { width, height } = dimsForMp(mp, form.width / form.height);
+  form.width = snap16(width);
+  form.height = snap16(height);
+}
+
+/**
+ * Switch the form to a canonical shape (a swatch id from @ui `ASPECTS`) while
+ * keeping the closest megapixel budget, snapped to /16. Unknown ids are a
+ * no-op, so a custom size the picker can't select never gets clobbered.
+ */
+export function applyAspectId(form: { width: number; height: number }, id: string): void {
+  const aspect = ASPECTS.find((option) => option.id === id);
+  if (!aspect) return;
+  const { width, height } = dimsForMp(nearestMp(form.width, form.height), aspect.ratio);
+  form.width = snap16(width);
+  form.height = snap16(height);
 }
