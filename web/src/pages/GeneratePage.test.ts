@@ -12,6 +12,9 @@ import {
   useNotifications,
 } from "../lib/toasts";
 import { styleHint } from "../lib/stylePresets";
+import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
+import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
+import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { ChainJobDetail, GalleryImage } from "../types";
 
 const entry: GalleryImage = {
@@ -75,6 +78,28 @@ vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: { value: null } }),
 }));
 
+// Create now reads its model list (and routing inputs) from the per-host poll.
+// Canned responses keep the page deterministic and off the network.
+const hostStatusMock = vi.hoisted(() =>
+  vi.fn(
+    async (_host: { id: string }): Promise<Record<string, unknown>> => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 0,
+    }),
+  ),
+);
+const hostModelsMock = vi.hoisted(() =>
+  vi.fn(async (_host: { id: string }): Promise<unknown[]> => []),
+);
+
+vi.mock("../components/machines/hostClient", () => ({
+  hostStatus: hostStatusMock,
+  hostModels: hostModelsMock,
+}));
+
 const RecentGridStub = defineComponent({
   name: "RecentGrid",
   props: {
@@ -85,7 +110,12 @@ const RecentGridStub = defineComponent({
 });
 
 describe("GeneratePage layout and behavior", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    // The routing singleton outlives a test's component; let any poll still in
+    // flight from the previous test land, then discard what it wrote.
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
     localStorage.clear();
     generateFormTesting.resetForTest();
     resetNotifications();
@@ -93,6 +123,9 @@ describe("GeneratePage layout and behavior", () => {
     createChainJobMock.mockClear();
     createChainJobMock.mockResolvedValue({ job_id: "job-1" });
     chainJobDetailRef.value = null;
+    hostStatusMock.mockClear();
+    hostModelsMock.mockClear();
+    hostModelsMock.mockResolvedValue([]);
     vi.stubGlobal("prompt", vi.fn());
   });
 
@@ -456,6 +489,299 @@ describe("GeneratePage layout and behavior", () => {
     expect(
       wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
     ).toMatchObject({ id: "job-1", state: "queued" });
+  });
+});
+
+// ── Multi-host generation routing (spec §08) ────────────────────────────────
+describe("GeneratePage host routing", () => {
+  const flux = {
+    name: "flux2-klein:q4",
+    family: "flux2",
+    description: "Flux.2 Klein Q4",
+    size_gb: 4,
+    default_width: 1024,
+    default_height: 1024,
+    default_steps: 20,
+    default_guidance: 3.5,
+    is_loaded: false,
+    hf_repo: "unsloth/FLUX.2-klein-4B-GGUF",
+    downloaded: true,
+  };
+  const zimage = { ...flux, name: "z-image:bf16", family: "z-image" };
+
+  beforeEach(async () => {
+    // The routing singleton outlives a test's component; let any poll still in
+    // flight from the previous test land, then discard what it wrote.
+    hostRoutingTesting.reset();
+    await flushPromises();
+    hostRoutingTesting.reset();
+    localStorage.clear();
+    generateFormTesting.resetForTest();
+    resetNotifications();
+    submitMock.mockClear();
+    hostStatusMock.mockReset();
+    hostStatusMock.mockResolvedValue({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 0,
+    });
+    hostModelsMock.mockReset();
+    hostModelsMock.mockResolvedValue([]);
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
+  it("submits unrouted when this server is the only machine", async () => {
+    hostModelsMock.mockResolvedValue([flux]);
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    // Third argument is the route — null means "stay on the serving origin".
+    expect(submitMock.mock.calls[0]?.[2]).toBeNull();
+  });
+
+  it("dispatches to the pinned machine with its base URL and key", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([flux]);
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock.mock.calls[0]?.[2]).toEqual({
+      hostId: studio.id,
+      label: "Studio",
+      target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+    });
+  });
+
+  it("refuses to reroute when the pinned machine is unreachable", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([flux]);
+    hostStatusMock.mockImplementation(async (host: { id: string }) => {
+      if (host.id !== ORIGIN_HOST_ID) throw new Error("unreachable");
+      return {
+        version: "test",
+        models_loaded: [],
+        busy: false,
+        uptime_secs: 1,
+        queue_depth: 0,
+      };
+    });
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    const notifications = useNotifications();
+    expect(notifications.toasts.map((t) => t.text).join(" ")).toMatch(
+      /isn't reachable/i,
+    );
+  });
+
+  // An offline pinned machine reports no models, so a model-first check would
+  // blame the model. Name the machine — that's the thing the user can fix.
+  it("blames the unreachable machine, not the empty model list", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostStatusMock.mockImplementation(async (host: { id: string }) => {
+      if (host.id !== ORIGIN_HOST_ID) throw new Error("unreachable");
+      return {
+        version: "test",
+        models_loaded: [],
+        busy: false,
+        uptime_secs: 1,
+        queue_depth: 0,
+      };
+    });
+    hostModelsMock.mockImplementation(async (host: { id: string }) => {
+      if (host.id !== ORIGIN_HOST_ID) throw new Error("unreachable");
+      return [flux];
+    });
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    const notifications = useNotifications();
+    expect(notifications.toasts.map((t) => t.text).join(" ")).toMatch(
+      /isn't reachable/i,
+    );
+    // The generic "Pick a model to start." never fires in its place.
+    expect(wrapper.find("[data-test='composer-submit-error']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("routes Auto to the machine that already holds the model", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    // Only the remote has the weights; the origin is idle but empty.
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [] : [zimage],
+    );
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({ hostId: studio.id });
+  });
+
+  it("offers the union of every ready machine's models under Auto", async () => {
+    addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", AUTO_TARGET_ID);
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
+    );
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    const names = (picker.props("models") as { name: string }[]).map(
+      (m) => m.name,
+    );
+    expect(names.sort()).toEqual(["flux2-klein:q4", "z-image:bf16"]);
+  });
+
+  it("shows only the pinned machine's models", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockImplementation(async (host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
+    );
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    expect(
+      (picker.props("models") as { name: string }[]).map((m) => m.name),
+    ).toEqual(["z-image:bf16"]);
+  });
+
+  // Regression: a persisted model the server no longer has left the <select>
+  // with no matching <option>, which renders BLANK — the picker looked empty
+  // even though models were installed.
+  it("re-homes the form when the persisted model isn't installed", async () => {
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q8";
+    form.state.value.modelFamily = "flux";
+    hostModelsMock.mockResolvedValue([flux]);
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    expect(form.state.value.model).toBe("flux2-klein:q4");
+    expect(
+      wrapper.getComponent({ name: "CreateModelPicker" }).props("model"),
+    ).toBe("flux2-klein:q4");
+  });
+
+  it("leaves the selection alone when the persisted model is installed", async () => {
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.modelFamily = "flux2";
+    hostModelsMock.mockResolvedValue([flux, zimage]);
+
+    mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    expect(form.state.value.model).toBe("flux2-klein:q4");
+  });
+
+  it("keeps the cold-start guide hidden while a machine is still answering", async () => {
+    addHost({ url: "http://studio:7680", name: "Studio" });
+    const deferred: { release: (models: unknown[]) => void } = {
+      release: () => {},
+    };
+    const pendingRemote = new Promise<unknown[]>((resolve) => {
+      deferred.release = resolve;
+    });
+    hostModelsMock.mockImplementation((host: { id: string }) =>
+      host.id === ORIGIN_HOST_ID ? Promise.resolve([]) : pendingRemote,
+    );
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(false);
+
+    deferred.release([]);
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
+  });
+
+  it("says sequences stay on this server when the route points elsewhere", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    localStorage.setItem("mold.composer.mode", "script");
+    hostModelsMock.mockResolvedValue([
+      { ...flux, name: "ltx-2:fp8", family: "ltx2" },
+    ]);
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.find("[data-test='sequence-origin-note']").exists()).toBe(
+      true,
+    );
+  });
+
+  it("routes Most capable to the strongest GPU", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    localStorage.setItem("mold.web.generateTarget.v1", CAPABLE_TARGET_ID);
+    hostModelsMock.mockResolvedValue([flux]);
+    hostStatusMock.mockImplementation(async (host: { id: string }) => ({
+      version: "test",
+      models_loaded: [],
+      busy: false,
+      uptime_secs: 1,
+      queue_depth: 0,
+      gpu_info:
+        host.id === ORIGIN_HOST_ID
+          ? { name: "Apple M3", vram_total_mb: 65536, vram_used_mb: 0 }
+          : {
+              name: "NVIDIA RTX 4090",
+              vram_total_mb: 24576,
+              vram_used_mb: 0,
+              backend: "cuda",
+            },
+    }));
+
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock.mock.calls[0]?.[2]).toMatchObject({ hostId: studio.id });
   });
 });
 

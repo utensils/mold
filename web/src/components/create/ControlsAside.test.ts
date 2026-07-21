@@ -9,12 +9,26 @@ import {
   useGenerateForm,
   __testing__,
 } from "../../composables/useGenerateForm";
-import { addHost, setGenerateTargetId } from "../../lib/hostRegistry";
+import {
+  addHost,
+  getGenerateTargetId,
+  setGenerateTargetId,
+} from "../../lib/hostRegistry";
+import { __testing__ as routingTesting } from "../../composables/useHostRouting";
+import { CAPABLE_TARGET_ID } from "../../lib/hostRouting";
 import type { GenerateFormState } from "../../types";
 
 const pushMock = vi.hoisted(() => vi.fn());
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: pushMock }),
+}));
+
+// The rail's host picker polls every registered machine. Keep the unit under
+// test off the network: no host answers, so rows render from the registry with
+// their pre-poll status.
+vi.mock("../machines/hostClient", () => ({
+  hostStatus: () => Promise.reject(new Error("offline in tests")),
+  hostModels: () => Promise.reject(new Error("offline in tests")),
 }));
 
 function baseForm(
@@ -35,6 +49,7 @@ describe("ControlsAside", () => {
   beforeEach(() => {
     localStorage.clear();
     pushMock.mockClear();
+    routingTesting.reset();
   });
   afterEach(() => __testing__.resetForTest());
 
@@ -151,31 +166,45 @@ describe("ControlsAside", () => {
     expect(last.seed).toBeNull();
   });
 
-  it("defaults the run-on row to this server with no caption", () => {
+  it("collapses the run-on row to this server with no remote machines", () => {
     const wrapper = factory();
     expect(wrapper.get("[data-test='controls-host']").text()).toContain(
-      "this server",
+      "Run on this server",
     );
-    expect(wrapper.find("[data-test='controls-host-note']").exists()).toBe(
-      false,
-    );
+    expect(wrapper.find("[data-test='host-chip']").exists()).toBe(false);
   });
 
-  it("reflects a non-origin generate target with an honest caption", () => {
-    const host = addHost({ url: "http://studio:7680", name: "Studio" });
-    setGenerateTargetId(host.id);
-    const wrapper = factory();
-    expect(wrapper.get("[data-test='controls-host']").text()).toContain(
-      "Studio",
-    );
-    expect(wrapper.get("[data-test='controls-host-note']").text()).toContain(
-      "generation runs on this server for now",
-    );
-  });
-
-  it("opens the machines workspace when the host row is clicked", async () => {
+  it("opens the machines workspace when the collapsed host row is clicked", async () => {
     const wrapper = factory();
     await wrapper.get("[data-test='controls-host']").trigger("click");
     expect(pushMock).toHaveBeenCalledWith("/machines");
+  });
+
+  it("offers the routing menu once a remote machine is registered", async () => {
+    const host = addHost({ url: "http://studio:7680", name: "Studio" });
+    const wrapper = factory();
+    await wrapper.get("[data-test='host-chip']").trigger("click");
+    expect(wrapper.find("[data-test='host-option-auto']").exists()).toBe(true);
+    expect(wrapper.find(`[data-test='host-option-${host.id}']`).exists()).toBe(
+      true,
+    );
+  });
+
+  it("persists a routing pick made from the rail", async () => {
+    addHost({ url: "http://studio:7680", name: "Studio" });
+    const wrapper = factory();
+    await wrapper.get("[data-test='host-chip']").trigger("click");
+    await wrapper.get("[data-test='host-option-capable']").trigger("click");
+    expect(getGenerateTargetId()).toBe(CAPABLE_TARGET_ID);
+  });
+
+  it("names an already-persisted sticky pick on the chip", async () => {
+    const host = addHost({ url: "http://studio:7680", name: "Studio" });
+    setGenerateTargetId(host.id);
+    const wrapper = factory();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-test='host-chip']").text()).toContain(
+      "Run on Studio",
+    );
   });
 });

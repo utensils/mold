@@ -9,6 +9,7 @@ import type {
   SseProgressEvent,
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
+import type { HostRoute } from "../lib/hostRouting";
 
 export interface JobProgress {
   stage: string;
@@ -47,6 +48,13 @@ export interface Job {
    * quiet for a long time, so stale-stream warnings must stay suppressed
    * until this flips. */
   workStarted: boolean;
+  /** Registry id of the host this job was dispatched to, and that host's
+   * label. `null` for submissions that were never routed (single-host web, or
+   * jobs persisted before routing existed) — those ran on the origin. Carried
+   * so the activity strip and the result caption can attribute the print to
+   * the machine that actually rendered it. */
+  hostId: string | null;
+  hostLabel: string | null;
   /** Server-assigned UUID, captured from the first `queued` SSE event.
    * `null` until that event arrives (e.g. between submit and HTTP
    * handshake), and stays `null` against legacy servers that predate
@@ -278,6 +286,7 @@ export interface UseGenerateStream {
   submit: (
     req: GenerateRequestWire | ChainRequestWire,
     decision?: ChainRoutingDecision,
+    route?: HostRoute | null,
   ) => string;
   cancel: (id: string) => void;
   clearDone: () => void;
@@ -326,6 +335,9 @@ interface PersistedJob {
   lastProgressAt?: number;
   /** Optional — pre-queue-stale-fix payloads don't carry workStarted. */
   workStarted?: boolean;
+  /** Optional — pre-routing payloads don't carry a host. */
+  hostId?: string | null;
+  hostLabel?: string | null;
   /** Optional — pre-L3 payloads don't carry a serverId. */
   serverId?: string | null;
 }
@@ -389,6 +401,8 @@ function loadPersistedJobs(raw: string | null): Job[] {
         chain: p.chain,
         lastProgressAt: p.lastProgressAt ?? p.startedAt,
         workStarted: p.workStarted ?? state !== "running",
+        hostId: p.hostId ?? null,
+        hostLabel: p.hostLabel ?? null,
         serverId: p.serverId ?? null,
       };
     });
@@ -420,6 +434,8 @@ function persistJobs(jobs: Job[]) {
       chain: j.chain,
       lastProgressAt: j.lastProgressAt,
       workStarted: j.workStarted,
+      hostId: j.hostId,
+      hostLabel: j.hostLabel,
       serverId: j.serverId,
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
@@ -520,6 +536,7 @@ export const __testing__ = {
 function submitJob(
   req: GenerateRequestWire | ChainRequestWire,
   decision: ChainRoutingDecision = { kind: "single" },
+  route: HostRoute | null = null,
 ): string {
   const id = crypto.randomUUID();
   const controller = new AbortController();
@@ -549,6 +566,8 @@ function submitJob(
       : null,
     lastProgressAt: now,
     workStarted: false,
+    hostId: route?.hostId ?? null,
+    hostLabel: route?.label ?? null,
     serverId: null,
   }) as Job;
   jobs.value = [job, ...jobs.value];
@@ -588,6 +607,7 @@ function submitJob(
         onError: onErrorCommon,
       },
       controller.signal,
+      route?.target,
     );
   } else if (isPrebuiltChainRequest(req)) {
     // Caller bug: a stages-based ChainRequestWire was submitted with a
@@ -613,6 +633,7 @@ function submitJob(
         onError: onErrorCommon,
       },
       controller.signal,
+      route?.target,
     );
   }
 

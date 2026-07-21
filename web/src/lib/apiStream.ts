@@ -14,6 +14,8 @@ export interface PostSseJsonOptions<TBody, TProgress, TComplete> {
   url: string;
   body: TBody;
   signal?: AbortSignal;
+  /** Extra request headers (the routed host's `x-api-key`). */
+  headers?: Record<string, string>;
   handlers: PostSseJsonHandlers<TProgress, TComplete>;
   silentCloseMessage: string;
 }
@@ -34,6 +36,7 @@ export async function postSseJsonStream<TBody, TProgress, TComplete>(
       url: opts.url,
       body: opts.body,
       signal: opts.signal,
+      headers: opts.headers,
       onEvent: (evt) => {
         if (!evt.data) return;
         let parsed: unknown;
