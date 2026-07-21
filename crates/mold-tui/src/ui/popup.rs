@@ -734,6 +734,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 negative_collapsed: false,
+                last_output_path: None,
                 advanced_open: false,
             },
             gallery: crate::app::GalleryState {
