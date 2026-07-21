@@ -184,6 +184,35 @@ describe("LibraryView delete keyboard handling", () => {
     },
   );
 
+  it("still commits the delete when the undo toast is dismissed mid-window", async () => {
+    const { wrapper, gallery } = await mountView();
+    vi.useFakeTimers();
+    try {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", cancelable: true }));
+      await flushPromises();
+      expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["second.png"]);
+
+      // Manually dismiss the undo toast (its ✕ / body click) before the window
+      // lapses. The commit rides an independent timer, so this must NOT strand
+      // a hidden-but-undeleted print — the delete still fires exactly once.
+      const toasts = useToastStore();
+      const undo = toasts.items.at(-1)!;
+      expect(undo.action?.label).toBe("Undo");
+      toasts.dismiss(undo.id);
+      await flushPromises();
+      expect(localGalleryDelete).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(6000);
+      await flushPromises();
+      expect(localGalleryDelete).toHaveBeenCalledWith("first.png");
+      expect(localGalleryDelete).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      wrapper.unmount();
+    }
+  });
+
   it("undo restores the print without a server call", async () => {
     const { wrapper, gallery } = await mountView();
     vi.useFakeTimers();

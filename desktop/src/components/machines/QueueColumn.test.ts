@@ -81,6 +81,42 @@ describe("QueueColumn", () => {
     expect(reorder).toHaveBeenCalledWith("local", "srv-1", 0);
   });
 
+  it("reorders within the queued subset, skipping the running job", async () => {
+    setActivePinia(createPinia());
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const jobs = useJobsStore();
+    // [running, A, B]: server positions count the running job, but the reorder
+    // PATCH indexes among queued jobs only.
+    jobs.queues.local = {
+      hostId: "local",
+      entries: [
+        { id: "run", model: "m", state: "running", started_at_unix_ms: 1, position: 0 },
+        { id: "A", model: "m", state: "queued", started_at_unix_ms: 2, position: 1 },
+        { id: "B", model: "m", state: "queued", started_at_unix_ms: 3, position: 2 },
+      ],
+      paused: null,
+      caps: { canPause: true, canCancelAll: true, canReorder: true },
+      gpuOrdinals: [],
+      error: null,
+    };
+    const reorder = vi.spyOn(jobs, "reorderQueued").mockResolvedValue(true);
+    const wrapper = mount(QueueColumn);
+    await flushPromises();
+
+    // Only the two queued rows expose reorder buttons: index 0 = A, 1 = B.
+    const ups = wrapper.findAll("[data-test='queue-reorder-up']");
+    const downs = wrapper.findAll("[data-test='queue-reorder-down']");
+    expect(ups).toHaveLength(2);
+
+    await ups[1]!.trigger("click"); // move B up
+    expect(reorder).toHaveBeenLastCalledWith("local", "B", 0);
+
+    await downs[0]!.trigger("click"); // move A down
+    expect(reorder).toHaveBeenLastCalledWith("local", "A", 1);
+  });
+
   it("hides reorder controls when the capability is absent", async () => {
     setActivePinia(createPinia());
     const conn = useConnectionStore();

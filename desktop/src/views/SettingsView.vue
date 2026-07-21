@@ -12,7 +12,12 @@ import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
 import ProfilesSection from "../components/settings/ProfilesSection.vue";
 import AdvancedSection from "../components/settings/AdvancedSection.vue";
-import { ACCORDION_SECTIONS, sectionMatchesSearch, type SectionId } from "../lib/settingsSchema";
+import {
+  ACCORDION_SECTIONS,
+  SECTIONS,
+  sectionMatchesSearch,
+  type SectionId,
+} from "../lib/settingsSchema";
 import { useConnectionStore } from "../stores/connection";
 import { useModelStore } from "../stores/models";
 import { useSettingsConfigStore } from "../stores/settingsConfig";
@@ -53,6 +58,18 @@ const visibleSections = computed(() =>
   ACCORDION_SECTIONS.filter(
     (section) => !searching.value || sectionMatchesSearch(query.value, section, advancedKeys.value),
   ),
+);
+
+/**
+ * Hosts is a doorway to the Machines workspace, not an accordion — but it owns
+ * host-scoped engine settings (models_dir, output_dir). Surface the doorway
+ * while searching when the query matches those keys/labels (or "Hosts"), so a
+ * search for "models_dir" / "Output directory" points the user at where those
+ * live instead of returning nothing.
+ */
+const hostsSection = SECTIONS.find((s) => s.id === "hosts")!;
+const hostsMatches = computed(
+  () => searching.value && sectionMatchesSearch(query.value, hostsSection),
 );
 
 /** Search auto-opens every match; otherwise the single manually-opened one. */
@@ -105,13 +122,15 @@ function toggle(id: SectionId): void {
               <AboutSection />
             </CardSurface>
           </section>
-
-          <!-- Hosts live in the Machines workspace — this is the doorway -->
-          <section data-test="hosts-region">
-            <div class="edge-code mb-2.5 uppercase">Hosts</div>
-            <HostsSection />
-          </section>
         </template>
+
+        <!-- Hosts live in the Machines workspace — this is the doorway. It rides
+             at the top normally, and reappears as a search result when the query
+             matches host-owned settings (models_dir / output_dir). -->
+        <section v-if="!searching || hostsMatches" data-test="hosts-region">
+          <div class="edge-code mb-2.5 uppercase">Hosts</div>
+          <HostsSection />
+        </section>
 
         <!-- Everything deeper, collapsed until wanted -->
         <section data-test="all-settings">
@@ -133,7 +152,7 @@ function toggle(id: SectionId): void {
               <component :is="componentFor[s.id]" />
             </AccordionSection>
             <p
-              v-if="searching && visibleSections.length === 0"
+              v-if="searching && visibleSections.length === 0 && !hostsMatches"
               class="text-caption text-ink-3"
               data-test="no-search-results"
             >

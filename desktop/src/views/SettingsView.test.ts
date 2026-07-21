@@ -121,4 +121,19 @@ describe("SettingsView shell", () => {
     await typeSearch(wrapper, "zzznope");
     expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(true);
   });
+
+  it("surfaces the Hosts doorway when a search matches a host-owned setting", async () => {
+    const wrapper = await mountView();
+    // models_dir / output_dir belong to the Hosts section, which is the doorway
+    // card (excluded from the accordions) and hidden while searching.
+    await typeSearch(wrapper, "models_dir");
+    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='stub-hosts']").exists()).toBe(true);
+    // A host-owned match is a real result, not "nothing matches".
+    expect(wrapper.find("[data-test='no-search-results']").exists()).toBe(false);
+
+    // The human label works too.
+    await typeSearch(wrapper, "Output directory");
+    expect(wrapper.find("[data-test='hosts-region']").exists()).toBe(true);
+  });
 });

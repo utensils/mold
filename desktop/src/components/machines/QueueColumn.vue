@@ -56,9 +56,18 @@ async function cancel(row: QueueSurfaceRow) {
   }
 }
 
+/** This job's slot among its host's QUEUED rows — the index space the reorder
+ *  PATCH uses. `entry.position` counts running jobs too, so nudging against it
+ *  is off-by-N (or a no-op) the moment anything on the host is running. */
+function queuedIndexOf(row: QueueSurfaceRow): number {
+  return rows.value
+    .filter((r) => r.hostId === row.hostId && r.entry.state === "queued")
+    .findIndex((r) => r.entry.id === row.entry.id);
+}
+
 /** Nudge a queued job earlier/later; the server clamps out-of-range indices. */
 async function reorder(row: QueueSurfaceRow, delta: number) {
-  const target = Math.max(0, row.entry.position + delta);
+  const target = Math.max(0, queuedIndexOf(row) + delta);
   await jobs.reorderQueued(row.hostId, row.entry.id, target);
 }
 </script>
