@@ -10,11 +10,15 @@ use crate::app::{BackgroundEvent, GenerateParams, InferenceMode};
 
 /// Run a generation request — tries remote first, falls back to local on connection error.
 /// When batch > 1, loops client-side with `batch_size=1` per iteration (matching CLI behavior).
+///
+/// `api_key` carries the per-host key when the Machines generation
+/// target routed this run at a specific registered host.
 pub async fn run_generation(
     server_url: Option<String>,
     params: GenerateParams,
     prompt: String,
     negative_prompt: Option<String>,
+    api_key: Option<String>,
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
     let batch = params.batch;
@@ -42,8 +46,8 @@ pub async fn run_generation(
             let effective_url = iter_params.host.clone().or_else(|| server_url.clone());
 
             let mut fell_through = false;
-            if let Some(url) = effective_url {
-                let client = MoldClient::new(&url);
+            if let Some(ref url) = effective_url {
+                let client = crate::hosts::client_for(url, api_key.as_deref());
                 let req = build_request(&iter_params, &prompt, &negative_prompt);
 
                 match try_server_generate(&client, &req, &tx).await {
@@ -62,10 +66,12 @@ pub async fn run_generation(
 
             if fell_through {
                 if iter_params.inference_mode == InferenceMode::Remote {
-                    let _ = tx.send(BackgroundEvent::Error(
-                        "Server unreachable and mode is set to 'remote'. Switch to 'auto' or 'local'."
-                            .to_string(),
-                    ));
+                    // An explicit target that's down is an error naming the
+                    // host + a concrete fix — never a silent local fallback.
+                    let _ = tx.send(BackgroundEvent::Error(remote_unreachable_message(
+                        iter_params.target_host_name.as_deref(),
+                        effective_url.as_deref(),
+                    )));
                     return;
                 }
                 run_local_generation_single(
@@ -232,6 +238,22 @@ pub async fn auto_pull_model(
             Ok(config)
         }
         Err(e) => Err(format!("Failed to pull '{}': {}", model_name, e)),
+    }
+}
+
+/// Compose the no-fallback error for `InferenceMode::Remote` (spec §11
+/// error pattern: name the thing, name the fix). A Machines-targeted run
+/// carries the host's display name in `GenerateParams.target_host_name`.
+pub(crate) fn remote_unreachable_message(host_name: Option<&str>, url: Option<&str>) -> String {
+    match (host_name, url) {
+        (Some(name), Some(url)) => {
+            format!("Can't reach {name} ({url}). Check the host in Machines.")
+        }
+        (None, Some(url)) => {
+            format!("Can't reach {url}. Check the host in Machines, or switch the mode to 'auto' or 'local'.")
+        }
+        _ => "Server unreachable and mode is set to 'remote'. Switch to 'auto' or 'local'."
+            .to_string(),
     }
 }
 
@@ -714,6 +736,21 @@ mod tests {
         let config = mold_core::Config::default();
         let refs = build_ref_counts(&config);
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn remote_unreachable_message_names_host_and_fix() {
+        // Machines-targeted run: name + URL + the concrete fix (spec §11).
+        assert_eq!(
+            remote_unreachable_message(Some("hal9000"), Some("http://hal9000:7680")),
+            "Can't reach hal9000 (http://hal9000:7680). Check the host in Machines."
+        );
+        // Legacy Remote mode without a Machines target still names the URL.
+        let msg = remote_unreachable_message(None, Some("http://hal9000:7680"));
+        assert!(msg.contains("http://hal9000:7680"), "{msg}");
+        assert!(msg.contains("Machines"), "{msg}");
+        // No URL at all — the old copy survives.
+        assert!(remote_unreachable_message(None, None).contains("Server unreachable"));
     }
 
     #[test]

@@ -198,11 +198,22 @@ fn map_models_key(key: &KeyEvent) -> Action {
     }
 }
 
-/// Machines is a read-only view in this phase (interim queue snapshot) —
-/// no per-row interactions yet, so the only bindings are view switches,
-/// quit, and Esc back to Create.
+/// Key map for the Machines workspace. `j`/`k` move the selection in
+/// whichever pane holds focus (host list or queue lanes — the dispatcher
+/// routes by `MachinesFocus`), Tab toggles panes, Enter sets the sticky
+/// generation target, and the row actions are `c` connect / `d` forget /
+/// `r` refresh / `x` cancel-queued-job (detail focus).
 fn map_machines_key(key: &KeyEvent) -> Action {
     match key.code {
+        KeyCode::Up | KeyCode::Char('k') => Action::Up,
+        KeyCode::Down | KeyCode::Char('j') => Action::Down,
+        KeyCode::Enter => Action::MachinesSetTarget,
+        KeyCode::Tab => Action::FocusNext,
+        KeyCode::BackTab => Action::FocusPrev,
+        KeyCode::Char('c') => Action::MachinesConnect,
+        KeyCode::Char('d') => Action::MachinesForget,
+        KeyCode::Char('r') => Action::MachinesRefresh,
+        KeyCode::Char('x') => Action::MachinesCancelJob,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Esc => Action::SwitchView(View::Create),
         KeyCode::Char('1') => Action::SwitchView(View::Create),
@@ -587,19 +598,32 @@ mod tests {
     }
 
     #[test]
-    fn machines_keys_are_readonly_subset() {
-        // Interim Machines view: workspace switches, quit, Esc-to-Create
-        // only. Row interactions arrive with the real Machines workspace.
-        assert_eq!(
-            map_machines_key(&key(KeyCode::Char('4'))),
-            Action::SwitchView(View::Machines)
-        );
-        assert_eq!(
-            map_machines_key(&key(KeyCode::Esc)),
-            Action::SwitchView(View::Create)
-        );
-        assert_eq!(map_machines_key(&key(KeyCode::Char('q'))), Action::Quit);
-        assert_eq!(map_machines_key(&key(KeyCode::Enter)), Action::None);
-        assert_eq!(map_machines_key(&key(KeyCode::Char('j'))), Action::None);
+    fn machines_key_map_contract() {
+        // The full Machines key→action map. The status bar advertises
+        // exactly these — keep both in sync.
+        for (code, action) in [
+            (KeyCode::Up, Action::Up),
+            (KeyCode::Char('k'), Action::Up),
+            (KeyCode::Down, Action::Down),
+            (KeyCode::Char('j'), Action::Down),
+            (KeyCode::Enter, Action::MachinesSetTarget),
+            (KeyCode::Tab, Action::FocusNext),
+            (KeyCode::BackTab, Action::FocusPrev),
+            (KeyCode::Char('c'), Action::MachinesConnect),
+            (KeyCode::Char('d'), Action::MachinesForget),
+            (KeyCode::Char('r'), Action::MachinesRefresh),
+            (KeyCode::Char('x'), Action::MachinesCancelJob),
+            (KeyCode::Char('q'), Action::Quit),
+            (KeyCode::Esc, Action::SwitchView(View::Create)),
+            (KeyCode::Char('1'), Action::SwitchView(View::Create)),
+            (KeyCode::Char('2'), Action::SwitchView(View::Library)),
+            (KeyCode::Char('3'), Action::SwitchView(View::Models)),
+            (KeyCode::Char('4'), Action::SwitchView(View::Machines)),
+            (KeyCode::Char('5'), Action::SwitchView(View::Settings)),
+        ] {
+            assert_eq!(map_machines_key(&key(code)), action, "{code:?}");
+        }
+        // Unbound keys stay no-ops.
+        assert_eq!(map_machines_key(&key(KeyCode::Char('z'))), Action::None);
     }
 }

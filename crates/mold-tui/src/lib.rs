@@ -8,6 +8,7 @@ mod backend;
 mod event;
 mod gallery_scan;
 mod history;
+mod hosts;
 mod model_info;
 mod palette;
 mod session;
@@ -110,6 +111,9 @@ async fn run_event_loop(
             } else {
                 app.resource_info.refresh_local();
             }
+            // Multi-host telemetry: all registered hosts while Machines
+            // is active, only the generation-target host otherwise.
+            app.tick_host_polling();
             last_resource_refresh = std::time::Instant::now();
         }
 
