@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "mold-mobile"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "libc",
  "objc2-ui-kit",
