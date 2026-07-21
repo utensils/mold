@@ -126,7 +126,7 @@ fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Some(format!("{} images", app.gallery.entries.len()))
     };
-    let block = panel_block(theme, "Gallery", true, hint.as_deref());
+    let block = panel_block(theme, "Library", true, hint.as_deref());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

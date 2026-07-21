@@ -36,7 +36,7 @@ scripts/tui-uat.sh env              # Print MOLD_HOME / MOLD_DB_PATH
 # Screen I/O
 scripts/tui-uat.sh capture          # Print current screen (plain text)
 scripts/tui-uat.sh screenshot [output.png]
-scripts/tui-uat.sh view <1-5|name>  # 1=Generate 2=Gallery 3=Models 4=Queue 5=Settings
+scripts/tui-uat.sh view <1-5|name>  # 1=Create 2=Library 3=Models 4=Machines 5=Settings; 'chain' opens the Create chain composer
 scripts/tui-uat.sh send <key>...
 scripts/tui-uat.sh wait-for <pattern> [timeout]
 scripts/tui-uat.sh assert <pattern>
@@ -82,13 +82,15 @@ This opens a new Ghostty window running `mold tui`. The `--local` flag runs infe
 ### 2. Navigate Views
 
 ```bash
-scripts/tui-uat.sh view generate   # or: view 1
-scripts/tui-uat.sh view gallery    # or: view 2
+scripts/tui-uat.sh view create     # or: view 1 (legacy alias: generate)
+scripts/tui-uat.sh view library    # or: view 2 (legacy alias: gallery)
 scripts/tui-uat.sh view models     # or: view 3
-scripts/tui-uat.sh view settings   # or: view 4
+scripts/tui-uat.sh view machines   # or: view 4 (legacy alias: queue)
+scripts/tui-uat.sh view settings   # or: view 5
+scripts/tui-uat.sh view chain      # Create sub-mode: navigates to Create and presses c
 ```
 
-The `view` command handles the Generate prompt-focus quirk automatically — it detects prompt focus and uses Tab + Escape to reach Nav mode before sending the view key.
+The `view` command handles the Create prompt-focus quirk automatically — it detects prompt focus and uses Tab + Escape to reach Nav mode before sending the view key.
 
 ### 3. Send Keystrokes
 
@@ -139,20 +141,22 @@ scripts/tui-uat.sh quit
 
 | View | Key | Unique landmark | Content |
 |------|-----|----------------|---------|
-| Generate | 1 | `┌ Parameters` or `┌ Prompt` | Prompt, Parameters, Preview, Info, Progress |
-| Gallery | 2 | `┌ Gallery` | Image thumbnails in grid, detail view on Enter |
+| Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt, Parameters, Preview, Info, Progress |
+| Library | 2 | `┌ Library` | Print thumbnails in grid, detail view on Enter |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
-| Settings | 4 | `┌ Settings` | Config values: model, dirs, server, expand |
+| Machines | 4 | `┌ Queue` (interim) | Read-only queue snapshot until the Machines workspace lands |
+| Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme picker + config values |
+| Chain | c (from Create) | `┌ Stages` | Chain composer — a Create sub-mode, Esc returns to compose |
 
 ## Key Bindings Reference
 
-**Global:** Ctrl+C = quit, Alt+1-4 = switch view
+**Global:** Ctrl+C = quit, Alt+1-5 = switch workspace
 
-**Generate (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = randomize seed
+**Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = randomize seed
 
-**Generate (nav mode):** 1-4 = switch view, q = quit, Enter = focus prompt
+**Create (nav mode):** 1-5 = switch workspace, c = chain composer, A = toggle Advanced, q = quit, Enter = focus prompt
 
-**Gallery (grid):** hjkl/arrows = navigate, Enter = detail, e = edit, d = delete, u = upscale, o = open
+**Library (grid):** hjkl/arrows = navigate, Enter = detail, e = edit, d = delete, u = upscale, o = open
 
 **Models:** j/k = navigate, Enter = select, p = pull, r = remove, u = unload, / = filter
 
@@ -160,9 +164,9 @@ scripts/tui-uat.sh quit
 
 ## Known Quirks
 
-1. **Escape from prompt focus**: The `view` command works around Generate's prompt focus by detecting "Esc Nav" in the footer and sending Tab + Escape to reach Nav mode.
+1. **Escape from prompt focus**: The `view` command works around Create's prompt focus by detecting "Esc Nav" in the footer and sending Tab + Escape to reach Nav mode.
 
-2. **First key after Nav mode**: The first character key after entering Generate nav mode may be consumed by a crossterm timing issue. The `view` command retries automatically.
+2. **First key after Nav mode**: The first character key after entering Create nav mode may be consumed by a crossterm timing issue. The `view` command retries automatically.
 
 3. **Session persistence** (since #264): TUI state lives in the SQLite metadata DB at `~/.mold/mold.db` — `settings` table for global TUI prefs (theme, last_model, last_prompt, negative_collapsed), `model_prefs` table for per-model generation parameters (one row per resolved model tag), `prompt_history` table for the prev/next prompt stack. `~/.mold/tui-session.json` and `~/.mold/prompt-history.jsonl` are imported once on first launch and renamed to `.migrated`; they're no longer written. For a clean slate, isolate the DB with `MOLD_DB_PATH=$(mktemp -d)/mold.db scripts/tui-uat.sh launch …` (legacy: deleting `~/.mold/mold.db` also works but wipes the gallery DB too). `MOLD_DB_DISABLE=1` boots the TUI with in-memory-only defaults — useful for verifying the fail-safe fallback.
 
@@ -177,13 +181,13 @@ scripts/tui-uat.sh quit
 ```bash
 trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true' EXIT INT TERM
 scripts/tui-uat.sh launch --local
-scripts/tui-uat.sh view generate
+scripts/tui-uat.sh view create
 scripts/tui-uat.sh assert "Parameters"
 scripts/tui-uat.sh assert "Model"
 scripts/tui-uat.sh assert "Preview"
 scripts/tui-uat.sh screenshot /tmp/generate-view.png
-scripts/tui-uat.sh view gallery
-scripts/tui-uat.sh assert "Gallery"
+scripts/tui-uat.sh view library
+scripts/tui-uat.sh assert "Library"
 scripts/tui-uat.sh view models
 scripts/tui-uat.sh assert "flux2-klein"
 scripts/tui-uat.sh screenshot /tmp/models-view.png
@@ -203,7 +207,7 @@ trap 'scripts/tui-uat.sh cleanup >/dev/null 2>&1 || true; [ -n "${MOLD_HOME:-}" 
 scripts/tui-uat.sh launch --fresh --local
 eval "$(scripts/tui-uat.sh env)"              # exports MOLD_HOME + MOLD_DB_PATH
 scripts/tui-uat.sh theme-set dracula          # cycles + asserts
-scripts/tui-uat.sh view generate
+scripts/tui-uat.sh view create
 scripts/tui-uat.sh send "a test prompt"       # single arg is sent as literal text
 scripts/tui-uat.sh send escape                # exit textarea focus
 scripts/tui-uat.sh send ctrl+c                # quit (writes settings + model_prefs)
@@ -314,7 +318,7 @@ scripts/tui-uat.sh launch --fresh --local
 scripts/tui-uat.sh view settings
 scripts/tui-uat.sh theme-set gruvbox
 scripts/tui-uat.sh db-assert tui.theme gruvbox
-scripts/tui-uat.sh view generate
+scripts/tui-uat.sh view create
 scripts/tui-uat.sh assert "flux2-klein"
 scripts/tui-uat.sh view gallery && scripts/tui-uat.sh assert "Gallery"
 scripts/tui-uat.sh view queue && scripts/tui-uat.sh assert "Queue"

@@ -17,7 +17,7 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Quit,
         (KeyCode::Char('?'), KeyModifiers::NONE)
-            if app.active_view != View::Generate
+            if app.active_view != View::Create
                 || matches!(
                     app.generate.focus,
                     crate::app::GenerateFocus::Parameters | crate::app::GenerateFocus::Navigation
@@ -31,12 +31,11 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     // Alt+number and Alt+arrows for view switching (works even in text fields)
     if key.modifiers.contains(KeyModifiers::ALT) {
         match key.code {
-            KeyCode::Char('1') => return Action::SwitchView(View::Generate),
-            KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
+            KeyCode::Char('1') => return Action::SwitchView(View::Create),
+            KeyCode::Char('2') => return Action::SwitchView(View::Library),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
-            KeyCode::Char('4') => return Action::SwitchView(View::Queue),
+            KeyCode::Char('4') => return Action::SwitchView(View::Machines),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
-            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 return Action::ToggleNegativePrompt;
             }
@@ -46,14 +45,15 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
         }
     }
 
-    // View-specific key mapping
+    // View-specific key mapping. The chain composer is a Create sub-mode,
+    // not a tab — Create routes to it while `create_mode` is Chain.
     match app.active_view {
-        View::Generate => map_generate_key(key, app),
-        View::Gallery => map_gallery_key(key, app),
+        View::Create if app.create_mode == crate::app::CreateMode::Chain => map_chain_key(key, app),
+        View::Create => map_generate_key(key, app),
+        View::Library => map_gallery_key(key, app),
         View::Models => map_models_key(key),
-        View::Queue => map_queue_key(key),
+        View::Machines => map_machines_key(key),
         View::Settings => map_settings_key(key),
-        View::Script => map_script_key(key, app),
     }
 }
 
@@ -92,12 +92,13 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
     // View cycling uses Alt+Left/Right (handled globally above)
     if app.generate.focus == GenerateFocus::Navigation {
         return match key.code {
-            KeyCode::Char('1') => Action::SwitchView(View::Generate),
-            KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+            KeyCode::Char('1') => Action::SwitchView(View::Create),
+            KeyCode::Char('2') => Action::SwitchView(View::Library),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
-            KeyCode::Char('4') => Action::SwitchView(View::Queue),
+            KeyCode::Char('4') => Action::SwitchView(View::Machines),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
-            KeyCode::Char('6') | KeyCode::Char('s') => Action::SwitchView(View::Script),
+            KeyCode::Char('c') => Action::ChainEnter,
+            KeyCode::Char('a') | KeyCode::Char('A') => Action::ToggleAdvanced,
             KeyCode::Char('/') => Action::SearchHistory,
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Down => Action::FocusNext,
@@ -123,12 +124,12 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => return Action::Increment,
             KeyCode::Char('-') | KeyCode::Left => return Action::Decrement,
             KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Char('1') => return Action::SwitchView(View::Generate),
-            KeyCode::Char('2') => return Action::SwitchView(View::Gallery),
+            KeyCode::Char('a') | KeyCode::Char('A') => return Action::ToggleAdvanced,
+            KeyCode::Char('1') => return Action::SwitchView(View::Create),
+            KeyCode::Char('2') => return Action::SwitchView(View::Library),
             KeyCode::Char('3') => return Action::SwitchView(View::Models),
-            KeyCode::Char('4') => return Action::SwitchView(View::Queue),
+            KeyCode::Char('4') => return Action::SwitchView(View::Machines),
             KeyCode::Char('5') => return Action::SwitchView(View::Settings),
-            KeyCode::Char('6') => return Action::SwitchView(View::Script),
             _ => {}
         }
     }
@@ -150,14 +151,13 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Char('d') => Action::DeleteImage,
             KeyCode::Char('o') => Action::OpenFile,
             KeyCode::Char('u') => Action::UpscaleImage,
-            KeyCode::Esc => Action::SwitchView(View::Generate),
+            KeyCode::Esc => Action::SwitchView(View::Create),
             KeyCode::Char('q') => Action::Quit,
-            KeyCode::Char('1') => Action::SwitchView(View::Generate),
-            KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+            KeyCode::Char('1') => Action::SwitchView(View::Create),
+            KeyCode::Char('2') => Action::SwitchView(View::Library),
             KeyCode::Char('3') => Action::SwitchView(View::Models),
-            KeyCode::Char('4') => Action::SwitchView(View::Queue),
+            KeyCode::Char('4') => Action::SwitchView(View::Machines),
             KeyCode::Char('5') => Action::SwitchView(View::Settings),
-            KeyCode::Char('6') => Action::SwitchView(View::Script),
             _ => Action::None,
         },
         GalleryViewMode::Detail => match key.code {
@@ -185,29 +185,28 @@ fn map_models_key(key: &KeyEvent) -> Action {
         KeyCode::Char('u') => Action::UnloadModel,
         KeyCode::Char('/') => Action::FilterModels,
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Esc => Action::SwitchView(View::Generate),
-        KeyCode::Char('1') => Action::SwitchView(View::Generate),
-        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+        KeyCode::Esc => Action::SwitchView(View::Create),
+        KeyCode::Char('1') => Action::SwitchView(View::Create),
+        KeyCode::Char('2') => Action::SwitchView(View::Library),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
-        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('4') => Action::SwitchView(View::Machines),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
-        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
 
-/// Queue is a read-only view in this phase — no per-row interactions yet, so
-/// the only bindings are view switches, quit, and Esc to Generate.
-fn map_queue_key(key: &KeyEvent) -> Action {
+/// Machines is a read-only view in this phase (interim queue snapshot) —
+/// no per-row interactions yet, so the only bindings are view switches,
+/// quit, and Esc back to Create.
+fn map_machines_key(key: &KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Esc => Action::SwitchView(View::Generate),
-        KeyCode::Char('1') => Action::SwitchView(View::Generate),
-        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+        KeyCode::Esc => Action::SwitchView(View::Create),
+        KeyCode::Char('1') => Action::SwitchView(View::Create),
+        KeyCode::Char('2') => Action::SwitchView(View::Library),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
-        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('4') => Action::SwitchView(View::Machines),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
-        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
@@ -219,19 +218,22 @@ fn map_settings_key(key: &KeyEvent) -> Action {
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => Action::Increment,
         KeyCode::Char('-') | KeyCode::Left => Action::Decrement,
         KeyCode::Enter => Action::Confirm,
-        KeyCode::Esc => Action::SwitchView(View::Generate),
+        KeyCode::Esc => Action::SwitchView(View::Create),
         KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('1') => Action::SwitchView(View::Generate),
-        KeyCode::Char('2') => Action::SwitchView(View::Gallery),
+        KeyCode::Char('1') => Action::SwitchView(View::Create),
+        KeyCode::Char('2') => Action::SwitchView(View::Library),
         KeyCode::Char('3') => Action::SwitchView(View::Models),
-        KeyCode::Char('4') => Action::SwitchView(View::Queue),
+        KeyCode::Char('4') => Action::SwitchView(View::Machines),
         KeyCode::Char('5') => Action::SwitchView(View::Settings),
-        KeyCode::Char('6') => Action::SwitchView(View::Script),
         _ => Action::None,
     }
 }
 
-fn map_script_key(key: &KeyEvent, app: &App) -> Action {
+/// Key map for the chain composer — the Create view's Chain sub-mode.
+/// All Script* bindings are unchanged from the former Script tab; only
+/// Esc differs: it exits back to Create's compose mode instead of
+/// switching tabs.
+fn map_chain_key(key: &KeyEvent, app: &App) -> Action {
     use crate::ui::script_composer::ScriptModal;
 
     if app.script.modal.is_open() {
@@ -276,7 +278,7 @@ fn map_script_key(key: &KeyEvent, app: &App) -> Action {
         (KeyCode::Char('i'), KeyModifiers::NONE) => Action::ScriptOpenPromptEditor,
         (KeyCode::Char('f'), KeyModifiers::NONE) => Action::ScriptOpenFramesEditor,
         (KeyCode::Enter, KeyModifiers::NONE) => Action::ScriptSubmit,
-        (KeyCode::Esc, _) => Action::SwitchView(View::Generate),
+        (KeyCode::Esc, _) => Action::ChainExit,
         (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
         _ => Action::None,
     }
@@ -306,7 +308,7 @@ mod tests {
                 KeyCode::Char('d') => Action::DeleteImage,
                 KeyCode::Char('o') => Action::OpenFile,
                 KeyCode::Char('u') => Action::UpscaleImage,
-                KeyCode::Esc => Action::SwitchView(View::Generate),
+                KeyCode::Esc => Action::SwitchView(View::Create),
                 KeyCode::Char('q') => Action::Quit,
                 _ => Action::None,
             },
@@ -394,7 +396,7 @@ mod tests {
     fn gallery_grid_esc_returns_to_generate() {
         assert_eq!(
             gallery_key(KeyCode::Esc, GalleryViewMode::Grid),
-            Action::SwitchView(View::Generate)
+            Action::SwitchView(View::Create)
         );
     }
 
@@ -462,7 +464,7 @@ mod tests {
         assert_eq!(map_models_key(&key(KeyCode::Down)), Action::Down);
         assert_eq!(
             map_models_key(&key(KeyCode::Esc)),
-            Action::SwitchView(View::Generate)
+            Action::SwitchView(View::Create)
         );
     }
 
@@ -499,7 +501,7 @@ mod tests {
         assert_eq!(map_settings_key(&key(KeyCode::Enter)), Action::Confirm);
         assert_eq!(
             map_settings_key(&key(KeyCode::Esc)),
-            Action::SwitchView(View::Generate)
+            Action::SwitchView(View::Create)
         );
     }
 
@@ -512,11 +514,11 @@ mod tests {
     fn settings_view_switch_keys() {
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('1'))),
-            Action::SwitchView(View::Generate)
+            Action::SwitchView(View::Create)
         );
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('2'))),
-            Action::SwitchView(View::Gallery)
+            Action::SwitchView(View::Library)
         );
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('3'))),
@@ -524,7 +526,7 @@ mod tests {
         );
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('4'))),
-            Action::SwitchView(View::Queue)
+            Action::SwitchView(View::Machines)
         );
         assert_eq!(
             map_settings_key(&key(KeyCode::Char('5'))),
@@ -536,7 +538,7 @@ mod tests {
     fn models_view_switch_to_queue_and_settings() {
         assert_eq!(
             map_models_key(&key(KeyCode::Char('4'))),
-            Action::SwitchView(View::Queue)
+            Action::SwitchView(View::Machines)
         );
         assert_eq!(
             map_models_key(&key(KeyCode::Char('5'))),
@@ -568,5 +570,33 @@ mod tests {
         assert!(a1.modifiers.contains(KeyModifiers::ALT));
         let a4 = alt_key(KeyCode::Char('4'));
         assert!(a4.modifiers.contains(KeyModifiers::ALT));
+    }
+
+    // ── Five-workspace IA contract ───────────────────────────
+
+    #[test]
+    fn number_six_is_unbound_in_every_direct_mapper() {
+        // The Script tab is gone — `6` must be a no-op everywhere. The
+        // chain composer is reachable only via `c` (Create) or the palette.
+        assert_eq!(map_settings_key(&key(KeyCode::Char('6'))), Action::None);
+        assert_eq!(map_models_key(&key(KeyCode::Char('6'))), Action::None);
+        assert_eq!(map_machines_key(&key(KeyCode::Char('6'))), Action::None);
+    }
+
+    #[test]
+    fn machines_keys_are_readonly_subset() {
+        // Interim Machines view: workspace switches, quit, Esc-to-Create
+        // only. Row interactions arrive with the real Machines workspace.
+        assert_eq!(
+            map_machines_key(&key(KeyCode::Char('4'))),
+            Action::SwitchView(View::Machines)
+        );
+        assert_eq!(
+            map_machines_key(&key(KeyCode::Esc)),
+            Action::SwitchView(View::Create)
+        );
+        assert_eq!(map_machines_key(&key(KeyCode::Char('q'))), Action::Quit);
+        assert_eq!(map_machines_key(&key(KeyCode::Enter)), Action::None);
+        assert_eq!(map_machines_key(&key(KeyCode::Char('j'))), Action::None);
     }
 }
