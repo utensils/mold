@@ -154,18 +154,28 @@ describe("LoraPicker — multi-LoRA stack", () => {
     expect(w.emitted("append-prompt")?.at(-1)?.[0]).toBe("cinematic style");
   });
 
-  it("clicking the ✕ button on a row removes it from the stack", async () => {
+  it("clicking the remove button on a row removes it from the stack", async () => {
     const w = mountPicker([
       { path: "/loras/cinematic.safetensors", scale: 1.0 },
       { path: "/loras/pixel.safetensors", scale: 0.6 },
     ]);
     await flushPromises();
-    const removeBtns = w.findAll("button").filter((b) => b.text() === "✕");
+    // The control is a kit Icon with no text, so it is addressed by its
+    // accessible name — the spec voice bans emoji glyphs as buttons.
+    const removeBtns = w.findAll("[aria-label='Remove this LoRA']");
     expect(removeBtns).toHaveLength(2);
     await removeBtns[0].trigger("click");
     const last = w.emitted("update:modelValue")?.at(-1)?.[0] as LoraSelection[];
     expect(last).toHaveLength(1);
     expect(last[0].path).toBe("/loras/pixel.safetensors");
+  });
+
+  it("renders row controls as kit icons, never emoji glyphs", async () => {
+    const w = mountPicker([{ path: "/loras/cinematic.safetensors", scale: 1 }]);
+    await flushPromises();
+    expect(w.html()).not.toMatch(
+      /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/u,
+    );
   });
 
   it("uses only explicit up/down buttons for row movement", async () => {

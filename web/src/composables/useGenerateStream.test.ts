@@ -11,7 +11,12 @@ import type {
   SseCompleteEvent,
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
-import type { ChainStreamHandlers, GenerateStreamHandlers } from "../api";
+import type {
+  ChainStreamHandlers,
+  GenerateStreamHandlers,
+  StreamTarget,
+} from "../api";
+import type { HostRoute } from "../lib/hostRouting";
 
 // Capture the most recent handlers passed into `generateStream` /
 // `generateChainStream` so each test can drive the SSE lifecycle (complete /
@@ -19,6 +24,10 @@ import type { ChainStreamHandlers, GenerateStreamHandlers } from "../api";
 // resolve immediately — no network.
 let lastSingleHandlers: GenerateStreamHandlers | null = null;
 let lastChainHandlers: ChainStreamHandlers | null = null;
+// The dispatch target the singleton threaded through — `undefined` means the
+// submission was never routed and lands on the serving origin.
+let lastSingleTarget: StreamTarget | undefined;
+let lastChainTarget: StreamTarget | undefined;
 
 vi.mock("../api", () => ({
   generateStream: vi.fn(
@@ -26,8 +35,10 @@ vi.mock("../api", () => ({
       _req: GenerateRequestWire,
       handlers: GenerateStreamHandlers,
       _signal?: AbortSignal,
+      target?: StreamTarget,
     ) => {
       lastSingleHandlers = handlers;
+      lastSingleTarget = target;
       return Promise.resolve();
     },
   ),
@@ -36,8 +47,10 @@ vi.mock("../api", () => ({
       _req: ChainRequestWire,
       handlers: ChainStreamHandlers,
       _signal?: AbortSignal,
+      target?: StreamTarget,
     ) => {
       lastChainHandlers = handlers;
+      lastChainTarget = target;
       return Promise.resolve();
     },
   ),
@@ -506,5 +519,102 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+  });
+});
+
+describe("useGenerateStream host routing", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    lastSingleTarget = undefined;
+    lastChainTarget = undefined;
+  });
+
+  const studioRoute: HostRoute = {
+    hostId: "studio",
+    label: "Studio",
+    target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+  };
+
+  it("dispatches a single-clip submission to the routed host with its key", () => {
+    const stream = useGenerateStream();
+    stream.submit(singleGen({ frames: 1 }), { kind: "single" }, studioRoute);
+    expect(lastSingleTarget).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+  });
+
+  it("dispatches an auto-promoted chain submission to the routed host", () => {
+    const stream = useGenerateStream();
+    stream.submit(singleGen({ frames: 241 }), chainDecision(), studioRoute);
+    expect(lastChainTarget).toEqual({
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+  });
+
+  it("leaves the target undefined when no route is supplied (origin)", () => {
+    const stream = useGenerateStream();
+    stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    expect(lastSingleTarget).toBeUndefined();
+  });
+
+  it("attributes the job to the host it was routed to", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    const job = stream.jobs.value.find((j) => j.id === id);
+    expect(job?.hostId).toBe("studio");
+    expect(job?.hostLabel).toBe("Studio");
+  });
+
+  it("leaves an unrouted job unattributed rather than guessing", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id);
+    expect(job?.hostId).toBeNull();
+    expect(job?.hostLabel).toBeNull();
+  });
+
+  it("round-trips the host attribution through persistence", () => {
+    const restored = __testing__.loadPersistedJobs(
+      JSON.stringify([
+        {
+          id: "j1",
+          request: singleGen({ frames: 1 }),
+          startedAt: 1,
+          progress: null,
+          result: null,
+          error: null,
+          state: "done",
+          chain: null,
+          hostId: "studio",
+          hostLabel: "Studio",
+        },
+      ]),
+    );
+    expect(restored[0]?.hostId).toBe("studio");
+    expect(restored[0]?.hostLabel).toBe("Studio");
+  });
+
+  it("reads a pre-routing persisted payload as unattributed", () => {
+    const restored = __testing__.loadPersistedJobs(
+      JSON.stringify([
+        {
+          id: "j1",
+          request: singleGen({ frames: 1 }),
+          startedAt: 1,
+          progress: null,
+          result: null,
+          error: null,
+          state: "done",
+          chain: null,
+        },
+      ]),
+    );
+    expect(restored[0]?.hostId).toBeNull();
   });
 });

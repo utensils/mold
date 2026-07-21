@@ -23,6 +23,7 @@ import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
 import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
+import UpscaleSection from "./advanced/UpscaleSection.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
@@ -99,17 +100,23 @@ const showScheduler = computed(
 );
 const showPlacement = computed(() => props.placementGpus.length > 0);
 
-// Sections actually rendered for this family, in template order. Upscale,
-// Output & seed are always present; the rest are capability-gated. Used to
-// pick a sensible default-open section (never a hidden one like Scheduler on
-// a flux model) and to honour `openTo`.
+// Post-generate upscale applies to stills only — the server skips the
+// upscaler whenever the response is a video (`queue.rs`), so video families
+// never see the section.
+const showUpscale = computed(() => !caps.value.supportsVideo);
+
+// Sections that take part in the single-open accordion, in template order.
+// Output & seed is always present; the rest are capability-gated. Used to pick
+// a sensible default-open section (never a hidden one like Scheduler on a flux
+// model) and to honour `openTo`. Upscale is deliberately absent: it is a switch
+// row whose body follows the switch, not the accordion.
 const visibleSections = computed<SectionKey[]>(() => {
   const out: SectionKey[] = [];
   if (showScheduler.value) out.push("scheduler");
   if (caps.value.supportsNegativePrompt) out.push("negative");
   if (caps.value.sourceImageMode === "single") out.push("source");
   if (caps.value.supportsLora) out.push("lora");
-  out.push("upscale", "output");
+  out.push("output");
   if (caps.value.supportsVideo) out.push("video");
   if (showPlacement.value) out.push("placement");
   return out;
@@ -227,13 +234,6 @@ function clearControl() {
 // exactly those families, so it doubles as the suite gate; plain
 // ltx-video keeps just frames/fps/GIF.
 const showLtx2 = computed(() => caps.value.supportsAudio);
-
-// ── Upscale ───────────────────────────────────────────────────────────
-const upscaleOn = computed(() => props.modelValue.upscaleModel.trim() !== "");
-function toggleUpscale(on: boolean) {
-  patch({ upscaleModel: on ? props.modelValue.upscaleModel || "" : "" });
-  if (on) openSection.value = "upscale";
-}
 
 // ── Output & seed: exact size (snap to the 16px grid, like desktop) ───
 function snapDim(v: number): number {
@@ -551,35 +551,11 @@ function resetAdvanced() {
         />
       </AccordionSection>
 
-      <AccordionSection
-        icon="upscale"
-        title="Upscale after generate"
-        :summary="upscaleOn ? 'Higher-res output' : 'Off'"
-        :header-interactive="false"
-        :open="openSection === 'upscale'"
-        data-test="section-upscale"
-      >
-        <template #action>
-          <SwitchToggle
-            :model-value="upscaleOn"
-            label="Upscale after generate"
-            data-test="upscale-toggle"
-            @update:model-value="toggleUpscale"
-          />
-        </template>
-        <div v-if="upscaleOn" class="adv__field">
-          <label class="adv__label">Upscaler model</label>
-          <input
-            class="adv__input"
-            data-test="upscale-model"
-            placeholder="e.g. real-esrgan-x4plus"
-            :value="modelValue.upscaleModel"
-            @input="
-              patch({ upscaleModel: ($event.target as HTMLInputElement).value })
-            "
-          />
-        </div>
-      </AccordionSection>
+      <UpscaleSection
+        v-if="showUpscale"
+        :model-value="modelValue.upscaleModel"
+        @update:model-value="patch({ upscaleModel: $event })"
+      />
 
       <AccordionSection
         icon="output"

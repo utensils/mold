@@ -1,11 +1,38 @@
-import { mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdvancedDrawer from "./AdvancedDrawer.vue";
 import {
   useGenerateForm,
   __testing__,
 } from "../../composables/useGenerateForm";
-import type { GenerateFormState } from "../../types";
+import type { GenerateFormState, ModelInfoExtended } from "../../types";
+
+// The upscale section reads the host's model list. Only upscalers matter here.
+const UPSCALERS: ModelInfoExtended[] = [
+  {
+    name: "real-esrgan-x4plus:fp16",
+    family: "upscaler",
+    size_gb: 0.03,
+    is_loaded: false,
+    last_used: null,
+    hf_repo: "",
+    downloaded: true,
+    default_steps: 0,
+    default_guidance: 0,
+    default_width: 0,
+    default_height: 0,
+    description: "Real-ESRGAN x4+ FP16",
+  } as ModelInfoExtended,
+];
+vi.mock("../../api", () => ({
+  fetchModels: vi.fn(async () => UPSCALERS),
+  fetchCatalogInstalled: vi.fn(async () => ({
+    entries: [],
+    page: 1,
+    page_size: 0,
+    total: 0,
+  })),
+}));
 
 function baseForm(
   overrides: Partial<GenerateFormState> = {},
@@ -26,6 +53,7 @@ function factory(
       stubs: {
         LoraPicker: { template: "<div data-test='lora-picker-stub' />" },
         PlacementPanel: { template: "<div data-test='placement-stub' />" },
+        RouterLink: { template: "<a><slot /></a>" },
       },
     },
   });
@@ -75,6 +103,13 @@ describe("AdvancedDrawer capability matrix", () => {
 
   it("ltx2 exposes the video section", () => {
     expect(sections("ltx2").video).toBe(true);
+  });
+
+  it("offers post-generate upscale for stills but not for video", () => {
+    // The server skips the post-upscaler whenever the response is a video
+    // (queue.rs), so the section must not pretend otherwise.
+    expect(sections("flux").upscale).toBe(true);
+    expect(sections("ltx2").upscale).toBe(false);
   });
 
   it("shows GPU placement only when GPUs are reported", () => {
@@ -361,6 +396,40 @@ describe("AdvancedDrawer interactions", () => {
     };
     expect(swapped.width).toBe(704);
     expect(swapped.height).toBe(1216);
+  });
+
+  it("round-trips 'Upscale after generate' into the generate request", async () => {
+    // The toggle is only honest if the chosen upscaler survives into the wire
+    // request as `upscale_model` — and disappears again when it is turned off.
+    const form = useGenerateForm();
+    const wrapper = mount(AdvancedDrawer, {
+      props: { open: true, modelValue: form.state.value, family: "flux" },
+      global: {
+        stubs: {
+          LoraPicker: { template: "<div />" },
+          PlacementPanel: { template: "<div />" },
+          RouterLink: { template: "<a><slot /></a>" },
+        },
+      },
+    });
+    await flushPromises();
+
+    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    let next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
+      | GenerateFormState
+      | undefined;
+    Object.assign(form.state.value, next);
+    expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
+    expect(form.toRequest().upscale_model).toBe("real-esrgan-x4plus:fp16");
+
+    await wrapper.setProps({ modelValue: { ...form.state.value } });
+    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
+      | GenerateFormState
+      | undefined;
+    Object.assign(form.state.value, next);
+    expect(form.state.value.upscaleModel).toBe("");
+    expect(form.toRequest().upscale_model).toBeUndefined();
   });
 
   it("emits close from Done in the phone sheet", async () => {

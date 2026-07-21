@@ -20,12 +20,8 @@ import { ASPECTS, dimsForMp } from "@ui/lib/resolution";
 import type { GenerateFormState } from "../../types";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
-import {
-  ORIGIN_HOST_ID,
-  getGenerateTargetId,
-  getHost,
-  originHost,
-} from "../../lib/hostRegistry";
+import HostRoutingPicker from "./HostRoutingPicker.vue";
+import { useHostRouting } from "../../composables/useHostRouting";
 
 const props = withDefaults(
   defineProps<{
@@ -58,17 +54,12 @@ function reroll() {
   patch({ seedMode: "random", seed: null });
 }
 
-// Generation target row (spec §08 multi-host, light). The row reflects the
-// chosen target from the host registry (origin by default) and opens Machines
-// on click. Cross-host dispatch from the browser is a follow-up — a non-origin
-// target here is honest that generation still runs on this server for now.
+// Generation target (spec §08 multi-host). The picker owns the routing choice —
+// Auto, Most capable, or a sticky host — and the submit path in GeneratePage
+// resolves the same persisted pick through the same singleton, so what the row
+// claims and where the job lands can't drift apart.
 const router = useRouter();
-// Read once at setup — ControlsAside remounts on returning to Create, so a
-// target changed on the Machines page is picked up on the next visit.
-const targetHost = computed(
-  () => getHost(getGenerateTargetId()) ?? originHost(),
-);
-const targetIsOrigin = computed(() => targetHost.value.id === ORIGIN_HOST_ID);
+const routing = useHostRouting();
 function openMachines() {
   void router?.push("/machines");
 }
@@ -232,29 +223,12 @@ function setSeed(value: number) {
       >
     </button>
 
-    <button
-      type="button"
-      class="controls__host"
-      data-test="controls-host"
-      @click="openMachines"
-    >
-      <span
-        class="controls__dot"
-        :class="{ 'controls__dot--remote': !targetIsOrigin }"
-      />
-      <span class="controls__host-label">Run on {{ targetHost.name }}</span>
-      <span v-if="!targetIsOrigin" class="controls__host-hint">
-        opens machines
-      </span>
-      <Icon name="chevron-right" :size="14" />
-    </button>
-    <p
-      v-if="!targetIsOrigin"
-      class="controls__host-note"
-      data-test="controls-host-note"
-    >
-      generation runs on this server for now
-    </p>
+    <HostRoutingPicker
+      :hosts="routing.hosts.value"
+      :target-id="routing.targetId.value"
+      @select="routing.setTarget"
+      @open-machines="openMachines"
+    />
   </aside>
 </template>
 
@@ -356,61 +330,5 @@ function setSeed(value: number) {
   gap: 8px;
   margin-bottom: 16px;
   cursor: pointer;
-}
-
-.controls__host {
-  width: 100%;
-  border: 0;
-  border-top: 1px solid var(--edge);
-  background: transparent;
-  padding: 14px 0 0;
-  margin-top: 2px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  cursor: pointer;
-  color: var(--ink-2);
-  text-align: left;
-}
-
-.controls__host:hover .controls__host-label {
-  color: var(--rebate);
-}
-
-.controls__host:focus-visible {
-  outline: 2px solid var(--safelight);
-  outline-offset: 2px;
-}
-
-.controls__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--success);
-  flex: 0 0 7px;
-}
-
-.controls__dot--remote {
-  background: var(--halide);
-}
-
-.controls__host-label {
-  font-size: 12px;
-  color: var(--ink-2);
-  flex: 1;
-}
-
-.controls__host-hint {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.controls__host-note {
-  margin: 8px 0 0;
-  font-size: 11px;
-  color: var(--ink-3);
 }
 </style>

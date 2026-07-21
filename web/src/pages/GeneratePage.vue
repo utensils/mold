@@ -32,7 +32,6 @@ import { ASPECTS } from "@ui/lib/resolution";
 import {
   createChainJob,
   deleteGalleryImage,
-  fetchModels,
   fetchPromptHistory,
   imageUrl,
   listGallery,
@@ -59,7 +58,10 @@ import {
   resolveSourceFitTransform,
 } from "../lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
+import { useHostRouting } from "../composables/useHostRouting";
+import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
+import type { HostRoute } from "../lib/hostRouting";
 import type {
   ChainRequestWire,
   ChainStageWire,
@@ -84,10 +86,15 @@ function loadMuted(): boolean {
 const form = useGenerateForm();
 const { status } = useStatusPoll();
 const queue = useQueue();
-const models = ref<ModelInfoExtended[]>([]);
-// Gates the cold-start guide (spec §08 G10): only after the first models load
-// resolves so we never flash the guide while the list is still in flight.
-const modelsLoaded = ref(false);
+const routing = useHostRouting();
+// The model list follows the routing target: a pinned machine shows its own
+// models, Auto / Most capable show the union across ready machines. Single-host
+// installs collapse to exactly the origin's `/api/models`, as before.
+const models = computed<ModelInfoExtended[]>(() => routing.targetModels.value);
+// Gates the cold-start guide (spec §08 G10): only after every listed host's
+// models have settled, so a slow remote can't make Create flash "nothing
+// installed" while the list is still in flight.
+const modelsLoaded = routing.modelsSettled;
 const galleryEntries = ref<GalleryImage[]>([]);
 const promptHistory = ref<string[]>([]);
 const muted = ref(loadMuted());
@@ -210,16 +217,6 @@ const submittedChainJobId = ref<string | null>(null);
 const submittedChainJob = useChainJobStream(submittedChainJobId);
 const submittedChainJobDetail = submittedChainJob.detail;
 
-async function refreshModels() {
-  try {
-    models.value = await fetchModels();
-  } catch (e) {
-    console.error(e);
-  } finally {
-    modelsLoaded.value = true;
-  }
-}
-
 async function refreshGallery() {
   try {
     galleryEntries.value = await listGallery();
@@ -259,26 +256,20 @@ watch(
 );
 
 let galleryTimer: ReturnType<typeof setInterval> | null = null;
-let modelsTimer: ReturnType<typeof setInterval> | null = null;
 
 function startAutoRefresh() {
   stopAutoRefresh();
   galleryTimer = setInterval(() => {
     if (!document.hidden) void refreshGallery();
   }, 10_000);
-  modelsTimer = setInterval(() => {
-    if (!document.hidden) void refreshModels();
-  }, 15_000);
+  // Models refresh on the host-routing poll — one sweep feeds every machine's
+  // model list and queue depth, so Create doesn't duplicate the origin fetch.
 }
 
 function stopAutoRefresh() {
   if (galleryTimer) {
     clearInterval(galleryTimer);
     galleryTimer = null;
-  }
-  if (modelsTimer) {
-    clearInterval(modelsTimer);
-    modelsTimer = null;
   }
 }
 
@@ -333,6 +324,25 @@ const showColdStart = computed(
 function selectModel(model: ModelInfoExtended) {
   form.applyModelDefaults(model);
 }
+
+// The persisted model can name something the routing target doesn't have — it
+// was deleted, or the user pinned a machine that never installed it. A <select>
+// whose value matches no option renders BLANK, which reads as "this server has
+// no models" even when it has several. Re-home the form onto a model that is
+// actually there instead.
+watch(
+  [installedModels, modelsLoaded],
+  () => {
+    if (!modelsLoaded.value) return;
+    const first = installedModels.value[0];
+    if (!first) return;
+    const current = form.state.value.model;
+    if (current && installedModels.value.some((m) => m.name === current))
+      return;
+    form.applyModelDefaults(first);
+  },
+  { immediate: true },
+);
 
 const composerCardRef = ref<InstanceType<typeof ComposerCard> | null>(null);
 
@@ -457,10 +467,13 @@ const resultSrc = computed(() => {
   return `data:image/${r.format};base64,${r.image}`;
 });
 const resultCaption = computed(() => {
-  const r = latestDone.value?.result;
+  const job = latestDone.value;
+  const r = job?.result;
   if (!r) return "";
   const secs = Math.round(r.generation_time_ms / 1000);
-  return `${r.model} · seed ${r.seed_used} · ${secs}s · this server`;
+  // Name the machine that actually rendered it — an unrouted job ran here.
+  const where = job?.hostLabel ?? "this server";
+  return `${r.model} · seed ${r.seed_used} · ${secs}s · ${where}`;
 });
 
 function openLatestResult() {
@@ -613,7 +626,34 @@ function validateSubmit(): boolean {
   return true;
 }
 
+/**
+ * The machine this submission dispatches to.
+ *
+ * `null` means "don't route" — the single-machine case, where requests stay
+ * relative to the serving origin exactly as they always have. `false` means the
+ * user's pick is currently unreachable: a pinned machine that went offline is
+ * an error, never a silent reroute of their print to a different GPU.
+ */
+function resolveSubmitRoute(): HostRoute | null | false {
+  if (!routing.multiHost.value) return null;
+  const route = routing.resolve(form.state.value.model || null);
+  if (!route) {
+    toast(
+      "error",
+      "The machine you picked isn't reachable. Choose another under Run on.",
+    );
+    return false;
+  }
+  return route;
+}
+
 async function onSubmit() {
+  // The route is settled first, and before source preprocessing, for two
+  // reasons: an unreachable pinned machine is the real complaint (its model
+  // list is empty, so a model check first would blame the model instead), and
+  // the upscale pass has to land on the same machine as the render.
+  const route = resolveSubmitRoute();
+  if (route === false) return;
   if (!validateSubmit()) return;
   const decision = chainDecision.value;
   if (decision.kind === "reject") {
@@ -623,7 +663,7 @@ async function onSubmit() {
   if (!(await preprocessSourceIfNeeded())) return;
   await fitStillSourceToRequest();
   const req = form.toRequest();
-  stream.submit(req, decision);
+  stream.submit(req, decision, route);
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
   if (
@@ -633,6 +673,16 @@ async function onSubmit() {
     form.state.value.seed += Math.max(1, form.state.value.batchSize);
   }
 }
+
+// Sequences are submitted as durable chain jobs and followed with an
+// EventSource, which cannot carry a per-host `x-api-key` — so they stay on this
+// server. Say so rather than letting the Run on chip imply otherwise.
+const sequenceIgnoresRouting = computed(
+  () =>
+    routing.multiHost.value &&
+    (routing.resolve(form.state.value.model || null)?.hostId ??
+      ORIGIN_HOST_ID) !== ORIGIN_HOST_ID,
+);
 
 async function onSubmitScript(script: ChainScriptToml) {
   const stages: ChainStageWire[] = script.stage.map((s) => ({
@@ -751,6 +801,10 @@ function discardVariations() {
 }
 
 async function queueVariations() {
+  // One route for the whole review set — siblings of a batch belong together
+  // on one machine.
+  const route = resolveSubmitRoute();
+  if (route === false) return;
   if (!validateSubmit()) return;
   const decision = chainDecision.value;
   if (decision.kind === "reject") {
@@ -765,7 +819,7 @@ async function queueVariations() {
     // prompt — override the base request's prompt rather than re-appending.
     // Each is one print; the batch size drove the variation count, not the
     // per-job image count.
-    stream.submit({ ...base, prompt, batch_size: 1 }, decision);
+    stream.submit({ ...base, prompt, batch_size: 1 }, decision, route);
   }
 }
 
@@ -895,17 +949,15 @@ onMounted(async () => {
     syncPhone();
     phoneQuery.addEventListener?.("change", syncPhone);
   }
-  await refreshModels();
+  // Models arrive from the host-routing poll (every machine, not just this
+  // one); the watcher above homes the form onto one that's actually installed.
+  void routing.refresh();
   try {
     galleryEntries.value = await listGallery();
   } catch (e) {
     console.error(e);
   }
   void refreshHistory();
-  if (!form.state.value.model) {
-    const first = installedModels.value[0];
-    if (first) form.applyModelDefaults(first);
-  }
   window.addEventListener("mold:new-print", onNewPrint);
   startAutoRefresh();
 });
@@ -965,6 +1017,15 @@ onBeforeUnmount(() => {
               <GenerationTemplatesPanel v-model="form.state.value" />
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="composerMode === 'script' && sequenceIgnoresRouting"
+          class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
+          data-test="sequence-origin-note"
+        >
+          Sequences render on this server — the Run on choice applies to single
+          prints.
         </div>
 
         <div

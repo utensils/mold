@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
+import Icon from "@ui/components/Icon.vue";
 import { fetchCatalogInstalled } from "../api";
 import type { CatalogEntryWire, LoraSelection } from "../types";
 import { MAX_LORA_STACK } from "../types";
@@ -200,7 +201,7 @@ function addAnother() {
             :disabled="index === 0"
             @click="moveAt(index, index - 1)"
           >
-            ↑
+            <Icon name="arrow-up" :size="14" />
           </button>
           <button
             type="button"
@@ -209,7 +210,7 @@ function addAnother() {
             :disabled="index === modelValue.length - 1"
             @click="moveAt(index, index + 1)"
           >
-            ↓
+            <Icon name="arrow-down" :size="14" />
           </button>
           <button
             type="button"
@@ -217,7 +218,7 @@ function addAnother() {
             aria-label="Remove this LoRA"
             @click="removeAt(index)"
           >
-            ✕
+            <Icon name="close" :size="14" />
           </button>
         </div>
       </div>

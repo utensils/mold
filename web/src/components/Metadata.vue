@@ -90,7 +90,7 @@ function onCopy(text: string, kind: CopyTarget) {
         class="text-[11px] font-medium text-safelight transition hover:text-safelight"
         @click="onCopy(item.metadata.prompt, 'prompt')"
       >
-        {{ copied === "prompt" ? "copied ✓" : "copy" }}
+        {{ copied === "prompt" ? "copied" : "copy" }}
       </button>
     </div>
     <p

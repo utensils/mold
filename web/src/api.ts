@@ -219,19 +219,39 @@ export interface GenerateStreamHandlers {
   onError: (err: StreamError) => void;
 }
 
+/**
+ * Where a generation stream is dispatched. Omitted = the serving origin (the
+ * single-host case and every non-routed caller). The key travels as the
+ * server's `x-api-key` header — never in the URL.
+ */
+export interface StreamTarget {
+  baseUrl: string;
+  apiKey?: string;
+}
+
+function targetBase(target?: StreamTarget): string {
+  return target?.baseUrl ?? base;
+}
+
+function targetHeaders(target?: StreamTarget): Record<string, string> {
+  return target?.apiKey ? { "x-api-key": target.apiKey } : {};
+}
+
 export async function generateStream(
   req: GenerateRequestWire,
   handlers: GenerateStreamHandlers,
   signal?: AbortSignal,
+  target?: StreamTarget,
 ): Promise<void> {
   await postSseJsonStream<
     GenerateRequestWire,
     SseProgressEvent,
     SseCompleteEvent
   >({
-    url: `${base}/api/generate/stream`,
+    url: `${targetBase(target)}/api/generate/stream`,
     body: req,
     signal,
+    headers: targetHeaders(target),
     handlers,
     silentCloseMessage: "stream closed before completion",
   });
@@ -274,15 +294,17 @@ export async function generateChainStream(
   req: ChainRequestWire,
   handlers: ChainStreamHandlers,
   signal?: AbortSignal,
+  target?: StreamTarget,
 ): Promise<void> {
   await postSseJsonStream<
     ChainRequestWire,
     ChainProgressEvent,
     SseChainCompleteEvent
   >({
-    url: `${base}/api/generate/chain/stream`,
+    url: `${targetBase(target)}/api/generate/chain/stream`,
     body: req,
     signal,
+    headers: targetHeaders(target),
     handlers,
     silentCloseMessage: "stream closed before completion",
   });

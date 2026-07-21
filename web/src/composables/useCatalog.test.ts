@@ -73,6 +73,39 @@ function installFetchMock(opts: { total: number; pageSize: number }) {
   }) as typeof fetch;
 }
 
+/**
+ * Serves a fixed list of pages whose rows carry the given modalities, so a
+ * test can describe "page 1 is all image, page 2 has two video rows" and
+ * exercise the client-side modality filter across page boundaries.
+ */
+function installModalityFetchMock(opts: { pages: string[][] }) {
+  const total = opts.pages.reduce((n, p) => n + p.length, 0);
+  globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+    if (url.startsWith("/api/catalog/families")) {
+      return { ok: true, json: async () => ({ families: [] }) };
+    }
+    if (url.startsWith("/api/catalog/search")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      const page = Number(params.get("page") ?? "1");
+      const rows = opts.pages[page - 1] ?? [];
+      const offset = opts.pages
+        .slice(0, page - 1)
+        .reduce((n, p) => n + p.length, 0);
+      const entries = rows.map((modality, i) => ({
+        ...makePageEntries(1, 1)[0],
+        id: `hf:row-${offset + i}`,
+        name: `Row ${offset + i}`,
+        modality,
+      }));
+      return {
+        ok: true,
+        json: async () => ({ entries, page, page_size: 48, total }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  }) as typeof fetch;
+}
+
 beforeEach(() => {
   __resetCatalogSingletonForTests();
   installFetchMock({ total: 1, pageSize: 48 });
@@ -89,6 +122,18 @@ describe("useCatalog", () => {
     await cat.refresh();
     expect(cat.entries.value.length).toBe(1);
     expect(cat.families.value[0].family).toBe("flux");
+  });
+
+  it("states include_nsfw=false by default so the unchecked box matches the server", async () => {
+    // `GET /api/catalog/search` treats a missing `include_nsfw` as *true*.
+    // Leaving it out of the default filter meant the topbar rendered an
+    // unchecked box over an NSFW-inclusive result set.
+    const cat = useCatalog();
+    await cat.refresh();
+    const searchUrl = (globalThis.fetch as any).mock.calls
+      .map((c: any[]) => c[0] as string)
+      .find((u: string) => u.startsWith("/api/catalog/search"));
+    expect(searchUrl).toContain("include_nsfw=false");
   });
 
   it("setFilter triggers a re-fetch", async () => {
@@ -256,6 +301,65 @@ describe("useCatalog", () => {
   });
 });
 
+describe("useCatalog modality filter", () => {
+  // `GET /api/catalog/search` has no `modality` parameter — Axum drops it
+  // silently, so the Image/Video chips filtered nothing. Every entry does
+  // carry a `modality`, so the filter is applied to the fetched rows.
+  it("narrows visibleEntries to the selected modality", async () => {
+    installModalityFetchMock({ pages: [["image", "video", "image", "video"]] });
+    const cat = useCatalog();
+    cat.setFilter({ modality: "video" });
+    await cat.refresh();
+    expect(cat.entries.value.length).toBe(4);
+    expect(cat.visibleEntries.value.map((e) => e.id)).toEqual([
+      "hf:row-1",
+      "hf:row-3",
+    ]);
+  });
+
+  it("leaves visibleEntries untouched when no modality is selected", async () => {
+    installModalityFetchMock({ pages: [["image", "video"]] });
+    const cat = useCatalog();
+    await cat.refresh();
+    expect(cat.visibleEntries.value.length).toBe(2);
+  });
+
+  it("layers on top of the server-side filters instead of replacing them", async () => {
+    // The regression the user hit was combinational: picking Video alongside
+    // a kind/source must keep sending those to the server and only then
+    // narrow by modality locally.
+    installModalityFetchMock({ pages: [["image", "video"]] });
+    const cat = useCatalog();
+    cat.setFilter({ modality: "video", kind: "lora", source: "civitai" });
+    await cat.refresh();
+    const url = (globalThis.fetch as any).mock.calls
+      .map((c: any[]) => c[0] as string)
+      .find((u: string) => u.startsWith("/api/catalog/search"));
+    expect(url).toContain("kind=lora");
+    expect(url).toContain("source=civitai");
+    expect(url).toContain("include_nsfw=false");
+    expect(cat.visibleEntries.value.map((e) => e.id)).toEqual(["hf:row-1"]);
+  });
+
+  it("resultCount reports the surviving rows while a modality filter is on", async () => {
+    installModalityFetchMock({ pages: [["image", "video", "image"]] });
+    const cat = useCatalog();
+    cat.setFilter({ modality: "video" });
+    await cat.refresh();
+    // The server total (3) describes the unfiltered feed and would overstate
+    // what the grid actually shows.
+    expect(cat.total.value).toBe(3);
+    expect(cat.resultCount.value).toBe(1);
+  });
+
+  it("resultCount reports the server total when no modality filter is on", async () => {
+    installFetchMock({ total: 130, pageSize: 48 });
+    const cat = useCatalog();
+    await cat.refresh();
+    expect(cat.resultCount.value).toBe(130);
+  });
+});
+
 describe("useCatalog infinite scroll", () => {
   it("exposes total and hasMore from the list response", async () => {
     installFetchMock({ total: 130, pageSize: 48 });
@@ -304,6 +408,41 @@ describe("useCatalog infinite scroll", () => {
     await new Promise((r) => setTimeout(r, 300)); // past debounce
     expect(cat.entries.value.length).toBe(48);
     expect(cat.entries.value[0].id).toBe("hf:row-0");
+  });
+
+  it("keeps fetching while a modality filter hides every row of a page", async () => {
+    // Client-side filtering after a paged fetch can hide an entire page. The
+    // grid must not settle on "No models found." while the server still has
+    // pages left — keep pulling until something survives or the feed ends.
+    installModalityFetchMock({
+      pages: [
+        Array(48).fill("image"),
+        Array(48).fill("image"),
+        ["video", "image", "video"],
+      ],
+    });
+    const cat = useCatalog();
+    cat.setFilter({ modality: "video" });
+    await cat.refresh();
+    expect(cat.visibleEntries.value.length).toBe(2);
+    expect(cat.visibleEntries.value.every((e) => e.modality === "video")).toBe(
+      true,
+    );
+  });
+
+  it("stops auto-filling once the feed is exhausted instead of looping", async () => {
+    installModalityFetchMock({
+      pages: [Array(48).fill("image"), Array(20).fill("image")],
+    });
+    const cat = useCatalog();
+    cat.setFilter({ modality: "video" });
+    await cat.refresh();
+    expect(cat.visibleEntries.value.length).toBe(0);
+    expect(cat.hasMore.value).toBe(false);
+    const calls = (globalThis.fetch as any).mock.calls.filter((c: any[]) =>
+      (c[0] as string).startsWith("/api/catalog/search"),
+    );
+    expect(calls.length).toBe(2);
   });
 
   it("concurrent loadMore calls do not double-fetch the same page", async () => {

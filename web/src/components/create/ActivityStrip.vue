@@ -10,8 +10,16 @@ import { computed } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { Job } from "../../composables/useGenerateStream";
+import { ORIGIN_HOST_ID } from "../../lib/hostRegistry";
 
 const props = defineProps<{ jobs: Job[] }>();
+
+/** Which machine a job is running on — omitted when it's this server, so the
+ * single-host case stays uncluttered and a routed job is always attributed. */
+function hostBadge(job: Job): string | null {
+  if (!job.hostId || job.hostId === ORIGIN_HOST_ID) return null;
+  return job.hostLabel ?? job.hostId;
+}
 
 const emit = defineEmits<{
   cancel: [id: string];
@@ -56,7 +64,15 @@ const active = computed(() => running.value.length + queued.value.length > 0);
     >
       <span class="activity__thumb ms-shimmer" aria-hidden="true" />
       <span class="activity__body">
-        <span class="activity__prompt">{{ promptFor(job) }}</span>
+        <span class="activity__prompt">
+          <span
+            v-if="hostBadge(job)"
+            class="activity__host"
+            :data-test="`activity-host-${job.id}`"
+            >{{ hostBadge(job) }}</span
+          >
+          {{ promptFor(job) }}
+        </span>
         <ProgressBar
           :value="percentFor(job) ?? 0"
           tone="accent"
@@ -79,7 +95,15 @@ const active = computed(() => running.value.length + queued.value.length > 0);
         class="activity__pill"
         :data-test="`activity-queued-${job.id}`"
       >
-        <span class="activity__pill-text">{{ promptFor(job) }}</span>
+        <span class="activity__pill-text">
+          <span
+            v-if="hostBadge(job)"
+            class="activity__host"
+            :data-test="`activity-host-${job.id}`"
+            >{{ hostBadge(job) }}</span
+          >
+          {{ promptFor(job) }}
+        </span>
         <button
           type="button"
           class="activity__cancel"
@@ -144,6 +168,20 @@ const active = computed(() => running.value.length + queued.value.length > 0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.activity__host {
+  display: inline-block;
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--halide);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-pill);
+  padding: 1px 6px;
+  margin-right: 5px;
+  vertical-align: middle;
 }
 
 .activity__pct {

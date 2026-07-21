@@ -16,6 +16,8 @@ export interface StreamSseOptions<TBody> {
   url: string;
   body: TBody;
   signal?: AbortSignal;
+  /** Extra request headers — how a cross-host stream carries its `x-api-key`. */
+  headers?: Record<string, string>;
   onEvent: (evt: SseEvent) => void;
   /** Called once with the Response if the server returned a non-2xx. */
   onHttpError?: (res: Response) => void;
@@ -29,6 +31,7 @@ export async function streamSse<TBody>(
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
+      ...opts.headers,
     },
     body: JSON.stringify(opts.body),
     signal: opts.signal,

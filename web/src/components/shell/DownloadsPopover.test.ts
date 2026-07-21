@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import DownloadsPopover from "./DownloadsPopover.vue";
 
 const makeJob = (over: Record<string, unknown> = {}) => ({
@@ -126,5 +126,56 @@ describe("DownloadsPopover", () => {
   it("shows an empty message when there is nothing to show", () => {
     const wrapper = mountPopover({});
     expect(wrapper.text()).toContain("No downloads yet");
+  });
+});
+
+function baseProps() {
+  return {
+    open: true,
+    active: [],
+    queued: [],
+    history: [],
+    etaByJob: {},
+    rateByJob: {},
+  };
+}
+
+describe("DownloadsPopover dismissal", () => {
+  it("closes on Escape from anywhere, not just when focus is inside it", async () => {
+    // The handler used to sit on the <aside>, which never receives key events
+    // because opening the popover doesn't focus it — so Escape did nothing.
+    const w = mount(DownloadsPopover, { props: baseProps() });
+    await flushPromises();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(w.emitted("close")).toBeTruthy();
+    w.unmount();
+  });
+
+  it("closes when clicking outside the panel", async () => {
+    const w = mount(DownloadsPopover, {
+      props: baseProps(),
+      attachTo: document.body,
+    });
+    await flushPromises();
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await flushPromises();
+    expect(w.emitted("close")).toBeTruthy();
+    w.unmount();
+  });
+
+  it("stays open when clicking inside the panel", async () => {
+    const w = mount(DownloadsPopover, {
+      props: baseProps(),
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const panel = w.get("[data-test='downloads-popover']");
+    (panel.element as HTMLElement).dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true }),
+    );
+    await flushPromises();
+    expect(w.emitted("close")).toBeFalsy();
+    w.unmount();
   });
 });

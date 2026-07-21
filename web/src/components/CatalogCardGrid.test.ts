@@ -46,6 +46,9 @@ const baseEntry = {
 
 let mockState: {
   entries: any;
+  visibleEntries: any;
+  resultCount: any;
+  total: any;
   loading: any;
   loadingMore: any;
   hasMore: any;
@@ -63,6 +66,9 @@ beforeEach(() => {
   (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
   mockState = {
     entries: ref([baseEntry]),
+    visibleEntries: ref([baseEntry]),
+    resultCount: ref(1),
+    total: ref<number | null>(1),
     loading: ref(false),
     loadingMore: ref(false),
     hasMore: ref(true),
@@ -76,6 +82,59 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete (globalThis as any).IntersectionObserver;
+});
+
+describe("CatalogCardGrid result count", () => {
+  // The unfiltered feed is checkpoint-heavy, so switching between All and
+  // Models leaves the first ~130 cards byte-identical — the filter applied
+  // but the visible screen did not move, which read as "the chips do
+  // nothing". A count is the one piece of feedback every filter changes.
+  it("reports the count the composable resolved", () => {
+    mockState.resultCount = ref(854);
+    const w = mount(CatalogCardGrid);
+    expect(w.find('[data-testid="catalog-result-count"]').text()).toContain(
+      "854",
+    );
+  });
+
+  it("singularises a one-row result", () => {
+    mockState.resultCount = ref(1);
+    const w = mount(CatalogCardGrid);
+    expect(w.find('[data-testid="catalog-result-count"]').text()).toBe(
+      "1 result",
+    );
+  });
+});
+
+describe("CatalogCardGrid client-side filtering", () => {
+  // The grid renders the modality-filtered view, not the raw fetched page:
+  // rendering `entries` would put image models under the Video chip.
+  it("renders visibleEntries rather than every fetched entry", () => {
+    const video = { ...baseEntry, id: "hf:row-1", modality: "video" };
+    mockState.entries = ref([baseEntry, video]);
+    mockState.visibleEntries = ref([video]);
+    mockState.resultCount = ref(1);
+    const w = mount(CatalogCardGrid);
+    expect(w.findAllComponents({ name: "CatalogCard" }).length).toBe(1);
+  });
+
+  it("does not send the user to a 'Refresh catalog' control that no longer exists", () => {
+    mockState.visibleEntries = ref([]);
+    mockState.resultCount = ref(0);
+    mockState.hasMore = ref(false);
+    const w = mount(CatalogCardGrid);
+    expect(w.text()).toContain("No models found.");
+    expect(w.text()).not.toContain("Refresh catalog");
+  });
+
+  it("shows the empty state when the filter hides every fetched row", () => {
+    mockState.entries = ref([baseEntry]);
+    mockState.visibleEntries = ref([]);
+    mockState.resultCount = ref(0);
+    mockState.hasMore = ref(false);
+    const w = mount(CatalogCardGrid);
+    expect(w.text()).toContain("No models found.");
+  });
 });
 
 describe("CatalogCardGrid infinite scroll", () => {

@@ -74,7 +74,10 @@ type CatalogFilter = Omit<CatalogListParams, "page" | "page_size">;
 let singleton: ReturnType<typeof build> | null = null;
 
 function build() {
-  const filter = ref<CatalogFilter>({ sort: "downloads" });
+  // `include_nsfw` is spelled out because the server defaults a missing one
+  // to true — leaving it unset put the topbar's unchecked box over an
+  // NSFW-inclusive result set.
+  const filter = ref<CatalogFilter>({ sort: "downloads", include_nsfw: false });
   const page = ref(1);
   const entries = ref<CatalogEntryWire[]>([]);
   const total = ref<number | null>(null);
@@ -108,7 +111,60 @@ function build() {
     return entries.value.length % PAGE_SIZE === 0;
   });
 
+  // `modality` is the one filter the server has no parameter for — Axum
+  // drops it, so the Image/Video chips narrowed nothing. Every entry carries
+  // its own `modality` (derived upstream from the family), so it is applied
+  // to the rows we already hold. It is still sent on the request: today the
+  // server ignores it, and the day it grows a `modality` parameter this
+  // becomes a pass-through rather than something to remember to re-wire.
+  const visibleEntries = computed(() => {
+    const m = filter.value.modality;
+    if (!m) return entries.value;
+    return entries.value.filter((e) => e.modality === m);
+  });
+
+  /** Rows the grid actually shows. The server total describes the unfiltered
+   * feed, so it overstates the grid whenever a client-side filter is on. */
+  const resultCount = computed(() => {
+    if (filter.value.modality) return visibleEntries.value.length;
+    if (total.value !== null) return total.value;
+    return entries.value.length;
+  });
+
+  // Bounds `autoFill` so a feed that never yields a matching row can't spin
+  // through every page — the grid settles on its empty state instead.
+  const AUTO_FILL_MAX_PAGES = 10;
+
   let debounceHandle: ReturnType<typeof setTimeout> | null = null;
+
+  /** Fetch the page after the current one. Returns false when there was
+   * nothing left to fetch, so callers can tell progress from exhaustion. */
+  async function fetchNextPage(): Promise<boolean> {
+    if (!hasMore.value) return false;
+    const next = page.value + 1;
+    const list = await fetchCatalogSearch({
+      ...filter.value,
+      page: next,
+      page_size: PAGE_SIZE,
+    });
+    entries.value = [...entries.value, ...list.entries];
+    page.value = next;
+    if (typeof list.total === "number") total.value = list.total;
+    return list.entries.length > 0;
+  }
+
+  /** Client-side filtering can hide a whole page. Keep pulling pages while
+   * the visible set is empty so the user never sees "No models found." over
+   * a feed the server still has rows for. Runs with `loading`/`loadingMore`
+   * still set, so the grid shows its loading state rather than flashing an
+   * empty one. */
+  async function autoFill() {
+    if (!filter.value.modality) return;
+    for (let i = 0; i < AUTO_FILL_MAX_PAGES; i += 1) {
+      if (visibleEntries.value.length > 0 || !hasMore.value) return;
+      if (!(await fetchNextPage())) return;
+    }
+  }
 
   async function refresh() {
     loading.value = true;
@@ -122,6 +178,7 @@ function build() {
       total.value = typeof list.total === "number" ? list.total : null;
       page.value = 1;
       families.value = fams.families;
+      await autoFill();
     } catch (e: unknown) {
       errorMsg.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -134,15 +191,8 @@ function build() {
     if (!hasMore.value) return;
     loadingMore.value = true;
     try {
-      const next = page.value + 1;
-      const list = await fetchCatalogSearch({
-        ...filter.value,
-        page: next,
-        page_size: PAGE_SIZE,
-      });
-      entries.value = [...entries.value, ...list.entries];
-      page.value = next;
-      if (typeof list.total === "number") total.value = list.total;
+      await fetchNextPage();
+      await autoFill();
     } catch (e: unknown) {
       errorMsg.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -321,6 +371,8 @@ function build() {
     filter,
     page,
     entries,
+    visibleEntries,
+    resultCount,
     total,
     hasMore,
     families,
