@@ -1,9 +1,9 @@
 # mold web gallery
 
 A small Vue 3 + Vite + Tailwind v4.2 SPA that serves as the browser-facing
-gallery for [mold](../). It talks to a running `mold serve` via the existing
-`/api/gallery`, `/api/gallery/image/:name`, `/api/gallery/thumbnail/:name`,
-and `DELETE /api/gallery/image/:name` endpoints.
+Mold Studio interface for [mold](../). It talks to the serving `mold serve`
+origin and can connect directly to remembered remote servers from its Machines
+workspace.
 
 ## Quick start
 
@@ -55,6 +55,12 @@ router; the SPA fallback handles everything else and reuses
 
 ## What you get
 
+- **Multi-host Machines workspace** with direct per-host status and detail
+  views. Current mDNS-enabled servers expose peers visible on the server's LAN
+  through `GET /api/discovery/peers`; the browser feature-detects this via
+  `discovery.can_browse`, test-connects each selection directly, and dedupes by
+  stable instance UUID. Older servers keep Local network disabled without a
+  probe.
 - **Feed ↔ Grid toggle** in the header, persisted in `localStorage`.
   **Feed** (default) is a Tumblr-style single-column stream — full-bleed
   edge-to-edge cards on mobile, constrained reading width on desktop,
@@ -103,5 +109,5 @@ router; the SPA fallback handles everything else and reuses
 - Vite 7
 - Tailwind CSS v4.2 via `@tailwindcss/vite`
 
-No router, no state library — the feature is small enough that component
-refs and `watch` are plenty.
+Vue Router provides the five-workspace shell; composables and module-singleton
+stores provide state without a separate state-library dependency.

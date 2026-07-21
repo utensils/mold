@@ -1226,6 +1226,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_peers_is_registered_and_excludes_the_serving_instance() {
+        let mut state = AppState::for_tests();
+        state.instance_id = std::sync::Arc::new("self-instance".to_string());
+        state.discovery.set_can_browse(true);
+        *state.discovery.peers.write().unwrap() = vec![
+            mold_core::DiscoveryPeer {
+                name: "this-server-7680".to_string(),
+                url: "http://192.168.1.10:7680".to_string(),
+                host: "192.168.1.10".to_string(),
+                port: 7680,
+                version: Some("0.20.2".to_string()),
+                auth_required: false,
+                instance_id: Some("self-instance".to_string()),
+                is_this_machine: true,
+            },
+            mold_core::DiscoveryPeer {
+                name: "studio-7680".to_string(),
+                url: "http://192.168.1.20:7680".to_string(),
+                host: "192.168.1.20".to_string(),
+                port: 7680,
+                version: Some("0.20.1".to_string()),
+                auth_required: true,
+                instance_id: Some("studio-instance".to_string()),
+                is_this_machine: false,
+            },
+        ];
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::get("/api/discovery/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let peers = body.as_array().expect("peer array");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0]["instance_id"], "studio-instance");
+        assert_eq!(peers[0]["auth_required"], true);
+        assert_eq!(peers[0]["is_this_machine"], false);
+    }
+
+    #[tokio::test]
+    async fn discovery_capability_and_endpoint_are_gated_when_browser_is_unavailable() {
+        let app = app_empty();
+        let capability = app
+            .clone()
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            json_body(capability).await["discovery"]["can_browse"],
+            false
+        );
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/discovery/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn capabilities_reports_queue_controls_available() {
         let app = app_empty();
         let resp = app
@@ -3307,6 +3380,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3371,6 +3445,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3638,6 +3713,7 @@ mod tests {
         cache.insert(Box::new(engine), 0);
         let state = AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
@@ -3957,6 +4033,23 @@ mod tests {
                 auth_state,
                 crate::auth::inject_auth_state,
             ))
+    }
+
+    #[tokio::test]
+    async fn discovery_peers_requires_the_configured_api_key() {
+        let keys = std::collections::HashSet::from(["test-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = app_with_auth(auth);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/discovery/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

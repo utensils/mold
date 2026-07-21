@@ -209,11 +209,12 @@ in
       default = true;
       description = ''
         Advertise the server on the local network as a `_mold._tcp` mDNS/DNS-SD
-        service so clients (`mold server discover`, the desktop app) can find it
-        automatically. Only takes effect when the server binds a non-loopback
-        address; requires a package built with the `mdns` cargo feature (the
-        flake's default packages are). Set to false to set MOLD_MDNS=0 and stay
-        silent on the LAN. Note: mold runs its own mDNS responder — hosts also
+        service and browse peers for the web Machines workspace. Advertising
+        only takes effect when the server binds a non-loopback address; browsing
+        also works for loopback binds. Requires a package built with the `mdns`
+        cargo feature (the flake's default packages are). Set to false to set
+        MOLD_MDNS=0 and disable both behaviors. Note: mold runs its own mDNS
+        responder — hosts also
         running Avahi share UDP 5353 via SO_REUSEPORT, which works but means
         both daemons answer their own registrations.
       '';
