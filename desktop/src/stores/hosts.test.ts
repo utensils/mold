@@ -75,6 +75,7 @@ function settings(overrides: Record<string, unknown> = {}) {
     saveRemoteOutputs: true,
     navRailWidth: null,
     generateParamsWidth: null,
+    sidebarCollapsed: false,
     ...overrides,
   };
 }

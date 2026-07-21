@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { OutputMetadata, ServerStatus } from "../lib/api/types";
+import { useGenerationStore } from "./generation";
 import { useHostsStore, type HostView } from "./hosts";
 import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
@@ -28,6 +29,9 @@ export interface QueueEntry {
 export interface HostQueueCaps {
   canPause: boolean;
   canCancelAll: boolean;
+  /** Whether queued jobs can be reordered via `PATCH /api/queue/:id {position}`
+   *  (older servers never report it → false). */
+  canReorder: boolean;
 }
 
 export interface HostQueueSnapshot {
@@ -45,6 +49,24 @@ export interface HostQueueSnapshot {
 export interface EnrichedQueueEntry extends QueueEntry {
   mine: boolean;
   clientId: number | null;
+}
+
+/**
+ * One row of the unified cross-host queue surface. Both the Machines queue
+ * column and the Create activity strip render this exact shape so the two
+ * surfaces never disagree about what is running or queued (G2).
+ */
+export interface QueueSurfaceRow {
+  hostId: string;
+  hostLabel: string;
+  entry: EnrichedQueueEntry;
+  /** Whether this host supports queued-job reordering (capability-gated). */
+  canReorder: boolean;
+}
+
+/** Running rows sort before queued; within a state, by queue position. */
+function queueSurfaceRank(entry: EnrichedQueueEntry): number {
+  return entry.state === "running" ? 0 : 1;
 }
 
 /**
@@ -76,6 +98,33 @@ export const useJobsStore = defineStore("jobs", {
     queues: {} as Record<string, HostQueueSnapshot>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
   }),
+  getters: {
+    /**
+     * Unified running+queued rows across every connected host, joined with
+     * this app's own jobs. Running rows first, then by queue position. The
+     * single source both the Machines queue column and the Create activity
+     * strip render, so the two surfaces show identical state (G2).
+     */
+    queueSurface(state): QueueSurfaceRow[] {
+      const hosts = useHostsStore();
+      const generation = useGenerationStore();
+      const primaryId = hosts.primaryHost?.id ?? "local";
+      const rows: QueueSurfaceRow[] = [];
+      for (const host of hosts.all) {
+        const snap = state.queues[host.id];
+        if (!snap) continue;
+        const canReorder = snap.caps?.canReorder ?? false;
+        for (const entry of enrichQueueEntries(snap.entries, host.id, generation.jobs, primaryId)) {
+          rows.push({ hostId: host.id, hostLabel: host.label, entry, canReorder });
+        }
+      }
+      return rows.sort(
+        (a, b) =>
+          queueSurfaceRank(a.entry) - queueSurfaceRank(b.entry) ||
+          a.entry.position - b.entry.position,
+      );
+    },
+  },
   actions: {
     targetFor(host: HostView): ApiTarget | null {
       return host.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
@@ -90,13 +139,13 @@ export const useJobsStore = defineStore("jobs", {
         // change across server upgrades.
         const caps =
           previous?.caps ??
-          (await apiJsonTo<{ queue?: { can_pause?: boolean; can_cancel_all?: boolean } }>(
-            target,
-            "/api/capabilities",
-          ).then(
+          (await apiJsonTo<{
+            queue?: { can_pause?: boolean; can_cancel_all?: boolean; can_reorder?: boolean };
+          }>(target, "/api/capabilities").then(
             (c) => ({
               canPause: c.queue?.can_pause === true,
               canCancelAll: c.queue?.can_cancel_all === true,
+              canReorder: c.queue?.can_reorder === true,
             }),
             () => null,
           ));
@@ -106,7 +155,7 @@ export const useJobsStore = defineStore("jobs", {
         ]);
         this.queues[host.id] = {
           hostId: host.id,
-          entries: listing.entries,
+          entries: listing.entries ?? [],
           paused: status.queue_paused ?? null,
           caps,
           gpuOrdinals: (status.gpus ?? []).map((g) => g.ordinal),
@@ -180,6 +229,32 @@ export const useJobsStore = defineStore("jobs", {
         return false;
       } finally {
         // Server truth over local reordering, on success and failure alike.
+        await this.refresh();
+      }
+    },
+    /**
+     * Move a queued job up or down its host's queue via `PATCH /api/queue/:id`
+     * with a 0-based `position`. Never optimistic — the queue re-syncs from the
+     * server afterwards whether the move succeeds or the job started mid-flight.
+     */
+    async reorderQueued(hostId: string, jobId: string, position: number): Promise<boolean> {
+      const toasts = useToastStore();
+      try {
+        await this.queueControl(hostId, `/api/queue/${encodeURIComponent(jobId)}`, "PATCH", {
+          position,
+        });
+        return true;
+      } catch (err) {
+        const status = (err as { status?: number } | null)?.status ?? 0;
+        const message =
+          status === 404
+            ? "That job is no longer queued."
+            : status === 409
+              ? "Job already started — only queued jobs can be reordered."
+              : String(err);
+        toasts.push(message, "error");
+        return false;
+      } finally {
         await this.refresh();
       }
     },

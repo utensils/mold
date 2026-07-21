@@ -49,6 +49,9 @@ pub struct ExpandConfig {
     pub batch_prompt: Option<String>,
     /// Per-family overrides for word limits and style notes.
     pub family_overrides: HashMap<String, FamilyOverride>,
+    /// Optional visual style to weave into the expansion (per-request, set by
+    /// the route handler from `ExpandRequest::style` — never from settings).
+    pub style: Option<String>,
 }
 
 impl Default for ExpandConfig {
@@ -63,6 +66,7 @@ impl Default for ExpandConfig {
             system_prompt: None,
             batch_prompt: None,
             family_overrides: HashMap::new(),
+            style: None,
         }
     }
 }
@@ -150,6 +154,7 @@ impl PromptExpander for ApiExpander {
                 config.variations,
                 config.batch_prompt.as_deref(),
                 family_override,
+                config.style.as_deref(),
             )
         } else {
             build_single_messages(
@@ -157,6 +162,7 @@ impl PromptExpander for ApiExpander {
                 &config.model_family,
                 config.system_prompt.as_deref(),
                 family_override,
+                config.style.as_deref(),
             )
         };
 
@@ -449,6 +455,9 @@ impl ExpandSettings {
             system_prompt: self.system_prompt.clone(),
             batch_prompt: self.batch_prompt.clone(),
             family_overrides: self.families.clone(),
+            // Style is per-request state; the route handler sets it from the
+            // incoming ExpandRequest, never from persisted settings.
+            style: None,
         }
     }
 
@@ -873,6 +882,19 @@ mod tests {
         assert!(config.system_prompt.is_none());
         assert!(config.batch_prompt.is_none());
         assert!(config.family_overrides.is_empty());
+    }
+
+    #[test]
+    fn expand_config_default_style_is_none() {
+        assert!(ExpandConfig::default().style.is_none());
+    }
+
+    #[test]
+    fn to_expand_config_never_sets_style() {
+        // Style is per-request state owned by the route handler, not settings.
+        let settings = ExpandSettings::default();
+        let config = settings.to_expand_config("flux", 3);
+        assert!(config.style.is_none());
     }
 
     // ── validate_templates ──────────────────────────────────────────────

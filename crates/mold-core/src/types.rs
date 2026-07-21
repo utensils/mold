@@ -178,6 +178,12 @@ pub struct ExpandRequest {
     #[serde(default = "default_expand_variations")]
     #[schema(example = 1)]
     pub variations: usize,
+    /// Optional visual style the expansion should absorb (e.g. a style preset
+    /// label). Sent as a natural-language instruction to the expander — never
+    /// appended to the prompt verbatim. Additive: old clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "gritty film noir")]
+    pub style: Option<String>,
 }
 
 fn default_expand_model_family() -> String {
@@ -1394,6 +1400,45 @@ mod tests {
         assert_eq!(json, r#""png""#);
         let back: OutputFormat = serde_json::from_str(&json).unwrap();
         assert_eq!(back, fmt);
+    }
+
+    #[test]
+    fn expand_request_serde_roundtrip_with_style() {
+        let req = ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 4,
+            style: Some("gritty film noir".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ExpandRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.style.as_deref(), Some("gritty film noir"));
+        assert_eq!(back.prompt, "a cat");
+        assert_eq!(back.variations, 4);
+    }
+
+    #[test]
+    fn expand_request_serde_roundtrip_without_style() {
+        let req = ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "sdxl".to_string(),
+            variations: 1,
+            style: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // No style set — the field stays off the wire entirely.
+        assert!(!json.contains("style"));
+        let back: ExpandRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.style, None);
+    }
+
+    #[test]
+    fn expand_request_old_client_missing_style_is_none() {
+        // Old clients don't know about `style` — the field must default to None.
+        let back: ExpandRequest = serde_json::from_str(r#"{"prompt":"a cat"}"#).unwrap();
+        assert_eq!(back.style, None);
+        assert_eq!(back.model_family, "flux");
+        assert_eq!(back.variations, 1);
     }
 
     #[test]
@@ -3192,6 +3237,12 @@ pub struct CatalogCapabilities {
     pub available: bool,
     /// List of model family names available in the catalog.
     pub families: Vec<String>,
+    /// Sort orders `GET /api/catalog/search` accepts via `?sort=`
+    /// (`"downloads"`, `"recent"`, `"rating"`). Empty on older servers
+    /// that ignore the parameter — clients feature-detect against this
+    /// before offering sort controls.
+    #[serde(default)]
+    pub sort: Vec<String>,
 }
 
 /// Whether the server exposes the `GET /api/events` broadcast stream.
@@ -3204,12 +3255,15 @@ pub struct EventsCapabilities {
 
 /// Whether the server exposes queue-wide controls. `can_pause` covers
 /// `POST /api/queue/pause` and `POST /api/queue/resume`; `can_cancel_all`
-/// covers `DELETE /api/queue`. Both default to `false` so older servers that
-/// omit the field are treated as lacking the controls.
+/// covers `DELETE /api/queue`; `can_reorder` covers moving a queued job with
+/// the `PATCH /api/queue/:id` `position` field. All default to `false` so
+/// older servers that omit the fields are treated as lacking the controls.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueCapabilities {
     pub can_pause: bool,
     pub can_cancel_all: bool,
+    #[serde(default)]
+    pub can_reorder: bool,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
@@ -3668,6 +3722,18 @@ mod server_event_tests {
     }
 
     #[test]
+    fn capabilities_catalog_without_sort_field_deserializes_as_empty() {
+        // Older servers predate server-side catalog sorting and omit
+        // `catalog.sort` — clients must see an empty vocabulary, not a
+        // deserialization failure.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":true,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(caps.catalog.sort.is_empty());
+    }
+
+    #[test]
     fn capabilities_without_queue_field_deserializes_as_uncontrollable() {
         // An older server omits the `queue` block — both flags default false.
         let caps: ServerCapabilities = serde_json::from_str(
@@ -3676,6 +3742,21 @@ mod server_event_tests {
         .unwrap();
         assert!(!caps.queue.can_pause);
         assert!(!caps.queue.can_cancel_all);
+        assert!(!caps.queue.can_reorder);
+    }
+
+    #[test]
+    fn capabilities_queue_without_reorder_field_defaults_to_false() {
+        // A server that predates reorder support reports `queue` with the two
+        // older flags only — `can_reorder` must default false, not fail to
+        // deserialize.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]},"queue":{"can_pause":true,"can_cancel_all":true}}"#,
+        )
+        .unwrap();
+        assert!(caps.queue.can_pause);
+        assert!(caps.queue.can_cancel_all);
+        assert!(!caps.queue.can_reorder);
     }
 
     #[test]

@@ -711,6 +711,134 @@ mod tests {
         assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
     }
 
+    #[tokio::test]
+    async fn patch_queue_position_reorders_the_queued_job() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.register("bbbb", "sdxl:q8");
+        state.job_registry.register("cccc", "ltx-video:q8");
+
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/cccc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], "cccc");
+        assert_eq!(body["position"], 0);
+
+        // The whole queue reflects the new order.
+        let resp = app
+            .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = json_body(resp).await;
+        let entries = body["entries"].as_array().expect("entries array");
+        let order: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(order, ["cccc", "aaaa", "bbbb"]);
+    }
+
+    #[tokio::test]
+    async fn patch_queue_position_only_leaves_target_gpu_untouched() {
+        // A reorder that omits `target_gpu` must not reset the pinned lane to
+        // Auto — the additive `position` edit is independent.
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state
+            .job_registry
+            .register_with_target_gpu("aaaa", "flux-dev:fp16", Some(2));
+        state.job_registry.register("bbbb", "sdxl:q8");
+
+        let app = app_with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], "aaaa");
+        assert_eq!(body["position"], 1, "aaaa moved behind bbbb");
+        assert_eq!(body["target_gpu"], 2, "pinned lane survived the reorder");
+    }
+
+    #[tokio::test]
+    async fn patch_queue_applies_target_gpu_and_position_together() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state
+            .job_registry
+            .register_with_target_gpu("aaaa", "flux-dev:fp16", Some(0));
+        state.job_registry.register("bbbb", "sdxl:q8");
+
+        let app = app_with_state(state);
+        // `target_gpu:null` clears the lane (no worker pool needed) and
+        // `position:1` sends the job to the back — both in one PATCH.
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"target_gpu":null,"position":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], "aaaa");
+        assert_eq!(body["position"], 1);
+        assert!(
+            body.get("target_gpu").is_none(),
+            "lane cleared to Auto: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_queue_position_rejects_running_jobs() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        state.job_registry.mark_running("aaaa", Some(0));
+
+        let app = app_with_state(state);
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "QUEUE_JOB_RUNNING");
+    }
+
+    #[tokio::test]
+    async fn patch_queue_position_unknown_id_returns_404() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::patch("/api/queue/not-here")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     // ── DELETE /api/models/:model ────────────────────────────────────────────
 
     /// All clean storage paths for a manifest model under `models_dir`.
@@ -1112,6 +1240,28 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
+        assert_eq!(body["queue"]["can_reorder"], true);
+    }
+
+    /// Clients feature-detect server-side catalog sorting against this
+    /// advertisement — older servers omit the field entirely.
+    #[tokio::test]
+    async fn capabilities_reports_catalog_sort_vocabulary() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(
+            body["catalog"]["sort"],
+            serde_json::json!(["downloads", "recent", "rating"])
+        );
     }
 
     /// Poll the registry until the submitted job shows up (the generate

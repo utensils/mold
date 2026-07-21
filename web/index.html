@@ -6,17 +6,37 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#020617" />
+    <meta name="theme-color" content="#0a0805" />
     <meta
       name="description"
-      content="mold — local AI image and video gallery."
+      content="mold — local AI image and video studio."
     />
     <link rel="icon" type="image/png" href="/logo.png" />
     <link rel="apple-touch-icon" href="/logo.png" />
-    <title>mold — gallery</title>
+    <title>mold — studio</title>
+    <script>
+      // Apply the persisted Mold Studio theme before first paint so the app
+      // never flashes the wrong palette. Mirrors web/src/lib/theme.ts.
+      (function () {
+        var family = "safelight";
+        var theme = "system";
+        try {
+          var raw = localStorage.getItem("mold.web.theme.v1");
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed.family === "safelight" || parsed.family === "mold")
+              family = parsed.family;
+            if (parsed.theme === "dark" || parsed.theme === "light")
+              theme = parsed.theme;
+          }
+        } catch (e) {}
+        var root = document.documentElement;
+        root.dataset.themeFamily = family;
+        if (theme !== "system") root.dataset.theme = theme;
+      })();
+    </script>
   </head>
-  <body class="bg-slate-950 text-slate-100 antialiased">
+  <body class="antialiased">
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

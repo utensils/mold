@@ -2,13 +2,17 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick } from "vue";
 import GeneratePage from "./GeneratePage.vue";
-import { __testing__ as generateFormTesting } from "../composables/useGenerateForm";
-import type {
-  ChainJobDetail,
-  GalleryImage,
-  GenerateFormState,
-  ModelInfoExtended,
-} from "../types";
+import {
+  useGenerateForm,
+  __testing__ as generateFormTesting,
+} from "../composables/useGenerateForm";
+import {
+  resetNotifications,
+  settleConfirm,
+  useNotifications,
+} from "../lib/toasts";
+import { styleHint } from "../lib/stylePresets";
+import type { ChainJobDetail, GalleryImage } from "../types";
 
 const entry: GalleryImage = {
   filename: "generate-visible.png",
@@ -32,23 +36,22 @@ const createChainJobMock = vi.hoisted(() =>
 );
 const chainJobDetailRef = vi.hoisted(
   () =>
-    ({
-      __v_isRef: true,
-      value: null as ChainJobDetail | null,
-    }) as { __v_isRef: true; value: ChainJobDetail | null },
-);
-const fetchModelsMock = vi.hoisted(() =>
-  vi.fn(async (): Promise<ModelInfoExtended[]> => []),
+    ({ __v_isRef: true, value: null as ChainJobDetail | null }) as {
+      __v_isRef: true;
+      value: ChainJobDetail | null;
+    },
 );
 
 vi.mock("../api", () => ({
   createChainJob: createChainJobMock,
-  fetchModels: fetchModelsMock,
+  fetchModels: vi.fn(async () => []),
   fetchQueue: vi.fn(async () => ({ entries: [] })),
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
   upscaleStream: vi.fn(async () => undefined),
-  updateQueueJobTargetGpu: vi.fn(async () => undefined),
+  fetchPromptHistory: vi.fn(async () => []),
+  imageUrl: (name: string) => `/api/gallery/image/${name}`,
+  thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
 }));
 
 vi.mock("../composables/useGenerateStream", () => ({
@@ -72,120 +75,86 @@ vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: { value: null } }),
 }));
 
-const GalleryFeedStub = defineComponent({
-  name: "GalleryFeed",
+const RecentGridStub = defineComponent({
+  name: "RecentGrid",
   props: {
     entries: { type: Array, required: true },
-    loading: { type: Boolean, required: true },
-    view: { type: String, required: true },
-    muted: { type: Boolean, required: true },
-    hideMode: { type: Boolean, default: undefined },
-    revealed: { type: Object, default: undefined },
+    limit: { type: Number, default: undefined },
   },
-  template: '<div data-test="gallery-feed">{{ entries.length }}</div>',
+  template: '<div data-test="recent-grid">{{ entries.length }}</div>',
 });
 
-const fluxModel: ModelInfoExtended = {
-  name: "flux-dev:q4",
-  family: "flux",
-  size_gb: 12,
-  is_loaded: false,
-  last_used: null,
-  hf_repo: "black-forest-labs/FLUX.1-dev",
-  downloaded: true,
-  default_steps: 28,
-  default_guidance: 3.5,
-  default_width: 1024,
-  default_height: 1024,
-  description: "",
-};
-
-const qwenEditModel: ModelInfoExtended = {
-  ...fluxModel,
-  name: "qwen-image-edit:q4",
-  family: "qwen-image-edit",
-  hf_repo: "Qwen/Qwen-Image-Edit",
-};
-
-describe("GeneratePage layout and visibility", () => {
+describe("GeneratePage layout and behavior", () => {
   beforeEach(() => {
     localStorage.clear();
     generateFormTesting.resetForTest();
+    resetNotifications();
     submitMock.mockClear();
     createChainJobMock.mockClear();
     createChainJobMock.mockResolvedValue({ job_id: "job-1" });
     chainJobDetailRef.value = null;
-    fetchModelsMock.mockResolvedValue([]);
     vi.stubGlobal("prompt", vi.fn());
   });
 
-  it("uses a wider large-screen shell and controls rail", () => {
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
-
+  it("uses the Mold Studio composer + controls-region workspace", () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     expect(wrapper.get("[data-test='generate-shell']").classes()).toContain(
-      "max-w-[2400px]",
+      "max-w-[1600px]",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "2xl:grid-cols-[26rem_minmax(0,1fr)_38rem]",
+      "md:grid-cols-[minmax(0,1fr)_340px]",
     );
   });
 
-  it("keeps the compact recent gallery visible after refreshes", async () => {
-    localStorage.setItem("mold.gallery.hide", "true");
-
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
+  it("keeps the recent gallery visible after refreshes", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-
-    const feed = wrapper.findComponent(GalleryFeedStub);
+    const feed = wrapper.findComponent(RecentGridStub);
     expect(feed.props("entries")).toEqual([entry]);
-    expect(feed.props("hideMode")).toBeUndefined();
-    expect(feed.props("revealed")).toBeUndefined();
+  });
+
+  it("guides a first pull when no models are installed (cold start)", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
-    fetchModelsMock.mockResolvedValue([fluxModel]);
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
-    await flushPromises();
-
-    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
-    const current = params.props("modelValue") as GenerateFormState;
-    params.vm.$emit("update:modelValue", {
-      ...current,
-      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
-    });
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK",
+    };
     await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
 
     expect(submitMock).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("Mask image needs a source image.");
   });
 
   it("submits Qwen edit images without sending stale mask state", async () => {
-    fetchModelsMock.mockResolvedValue([qwenEditModel]);
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
-    await flushPromises();
-
-    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
-    const current = params.props("modelValue") as GenerateFormState;
-    params.vm.$emit("update:modelValue", {
-      ...current,
-      imageAttachments: [
-        { kind: "upload", filename: "target.png", base64: "TARGET" },
-      ],
-      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
-    });
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "qwen-image-edit:q4";
+    form.state.value.modelFamily = "qwen-image-edit";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "target.png", base64: "TARGET" },
+    ];
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK",
+    };
     await nextTick();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
 
     expect(submitMock).toHaveBeenCalledTimes(1);
     const req = submitMock.mock.calls[0][0];
@@ -194,27 +163,21 @@ describe("GeneratePage layout and visibility", () => {
     expect(req.source_image).toBeUndefined();
   });
 
-  it("prompts before replacing a source image while a mask exists", async () => {
-    fetchModelsMock.mockResolvedValue([fluxModel]);
-    const promptSpy = vi.mocked(window.prompt).mockReturnValue("reset");
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
-    await flushPromises();
-
-    const params = wrapper.getComponent({ name: "GenerateParamsPanel" });
-    const current = params.props("modelValue") as GenerateFormState;
-    params.vm.$emit("update:modelValue", {
-      ...current,
-      imageAttachments: [
-        { kind: "upload", filename: "old.png", base64: "OLD" },
-      ],
-      maskImage: { kind: "upload", filename: "mask.png", base64: "MASK" },
-    });
+  it("asks before replacing a source image while a mask exists", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "old.png", base64: "OLD" },
+    ];
+    form.state.value.maskImage = {
+      kind: "upload",
+      filename: "mask.png",
+      base64: "MASK",
+    };
     await nextTick();
 
-    wrapper.getComponent({ name: "Composer" }).vm.$emit("open-image-picker");
-    await nextTick();
     wrapper
       .getComponent({ name: "ImagePickerModal" })
       .vm.$emit("pick", [
@@ -222,21 +185,28 @@ describe("GeneratePage layout and visibility", () => {
       ]);
     await nextTick();
 
-    const updated = wrapper
-      .getComponent({ name: "GenerateParamsPanel" })
-      .props("modelValue") as GenerateFormState;
-    expect(promptSpy).toHaveBeenCalled();
-    expect(updated.imageAttachments[0]?.filename).toBe("new.png");
-    expect(updated.maskImage).toBeNull();
-  });
-
-  it("submits Script mode through createChainJob instead of the legacy stream", async () => {
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
+    expect(useNotifications().confirm?.kind).toBe("choice");
+    settleConfirm("reset");
     await flushPromises();
 
-    wrapper.getComponent({ name: "Composer" }).vm.$emit("submit-script", {
+    expect(form.state.value.imageAttachments[0]?.filename).toBe("new.png");
+    expect(form.state.value.maskImage).toBeNull();
+  });
+
+  it("submits Sequence mode through createChainJob instead of the legacy stream", async () => {
+    // Sequence only offers the ScriptComposer for a chain-capable (video)
+    // model; a non-chain model gets the "sequences need a video model" panel.
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    // Switch to Sequence so the ScriptComposer renders.
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+
+    wrapper.getComponent({ name: "ScriptComposer" }).vm.$emit("submit", {
       chain: {
         model: "ltx-2-19b-distilled:fp8",
         width: 64,
@@ -258,16 +228,211 @@ describe("GeneratePage layout and visibility", () => {
       expect.objectContaining({
         model: "ltx-2-19b-distilled:fp8",
         output_format: "mp4",
-        stages: [
-          expect.objectContaining({
-            prompt: "stage zero",
-            frames: 9,
-            transition: "cut",
-          }),
-        ],
+        stages: [expect.objectContaining({ prompt: "stage zero", frames: 9 })],
       }),
     );
     expect(submitMock).not.toHaveBeenCalled();
+  });
+
+  it("explains Sequence for a non-chain model instead of a dead composer", async () => {
+    useGenerateForm().state.value.modelFamily = "flux2";
+    useGenerateForm().state.value.model = "flux2-klein:q4";
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    // The Sequence tab stays reachable, but a non-chain model gets a clear
+    // explanation — not the ScriptComposer with a live-looking Generate button.
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='script-composer']").exists()).toBe(false);
+    // "back to single" returns to the composer.
+    await wrapper.get("[data-test='chain-back-to-single']").trigger("click");
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("fans a batch out into variations and queues one print per edited prompt", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    // Expand fans out into 3 client-side variations instead of submitting.
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(
+      wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
+    ).toHaveLength(3);
+
+    // Queue submits one single print per variation.
+    await wrapper.get("[data-test='queue-variations']").trigger("click");
+    await flushPromises();
+    expect(submitMock).toHaveBeenCalledTimes(3);
+    for (const call of submitMock.mock.calls) {
+      expect(call[0].batch_size).toBe(1);
+      expect(call[0].prompt).toContain("a lighthouse");
+    }
+  });
+
+  it("sends the active style as a directive on the main-prompt expand", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("open")).toBe(true);
+    // The chip travels as natural language the server weaves into the
+    // expander's system message — never as a literal prompt suffix.
+    expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
+  });
+
+  it("never steers a chain-stage expand with the composer's style chip", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2:q8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    await nextTick();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("prompt")).toBe("a stage prompt");
+    // The style row belongs to the single-print composer, not to stage text.
+    expect(modal.props("styleDirective")).toBeNull();
+  });
+
+  it("bakes and clears the chip when a quick expansion is applied", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over a cinematic coast");
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("storm light over a cinematic coast");
+    // Bake-and-clear: the rewrite absorbed the look, so the chip drops — and
+    // the curated negative moves into the form, its only remaining home.
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+    // Applied exactly once — the cleared chip can't merge it again at submit.
+    expect(form.toRequest().negative_prompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.negativePrompt).toBe("text");
+  });
+
+  it("keeps a stage expansion out of the composer's prompt and style", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2:q8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "a rewritten stage");
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.stylePreset).toBe("cinematic");
+  });
+
+  it("carries the preset negative when a variation is adopted into the composer", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    const variations = canvas.props("variations") as string[];
+    canvas.vm.$emit("use-variation", 0);
+    await nextTick();
+
+    // The variation already carries the baked look, so the chip clears — the
+    // curated negative has to come with it.
+    expect(form.state.value.prompt).toBe(variations[0]);
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+  });
+
+  it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises(); // onMounted registers the mold:new-print listener
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 2;
+    await nextTick();
+
+    // Fan the batch out into variations so there's review state to clear.
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    expect(
+      wrapper.get("[data-test='result-canvas']").attributes("data-count"),
+    ).toBe("2");
+
+    window.dispatchEvent(new CustomEvent("mold:new-print"));
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("");
+    // The selected model survives — New print is a fresh canvas, not a reset.
+    expect(form.state.value.model).toBe("flux-dev:q4");
+    // Variations cleared → the variations canvas gives way to the cold-start guide.
+    expect(wrapper.find("[data-test='result-canvas']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
   it("renders the submitted durable chain job card from useChainJobStream", async () => {
@@ -284,60 +449,72 @@ describe("GeneratePage layout and visibility", () => {
       stages: [],
       finalizes: [],
       retakes: [],
-      script: {
-        schema: "mold.chain.v1",
-        chain: {},
-        stage: [],
-      },
+      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
     };
-    const wrapper = mount(GeneratePage, {
-      global: { stubs: pageStubs() },
-    });
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-
     expect(
       wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
-    ).toMatchObject({
-      id: "job-1",
-      state: "queued",
-    });
+    ).toMatchObject({ id: "job-1", state: "queued" });
   });
 });
 
 function pageStubs() {
   return {
-    TopBar: { template: "<header />" },
-    Composer: {
-      name: "Composer",
-      props: ["submitError"],
-      emits: ["submit", "submit-script", "open-image-picker", "clear-source"],
+    ColdStartGuide: {
+      name: "ColdStartGuide",
+      template: "<div data-test='cold-start-stub' />",
+    },
+    ComposerCard: {
+      name: "ComposerCard",
       template:
-        '<section><p v-if="submitError">{{ submitError }}</p><button data-test="composer-submit" @click="$emit(\'submit\')">submit</button></section>',
+        '<div><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+      // The page calls these through its template ref on submit / new-print;
+      // a stub without them throws an unhandled TypeError mid-run.
+      methods: { record: vi.fn(), focus: vi.fn() },
+    },
+    ResultCanvas: {
+      name: "ResultCanvas",
+      props: ["mode", "variations"],
+      template:
+        '<div data-test="result-canvas" :data-count="(variations||[]).length"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
+    },
+    ControlsAside: { name: "ControlsAside", template: "<aside />" },
+    AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
+    ActivityStrip: { name: "ActivityStrip", template: "<div />" },
+    ScriptComposer: {
+      name: "ScriptComposer",
+      template:
+        "<div data-test='script-composer'><button data-test='stage-expand' @click=\"$emit('expand', 0, 'a stage prompt')\">expand stage</button></div>",
+      methods: { setStagePrompt: vi.fn() },
     },
     ChainJobCard: {
       name: "ChainJobCard",
       props: ["job"],
       template: '<div data-test="chain-job-card">{{ job.id }}</div>',
     },
-    GenerateParamsPanel: {
-      name: "GenerateParamsPanel",
-      props: ["modelValue"],
-      emits: ["update:modelValue"],
-      template: "<aside />",
-      methods: { setExpanded: vi.fn() },
+    ExpandModal: {
+      name: "ExpandModal",
+      props: [
+        "open",
+        "prompt",
+        "expand",
+        "currentModel",
+        "queueBusy",
+        "styleDirective",
+      ],
+      template: "<div />",
     },
-    LoraPicker: { template: "<div />" },
-    ModelPicker: { template: "<div />" },
-    PreferencesModal: { template: "<div />" },
-    ExpandModal: { template: "<div />" },
     ImagePickerModal: {
       name: "ImagePickerModal",
       props: ["open"],
       emits: ["pick", "close"],
-      template: "<div v-if='open' />",
+      template: "<div />",
     },
-    RunningStrip: { template: "<div />" },
-    GalleryFeed: GalleryFeedStub,
-    DetailDrawer: { template: "<div />" },
+    MaskEditorModal: { name: "MaskEditorModal", template: "<div />" },
+    GenerationTemplatesPanel: { template: "<div />" },
+    RecentGrid: RecentGridStub,
+    Lightbox: { template: "<div />" },
+    RouterLink: { template: "<a><slot /></a>" },
   };
 }

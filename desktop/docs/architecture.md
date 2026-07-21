@@ -3,8 +3,14 @@
 Mold ships native macOS (Apple Silicon / Metal) and x86_64 Linux (CUDA)
 desktop apps plus a remote-only iPhone companion. The backend and shared
 frontend logic stay platform-neutral; Tauri platform configs and thin native
-bridges own window chrome, device capabilities, and bundle details. Mold and
-Safelight theme families are shared without changing generated-media color.
+bridges own window chrome, device capabilities, and bundle details. The Mold
+Studio Mold and Safelight theme families are shared without changing
+generated-media color.
+
+Design system: [`../../docs/design/mold-studio-spec.html`](../../docs/design/mold-studio-spec.html)
+— the Mold Studio interface spec these surfaces implement. Its information
+architecture is five workspaces on every surface: Create, Library, Models,
+Machines, and Settings.
 
 ## iOS companion
 
@@ -23,8 +29,8 @@ and Tailscale MagicDNS names. Tailscale support is network/DNS interoperability,
 not an embedded SDK. The only other native command synchronizes System, Light,
 or Dark appearance to UIKit so status-bar glyphs match the WebView.
 
-Navigation covers Generate, Gallery, Catalog, and Hosts; Settings is a pushed
-header destination. Generate reuses the capability matrix and request builder
+Navigation covers Create, Library, Models, and Machines; Settings is a pushed
+header destination. Create reuses the capability matrix and request builder
 for prompt tools, templates, independent batch jobs, source/edit/mask/ControlNet
 inputs, LoRA, resolution/seed controls, estimates, and video/LTX-2 controls.
 Native prepared expansion is intentionally view-ephemeral. `GenerateView` and
@@ -35,31 +41,32 @@ focus restoration. `stores/generation.ts` maps the ordered prompts plus shared
 source provenance and durable batch ID/position metadata to one independently
 cancellable sibling each, including auto-chained video requests. Desktop
 projects the route's `useDownloadsStore` bucket; iPhone shares
-`useMobileDownloadsStore` with Catalog and holds an exact selected-host lease
+`useMobileDownloadsStore` with the Models view and holds an exact selected-host lease
 without initializing desktop-primary state. Returned job IDs are authoritative;
 a newly observed exact-model in-flight row covers older snapshot/response timing
 without treating stale history, another host, or a competing job as completion.
 The iPhone recovery record deep-freezes its original inputs and route-derived
-host. Its attempt lease outranks later Catalog registration only while that pull
-is active, joins a compatible Catalog POST already in Starting, and releases on
+host. Its attempt lease outranks later Models registration only while that pull
+is active, joins a compatible Models POST already in Starting, and releases on
 every terminal, error, stale, superseded, or aborted path; Retry reacquires the
 exact route. Prepared edits/removals supersede pending replacement ownership.
 Per-view consumer IDs and synchronous unmount invalidation keep late
 expansion, preprocessing, pull, and retry callbacks from acting on a remount.
 Capability discovery is advisory
 per host and never participates in fallback routing.
-Gallery merges every saved remote host, streams full-size media through a
+Library merges every saved remote host, streams full-size media through a
 short-lived path-scoped ticket, plays videos with native seeking, swipes between
 prints, and exposes explicit Use as prompt / Use as source actions. Host detail
-shows telemetry, storage, queue, downloads, and installed models. Catalog merges
+shows telemetry, storage, queue, downloads, and installed models. Models merges
 installed/live entries and routes actions per host; Pull visibly progresses
 through Connecting, Starting, Queued, and Pulling percentage states with
 snapshot-before-POST reconciliation and duplicate prevention.
 
 The shell is iPhone-first with safe areas, 44pt controls, 16px editable text,
-document zoom disabled, and overscroll bounce suppressed. The gallery viewer
-keeps a narrowly scoped horizontal swipe gesture. Settings persists Mold or
-Safelight with System/Dark/Light, host management, version, and the TestFlight
+document zoom disabled, and overscroll bounce suppressed. The Library viewer
+keeps a narrowly scoped horizontal swipe gesture. Settings persists the Mold
+Studio families (Mold or Safelight) with System/Dark/Light, host management,
+version, and the TestFlight
 update channel. Fresh installs start with Safelight + System; valid persisted
 theme choices remain authoritative.
 
@@ -105,11 +112,11 @@ resolver = "2"
 
 **Port selection:** prefer `0.0.0.0:7680` so the desktop server has the conventional address. If an unrelated process occupies 7680, reserve an ephemeral wildcard port and advertise that real port over mDNS. The listener probe is dropped before `run_server` binds, leaving the existing small TOCTOU race; the upstream `run_server_with_listener` follow-up remains applicable.
 
-**Auth:** resolve `MOLD_API_KEY` as an explicit override; otherwise reuse or generate `desktop-local-api-key` in the owner-only app secrets file. Export it before spawning the server thread (`auth::load_api_keys` reads env once), advertise `auth=1`, and expose a masked reveal/copy control in Settings → Hosts. The frontend attaches `X-Api-Key`; remote hosts retain their own per-host keys. CORS stays permissive (default), with CSP constraining the frontend side.
+**Auth:** resolve `MOLD_API_KEY` as an explicit override; otherwise reuse or generate `desktop-local-api-key` in the owner-only app secrets file. Export it before spawning the server thread (`auth::load_api_keys` reads env once), advertise `auth=1`, and expose a masked reveal/copy control in the Machines workspace. The frontend attaches `X-Api-Key`; remote hosts retain their own per-host keys. CORS stays permissive (default), with CSP constraining the frontend side.
 
 **Shutdown:** the embedded handle is owned separately from host connections; app exit or an explicit local-engine restart POSTs `/api/shutdown` and joins the thread with a 5s timeout. User-run external servers are never shut down by the app.
 
-**Hosts UI (no modes):** there is no connection switcher — the built-in/local engine is permanently the internal primary (**This device**) and every remote server is a list entry managed in Settings → Hosts (This-device card, Add host, Connected, Remembered, On your network). Hosts dedupe by the server's instance UUID (`/api/status.instance_id`, mDNS `id` TXT record) with display names from the server's hostname; a one-shot Rust boot migration (`settings::migrate_remote_primary`) re-homes old remote-primary installs into the host list, carrying the API key into the per-host secret slot and pinning the generation target. Routing is generation-time only: the Host selector's Auto / Most capable / sticky pick covers every connected host. LTX-2 is CUDA-only: the local Metal engine grays out `ltx2` (drive from `/api/status` gpus backend + family capability map); remote CUDA hosts get it enabled.
+**Machines UI (no modes):** there is no connection switcher — the built-in/local engine is permanently the internal primary (**This device**) and every remote server is a list entry managed in the Machines workspace (This-device card, Add host, Connected, Remembered, On your network). Hosts dedupe by the server's instance UUID (`/api/status.instance_id`, mDNS `id` TXT record) with display names from the server's hostname; a one-shot Rust boot migration (`settings::migrate_remote_primary`) re-homes old remote-primary installs into the host list, carrying the API key into the per-host secret slot and pinning the generation target. Routing is generation-time only: the Host selector's Auto / Most capable / sticky pick covers every connected host. LTX-2 is CUDA-only: the local Metal engine grays out `ltx2` (drive from `/api/status` gpus backend + family capability map); remote CUDA hosts get it enabled.
 
 ## 3. Frontend stack — DECISION: Vue 3.5 + TS strict + Vite 7 + Tailwind v4 + Pinia + TanStack Query/Virtual + fetch-event-source
 
@@ -122,7 +129,7 @@ resolver = "2"
 - **Video:** native `<video>` pointed at `GET /api/gallery/image/:filename` — the endpoint already supports HTTP Range (206), which WKWebView requires for scrubbing. Thumbnails/GIF previews from the existing endpoints. Loading `http://127.0.0.1` media from the `tauri://` origin is permitted by the CSP below.
 - **SSE:** `@microsoft/fetch-event-source ^2.0.1` for **everything** — required because (a) `/api/generate/stream`, `/api/upscale/stream`, `/api/generate/chain/stream` are **POST**-SSE, and (b) native `EventSource` cannot send the `X-Api-Key` header even for the GET streams (`/api/resources/stream`, `/api/downloads/stream`, `/api/chain-jobs/:id/events`, `/api/events`). One `sse.ts` helper wraps auth, abort, retry-with-snapshot semantics, and the `/api/queue` polling reconciler (zombie-card dead-lettering, same trick the SPA uses via the `Queued{id}` correlation event).
 - **Connection budget (HTTP/1.1, ~6 per host):** every generate job holds a POST-SSE stream for its whole run, and downloads + resources + `/api/events` each hold one more. Batch siblings are therefore capped at **two concurrent streams** (`runWithConcurrency` in `stores/generation.ts`) so a big batch can't starve gallery/download requests behind held-open connections. Worst case: 2 job streams + downloads + resources + events = 5 < 6.
-- **Cross-view state:** the Generate form (model, prompt, params) lives in `stores/generateForm.ts`, not the view — `<router-view>` has no KeepAlive, so views unmount on navigation and component-local state would reset. The `events` store subscribes app-wide to `/api/events` (from `App.vue` on connection ready) and keeps the gallery store live; older servers fall back to a 5 s poll while jobs are pending.
+- **Cross-view state:** the Create form (model, prompt, params) lives in `stores/generateForm.ts`, not the view — `<router-view>` has no KeepAlive, so views unmount on navigation and component-local state would reset. The `events` store subscribes app-wide to `/api/events` (from `App.vue` on connection ready) and keeps the gallery store live; older servers fall back to a 5 s poll while jobs are pending.
 - **TypeScript:** strict, `vue-tsc ^3` in CI. Wire types hand-written in `src/lib/api/types.ts` mirroring mold-core (source of truth: `/api/openapi.json` — validate drift with a vitest snapshot test that fetches the OpenAPI doc from a dev server, optional).
 
 ## 4. Tauri specifics
@@ -198,7 +205,7 @@ The checked-in config deliberately leaves `createUpdaterArtifacts` false so unsi
 
 **Capabilities file** (`capabilities/default.json`): main window; permissions: `core:default` plus `core:webview:allow-set-webview-zoom`, `dialog:default`, `opener:default` (+ `opener:allow-reveal-item-in-dir`), `notification:default`, `clipboard-manager:allow-write-text`, `clipboard-manager:allow-write-image`, `window-state:default`, `process:allow-restart`. No updater or fs scope is exposed to JavaScript: Mold's Rust commands own the trusted updater object, channel allowlist, and file IO.
 
-**LAN discovery** (Settings → Hosts "On your network"): the `discover_servers{timeout_ms?}` IPC command runs `mold_server::mdns::discover` (the `mdns` feature is enabled on the embedded `mold-ai-server` dep) inside `spawn_blocking`, then maps each hit to a camelCase `DiscoveredHost {name, url, host, port, version, authRequired, isThisMachine, instanceId}` (`instanceId` from the `id` TXT record; discovery lists dedupe against connected hosts by URL slug and instance id). `isThisMachine` is computed by intersecting the advertised addresses with the machine's own interface addresses (`if-addrs`), falling back to a hostname-prefix match — so the app's own embedded/local server is flagged rather than offered as a remote. The frontend wraps it as `ipc.discoverServers()` (browser fallback `[]`); pure sort/dedupe/label helpers live in `lib/discovery.ts`. Because the app is not sandboxed, no multicast entitlement is needed, but macOS 15 still gates the browse behind Local Network permission — `src-tauri/Info.plist` supplies `NSLocalNetworkUsageDescription` and `NSBonjourServices = ["_mold._tcp"]` (a browse silently returns nothing without the latter). `Entitlements.plist` is unchanged.
+**LAN discovery** (the Machines workspace "On your network"): the `discover_servers{timeout_ms?}` IPC command runs `mold_server::mdns::discover` (the `mdns` feature is enabled on the embedded `mold-ai-server` dep) inside `spawn_blocking`, then maps each hit to a camelCase `DiscoveredHost {name, url, host, port, version, authRequired, isThisMachine, instanceId}` (`instanceId` from the `id` TXT record; discovery lists dedupe against connected hosts by URL slug and instance id). `isThisMachine` is computed by intersecting the advertised addresses with the machine's own interface addresses (`if-addrs`), falling back to a hostname-prefix match — so the app's own embedded/local server is flagged rather than offered as a remote. The frontend wraps it as `ipc.discoverServers()` (browser fallback `[]`); pure sort/dedupe/label helpers live in `lib/discovery.ts`. Because the app is not sandboxed, no multicast entitlement is needed, but macOS 15 still gates the browse behind Local Network permission — `src-tauri/Info.plist` supplies `NSLocalNetworkUsageDescription` and `NSBonjourServices = ["_mold._tcp"]` (a browse silently returns nothing without the latter). `Entitlements.plist` is unchanged.
 
 **Icons:** new icon set generated via `cargo tauri icon` from a 1024px master (new artwork, not the web favicon).
 
@@ -278,9 +285,9 @@ desktop/
 │   │   ├── capabilities.ts                  # ported from web/src/lib/generateCapabilities.ts
 │   │   └── ipc.ts                           # invoke() wrappers for all Tauri commands
 │   ├── stores/  connection.ts generation.ts queue.ts composer.ts settings.ts
-│   ├── views/   GenerateView.vue GalleryView.vue JobsView.vue ModelsView.vue SettingsView.vue
+│   ├── views/   GenerateView.vue LibraryView.vue JobsView.vue ModelsView.vue MachinesView.vue SettingsView.vue
 │   └── components/
-│       ├── shell/   TitleBar.vue NavRail.vue Inspector.vue StatusFooter.vue
+│       ├── shell/   TitleBar.vue NavRail.vue Inspector.vue StatusPopover.vue
 │       ├── generate/ ParamPanel.vue LoraStack.vue SourceImageWell.vue ExpandSheet.vue EstimateBadge.vue VideoParams.vue PlacementPanel.vue
 │       ├── gallery/ VirtualGrid.vue MediaCard.vue DetailPane.vue MetadataTable.vue
 │       ├── jobs/    QueueStrip.vue JobCard.vue ChainComposer.vue StageCard.vue ChainJobDetail.vue DownloadsDrawer.vue

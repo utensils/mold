@@ -7,7 +7,8 @@ import {
 } from "../lib/generationTemplates";
 import { newGenerateForm } from "../lib/generateForm";
 import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
-import MobileTemplates, { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./MobileTemplates.vue";
+import MobileTemplates from "./MobileTemplates.vue";
+import { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./mobileTemplateStorage";
 
 installMemoryLocalStorage();
 

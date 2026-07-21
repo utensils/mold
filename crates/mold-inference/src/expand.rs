@@ -326,6 +326,7 @@ impl PromptExpander for LocalExpander {
                 config.variations,
                 config.batch_prompt.as_deref(),
                 family_override,
+                config.style.as_deref(),
             )
         } else {
             build_single_messages(
@@ -333,6 +334,7 @@ impl PromptExpander for LocalExpander {
                 &config.model_family,
                 config.system_prompt.as_deref(),
                 family_override,
+                config.style.as_deref(),
             )
         };
 

@@ -16,7 +16,20 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "paths": {
+      "@ui/*": ["../ui/*"],
+      "vue": ["./node_modules/vue"],
+      "vitest": ["./node_modules/vitest"],
+      "@vue/test-utils": ["./node_modules/@vue/test-utils"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.tsx",
+    "src/**/*.vue",
+    "../ui/**/*.ts",
+    "../ui/**/*.vue"
+  ]
 }

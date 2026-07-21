@@ -65,6 +65,7 @@ vi.mock("../api", () => ({
 function mountPicker(modelValue: LoraSelection[] = []) {
   return mount(LoraPicker, {
     props: { family: "flux", modelValue },
+    global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
   });
 }
 
@@ -73,7 +74,7 @@ describe("LoraPicker — multi-LoRA stack", () => {
     vi.clearAllMocks();
   });
 
-  it("renders nothing when no LoRAs are installed and the stack is empty", async () => {
+  it("shows a helpful empty state when no LoRAs are installed and the stack is empty", async () => {
     const { fetchCatalogInstalled } = await import("../api");
     (
       fetchCatalogInstalled as unknown as ReturnType<typeof vi.fn>
@@ -85,7 +86,12 @@ describe("LoraPicker — multi-LoRA stack", () => {
     });
     const w = mountPicker([]);
     await flushPromises();
-    expect(w.find("section").exists()).toBe(false);
+    // Old behaviour rendered nothing (a blank drawer section). The picker now
+    // explains the empty state and points at Models rather than going dark.
+    const empty = w.find("[data-test='lora-hint-empty']");
+    expect(empty.exists()).toBe(true);
+    expect(empty.text().toLowerCase()).toContain("no loras installed");
+    expect(w.findAll("[data-test='lora-row']")).toHaveLength(0);
   });
 
   it("clicking + Add LoRA appends a row keyed to the first available LoRA", async () => {
@@ -138,9 +144,11 @@ describe("LoraPicker — multi-LoRA stack", () => {
       },
     ]);
     await flushPromises();
+    // The chip reads "+ cinematic style" (an add affordance) but the event
+    // carries the bare phrase so the prompt gets clean text.
     const chip = w
       .findAll("button")
-      .find((b) => b.text() === "cinematic style");
+      .find((b) => b.text().includes("cinematic style"));
     expect(chip).toBeDefined();
     await chip!.trigger("click");
     expect(w.emitted("append-prompt")?.at(-1)?.[0]).toBe("cinematic style");

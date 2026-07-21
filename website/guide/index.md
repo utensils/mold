@@ -60,7 +60,7 @@ mold run "a sunset over mountains"
 - [Configuration](/guide/configuration) — environment variables, config file
 - [Generating Images](/guide/generating) — full usage guide
 - [Desktop App](/guide/desktop) — local and multi-host native studio
-- [iPhone App](/guide/iphone) — remote Generate, Gallery, Catalog, Hosts, and
+- [iPhone App](/guide/iphone) — remote Create, Library, Models, Machines, and
   Settings
 - [Feature Support](/guide/feature-matrix) — which model families support which
   features

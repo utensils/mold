@@ -117,7 +117,7 @@ function advancedValue(field: keyof AdvancedPlacement): string {
     <select
       v-if="componentField && tier2"
       :value="advancedValue(componentField)"
-      class="w-full rounded bg-slate-950/70 px-2 py-1 text-[11px] text-slate-200"
+      class="w-full rounded bg-bath/70 px-2 py-1 text-[11px] text-ink-2"
       data-test="component-placement-select"
       aria-label="Component device placement"
       @change="emitComponent(($event.target as HTMLSelectElement).value)"

@@ -12,6 +12,13 @@ const props = defineProps<{
    * previewing while a generation is running would block the UI on the
    * inference slot. Disable the button instead of silently queueing it. */
   queueBusy?: boolean;
+  /**
+   * The composer's active style as a natural-language directive (`styleHint`)
+   * the server weaves into the expander's system message. Null for a chain
+   * stage — the style row belongs to the single-print composer, not to stage
+   * text — and never appended to the prompt itself.
+   */
+  styleDirective?: string | null;
 }>();
 const emit = defineEmits<{
   (e: "update:expand", v: ExpandFormState): void;
@@ -37,10 +44,12 @@ async function preview() {
   previewing.value = true;
   previewError.value = null;
   try {
+    const style = props.styleDirective?.trim();
     const res = await expandPrompt({
       prompt: props.prompt,
       model_family: effectiveFamily.value,
       variations: props.expand.variations,
+      ...(style ? { style } : {}),
     });
     previewResults.value = res.expanded;
   } catch (e) {
@@ -60,26 +69,24 @@ function pick(text: string) {
   <Teleport to="body">
     <div
       v-if="open"
-      class="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm"
+      class="fixed inset-0 z-40 flex items-center justify-center bg-bath/70 backdrop-blur-sm"
       @click.self="emit('close')"
     >
       <div
-        class="glass max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl p-6 sm:p-8"
+        class="bg-bench border border-edge max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl p-6 sm:p-8"
       >
         <div class="flex items-center justify-between">
-          <h2 class="text-lg font-semibold text-slate-100">
-            ✨ Prompt expansion
-          </h2>
+          <h2 class="text-lg font-semibold text-rebate">✨ Prompt expansion</h2>
           <button
             type="button"
-            class="text-slate-400 hover:text-slate-100"
+            class="text-ink-3 hover:text-rebate"
             @click="emit('close')"
           >
             ✕
           </button>
         </div>
 
-        <label class="mt-4 flex items-center gap-2 text-sm text-slate-200">
+        <label class="mt-4 flex items-center gap-2 text-sm text-ink-2">
           <input
             type="checkbox"
             :checked="expand.enabled"
@@ -91,7 +98,7 @@ function pick(text: string) {
         </label>
 
         <div class="mt-3">
-          <label class="text-xs uppercase text-slate-400">Variations</label>
+          <label class="text-xs uppercase text-ink-3">Variations</label>
           <div class="mt-1 flex gap-1">
             <button
               v-for="n in variationsOptions"
@@ -100,8 +107,8 @@ function pick(text: string) {
               class="rounded-full px-3 py-1 text-sm"
               :class="
                 expand.variations === n
-                  ? 'bg-brand-500 text-white'
-                  : 'bg-slate-900/60 text-slate-200'
+                  ? 'bg-safelight text-white'
+                  : 'bg-bench/60 text-ink-2'
               "
               @click="patch('variations', n)"
             >
@@ -110,15 +117,15 @@ function pick(text: string) {
           </div>
         </div>
 
-        <details class="mt-3 text-sm text-slate-300">
-          <summary class="cursor-pointer text-slate-400">
+        <details class="mt-3 text-sm text-ink-2">
+          <summary class="cursor-pointer text-ink-3">
             Advanced: model family override
           </summary>
           <input
             type="text"
             :value="expand.familyOverride ?? ''"
             placeholder="auto"
-            class="mt-1 w-full rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+            class="mt-1 w-full rounded-lg bg-bench/60 px-2 py-1 text-rebate"
             @change="
               patch(
                 'familyOverride',
@@ -131,7 +138,7 @@ function pick(text: string) {
         <div class="mt-4 flex items-center gap-2">
           <button
             type="button"
-            class="rounded-lg bg-brand-500 px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            class="rounded-lg bg-safelight px-3 py-1.5 text-sm text-white disabled:opacity-50"
             :disabled="previewing || !prompt.trim() || queueBusy"
             :title="
               queueBusy
@@ -143,7 +150,7 @@ function pick(text: string) {
           >
             {{ previewing ? "Expanding…" : "Preview" }}
           </button>
-          <span v-if="queueBusy" class="text-xs text-slate-400">
+          <span v-if="queueBusy" class="text-xs text-ink-3">
             Queue busy — preview disabled.
           </span>
         </div>
@@ -156,7 +163,7 @@ function pick(text: string) {
           <li v-for="(text, i) in previewResults" :key="i">
             <button
               type="button"
-              class="w-full rounded-xl bg-slate-900/60 p-3 text-left text-sm text-slate-100 hover:bg-slate-800/80"
+              class="w-full rounded-xl bg-bench/60 p-3 text-left text-sm text-rebate hover:bg-surface/80"
               @click="pick(text)"
             >
               {{ text }}
@@ -164,7 +171,7 @@ function pick(text: string) {
           </li>
         </ul>
 
-        <p class="mt-4 text-xs text-slate-500">
+        <p class="mt-4 text-xs text-ink-3">
           Backend model, temperature, and thinking mode are controlled by the
           server config. Ask your operator to adjust them.
         </p>

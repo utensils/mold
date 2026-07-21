@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"Bricolage Grotesque";src:url("fonts/BricolageGrotesque-VF.ttf") format("truetype-variations");font-weight:200 800;font-display:swap;}
+@font-face{font-family:"Martian Mono";src:url("fonts/MartianMono-VF.ttf") format("truetype-variations");font-weight:300 700;font-display:swap;}
+@keyframes tblink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+@keyframes tfade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes tpulse{0%,100%{opacity:.55}50%{opacity:1}}
+body{margin:0;background:#08060f;}
+.wrap{--desk:#08060f;--frame:#0c0a14;--bg:#13111d;--surface:#221c34;--surface2:#2e2743;--border:#3a3352;--focus:#e879f9;--info:#5cd0ff;--text:#f3effb;--dim:#9089a8;--faint:#645d7c;--success:#6ee7a5;--warning:#f5c451;--error:#fb7185;--sel-bg:rgba(232,121,249,.15);--fmono:"Martian Mono",ui-monospace,monospace;--fdisp:"Bricolage Grotesque",system-ui,sans-serif;}
+.wrap[data-theme="studio-light"]{--desk:#dcd5ee;--frame:#e5e0f1;--bg:#f6f4fb;--surface:#efeaf8;--surface2:#e3dcf2;--border:#cfc6e4;--focus:#a21caf;--info:#0e7490;--text:#221430;--dim:#5f5673;--faint:#9a90b2;--success:#0f8a54;--warning:#a06a12;--error:#b4233b;--sel-bg:rgba(162,28,175,.12);}
+.wrap[data-theme="safelight"]{--desk:#0a0805;--frame:#12100b;--bg:#171210;--surface:#241c15;--surface2:#332619;--border:#463a2a;--focus:#f79433;--info:#8fb4c4;--text:#f1e8da;--dim:#a2937d;--faint:#6f6353;--success:#8fd39a;--warning:#f5c451;--error:#e5715a;--sel-bg:rgba(247,148,51,.15);}
+.wrap[data-theme="safelight-light"]{--desk:#ded2b8;--frame:#ece2cf;--bg:#f7f1e6;--surface:#f0e7d5;--surface2:#e6dcc7;--border:#d8cbb0;--focus:#9b4d00;--info:#3f6570;--text:#231d16;--dim:#6b5f4d;--faint:#9a8c74;--success:#2f7d4f;--warning:#a06a12;--error:#a93629;--sel-bg:rgba(155,77,0,.13);}
+.wrap[data-theme="mocha"]{--desk:#11111b;--frame:#181825;--bg:#1e1e2e;--surface:#313244;--surface2:#45475a;--border:#45475a;--focus:#89b4fa;--info:#89dceb;--text:#cdd6f4;--dim:#7f849c;--faint:#6c7086;--success:#a6e3a1;--warning:#f9e2af;--error:#f38ba8;--sel-bg:rgba(137,180,250,.16);}
+.term:focus,.term:focus-visible{outline:none;}
+.wrap [data-seg]{transition:all .12s}
+.wrap [data-seg][data-on="true"]{background:var(--sel-bg);color:var(--focus);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--focus) 55%,transparent)}
+.wrap [data-tab]{transition:color .12s}
+.wrap [data-tab]:hover{color:var(--text)}
+.wrap [data-tab][data-on="true"]{color:var(--focus)}
+.wrap [data-tab] [data-bar]{transition:opacity .12s,background .12s}
+.wrap [data-tab][data-on="true"] [data-bar]{opacity:1;background:var(--focus)}
+.wrap [data-panel][data-focus="true"]{border-color:var(--focus)}
+.wrap [data-panel][data-focus="true"] [data-ptitle]{color:var(--focus)}
+.wrap [data-row]{transition:background .1s}
+.wrap [data-row]:hover{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.wrap [data-row][data-sel="true"]{background:var(--sel-bg);color:var(--focus)}
+.wrap [data-cell]{transition:border-color .12s,transform .12s}
+.wrap [data-cell]:hover{border-color:var(--info)}
+.wrap [data-cell][data-sel="true"]{border-color:var(--focus)}
+.wrap [data-cmd]{transition:background .1s}
+.wrap [data-cmd]:hover,.wrap [data-cmd]:focus{background:var(--sel-bg);color:var(--focus);outline:none}
+.wrap [data-acc]{transition:background .1s}
+.wrap [data-acc]:hover{background:color-mix(in srgb,var(--text) 5%,transparent)}
+.wrap [data-ghost]{transition:border-color .12s,color .12s}
+.wrap [data-ghost]:hover{border-color:var(--focus);color:var(--focus)}
+.wrap a{color:var(--info);text-decoration:none}
+.wrap ::-webkit-scrollbar{width:7px;height:7px}
+.wrap ::-webkit-scrollbar-thumb{background:var(--border)}
+.wrap [data-brand]{background:linear-gradient(96deg,#89dceb,#89b4fa 45%,#cba6f7);-webkit-background-clip:text;background-clip:text;color:transparent!important;}
+</style>
+</helmet>
+
+<div class="wrap" data-theme="{{ themeAttr }}" style="min-height:100vh;background:var(--desk);font-family:var(--fmono);color:var(--text);box-sizing:border-box;padding:26px 28px 46px;display:flex;flex-direction:column;align-items:center;gap:18px;">
+
+  <!-- header -->
+  <div style="width:100%;max-width:1420px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+    <img src="assets/logo.png" alt="mold" style="width:22px;height:22px;object-fit:contain;"/>
+    <span data-brand style="font-family:var(--fdisp);font-weight:800;font-size:17px;letter-spacing:-.01em;color:var(--text);">mold</span>
+    <span style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);">tui · proposed — one design language, every surface</span>
+    <div style="margin-left:auto;display:flex;gap:3px;padding:3px;background:color-mix(in srgb,var(--text) 8%,transparent);border-radius:9px;">
+      <button data-seg data-on="{{ thDarkOn }}" onClick="{{ setDark }}" style="border:0;background:transparent;color:var(--dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:var(--fmono);">Studio Dark</button>
+      <button data-seg data-on="{{ thLightOn }}" onClick="{{ setLight }}" style="border:0;background:transparent;color:var(--dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:var(--fmono);">Studio Light</button>
+      <button data-seg data-on="{{ thSafeOn }}" onClick="{{ setSafe }}" style="border:0;background:transparent;color:var(--dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:var(--fmono);">Safelight Dark</button>
+      <button data-seg data-on="{{ thSafeLightOn }}" onClick="{{ setSafeLight }}" style="border:0;background:transparent;color:var(--dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:var(--fmono);">Safelight Light</button>
+      <button data-seg data-on="{{ thMochaOn }}" onClick="{{ setMocha }}" style="border:0;background:transparent;color:var(--dim);padding:6px 12px;border-radius:6px;font-size:11px;font-family:var(--fmono);">Catppuccin</button>
+    </div>
+  </div>
+
+  <div style="width:100%;max-width:1420px;display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap;justify-content:center;">
+
+    <!-- ============ TERMINAL WINDOW ============ -->
+    <div ref="{{ termRef }}" class="term" tabindex="0" onKeyDown="{{ onKey }}" onMouseDown="{{ focusTerm }}" style="position:relative;width:1000px;height:634px;flex:0 0 auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 40px 90px -24px rgba(0,0,0,.7);">
+
+      <!-- titlebar -->
+      <div style="height:34px;flex:0 0 34px;background:var(--frame);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;padding:0 12px;">
+        <span style="width:11px;height:11px;border-radius:50%;background:#ff5f57;"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#febc2e;"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#28c840;"></span>
+        <div style="flex:1;text-align:center;font-size:11px;color:var(--faint);letter-spacing:.02em;">~/mold — mold tui</div>
+        <span style="font-size:10px;color:{{ kbdColor }};display:flex;align-items:center;gap:5px;">{{ kbdHint }}</span>
+      </div>
+
+      <!-- tab strip -->
+      <div style="height:38px;flex:0 0 38px;background:var(--frame);border-bottom:1px solid var(--border);display:flex;align-items:stretch;padding:0 6px;">
+        <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="5">
+          <button data-tab data-on="{{ t.on }}" onClick="{{ t.nav }}" style="position:relative;border:0;background:transparent;color:var(--dim);padding:0 15px;font-family:var(--fmono);font-size:12px;font-weight:600;display:flex;align-items:center;gap:7px;">
+            <span style="font-size:10px;opacity:.6;">{{ t.num }}</span>{{ t.label }}
+            <span data-bar style="position:absolute;left:12px;right:12px;bottom:0;height:2px;opacity:0;border-radius:2px 2px 0 0;"></span>
+          </button>
+        </sc-for>
+        <div style="flex:1;"></div>
+        <div style="display:flex;align-items:center;padding-right:8px;gap:7px;color:var(--faint);font-size:10.5px;">
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--success);"></span>This Mac · Metal
+        </div>
+      </div>
+
+      <!-- ===== CONTENT ===== -->
+      <div style="flex:1;min-height:0;position:relative;">
+
+        <!-- CREATE -->
+        <sc-if value="{{ isCreate }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;padding:12px;gap:10px;box-sizing:border-box;animation:tfade .16s ease;">
+
+          <!-- prompt panel -->
+          <div data-panel data-focus="{{ fPrompt }}" style="position:relative;flex:0 0 auto;border:1px solid var(--border);border-radius:4px;padding:11px 13px 12px;background:var(--bg);">
+            <span data-ptitle style="position:absolute;top:-8px;left:12px;background:var(--bg);padding:0 6px;font-size:10.5px;color:var(--dim);letter-spacing:.02em;">Prompt</span>
+            <div style="font-size:12.5px;line-height:1.55;color:var(--text);">{{ prompt }}<span style="display:inline-block;width:8px;height:15px;background:var(--focus);vertical-align:-2px;margin-left:1px;animation:tblink 1.1s steps(1) infinite;"></span></div>
+          </div>
+
+          <div style="flex:1;min-height:0;display:flex;gap:10px;">
+            <!-- left column -->
+            <div style="flex:0 0 358px;display:flex;flex-direction:column;gap:10px;min-height:0;">
+              <div data-panel data-focus="{{ fParams }}" style="position:relative;flex:1;min-height:0;border:1px solid var(--border);border-radius:4px;background:var(--bg);display:flex;flex-direction:column;">
+                <span data-ptitle style="position:absolute;top:-8px;left:12px;background:var(--bg);padding:0 6px;font-size:10.5px;color:var(--dim);">Parameters</span>
+                <div style="padding:14px 13px 10px;overflow-y:auto;">
+                  <div data-row data-sel="{{ p0 }}" style="display:flex;align-items:center;padding:5px 7px;border-radius:3px;font-size:12px;">
+                    <span style="width:118px;color:var(--dim);">Model</span>
+                    <span style="flex:1;color:var(--text);">{{ model }}</span>
+                    <span style="color:var(--info);">▾</span>
+                  </div>
+                  <div data-row data-sel="{{ p1 }}" style="display:flex;align-items:center;padding:5px 7px;border-radius:3px;font-size:12px;">
+                    <span style="width:118px;color:var(--dim);">Detail</span>
+                    <span style="flex:1;letter-spacing:2px;color:var(--focus);">{{ detailDots }}</span>
+                    <span style="color:var(--text);margin-right:8px;">{{ steps }}</span>
+                    <span style="color:var(--info);">◀▶</span>
+                  </div>
+                  <div data-row data-sel="{{ p2 }}" style="display:flex;align-items:center;padding:5px 7px;border-radius:3px;font-size:12px;">
+                    <span style="width:118px;color:var(--dim);">Prompt strength</span>
+                    <span style="flex:1;color:var(--text);">{{ guidance }}</span>
+                    <span style="color:var(--info);">◀▶</span>
+                  </div>
+                  <div data-row data-sel="{{ p3 }}" style="display:flex;align-items:center;padding:5px 7px;border-radius:3px;font-size:12px;">
+                    <span style="width:118px;color:var(--dim);">Seed</span>
+                    <span style="flex:1;color:var(--text);">{{ seedLabel }}</span>
+                    <span style="color:var(--info);">◀▶</span>
+                  </div>
+
+                  <!-- Advanced disclosure -->
+                  <div style="margin-top:9px;border-top:1px dashed var(--border);padding-top:9px;">
+                    <button data-acc onClick="{{ toggleAdv }}" style="width:100%;border:0;background:transparent;color:var(--text);display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:3px;font-family:var(--fmono);font-size:12px;text-align:left;">
+                      <span style="color:var(--info);width:10px;">{{ advCaret }}</span>
+                      <span style="flex:1;">Advanced</span>
+                      <span style="color:var(--faint);font-size:10.5px;">{{ advHint }}</span>
+                    </button>
+                    <sc-if value="{{ adv }}" hint-placeholder-val="{{ false }}">
+                    <div style="animation:tfade .14s ease;padding:2px 0 0 4px;">
+                      <sc-for list="{{ advSections }}" as="a" hint-placeholder-count="6">
+                        <div data-row style="display:flex;align-items:center;padding:5px 8px;border-radius:3px;font-size:11.5px;">
+                          <span style="color:var(--faint);width:14px;">{{ a.caret }}</span>
+                          <span style="flex:1;color:var(--text);">{{ a.label }}</span>
+                          <span style="color:var(--faint);font-size:10.5px;">{{ a.summary }}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                    </sc-if>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- right column: preview + timeline -->
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;">
+              <div data-panel data-focus="{{ fPreview }}" style="position:relative;flex:1;min-height:0;border:1px solid var(--border);border-radius:4px;background:var(--bg);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+                <span data-ptitle style="position:absolute;top:-8px;left:12px;background:var(--bg);padding:0 6px;font-size:10.5px;color:var(--dim);z-index:2;">Preview</span>
+                <sc-if value="{{ previewIdle }}" hint-placeholder-val="{{ true }}">
+                <div style="text-align:center;color:var(--faint);">
+                  <div style="font-size:34px;opacity:.35;margin-bottom:10px;">◇</div>
+                  <div style="font-size:12px;">Press <span style="color:var(--focus);">Enter</span> to generate</div>
+                </div>
+                </sc-if>
+                <sc-if value="{{ previewGen }}" hint-placeholder-val="{{ false }}">
+                <div style="text-align:center;color:var(--info);width:78%;">
+                  <div style="font-size:40px;line-height:1;">{{ spinner }}</div>
+                  <div style="font-size:12px;margin:14px 0 8px;color:var(--text);">{{ stageLine }}</div>
+                  <div style="font-size:13px;letter-spacing:1px;color:var(--focus);">{{ progressBar }}</div>
+                  <div style="font-size:10.5px;margin-top:7px;color:var(--faint);">{{ genPct }} · 1.8 it/s · eta {{ genEta }}</div>
+                </div>
+                </sc-if>
+                <sc-if value="{{ previewDone }}" hint-placeholder-val="{{ false }}">
+                {{ resultImg }}
+                <div style="position:absolute;left:0;right:0;bottom:0;padding:8px 12px;background:linear-gradient(transparent,rgba(0,0,0,.72));font-size:10.5px;color:#f3effb;">{{ resultCaption }}</div>
+                </sc-if>
+              </div>
+
+              <div style="flex:0 0 150px;position:relative;border:1px solid var(--border);border-radius:4px;background:var(--bg);">
+                <span style="position:absolute;top:-8px;left:12px;background:var(--bg);padding:0 6px;font-size:10.5px;color:var(--dim);">Timeline</span>
+                <div style="padding:12px 13px 8px;overflow-y:auto;height:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:3px;">
+                  <sc-for list="{{ log }}" as="l" hint-placeholder-count="3">
+                    <div style="font-size:11.5px;display:flex;gap:8px;"><span style="color:{{ l.color }};width:10px;">{{ l.glyph }}</span><span style="color:var(--text);">{{ l.text }}</span></div>
+                  </sc-for>
+                  <sc-if value="{{ logEmpty }}" hint-placeholder-val="{{ true }}">
+                  <div style="font-size:11.5px;color:var(--faint);">— idle. no runs this session.</div>
+                  </sc-if>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- LIBRARY -->
+        <sc-if value="{{ isLibrary }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;padding:12px;gap:12px;box-sizing:border-box;animation:tfade .16s ease;">
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;">
+            <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--dim);margin-bottom:10px;"><span style="color:var(--text);font-weight:600;">Library</span><span style="color:var(--faint);">{{ libCount }} prints · all machines</span></div>
+            <div style="flex:1;min-height:0;overflow-y:auto;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;align-content:start;">
+              <sc-for list="{{ libItems }}" as="it" hint-placeholder-count="8">
+                <button data-cell data-sel="{{ it.sel }}" onClick="{{ it.pick }}" style="border:1px solid var(--border);border-radius:3px;padding:0;overflow:hidden;background:var(--surface);aspect-ratio:1;cursor:pointer;">
+                  <img src="{{ it.src }}" alt="print" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block;"/>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+          <div style="flex:0 0 258px;border:1px solid var(--border);border-radius:4px;background:var(--bg);position:relative;padding:16px 14px;">
+            <span style="position:absolute;top:-8px;left:12px;background:var(--bg);padding:0 6px;font-size:10.5px;color:var(--dim);">Details</span>
+            {{ selImg }}
+            <div style="font-size:11.5px;color:var(--text);line-height:1.5;margin-bottom:12px;">{{ selPrompt }}</div>
+            <div style="display:flex;flex-direction:column;gap:7px;font-size:11px;">
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--faint);">Model</span><span>{{ selModel }}</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--faint);">Seed</span><span>{{ selSeed }}</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--faint);">Dimensions</span><span>{{ selDim }}</span></div>
+              <div style="display:flex;justify-content:space-between;"><span style="color:var(--faint);">Machine</span><span>{{ selHost }}</span></div>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:16px;">
+              <button data-ghost style="flex:1;border:1px solid var(--border);background:transparent;color:var(--text);padding:8px;border-radius:4px;font-family:var(--fmono);font-size:11px;">Recall prompt</button>
+              <button data-ghost style="flex:1;border:1px solid var(--border);background:transparent;color:var(--text);padding:8px;border-radius:4px;font-family:var(--fmono);font-size:11px;">Upscale</button>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- MODELS -->
+        <sc-if value="{{ isModels }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;padding:14px;box-sizing:border-box;animation:tfade .16s ease;overflow-y:auto;">
+          <div style="display:flex;align-items:center;gap:10px;font-size:11px;color:var(--dim);margin-bottom:12px;"><span style="color:var(--text);font-weight:600;">Models</span><span style="color:var(--faint);">6 installed · ★ loaded</span></div>
+          <div style="display:flex;padding:0 10px 8px;font-size:10px;letter-spacing:.08em;color:var(--faint);border-bottom:1px solid var(--border);">
+            <span style="flex:1;">NAME</span><span style="width:110px;">FAMILY</span><span style="width:72px;text-align:right;">SIZE</span><span style="width:120px;text-align:right;">STATUS</span>
+          </div>
+          <sc-for list="{{ modelRows }}" as="m" hint-placeholder-count="6">
+            <div data-row data-sel="{{ m.star }}" style="display:flex;align-items:center;padding:9px 10px;font-size:12px;border-radius:3px;">
+              <span style="flex:1;color:var(--text);display:flex;align-items:center;gap:8px;"><span style="color:var(--warning);width:10px;">{{ m.starGlyph }}</span>{{ m.name }}</span>
+              <span style="width:110px;color:var(--dim);">{{ m.fam }}</span>
+              <span style="width:72px;text-align:right;color:var(--text);">{{ m.size }}</span>
+              <span style="width:120px;text-align:right;color:{{ m.statusColor }};">{{ m.status }}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- MACHINES -->
+        <sc-if value="{{ isMachines }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;padding:14px;box-sizing:border-box;animation:tfade .16s ease;overflow-y:auto;">
+          <div style="display:flex;align-items:center;margin-bottom:12px;"><span style="color:var(--text);font-weight:600;font-size:12px;">Machines</span><button data-ghost onClick="{{ openConnect }}" style="margin-left:auto;border:1px solid var(--border);background:transparent;color:var(--text);padding:7px 13px;border-radius:4px;font-family:var(--fmono);font-size:11px;">+ Connect a machine</button></div>
+          <sc-for list="{{ hostRows }}" as="h" hint-placeholder-count="3">
+            <div data-row style="display:flex;align-items:center;gap:12px;padding:13px 12px;border:1px solid var(--border);border-radius:4px;margin-bottom:8px;background:var(--bg);">
+              <span style="width:9px;height:9px;border-radius:50%;background:{{ h.dotColor }};flex:0 0 9px;"></span>
+              <div style="flex:1;min-width:0;"><div style="font-size:12.5px;color:var(--text);">{{ h.name }}</div><div style="font-size:10.5px;color:var(--faint);margin-top:3px;">{{ h.detail }}</div></div>
+              <span style="font-size:11px;color:{{ h.statusColor }};">{{ h.status }}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- SETTINGS -->
+        <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;padding:16px;box-sizing:border-box;animation:tfade .16s ease;overflow-y:auto;">
+          <div style="color:var(--text);font-weight:600;font-size:12px;margin-bottom:14px;">Settings</div>
+          <div style="font-size:10.5px;letter-spacing:.06em;color:var(--faint);margin-bottom:9px;">APPEARANCE</div>
+          <div style="display:flex;gap:8px;margin-bottom:20px;">
+            <sc-for list="{{ themeCards }}" as="c" hint-placeholder-count="3">
+              <button data-cell data-sel="{{ c.on }}" onClick="{{ c.pick }}" style="flex:1;border:1px solid var(--border);border-radius:5px;padding:12px;background:var(--bg);cursor:pointer;text-align:left;">
+                <div style="display:flex;gap:5px;margin-bottom:9px;"><span style="width:16px;height:16px;border-radius:3px;background:{{ c.sw1 }};"></span><span style="width:16px;height:16px;border-radius:3px;background:{{ c.sw2 }};"></span><span style="width:16px;height:16px;border-radius:3px;background:{{ c.sw3 }};"></span></div>
+                <div style="font-size:11.5px;color:var(--text);">{{ c.label }}</div>
+                <div style="font-size:10px;color:var(--faint);margin-top:2px;">{{ c.desc }}</div>
+              </button>
+            </sc-for>
+          </div>
+          <div style="font-size:10.5px;letter-spacing:.06em;color:var(--faint);margin-bottom:9px;">PREFERENCES</div>
+          <div style="display:flex;flex-direction:column;">
+            <sc-for list="{{ prefRows }}" as="pr" hint-placeholder-count="4">
+              <div style="display:flex;align-items:center;padding:11px 4px;border-bottom:1px solid var(--border);font-size:12px;">
+                <span style="flex:1;color:var(--text);">{{ pr.label }}</span>
+                <span style="color:var(--dim);font-size:11px;">{{ pr.value }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        </sc-if>
+
+      </div>
+
+      <!-- activity strip -->
+      <div style="height:26px;flex:0 0 26px;background:var(--frame);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 12px;gap:9px;font-size:11px;">
+        <span style="color:{{ activityColor }};animation:{{ activityAnim }};">{{ activityGlyph }}</span>
+        <span style="color:var(--dim);">{{ activityText }}</span>
+      </div>
+
+      <!-- status bar -->
+      <div style="height:28px;flex:0 0 28px;background:var(--frame);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 10px;gap:16px;font-size:10.5px;overflow:hidden;">
+        <sc-for list="{{ statusKeys }}" as="k" hint-placeholder-count="6">
+          <span style="display:flex;align-items:center;gap:6px;white-space:nowrap;"><span style="color:var(--focus);font-weight:700;">{{ k.key }}</span><span style="color:var(--dim);">{{ k.label }}</span></span>
+        </sc-for>
+      </div>
+
+      <!-- ^K command palette -->
+      <sc-if value="{{ paletteOpen }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closePalette }}" style="position:absolute;inset:0;background:rgba(6,5,10,.55);z-index:40;display:flex;justify-content:center;padding-top:66px;animation:tfade .12s ease;">
+        <div onClick="{{ stop }}" style="width:520px;max-width:88%;height:max-content;background:var(--surface);border:1px solid var(--focus);border-radius:6px;box-shadow:0 30px 70px -14px rgba(0,0,0,.7);overflow:hidden;">
+          <div style="display:flex;align-items:center;gap:9px;padding:13px 15px;border-bottom:1px solid var(--border);">
+            <span style="color:var(--focus);">›</span>
+            <span style="color:var(--faint);font-size:12.5px;">type a command…</span>
+            <span style="display:inline-block;width:7px;height:14px;background:var(--focus);animation:tblink 1.1s steps(1) infinite;"></span>
+          </div>
+          <div style="padding:6px;max-height:280px;overflow-y:auto;">
+            <sc-for list="{{ paletteCmds }}" as="c" hint-placeholder-count="7">
+              <button data-cmd onClick="{{ c.run }}" style="width:100%;border:0;background:transparent;color:var(--text);display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:4px;font-family:var(--fmono);font-size:12px;text-align:left;">
+                <span style="color:var(--info);width:15px;">{{ c.glyph }}</span>
+                <span style="flex:1;">{{ c.label }}</span>
+                <span style="color:var(--faint);font-size:10.5px;">{{ c.hint }}</span>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+    </div>
+
+    <!-- ============ RECOMMENDATION RAIL ============ -->
+    <div style="flex:0 0 340px;max-width:340px;display:flex;flex-direction:column;gap:14px;font-family:var(--fmono);">
+
+      <div style="border:1px solid var(--border);border-radius:8px;background:var(--bg);overflow:hidden;">
+        <div style="padding:13px 15px;border-bottom:1px solid var(--border);background:var(--frame);">
+          <div style="font-family:var(--fdisp);font-weight:700;font-size:14px;color:var(--text);">Recommended stack</div>
+          <div style="font-size:10px;color:var(--faint);margin-top:3px;line-height:1.5;">Stay terminal-native on <span style="color:var(--info);">ratatui</span> — don't port to a webview. Layer four crates to close the feel gap with the GUI surfaces.</div>
+        </div>
+        <div style="padding:6px 6px 10px;">
+          <sc-for list="{{ stack }}" as="s" hint-placeholder-count="5">
+            <div style="display:flex;gap:11px;padding:10px 10px;border-radius:5px;">
+              <span style="flex:0 0 auto;margin-top:1px;font-size:9px;font-weight:700;letter-spacing:.04em;color:{{ s.tagColor }};border:1px solid {{ s.tagColor }};border-radius:3px;padding:2px 5px;height:max-content;">{{ s.tag }}</span>
+              <div style="min-width:0;">
+                <div style="font-size:12px;color:var(--text);">{{ s.name }}</div>
+                <div style="font-size:10.5px;color:var(--faint);line-height:1.5;margin-top:2px;">{{ s.why }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:8px;background:var(--bg);overflow:hidden;">
+        <div style="padding:13px 15px;border-bottom:1px solid var(--border);background:var(--frame);font-family:var(--fdisp);font-weight:700;font-size:14px;color:var(--text);">What changed from today</div>
+        <div style="padding:11px 15px;display:flex;flex-direction:column;gap:11px;">
+          <sc-for list="{{ changes }}" as="c" hint-placeholder-count="5">
+            <div style="display:flex;gap:10px;font-size:11px;line-height:1.5;">
+              <span style="color:var(--focus);flex:0 0 auto;">→</span>
+              <div style="color:var(--dim);"><span style="color:var(--text);">{{ c.head }}</span> {{ c.body }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:8px;background:var(--bg);padding:13px 15px;">
+        <div style="font-size:10px;letter-spacing:.06em;color:var(--faint);margin-bottom:9px;">TRY IT</div>
+        <div style="display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--dim);line-height:1.5;">
+          <div>Click the window, then: <span style="color:var(--focus);">1–5</span> switch workspace · <span style="color:var(--focus);">⇥</span> move focus · <span style="color:var(--focus);">A</span> toggle Advanced · <span style="color:var(--focus);">⌘K</span> palette · <span style="color:var(--focus);">Enter</span> generate.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1420,&quot;height&quot;:760}}">
+const SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+const TOTAL = 28;
+const PRINTS = [
+  {src:"prints/p2.jpg", prompt:"a tuxedo cat wearing a striped top hat, bold ink illustration, playful confident lines", model:"flux2-klein:q4", seed:771204, dim:"1024×1024", host:"This Mac"},
+  {src:"prints/p1.jpg", prompt:"abandoned desert outpost silhouetted against a golden-hour sunset, sand dunes, cinematic haze", model:"flux2-klein:q4", seed:184023, dim:"1024×1024", host:"Studio"},
+  {src:"prints/p4.jpg", prompt:"a fishing boat sealed inside a glass bottle riding a stormy sea, lightning, dramatic", model:"qwen-image:q4", seed:902551, dim:"1024×1024", host:"Studio"},
+  {src:"prints/p9.jpg", prompt:"a green tree frog perched on weathered bark, macro photography, shallow depth of field", model:"flux-dev:q8", seed:30271, dim:"1024×1024", host:"This Mac"},
+  {src:"prints/p3.jpg", prompt:"a tabby cat in a black top hat with a red band, studio portrait, soft light", model:"flux-dev:q8", seed:55120, dim:"1024×1024", host:"Studio"},
+  {src:"prints/p7.jpg", prompt:"a moody impressionist portrait, thick oil texture, chiaroscuro lighting", model:"flux2-klein:q4", seed:640881, dim:"1024×1024", host:"This Mac"},
+  {src:"prints/p11.jpg", prompt:"a coiled naturalist form on a scaled branch, macro detail, muted greens", model:"sdxl:base", seed:118934, dim:"1024×1024", host:"Studio"},
+  {src:"prints/p12.jpg", prompt:"the Whirlpool galaxy, deep-sky astrophotography, faint nebulosity and dust lanes", model:"qwen-image:q4", seed:771, dim:"1880×1175", host:"Studio"},
+];
+
+class Component extends DCLogic {
+  state = {
+    theme: "studio-dark",
+    tab: "create",
+    focus: "prompt",
+    adv: false,
+    palette: false,
+    gen: false,
+    done: false,
+    step: 0,
+    spin: 0,
+    log: [],
+    libSel: 0,
+    prompt: "a tuxedo cat wearing a striped top hat, bold ink illustration, playful confident lines",
+    model: "flux2-klein:q4",
+    steps: 28,
+    guidance: "3.5",
+  };
+  termRef = React.createRef();
+
+  componentDidMount() { if (this.termRef.current) this.termRef.current.focus(); }
+  componentWillUnmount() { clearInterval(this._spin); clearInterval(this._step); }
+
+  runGen() {
+    if (this.state.gen) return;
+    clearInterval(this._spin); clearInterval(this._step);
+    this.setState({ gen:true, done:false, step:0, spin:0, tab:"create", focus:"preview",
+      log:[{glyph:"•",text:"Loaded flux2-klein:q4  ★",tone:"info"},{glyph:"✓",text:"Text encode  [0.3s]",tone:"ok"}] });
+    this._spin = setInterval(()=>this.setState(s=>({spin:(s.spin+1)%SPIN.length})), 90);
+    this._step = setInterval(()=>this.setState(s=>{
+      const step = s.step + 1;
+      if (step >= TOTAL) { clearInterval(this._step); this._step=null; return {step:TOTAL}; }
+      return {step};
+    }), 100);
+    setTimeout(()=>this.finishGen(), 100*TOTAL + 500);
+  }
+  finishGen() {
+    clearInterval(this._spin); clearInterval(this._step); this._spin=this._step=null;
+    this.setState(s=>({ gen:false, done:true, step:TOTAL,
+      log:[...s.log,
+        {glyph:"✓",text:"Denoising (28 steps)  [1.8s]",tone:"ok"},
+        {glyph:"✓",text:"VAE decode  [0.7s]",tone:"ok"},
+        {glyph:"✓",text:"Saved mold-flux2-klein-q4-1775322433.png  [4.0s]",tone:"ok"}] }));
+  }
+  cycleFocus() {
+    const order = ["prompt","params","preview"];
+    this.setState(s=>({ focus: order[(order.indexOf(s.focus)+1)%order.length] }));
+  }
+  onKey(e) {
+    const k = e.key;
+    if (this.state.palette) { if (k==="Escape") this.setState({palette:false}); return; }
+    if ((k==="k"||k==="K") && (e.ctrlKey||e.metaKey)) { e.preventDefault(); this.setState({palette:true}); return; }
+    if (["1","2","3","4","5"].includes(k)) { this.setState({tab:{1:"create",2:"library",3:"models",4:"machines",5:"settings"}[k]}); return; }
+    if (k==="Tab") { e.preventDefault(); this.cycleFocus(); return; }
+    if (k==="Enter") { e.preventDefault(); if (this.state.tab==="create") this.runGen(); return; }
+    if (k==="a"||k==="A") { this.setState(s=>({adv:!s.adv})); return; }
+    if (k==="Escape") this.setState({palette:false});
+  }
+
+  tone(t) {
+    return {ok:"var(--success)", info:"var(--info)", warn:"var(--warning)", err:"var(--error)", focus:"var(--focus)"}[t] || "var(--dim)";
+  }
+
+  renderVals() {
+    const s = this.state;
+    const nav = (t)=>()=>this.setState({tab:t});
+    const pct = s.gen ? s.step/TOTAL : (s.done?1:0);
+    const filled = Math.round(pct*22);
+    const dFilled = Math.max(0, Math.min(8, Math.round((s.steps-6)/44*8)));
+    const rp = PRINTS[0];
+    const sel = PRINTS[s.libSel] || PRINTS[0];
+
+    return {
+      themeAttr: s.theme,
+      thDarkOn: s.theme==="studio-dark", thLightOn: s.theme==="studio-light", thSafeOn: s.theme==="safelight", thSafeLightOn: s.theme==="safelight-light", thMochaOn: s.theme==="mocha",
+      setDark: ()=>this.setState({theme:"studio-dark"}), setLight: ()=>this.setState({theme:"studio-light"}), setSafe: ()=>this.setState({theme:"safelight"}), setSafeLight: ()=>this.setState({theme:"safelight-light"}), setMocha: ()=>this.setState({theme:"mocha"}),
+
+      termRef: this.termRef, onKey: (e)=>this.onKey(e), focusTerm: ()=>{ if(this.termRef.current) this.termRef.current.focus(); },
+      kbdHint: "● keyboard ready", kbdColor: "var(--faint)",
+
+      tabs: [
+        {label:"Create",num:"1",on:s.tab==="create",nav:nav("create")},
+        {label:"Library",num:"2",on:s.tab==="library",nav:nav("library")},
+        {label:"Models",num:"3",on:s.tab==="models",nav:nav("models")},
+        {label:"Machines",num:"4",on:s.tab==="machines",nav:nav("machines")},
+        {label:"Settings",num:"5",on:s.tab==="settings",nav:nav("settings")},
+      ],
+      isCreate:s.tab==="create", isLibrary:s.tab==="library", isModels:s.tab==="models", isMachines:s.tab==="machines", isSettings:s.tab==="settings",
+
+      fPrompt:s.focus==="prompt", fParams:s.focus==="params", fPreview:s.focus==="preview",
+      p0:s.focus==="params", p1:false, p2:false, p3:false,
+
+      prompt:s.prompt, model:s.model, steps:String(s.steps), guidance:s.guidance, seedLabel:"random",
+      detailDots: "●".repeat(dFilled)+"○".repeat(8-dFilled),
+
+      adv:s.adv, toggleAdv:()=>this.setState(st=>({adv:!st.adv})),
+      advCaret:s.adv?"▾":"▸", advHint:s.adv?"6 sections":"scheduler · negative · img2img · lora · upscale · format",
+      advSections:[
+        {caret:"▸",label:"Scheduler & sampling",summary:"default"},
+        {caret:"▸",label:"Negative prompt",summary:"off"},
+        {caret:"▸",label:"Source image (img2img)",summary:"off"},
+        {caret:"▸",label:"LoRA stack",summary:"none"},
+        {caret:"▸",label:"Upscale",summary:"off"},
+        {caret:"▸",label:"Seed & format",summary:"png"},
+      ],
+
+      previewIdle: !s.gen && !s.done, previewGen: s.gen, previewDone: s.done,
+      spinner: SPIN[s.spin], stageLine: "Denoising  step "+s.step+"/"+TOTAL,
+      progressBar: "█".repeat(filled)+"░".repeat(22-filled),
+      genPct: Math.round(pct*100)+"%", genEta: Math.max(1, Math.round((TOTAL-s.step)*0.55))+"s",
+      resultImg: React.createElement("img",{src:rp.src,alt:"result",style:{width:"100%",height:"100%",objectFit:"cover",display:"block"}}),
+      resultCaption: rp.model+" · seed "+rp.seed+" · 4.0s · This Mac",
+
+      log: s.log.map(l=>({glyph:l.glyph, text:l.text, color:this.tone(l.tone)})),
+      logEmpty: s.log.length===0,
+
+      activityGlyph: s.gen?SPIN[s.spin]:(s.done?"✓":"•"),
+      activityColor: s.gen?"var(--focus)":(s.done?"var(--success)":"var(--info)"),
+      activityAnim: s.gen?"none":"tpulse 2.4s ease-in-out infinite",
+      activityText: s.gen ? ("generating · flux2-klein:q4 · "+s.step+"/"+TOTAL+" · 1.8 it/s · queue 2")
+                    : s.done ? "done · 4.0s · saved to ~/mold-outputs · queue 0"
+                    : "idle · flux2-klein:q4 loaded · This Mac · 24.0 GB free",
+
+      statusKeys:[
+        {key:"↵",label:"Generate"},{key:"^K",label:"Commands"},{key:"⇥",label:"Focus"},
+        {key:"1-5",label:"Workspace"},{key:"A",label:"Advanced"},{key:"?",label:"Help"},
+      ],
+
+      paletteOpen:s.palette, closePalette:()=>this.setState({palette:false}), stop:(e)=>e.stopPropagation(),
+      paletteCmds:[
+        {glyph:"✦",label:"Create — new image",hint:"1",run:()=>this.setState({tab:"create",palette:false})},
+        {glyph:"▦",label:"Go to Library",hint:"2",run:()=>this.setState({tab:"library",palette:false})},
+        {glyph:"◈",label:"Go to Models",hint:"3",run:()=>this.setState({tab:"models",palette:false})},
+        {glyph:"⊟",label:"Connect a machine…",hint:"4",run:()=>this.setState({tab:"machines",palette:false})},
+        {glyph:"▸",label:"Toggle Advanced options",hint:"A",run:()=>this.setState(st=>({adv:!st.adv,palette:false}))},
+        {glyph:"◐",label:"Switch to Studio Light theme",hint:"",run:()=>this.setState({theme:"studio-light",palette:false})},
+        {glyph:"⚙",label:"Open Settings",hint:"5",run:()=>this.setState({tab:"settings",palette:false})},
+      ],
+
+      libCount:String(PRINTS.length),
+      libItems: PRINTS.map((p,i)=>({src:p.src, sel:i===s.libSel, pick:()=>this.setState({libSel:i})})),
+      selImg: React.createElement("img",{src:sel.src,alt:"selected",style:{width:"100%",border:"1px solid var(--border)",borderRadius:"3px",display:"block",marginBottom:"12px"}}),
+      selPrompt:sel.prompt, selModel:sel.model, selSeed:String(sel.seed), selDim:sel.dim, selHost:sel.host,
+
+      modelRows:[
+        {name:"flux2-klein:q4",fam:"FLUX.2",size:"6.9G",status:"loaded",statusColor:"var(--success)",star:true,starGlyph:"★"},
+        {name:"flux-dev:q8",fam:"FLUX",size:"12.1G",status:"ready",statusColor:"var(--dim)",star:false,starGlyph:""},
+        {name:"sdxl:base",fam:"SDXL",size:"6.6G",status:"ready",statusColor:"var(--dim)",star:false,starGlyph:""},
+        {name:"qwen-image:q4",fam:"Qwen",size:"11.2G",status:"ready",statusColor:"var(--dim)",star:false,starGlyph:""},
+        {name:"ltx-video-0.9.6:bf16",fam:"LTX Video",size:"9.3G",status:"local",statusColor:"var(--dim)",star:false,starGlyph:""},
+        {name:"z-image:q8",fam:"Z-Image",size:"—",status:"available",statusColor:"var(--info)",star:false,starGlyph:""},
+      ],
+
+      openConnect:()=>this.setState({palette:true}),
+      hostRows:[
+        {name:"This Mac",detail:"Apple M3 Max · 48 GB · Metal · in-process",status:"ready",statusColor:"var(--success)",dotColor:"var(--success)"},
+        {name:"Studio",detail:"RTX 4090 · 24 GB · CUDA · 192.168.1.20:7860",status:"ready",statusColor:"var(--success)",dotColor:"var(--success)"},
+        {name:"RunPod A100",detail:"A100 80GB · us-east · pod-3f9a2",status:"connecting...",statusColor:"var(--warning)",dotColor:"var(--warning)"},
+      ],
+
+      themeCards:[
+        {label:"Studio Dark",desc:"dual accent",on:s.theme==="studio-dark",pick:()=>this.setState({theme:"studio-dark"}),sw1:"#13111d",sw2:"#e879f9",sw3:"#5cd0ff"},
+        {label:"Studio Light",desc:"dual accent",on:s.theme==="studio-light",pick:()=>this.setState({theme:"studio-light"}),sw1:"#f6f4fb",sw2:"#a21caf",sw3:"#0e7490"},
+        {label:"Safelight Dark",desc:"warm · dual accent",on:s.theme==="safelight",pick:()=>this.setState({theme:"safelight"}),sw1:"#171210",sw2:"#f79433",sw3:"#8fb4c4"},
+        {label:"Safelight Light",desc:"warm · dual accent",on:s.theme==="safelight-light",pick:()=>this.setState({theme:"safelight-light"}),sw1:"#f7f1e6",sw2:"#9b4d00",sw3:"#3f6570"},
+        {label:"Catppuccin Mocha",desc:"single blue · ships today",on:s.theme==="mocha",pick:()=>this.setState({theme:"mocha"}),sw1:"#1e1e2e",sw2:"#89b4fa",sw3:"#89dceb"},
+      ],
+      prefRows:[
+        {label:"Default output format",value:"png ◀▶"},
+        {label:"Reduce motion (disable tachyonfx)",value:"off ◀▶"},
+        {label:"Show Timeline on Create",value:"on ◀▶"},
+        {label:"Confirm destructive actions",value:"on ◀▶"},
+      ],
+
+      stack:[
+        {tag:"KEEP",tagColor:"var(--success)",name:"ratatui",why:"the immediate-mode core. Right foundation — the whole value of a TUI is living in the terminal. Do not rewrite to a webview."},
+        {tag:"ADD",tagColor:"var(--focus)",name:"tachyonfx",why:"shader-style effects & timed transitions. Buys the Studio's motion vocabulary: workspace fades, activity pulse, generation shimmer — the single biggest feel upgrade."},
+        {tag:"KEEP",tagColor:"var(--info)",name:"ratatui-image",why:"already wired for Kitty / Sixel / iTerm2. Expand it to real thumbnails in Library + inline Create preview."},
+        {tag:"KEEP",tagColor:"var(--info)",name:"tui-textarea",why:"already wired for the prompt. Extend with the Studio's prompt affordances (style chips, negative field)."},
+        {tag:"ADD",tagColor:"var(--focus)",name:"tui-scrollview + tui-widget-list",why:"smooth, momentum-free scrolling for the Library grid and Timeline log — matches the GUI's list ergonomics."},
+      ],
+      changes:[
+        {head:"3 tabs → 5 workspaces.",body:"Create · Library · Models · Machines · Settings — the same vocabulary as macOS, iOS and web."},
+        {head:"Single blue → dual accent.",body:"safelight (magenta) = focus & primary action; halide (cyan) = info & live state. Classic Mocha stays single-blue."},
+        {head:"Flat param list → progressive disclosure.",body:"four essentials up top, six Advanced sections collapsed by default (A to expand)."},
+        {head:"New ⌘K command palette.",body:"^K opens navigation + actions — full parity with the GUI palette."},
+        {head:"Persistent activity strip.",body:"live job, throughput and queue depth above the status bar — mirrors Create's activity strip."},
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

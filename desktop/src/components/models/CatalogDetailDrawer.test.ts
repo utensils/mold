@@ -81,6 +81,50 @@ beforeEach(() => {
 });
 
 describe("CatalogDetailDrawer", () => {
+  // Civitai publishes several previews per model version, and the detail
+  // endpoint does not have to pick the one the search listing picked. The
+  // card the user clicked has to stay the hero, or the drawer looks like a
+  // different model.
+  it("keeps the clicked listing's preview as the hero when the detail names another", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg" }),
+    );
+    const wrapper = await mountDrawer(
+      summary({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/listing.jpeg" }),
+    );
+    expect(wrapper.get("[data-test='drawer-hero']").attributes("src")).toBe(
+      "https://image.civitai.com/tok/id/width=512/listing.jpeg",
+    );
+  });
+
+  it("falls back to the detail's preview when the listing carries none", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg" }),
+    );
+    const wrapper = await mountDrawer(summary({ thumbnail_url: null }));
+    expect(wrapper.get("[data-test='drawer-hero']").attributes("src")).toBe(
+      "https://image.civitai.com/tok/id/width=512/detail.jpeg",
+    );
+  });
+
+  it("still lets unrelated detail fields override the listing", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({
+        thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg",
+        description: "Detail-only copy.",
+        size_bytes: 12_000_000_000,
+      }),
+    );
+    const wrapper = await mountDrawer(
+      summary({
+        thumbnail_url: "https://image.civitai.com/tok/id/width=512/listing.jpeg",
+        size_bytes: 8_000_000_000,
+      }),
+    );
+    expect(wrapper.text()).toContain("Detail-only copy.");
+    expect(wrapper.get("[data-test='stat-checkpoint']").text()).toContain("12.0");
+  });
+
   it("lists on-disk component state with a presence summary for installed entries", async () => {
     fetchModelComponents.mockResolvedValue({
       model: "cv:8001",
@@ -242,5 +286,51 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.emitted("close")).toHaveLength(1);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(wrapper.emitted("close")).toHaveLength(2);
+  });
+
+  it("renders a media badge, source, and the checkpoint/footprint stat tiles", async () => {
+    const wrapper = await mountDrawer(summary());
+    expect(wrapper.get("[data-test='drawer-media-badge']").text()).toBe("image");
+    expect(wrapper.get("[data-test='drawer-source']").text()).toBe("Civitai");
+
+    const tiles = wrapper.get("[data-test='drawer-stat-tiles']");
+    expect(tiles.text()).toContain("Checkpoint weights");
+    expect(tiles.text()).toContain("Full footprint");
+    // SIZE = 8 GB weights; FETCH = 8 + 16 + 0.168 GB, and FETCH ≥ SIZE always.
+    expect(wrapper.get("[data-test='stat-checkpoint']").text()).toBe("8.0 GB");
+    expect(wrapper.get("[data-test='stat-footprint']").text()).toBe("24.2 GB");
+  });
+
+  it("shows no variant chips when no variants are supplied", async () => {
+    const wrapper = await mountDrawer(summary());
+    expect(wrapper.find("[data-test='drawer-variants']").exists()).toBe(false);
+  });
+
+  it("pulls exactly the row it opened for when no variant is chosen", async () => {
+    const wrapper = await mountDrawer(summary());
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
+  });
+
+  it("makes the selected variant the exact pull target", async () => {
+    const wrapper = await mountDrawer(summary(), {
+      variants: [
+        { id: "flux-dev:q4", label: "q4" },
+        { id: "flux-dev:q8", label: "q8" },
+      ],
+    });
+    const chips = wrapper
+      .get("[data-test='drawer-variants']")
+      .findAll("[data-test='variant-chip']");
+    expect(chips.map((c) => c.text().trim())).toEqual(["q4", "q8"]);
+    // No id in the variant list matches the opened entry, so the first is the
+    // default target; pulling it downloads q4.
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "flux-dev:q4" });
+
+    // Selecting q8 repoints the pull without re-opening the drawer.
+    await chips[1]!.trigger("click");
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[1]?.[0]).toMatchObject({ id: "flux-dev:q8" });
   });
 });

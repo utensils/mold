@@ -207,6 +207,156 @@ async fn live_search_returns_normalized_civitai_rows() {
     );
 }
 
+/// `?sort=` must be validated, not silently ignored — silent ignoring is
+/// exactly the bug this endpoint shipped with. Unknown values (including
+/// the retired client-side "name" sort) get a 422 naming the vocabulary.
+#[tokio::test]
+async fn live_search_rejects_unknown_sort_naming_allowed_values() {
+    let (state, _server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    for bad in ["name", "most-downloaded", "bogus"] {
+        let (status, body) = get(
+            router.clone(),
+            &format!("/api/catalog/search?q=test&source=civitai&sort={bad}"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "sort={bad} must be rejected: {body}"
+        );
+        assert!(
+            body.contains("downloads") && body.contains("recent") && body.contains("rating"),
+            "422 body must name the allowed values: {body}"
+        );
+    }
+}
+
+const NEWEST_FLUX_LORA_FIXTURE: &str = r#"{
+    "items": [{
+        "id": 9002,
+        "name": "Fresh Flux LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "bob" },
+        "stats": { "downloadCount": 3, "rating": 4.0, "favoriteCount": 1 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8002,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1, "name": "fresh.safetensors", "sizeKB": 100,
+                "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/fresh.safetensors",
+                "hashes": { "SHA256": "cafebabe" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
+/// Regression: the 5-minute in-process cache must key on the sort. The
+/// same query issued with two different sorts must forward each sort
+/// upstream and keep separate cache entries — repeated requests per sort
+/// return that sort's rows, never the other's.
+#[tokio::test]
+async fn live_search_forwards_sort_and_keys_cache_per_sort() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .and(wiremock::matchers::query_param("sort", "Most Downloaded"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(FLUX_LORA_FIXTURE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .and(wiremock::matchers::query_param("sort", "Newest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(NEWEST_FLUX_LORA_FIXTURE))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+    let router = create_router(state);
+
+    let downloads_uri =
+        "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai&sort=downloads";
+    let recent_uri = "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai&sort=recent";
+
+    let (status, body) = get(router.clone(), downloads_uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["entries"][0]["id"], "cv:8001");
+
+    let (status, body) = get(router.clone(), recent_uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        parsed["entries"][0]["id"], "cv:8002",
+        "recent sort must not replay the downloads-sorted cache entry: {body}"
+    );
+
+    // Second pass per sort — the expect(1) on each mock proves these are
+    // cache hits, and each sort still returns its own rows.
+    let (_, body) = get(router.clone(), downloads_uri).await;
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["entries"][0]["id"], "cv:8001");
+    let (_, body) = get(router, recent_uri).await;
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["entries"][0]["id"], "cv:8002");
+}
+
+/// Omitting `?sort=` keeps the historical most-downloaded ordering, and
+/// an explicit `sort=downloads` shares its cache entry (same opts).
+#[tokio::test]
+async fn live_search_defaults_to_downloads_sort() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .and(wiremock::matchers::query_param("sort", "Most Downloaded"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(FLUX_LORA_FIXTURE))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+    let router = create_router(state);
+
+    let (status, body) = get(
+        router.clone(),
+        "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["entries"][0]["id"], "cv:8001");
+
+    // Explicit sort=downloads is the same cache key as the implicit
+    // default — expect(1) above holds across both requests.
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?q=test&family=flux&kind=lora&source=civitai&sort=downloads",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 #[tokio::test]
 async fn live_search_returns_manual_clip_component_rows() {
     let (state, _server, _tmp) = build_state().await;

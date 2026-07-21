@@ -75,13 +75,15 @@ Pre-built binaries on the [releases page](https://github.com/utensils/mold/relea
 
 ## Desktop app
 
-Mold also has a native desktop app for macOS and Linux. It brings Generate,
-Gallery, Models, Chains, History, Jobs, RunPod, and Settings into one interface,
-and can use this device alongside multiple remote Mold hosts. The unified
-Catalog keeps installed models above the live catalog with image/video filters
-and pinned downloads, and lets you choose which host receives a download. Its
-Installed shelf merges every connected host with host badges, while both that
-screen and each host detail page show host-scoped pull progress. Size labels
+Mold also has a native desktop app for macOS and Linux. It brings the Create,
+Library, Models, Machines, and Settings workspaces into one interface — chains
+live inside Create, history inside Library, and the job queue and RunPod inside
+Machines — and can use this device alongside multiple remote Mold hosts. The
+Models workspace splits into Installed and Discover segments, keeps image/video
+filters and pinned downloads in Discover, and lets you choose which host
+receives a download. Its Installed segment merges every connected host with host
+badges, while both that segment and each host detail page show host-scoped pull
+progress. Size labels
 separate checkpoint weights from the larger footprint including shared runtime
 components.
 Curated built-in variants take precedence over ambiguous multi-checkpoint
@@ -89,16 +91,17 @@ Hugging Face repositories, so a pull targets one runnable model instead of an
 entire aggregate repository.
 Every remembered remote host is retried immediately whenever the app launches,
 independently of This Mac's startup; unreachable hosts stay visible and retry.
-Chains also uses the all-host video-model union and keeps creation, progress,
-previews, and durable job actions routed to the selected model's host.
+Chain authoring inside Create also uses the all-host video-model union and keeps
+creation, progress, previews, and durable job actions routed to the selected
+model's host.
 
 Desktop prompt expansion follows the visible Batch count. Batch 1 is a quick
 rewrite with undo; larger batches prepare exactly N editable variations for
 review before any work is queued. Expansion and every generated sibling stay
-on one resolved host (including Batch 1's next Generate), and changes to the
+on one resolved host (including Batch 1's next generation), and changes to the
 source prompt, model, host, or count preserve the prepared work while requiring
-an explicit refresh or discard. Gallery records the prepared batch identity and
-each sibling's position. If that host lacks the expansion model, Generate keeps
+an explicit refresh or discard. Library records the prepared batch identity and
+each sibling's position. If that host lacks the expansion model, Create keeps
 the recovery in place and shows its exact-host pull from connection through
 queue, byte/file progress, readiness, or retry without hiding reviewed prompts.
 
@@ -111,18 +114,18 @@ live in the desktop guide.
 
 ## iPhone app
 
-Mold for iPhone is a remote-only Tauri companion with first-class Generate,
-Gallery, Catalog, and Hosts views, plus a dedicated Settings screen. Add a host by LAN discovery, IP address,
+Mold for iPhone is a remote-only Tauri companion with first-class Create,
+Library, Models, and Machines views, plus a dedicated Settings screen. Add a host by LAN discovery, IP address,
 hostname, or Tailscale MagicDNS name; generation, model management, and media
 remain on that remote Mold server. Host details expose live resources, queue,
-downloads, and installed models, while Catalog can browse one host and send a
+downloads, and installed models, while Models can browse one host and send a
 pull to another without silently changing the host selected for generation.
 Pull actions immediately progress through Connecting, Starting, Queued, and
 Pulling states, with live percentage and cancellation instead of leaving the
 button looking idle.
 The app uses the same HTTP, SSE, model defaults, resolution presets, and
 generation request contract as the desktop app. New installs use the Safelight
-theme family with system appearance, while saved theme choices persist. Generate brings its
+theme family with system appearance, while saved theme choices persist. Create brings its
 capability-aware controls to touch: Batch 1 prompt expansion with undo, Batch N
 prepared-variation review, recent prompts, saved templates, source/edit images, masks, ControlNet, LoRA,
 schedulers, CFG++, upscaling, and the video/LTX-2 pipeline controls. Estimates
@@ -133,9 +136,9 @@ Prepared variations stay bound to the selected host's snapshotted endpoint,
 Keychain credential, and server identity through expansion, any required model
 pull, source preprocessing, and sibling submission. The phone requires exactly
 the visible Batch count, preserves edited work with named stale reasons, and
-shows batch position and source-prompt provenance in Gallery. A missing-model
-pull leases that frozen route only for the attempt, shares a compatible Catalog
-request already in Starting, and returns authority to Catalog on terminal,
+shows batch position and source-prompt provenance in Library. A missing-model
+pull leases that frozen route only for the attempt, shares a compatible Models
+pull already in Starting, and returns authority to Models on terminal,
 stale, or superseded outcomes without discarding the recovery record.
 Saved results stream from the host instead of crossing the iPhone WebView as
 encoded media; full-screen images swipe between prints, videos retain native
@@ -283,10 +286,11 @@ See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM r
 - **REST API** — `mold serve` with SSE streaming, auth, rate limiting
 - **Discord bot** — slash commands with role permissions and quotas
 - **Interactive TUI** — generate, gallery, models, settings
-- **Native desktop** — local and multi-host generation, gallery, model library,
-  chains, history, jobs, RunPod, and settings
-- **Native iPhone** — remote multi-host generation, gallery, model catalog,
-  host telemetry, and appearance settings through internal TestFlight
+- **Native desktop** — local and multi-host generation across the Create,
+  Library, Models, Machines, and Settings workspaces (chains, history, the job
+  queue, and RunPod included)
+- **Native iPhone** — remote multi-host generation, library, models, machine
+  telemetry, and appearance settings through internal TestFlight
 
 ## Deployment
 

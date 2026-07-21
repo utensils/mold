@@ -76,10 +76,10 @@ gets its own scale slider and remove button.
 
 ## Browsing & Installing LoRAs
 
-The web, desktop, and iPhone Catalog surfaces search Hugging Face and Civitai
-live. Open **Catalog**, choose a family and LoRA kind where available, then use
-**Install** on the web or **Pull** in a native app. Once installed, it appears
-in compatible Generate LoRA pickers on that host.
+The web, desktop, and iPhone Models surfaces search Hugging Face and Civitai
+live. Open **Models** (the Discover segment), choose a family and LoRA kind
+where available, then use **Install** on the web or **Pull** in a native app.
+Once installed, it appears in compatible Create LoRA pickers on that host.
 
 The same flow is available over the server API:
 
@@ -94,7 +94,7 @@ curl -X POST "http://localhost:7680/api/catalog/cv:1234567/download"
 curl "http://localhost:7680/api/catalog/installed?kind=lora&family=flux"
 ```
 
-Catalog downloads may also queue companion files such as tokenizers, VAEs, text
+Model downloads may also queue companion files such as tokenizers, VAEs, text
 encoders, or LTX-2 support assets. See [Model Discovery Catalog](/docs/catalog)
 for the complete API surface.
 

@@ -8,11 +8,17 @@ const emit = defineEmits<{ (e: "browse"): void }>();
 
 const downloads = useDownloadsStore();
 
-// Small enough to pull and run on common local GPUs.
-const STARTERS = [
-  { model: "flux2-klein:q4", label: "smallest · 2.4 GB weights" },
-  { model: "flux-schnell:q8", label: "fast 4-step" },
-  { model: "sd3.5-medium:q8", label: "classic quality" },
+// Cold start (§08 G10): the shortest path to a first print. Three small,
+// fast-to-pull models — the recommended one first — each a one-click pull.
+interface Starter {
+  model: string;
+  label: string;
+  recommended?: boolean;
+}
+const STARTERS: Starter[] = [
+  { model: "flux2-klein:q4", label: "fast, 6.9 GB", recommended: true },
+  { model: "z-image:turbo", label: "fastest, 3.4 GB" },
+  { model: "sdxl:base", label: "classic, 6.6 GB" },
 ];
 
 // Match an in-flight download to a starter by model base name (the server may
@@ -30,21 +36,36 @@ async function pull(model: string) {
 </script>
 
 <template>
-  <div class="flex h-full flex-col items-center justify-center p-8">
+  <div data-test="starter-cards" class="flex h-full flex-col items-center justify-center p-8">
     <h1 class="font-display text-display-lg font-bold text-ink" style="font-stretch: 90%">
       Develop your first print.
     </h1>
     <p class="mt-2 max-w-md text-center text-body-lg text-ink-2">
-      mold runs models locally on this device's GPU. Pull one to start.
+      mold runs models locally on your machine's GPU. Pull one to start.
     </p>
 
     <div class="mt-8 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-3">
       <div
         v-for="starter in STARTERS"
         :key="starter.model"
-        class="border-edge flex flex-col gap-2 rounded-chrome border bg-bench p-4"
+        data-test="starter-card"
+        class="flex flex-col gap-2 rounded-chrome border bg-bench p-4"
+        :class="
+          starter.recommended
+            ? 'border-safelight shadow-[inset_0_1px_0_var(--card-hi)]'
+            : 'border-edge'
+        "
       >
-        <span class="data-mono text-body text-ink">{{ starter.model }}</span>
+        <div class="flex items-center gap-2">
+          <span class="data-mono text-body text-ink">{{ starter.model }}</span>
+          <span
+            v-if="starter.recommended"
+            data-test="starter-recommended"
+            class="edge-code ml-auto rounded-pill bg-[color-mix(in_srgb,var(--safelight)_16%,transparent)] px-1.5 !text-safelight"
+          >
+            Recommended
+          </span>
+        </div>
         <span class="text-caption text-ink-3">{{ starter.label }}</span>
         <div class="flex-1" />
         <template v-if="jobFor(starter.model)">
@@ -56,12 +77,21 @@ async function pull(model: string) {
               }"
             />
           </div>
-          <span class="edge-code">Pulling…</span>
+          <span class="edge-code" data-test="starter-pulling">
+            Pulling…
+            {{ percent(jobFor(starter.model)!.bytes_done, jobFor(starter.model)!.bytes_total) }}%
+          </span>
         </template>
         <button
           v-else
           type="button"
-          class="border-edge h-8 rounded-control border text-body text-ink-2 hover:text-ink disabled:opacity-50"
+          data-test="starter-pull"
+          class="h-8 rounded-control text-body font-semibold transition-colors disabled:opacity-50"
+          :class="
+            starter.recommended
+              ? 'bg-safelight text-on-accent hover:brightness-105'
+              : 'border-edge border text-ink-2 hover:text-ink'
+          "
           :disabled="pulling.has(starter.model)"
           @click="pull(starter.model)"
         >

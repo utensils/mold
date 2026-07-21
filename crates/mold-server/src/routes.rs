@@ -940,6 +940,18 @@ fn create_server_expander(
     }
 }
 
+/// Build the per-request expand config: settings-derived knobs plus the
+/// request's optional visual style (bake-and-clear — the style reaches the
+/// expander as a natural-language instruction, never a literal suffix).
+fn expand_config_for_request(
+    settings: &mold_core::ExpandSettings,
+    req: &mold_core::ExpandRequest,
+) -> mold_core::ExpandConfig {
+    let mut config = settings.to_expand_config(&req.model_family, req.variations);
+    config.style = req.style.clone();
+    config
+}
+
 // ── /api/expand ──────────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -966,7 +978,7 @@ async fn expand_prompt(
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
-    let expand_config = expand_settings.to_expand_config(&req.model_family, req.variations);
+    let expand_config = expand_config_for_request(&expand_settings, &req);
     let prompt = req.prompt.clone();
     let config_snapshot = config.clone();
     drop(config);
@@ -2339,9 +2351,30 @@ async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::
     Json(state.job_registry.snapshot())
 }
 
+/// Wrap any present JSON value (including `null`) in `Some`, so a field using
+/// this as its `deserialize_with` distinguishes *absent* (`None`) from an
+/// explicit `null` (`Some(None)`). Lets a `position`-only PATCH omit
+/// `target_gpu` without resetting the lane to Auto.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct QueuePatchRequest {
-    target_gpu: Option<usize>,
+    /// Preferred GPU lane. Absent leaves the lane unchanged; `null` means Auto;
+    /// a number pins that ordinal. The double `Option` distinguishes absent
+    /// from an explicit `null` so a `position`-only reorder never clobbers it.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<usize>)]
+    target_gpu: Option<Option<usize>>,
+    /// New 0-based index for the job among the queued jobs. Clamped into range
+    /// (a large value sends it to the back). Absent means no reorder.
+    #[serde(default)]
+    position: Option<usize>,
 }
 
 #[utoipa::path(
@@ -2361,7 +2394,7 @@ async fn patch_queue_job(
     Path(id): Path<String>,
     Json(req): Json<QueuePatchRequest>,
 ) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
-    if let Some(target) = req.target_gpu {
+    if let Some(Some(target)) = req.target_gpu {
         let available = state
             .gpu_pool
             .workers
@@ -2374,19 +2407,40 @@ async fn patch_queue_job(
         }
     }
 
-    state
-        .job_registry
-        .set_target_gpu(&id, req.target_gpu)
-        .map_err(|e| match e {
-            crate::job_registry::TargetGpuUpdateError::NotFound => {
-                ApiError::queue_job_not_found(format!("queue job {id} not found"))
-            }
-            crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
-                ApiError::queue_job_running(format!(
-                    "queue job {id} is already running; lane changes only apply to queued jobs"
-                ))
-            }
-        })?;
+    // Both edits are independent and additive — apply whichever the request
+    // supplied. `target_gpu` only when the field was present (absent leaves the
+    // lane untouched); `position` only when a reorder was requested.
+    if let Some(target_gpu) = req.target_gpu {
+        state
+            .job_registry
+            .set_target_gpu(&id, target_gpu)
+            .map_err(|e| match e {
+                crate::job_registry::TargetGpuUpdateError::NotFound => {
+                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                }
+                crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
+                    ApiError::queue_job_running(format!(
+                        "queue job {id} is already running; lane changes only apply to queued jobs"
+                    ))
+                }
+            })?;
+    }
+
+    if let Some(position) = req.position {
+        state
+            .job_registry
+            .reorder_queued(&id, position)
+            .map_err(|e| match e {
+                crate::job_registry::QueueReorderError::NotFound => {
+                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                }
+                crate::job_registry::QueueReorderError::AlreadyRunning => {
+                    ApiError::queue_job_running(format!(
+                        "queue job {id} is already running; only queued jobs can be reordered"
+                    ))
+                }
+            })?;
+    }
 
     let entry = state
         .job_registry
@@ -2618,11 +2672,16 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect::<Vec<_>>(),
+            sort: mold_catalog::live::CatalogSort::WIRE_VALUES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
         },
         events: mold_core::EventsCapabilities { available: true },
         queue: mold_core::QueueCapabilities {
             can_pause: true,
             can_cancel_all: true,
+            can_reorder: true,
         },
         expand: Some(expand),
     })
@@ -3867,6 +3926,29 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_config_for_request_threads_style() {
+        let settings = mold_core::expand::ExpandSettings::default();
+        let req = mold_core::ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 2,
+            style: Some("oil painting".to_string()),
+        };
+        let config = expand_config_for_request(&settings, &req);
+        assert_eq!(config.style.as_deref(), Some("oil painting"));
+        assert_eq!(config.model_family, "flux");
+        assert_eq!(config.variations, 2);
+
+        let bare = mold_core::ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 1,
+            style: None,
+        };
+        assert!(expand_config_for_request(&settings, &bare).style.is_none());
+    }
 
     #[test]
     fn local_expand_capability_reports_feature_and_model_facts_separately() {

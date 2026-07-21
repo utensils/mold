@@ -1,35 +1,19 @@
 @import "./tokens.css";
-
-@font-face {
-  font-family: "Bricolage Grotesque";
-  src: url("../assets/fonts/bricolage-grotesque/BricolageGrotesque-VF.ttf")
-    format("truetype-variations");
-  font-weight: 200 800;
-  font-stretch: 75% 100%;
-  font-display: block;
-}
-
-@font-face {
-  font-family: "Schibsted Grotesk";
-  src: url("../assets/fonts/schibsted-grotesk/SchibstedGrotesk-VF.ttf")
-    format("truetype-variations");
-  font-weight: 400 900;
-  font-display: block;
-}
-
-@font-face {
-  font-family: "Martian Mono";
-  src: url("../assets/fonts/martian-mono/MartianMono-VF.ttf") format("truetype-variations");
-  font-weight: 100 800;
-  font-stretch: 75% 112.5%;
-  font-display: block;
-}
+@import "../../../ui/fonts/fonts.css";
+@import "../../../ui/kit.css";
 
 html,
 body,
 #app {
   height: 100%;
   overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* Native-app feel: no WebKit elastic rubber-banding anywhere. The shell rule
+ * above only covers the root; every inner scroll region (library grid, host
+ * detail, drawers, settings) must also stop dead at its limits. */
+* {
   overscroll-behavior: none;
 }
 

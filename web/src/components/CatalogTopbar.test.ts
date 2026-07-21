@@ -108,6 +108,16 @@ describe("CatalogTopbar", () => {
     );
   });
 
+  it("checking Include NSFW sets include_nsfw filter", async () => {
+    const w = mount(CatalogTopbar);
+    const box = w.find("input[type=checkbox]");
+    expect(box.exists()).toBe(true);
+    await box.setValue(true);
+    expect(mockSetFilter).toHaveBeenCalledWith(
+      expect.objectContaining({ include_nsfw: true }),
+    );
+  });
+
   it("clicking the kind 'All' chip clears the kind filter", async () => {
     mockFilter.value = { kind: "lora" };
     const w = mount(CatalogTopbar);
@@ -121,5 +131,26 @@ describe("CatalogTopbar", () => {
     expect(mockSetFilter).toHaveBeenCalledWith(
       expect.objectContaining({ kind: undefined }),
     );
+  });
+});
+
+describe("CatalogTopbar sort vocabulary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFilter.value = {};
+  });
+
+  it("offers only sorts an upstream can actually serve", () => {
+    // "name" was never implemented anywhere — the server 422s it, so it must
+    // not be offerable. downloads/recent/rating are the honest vocabulary.
+    const w = mount(CatalogTopbar);
+    const values = w
+      .findAll("option")
+      .map((o) => o.attributes("value"))
+      .filter((v): v is string => typeof v === "string");
+    expect(values).toEqual(
+      expect.arrayContaining(["downloads", "recent", "rating"]),
+    );
+    expect(values).not.toContain("name");
   });
 });

@@ -12,7 +12,8 @@ function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
   return {
-    version: 2,
+    version: 3,
+    stylePreset: null,
     prompt: "cinematic cat",
     negativePrompt: "blurry",
     model: "flux-dev:q4",

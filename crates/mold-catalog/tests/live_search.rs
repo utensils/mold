@@ -14,8 +14,8 @@ use std::time::Duration;
 use mold_catalog::entry::{Kind, Source};
 use mold_catalog::families::Family;
 use mold_catalog::live::{
-    family_from_hf, fetch_civitai_version, fetch_hf_repo, search, LiveCache, LiveSearchError,
-    LiveSearchOpts,
+    family_from_hf, fetch_civitai_version, fetch_hf_repo, search, CatalogSort, LiveCache,
+    LiveSearchError, LiveSearchOpts,
 };
 use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -120,6 +120,7 @@ fn flux_lora_opts(q: &str) -> LiveSearchOpts {
         page: 1,
         page_size: 20,
         include_nsfw: false,
+        sort: CatalogSort::Downloads,
         civitai_token: None,
         hf_token: None,
     }
@@ -401,6 +402,242 @@ async fn page_param_present_when_query_absent() {
         .unwrap();
 }
 
+// ── Sort mapping ────────────────────────────────────────────────────────────
+
+/// Second Flux LoRA fixture (distinct ids) so sort-keyed cache tests can
+/// tell which upstream response produced a result set.
+const NEWEST_FLUX_LORA: &str = r#"{
+    "items": [{
+        "id": 9002,
+        "name": "Fresh Flux LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "bob" },
+        "stats": { "downloadCount": 3, "rating": 4.0, "favoriteCount": 1 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8002,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1,
+                "name": "fresh.safetensors",
+                "sizeKB": 100000,
+                "downloadCount": 1,
+                "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/fresh.safetensors",
+                "hashes": { "SHA256": "cafebabe" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 1 }
+}"#;
+
+#[tokio::test]
+async fn civitai_sort_defaults_to_most_downloaded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("sort", "Most Downloaded"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let entries = search(
+        &server.uri(),
+        "https://hf.unused",
+        &cache,
+        &flux_lora_opts("test"),
+    )
+    .await
+    .expect("default sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn civitai_sort_recent_maps_to_newest() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("sort", "Newest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("test");
+    opts.sort = CatalogSort::Recent;
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("recent sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn civitai_sort_rating_maps_to_highest_rated() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("sort", "Highest Rated"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let mut opts = flux_lora_opts("test");
+    opts.sort = CatalogSort::Rating;
+    let entries = search(&server.uri(), "https://hf.unused", &cache, &opts)
+        .await
+        .expect("rating sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+fn hf_only_opts(sort: CatalogSort) -> LiveSearchOpts {
+    LiveSearchOpts {
+        q: Some("flux".into()),
+        family: None,
+        kind: None,
+        source: Some(Source::Hf),
+        page: 1,
+        page_size: 20,
+        include_nsfw: false,
+        sort,
+        civitai_token: None,
+        hf_token: None,
+    }
+}
+
+#[tokio::test]
+async fn hf_sort_defaults_to_downloads_descending() {
+    let hf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .and(query_param("sort", "downloads"))
+        .and(query_param("direction", "-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(HF_SEARCH_HITS))
+        .expect(1)
+        .mount(&hf)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let entries = search(
+        "https://civitai.unused",
+        &hf.uri(),
+        &cache,
+        &hf_only_opts(CatalogSort::Downloads),
+    )
+    .await
+    .expect("hf default sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn hf_sort_recent_maps_to_last_modified_descending() {
+    let hf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .and(query_param("sort", "lastModified"))
+        .and(query_param("direction", "-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(HF_SEARCH_HITS))
+        .expect(1)
+        .mount(&hf)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let entries = search(
+        "https://civitai.unused",
+        &hf.uri(),
+        &cache,
+        &hf_only_opts(CatalogSort::Recent),
+    )
+    .await
+    .expect("hf recent sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn hf_sort_rating_maps_to_likes_descending() {
+    let hf = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/models"))
+        .and(query_param("sort", "likes"))
+        .and(query_param("direction", "-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(HF_SEARCH_HITS))
+        .expect(1)
+        .mount(&hf)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let entries = search(
+        "https://civitai.unused",
+        &hf.uri(),
+        &cache,
+        &hf_only_opts(CatalogSort::Rating),
+    )
+    .await
+    .expect("hf rating sort search");
+    assert_eq!(entries.len(), 1);
+}
+
+/// Regression: the 5-minute cache must key on the sort. Two searches
+/// identical except for `sort` must each hit upstream (expect(1) per
+/// mock) and must return their own result set — before sort was part of
+/// [`LiveSearchOpts`] the second sort would silently replay the first
+/// sort's cached rows.
+#[tokio::test]
+async fn cache_keys_on_sort_so_sorts_do_not_cross_contaminate() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("sort", "Most Downloaded"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/models"))
+        .and(query_param("sort", "Newest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(NEWEST_FLUX_LORA))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = LiveCache::new(Duration::from_secs(300), 64);
+    let downloads_opts = flux_lora_opts("sorted");
+    let mut recent_opts = flux_lora_opts("sorted");
+    recent_opts.sort = CatalogSort::Recent;
+
+    let by_downloads = search(&server.uri(), "https://hf.unused", &cache, &downloads_opts)
+        .await
+        .expect("downloads search");
+    let by_recent = search(&server.uri(), "https://hf.unused", &cache, &recent_opts)
+        .await
+        .expect("recent search");
+    assert_eq!(by_downloads[0].id.0, "cv:8001");
+    assert_eq!(
+        by_recent[0].id.0, "cv:8002",
+        "recent sort must not replay the downloads-sorted cache entry"
+    );
+
+    // Repeat both — the expect(1) on each mock proves these are cache
+    // hits, and each sort keeps its own rows.
+    let by_downloads_again = search(&server.uri(), "https://hf.unused", &cache, &downloads_opts)
+        .await
+        .expect("cached downloads search");
+    let by_recent_again = search(&server.uri(), "https://hf.unused", &cache, &recent_opts)
+        .await
+        .expect("cached recent search");
+    assert_eq!(by_downloads_again[0].id.0, "cv:8001");
+    assert_eq!(by_recent_again[0].id.0, "cv:8002");
+}
+
 // ── Single-id Civitai ──────────────────────────────────────────────────────
 
 const CV_VERSION_DETAIL: &str = r#"{
@@ -551,6 +788,7 @@ async fn hf_search_drops_non_mold_repos() {
         page: 1,
         page_size: 20,
         include_nsfw: false,
+        sort: CatalogSort::Downloads,
         civitai_token: None,
         hf_token: None,
     };

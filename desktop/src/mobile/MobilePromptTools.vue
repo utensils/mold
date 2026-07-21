@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import type { ApiTarget } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { fetchHistoryFrom, type HistoryEntry } from "../lib/api/history";
 import type { GenerateForm } from "../lib/generateForm";
 
@@ -30,7 +31,7 @@ async function loadHistory(): Promise<void> {
   } catch (cause) {
     if (token !== historyToken) return;
     history.value = [];
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    error.value = describeTransportError(cause);
   } finally {
     if (token === historyToken) loadingHistory.value = false;
   }

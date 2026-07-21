@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import Icon from "@ui/components/Icon.vue";
+import Keycap from "@ui/components/Keycap.vue";
 import { useUiStore } from "../../stores/ui";
 import { useGalleryStore } from "../../stores/gallery";
 import { useModelStore } from "../../stores/models";
@@ -8,6 +10,7 @@ import { useComposerStore } from "../../stores/composer";
 import { useGenerationStore } from "../../stores/generation";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { matchCommands, type Matchable } from "../../lib/palette";
 import { fetchHistory, type HistoryEntry } from "../../lib/api/history";
 import { loadModel, unloadModel } from "../../lib/api/models";
@@ -28,6 +31,17 @@ const composer = useComposerStore();
 const generation = useGenerationStore();
 const conn = useConnectionStore();
 const toasts = useToastStore();
+const appPrefs = useAppPrefsStore();
+
+/** Mono section label for a result row, derived from its id prefix. */
+function sectionLabel(id: string): string {
+  if (id.startsWith("nav-")) return "go";
+  if (id.startsWith("theme-") || id.startsWith("appear-")) return "theme";
+  if (id.startsWith("model-") || id.startsWith("load-") || id.startsWith("unload-")) return "model";
+  if (id.startsWith("history-")) return "recent";
+  if (id.startsWith("print-")) return "print";
+  return "run";
+}
 
 const query = ref("");
 const selected = ref(0);
@@ -64,27 +78,54 @@ function prefillModel(model: string, prompt = "") {
     steps: form.steps,
     guidance: form.guidance,
   });
-  go("/generate");
+  go("/create");
 }
 
 const staticCommands = computed<Command[]>(() => {
   const cmds: Command[] = [
-    { id: "nav-generate", title: "Go to Generate", run: () => go("/generate") },
-    { id: "nav-gallery", title: "Go to Gallery", run: () => go("/gallery") },
-    { id: "nav-chains", title: "Go to Chains", run: () => go("/chains") },
+    {
+      id: "nav-create",
+      title: "Go to Create",
+      // "generate" keeps the pre-rename muscle memory working.
+      keywords: ["generate", "compose"],
+      run: () => go("/create"),
+    },
+    {
+      id: "nav-library",
+      title: "Go to Library",
+      keywords: ["gallery", "prints"],
+      run: () => go("/library"),
+    },
     {
       id: "nav-models",
-      title: "Go to Catalog",
-      // "models" keeps the pre-rename muscle memory working.
+      title: "Go to Models",
+      // "catalog" keeps the pre-rename muscle memory working.
       keywords: ["models", "catalog"],
       run: () => go("/models"),
     },
-    { id: "nav-history", title: "Go to History", run: () => go("/history") },
+    {
+      id: "nav-machines",
+      title: "Go to Machines",
+      keywords: ["hosts", "jobs", "gpu"],
+      run: () => go("/machines"),
+    },
+    {
+      id: "nav-chain",
+      title: "Compose chain",
+      keywords: ["chains", "multi-prompt", "storyboard"],
+      run: () => go("/create/chain"),
+    },
+    {
+      id: "nav-history",
+      title: "Open history",
+      keywords: ["runs", "prompts", "recent"],
+      run: () => go("/library?panel=history"),
+    },
     {
       id: "nav-runpod",
       title: "Manage RunPod GPUs",
       keywords: ["cloud", "gpu", "instance"],
-      run: () => go("/runpod"),
+      run: () => go("/machines/runpod"),
     },
     { id: "nav-settings", title: "Go to Settings", run: () => go("/settings") },
     {
@@ -93,7 +134,7 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["clear", "compose"],
       run: () => {
         ui.newGeneration();
-        go("/generate");
+        go("/create");
       },
     },
     {
@@ -101,7 +142,7 @@ const staticCommands = computed<Command[]>(() => {
       title: "Randomize seed",
       run: () => {
         ui.randomizeSeed();
-        go("/generate");
+        go("/create");
       },
     },
     // No "Switch to built-in engine" command: the built-in engine is always
@@ -130,6 +171,53 @@ const staticCommands = computed<Command[]>(() => {
       keywords: ["seed", "clipboard"],
       run: () => {
         ui.copySeed();
+        close();
+      },
+    },
+    {
+      id: "theme-mold",
+      title: "Theme: Mold",
+      subtitle: "cyan & magenta",
+      keywords: ["theme", "palette", "appearance", "family", "color"],
+      run: () => {
+        void appPrefs.update({ themeFamily: "mold" });
+        close();
+      },
+    },
+    {
+      id: "theme-safelight",
+      title: "Theme: Safelight",
+      subtitle: "warm darkroom",
+      keywords: ["theme", "palette", "appearance", "family", "color"],
+      run: () => {
+        void appPrefs.update({ themeFamily: "safelight" });
+        close();
+      },
+    },
+    {
+      id: "appear-dark",
+      title: "Appearance: Dark",
+      keywords: ["theme", "appearance", "dark", "lights off"],
+      run: () => {
+        void appPrefs.update({ theme: "dark" });
+        close();
+      },
+    },
+    {
+      id: "appear-light",
+      title: "Appearance: Light",
+      keywords: ["theme", "appearance", "light", "lights on"],
+      run: () => {
+        void appPrefs.update({ theme: "light" });
+        close();
+      },
+    },
+    {
+      id: "appear-system",
+      title: "Appearance: System",
+      keywords: ["theme", "appearance", "system", "auto"],
+      run: () => {
+        void appPrefs.update({ theme: "system" });
         close();
       },
     },
@@ -236,8 +324,8 @@ const galleryCommands = computed<Command[]>(() => {
     .map((e) => ({
       id: `print-${e.sourceKey}-${e.item.filename}`,
       title: e.item.metadata.prompt || e.item.filename,
-      subtitle: `${e.item.metadata.model} · gallery`,
-      run: () => go(`/gallery?print=${encodeURIComponent(e.item.filename)}`),
+      subtitle: `${e.item.metadata.model} · library`,
+      run: () => go(`/library?print=${encodeURIComponent(e.item.filename)}`),
     }));
 });
 
@@ -312,32 +400,38 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div
     v-if="ui.paletteOpen"
-    class="fixed inset-0 z-50 flex justify-center pt-24"
+    class="cmdk-scrim absolute inset-0 z-[120] flex justify-center pt-[84px]"
     @click.self="close"
   >
     <div
-      class="border-edge h-fit w-[36rem] max-w-[90vw] overflow-hidden rounded-chrome border bg-bench shadow-raised"
+      class="ms-fade-up flex h-fit max-h-[440px] w-[560px] max-w-[86%] flex-col overflow-hidden rounded-card-lg border border-ce bg-bench shadow-raised"
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
     >
-      <input
-        ref="inputEl"
-        v-model="query"
-        data-selectable
-        type="text"
-        placeholder="Search or run a command…"
-        class="border-edge w-full border-b bg-transparent px-4 py-3 text-body-lg text-ink outline-none placeholder:text-ink-3"
-        role="combobox"
-        aria-autocomplete="list"
-        aria-expanded="true"
-        aria-controls="cmd-palette-listbox"
-        :aria-activedescendant="activeOptionId"
-        aria-label="Search or run a command"
-        @keydown="onKeydown"
-      />
-      <div id="cmd-palette-listbox" class="max-h-80 overflow-y-auto py-1" role="listbox">
-        <p v-if="results.length === 0" class="px-4 py-3 text-caption text-ink-3">No matches.</p>
+      <div class="flex items-center gap-2.5 border-b border-edge px-4 py-3.5">
+        <Icon name="search" :size="17" class="shrink-0 text-ink-3" />
+        <input
+          ref="inputEl"
+          v-model="query"
+          data-selectable
+          type="text"
+          placeholder="Search actions, models, settings…"
+          class="min-w-0 flex-1 bg-transparent text-body-lg text-ink outline-none placeholder:text-ink-3"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls="cmd-palette-listbox"
+          :aria-activedescendant="activeOptionId"
+          aria-label="Search or run a command"
+          @keydown="onKeydown"
+        />
+        <Keycap>esc</Keycap>
+      </div>
+      <div id="cmd-palette-listbox" class="min-h-0 flex-1 overflow-y-auto p-2" role="listbox">
+        <p v-if="results.length === 0" class="px-3 py-6 text-center text-body text-ink-3">
+          No matches.
+        </p>
         <button
           v-for="(cmd, i) in results"
           :id="`cmd-palette-option-${i}`"
@@ -345,20 +439,33 @@ function onKeydown(e: KeyboardEvent) {
           type="button"
           role="option"
           :aria-selected="i === selected"
-          class="flex w-full items-center gap-3 px-4 py-2 text-left"
-          :class="i === selected ? 'bg-bath' : 'hover:bg-bath'"
+          class="flex w-full items-center gap-3 rounded-control px-3 py-2.5 text-left transition-colors duration-100"
+          :class="i === selected ? 'bg-surface' : ''"
           @mouseenter="selected = i"
           @click="cmd.run()"
         >
           <span
-            class="min-w-0 flex-1 truncate text-body"
+            class="w-12 shrink-0 font-utility text-[9px] tracking-[0.06em] text-ink-3 uppercase"
+          >
+            {{ sectionLabel(cmd.id) }}
+          </span>
+          <span
+            class="min-w-0 flex-1 truncate text-[13.5px]"
             :class="i === selected ? 'text-ink' : 'text-ink-2'"
           >
             {{ cmd.title }}
           </span>
           <span v-if="cmd.subtitle" class="edge-code shrink-0">{{ cmd.subtitle }}</span>
+          <Icon name="arrow-right" :size="14" class="shrink-0 text-ce" />
         </button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.cmdk-scrim {
+  background: rgba(6, 5, 10, 0.55);
+  backdrop-filter: blur(4px);
+}
+</style>

@@ -66,7 +66,7 @@ describe("modelSizeLabels", () => {
   it("distinguishes primary weights from a larger shared-runtime footprint", () => {
     expect(modelSizeLabels(model("flux2-klein:q4", "flux2", 10_800_000_000, false, 2.4))).toEqual({
       weights: "2.4 GB weights",
-      runtime: "10.8 GB with shared runtime",
+      runtime: "10.8 GB on disk",
     });
   });
 

@@ -23,6 +23,18 @@ import {
   supportsNegativePrompt,
   supportsScheduler,
 } from "../lib/generateCapabilities";
+import { composeStyle } from "../lib/stylePresets";
+
+/** The prompt actually sent to the server: the textarea content composed with
+ * the active style preset (the shared kit substitutes a "{prompt}" template,
+ * otherwise it comma-appends). Never mutates `state.prompt` — the style row is
+ * a request-time modifier, not a rewrite of what the user typed. Shared by
+ * `toRequest` and the estimate/summary display so both agree. */
+export function promptWithStyle(state: GenerateFormState): string {
+  return composeStyle(state.prompt, state.stylePreset ?? "", {
+    supportsNegativePrompt: false,
+  }).prompt;
+}
 
 /** Output-format options for a given model family, ordered by preference.
  * The first entry is the default the UI auto-selects when a model is
@@ -38,7 +50,9 @@ export function defaultOutputFormat(family: string): OutputFormat {
 }
 
 const STORAGE_KEY = "mold.generate.form";
-const FORM_VERSION = 2 as const;
+const FORM_VERSION = 3 as const;
+/** Versions we can load and migrate forward without discarding the draft. */
+const MIGRATABLE_VERSIONS = new Set([1, 2, FORM_VERSION]);
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
 
 function selectedFamily(s: GenerateFormState): string {
@@ -65,6 +79,7 @@ function defaultForm(): GenerateFormState {
   return {
     version: FORM_VERSION,
     prompt: "",
+    stylePreset: null,
     negativePrompt: "",
     model: "",
     modelFamily: "",
@@ -238,6 +253,9 @@ export function applyMetadataToForm(
   return {
     ...next,
     prompt: metadata.prompt ?? "",
+    // Saved metadata already carries the fully-composed prompt (style extras
+    // included at generation time); re-applying a preset would double-append.
+    stylePreset: null,
     negativePrompt: metadata.negative_prompt ?? "",
     width: metadata.generation_width || metadata.width || next.width,
     height: metadata.generation_height || metadata.height || next.height,
@@ -412,7 +430,7 @@ function load(): GenerateFormState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultForm();
     const parsed = JSON.parse(raw) as LegacyFormState;
-    if (parsed.version !== 1 && parsed.version !== FORM_VERSION) {
+    if (!MIGRATABLE_VERSIONS.has(parsed.version ?? -1)) {
       return defaultForm();
     }
     return {
@@ -547,10 +565,18 @@ export function useGenerateForm(): UseGenerateForm {
       const sourceVideoPath = s.sourceVideoPath.trim();
       const family = selectedFamily(s);
       const ltx2 = family === "ltx2" || family === "ltx-2";
+      // The style preset is baked into the OUTGOING request — prompt template
+      // plus the preset's curated negative, merged after the user's own
+      // fragments and only for families that accept a negative prompt. Neither
+      // field on screen is rewritten.
+      const styled = composeStyle(s.prompt, s.stylePreset ?? "", {
+        supportsNegativePrompt: capabilities.supportsNegativePrompt,
+        negative: s.negativePrompt,
+      });
       return {
-        prompt: s.prompt,
+        prompt: styled.prompt,
         negative_prompt: capabilities.supportsNegativePrompt
-          ? s.negativePrompt || null
+          ? styled.negative || null
           : null,
         model: s.model,
         width: s.width,

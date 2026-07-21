@@ -43,19 +43,19 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
 <template>
   <article
     data-test="chain-job-card"
-    class="rounded-lg border border-slate-700 bg-slate-950/60 p-3"
+    class="rounded-lg border border-edge bg-bath/60 p-3"
   >
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
-        <div class="text-sm font-medium text-slate-100">{{ job.id }}</div>
-        <div class="text-xs text-slate-400">
+        <div class="text-sm font-medium text-rebate">{{ job.id }}</div>
+        <div class="text-xs text-ink-3">
           {{ job.state }} - {{ job.current_stage }}/{{ job.stage_count }}
         </div>
       </div>
       <div class="flex gap-2">
         <button
           data-test="chain-job-resume"
-          class="rounded border border-slate-600 px-2 py-1 text-xs text-slate-100 disabled:opacity-40"
+          class="rounded border border-ce px-2 py-1 text-xs text-rebate disabled:opacity-40"
           :disabled="job.state === 'running' || job.state === 'completed'"
           @click="resume"
         >
@@ -63,7 +63,7 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
         </button>
         <button
           data-test="chain-job-cancel"
-          class="rounded border border-slate-600 px-2 py-1 text-xs text-slate-100 disabled:opacity-40"
+          class="rounded border border-ce px-2 py-1 text-xs text-rebate disabled:opacity-40"
           :disabled="job.state === 'completed' || job.state === 'cancelled'"
           @click="cancel"
         >
@@ -76,7 +76,7 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
       <li
         v-for="stage in job.stages"
         :key="stage.idx"
-        class="grid grid-cols-[56px_1fr_auto] items-center gap-3 rounded border border-slate-800 p-2"
+        class="grid grid-cols-[56px_1fr_auto] items-center gap-3 rounded border border-edge p-2"
         :data-test="`chain-job-stage-${stage.idx}`"
       >
         <img
@@ -88,27 +88,27 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
         />
         <div
           v-else
-          class="h-10 w-14 rounded bg-slate-800"
+          class="h-10 w-14 rounded bg-surface"
           :data-test="`chain-job-stage-preview-empty-${stage.idx}`"
         />
         <div class="min-w-0">
-          <div class="text-xs font-medium text-slate-100">
+          <div class="text-xs font-medium text-rebate">
             Stage {{ stage.idx }} - {{ stage.state }}
           </div>
-          <div class="truncate text-xs text-slate-400">
+          <div class="truncate text-xs text-ink-3">
             {{ job.script.stage[stage.idx]?.prompt }}
           </div>
         </div>
         <div class="flex gap-2">
           <button
-            class="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200"
+            class="rounded border border-edge px-2 py-1 text-xs text-ink-2"
             :data-test="`chain-job-retake-cascade-${stage.idx}`"
             @click="retake(stage.idx, 'cascade')"
           >
             Retake
           </button>
           <button
-            class="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 disabled:opacity-40"
+            class="rounded border border-edge px-2 py-1 text-xs text-ink-2 disabled:opacity-40"
             :data-test="`chain-job-retake-splice-${stage.idx}`"
             :disabled="spliceDisabled(stage.idx)"
             :title="

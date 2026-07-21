@@ -9,6 +9,8 @@ import {
   type RunPodGpu,
   type RunPodPod,
   estimatedPodCost,
+  liveAccruedCost,
+  formatUsd,
   podHardwareSummary,
 } from "./runpod";
 
@@ -115,5 +117,30 @@ describe("podHardwareSummary", () => {
       machine: null,
     } as never;
     expect(podHardwareSummary(sparse)).toBe("");
+  });
+});
+
+describe("liveAccruedCost", () => {
+  it("adds wall-clock time since the uptime snapshot to the accrued cost", () => {
+    // 30 min of reported uptime, read 30 min ago → 1h billed at $1.20/hr = $1.20.
+    const snapshotAt = 1_000_000;
+    const now = snapshotAt + 30 * 60 * 1000;
+    expect(liveAccruedCost(1.2, 1800, snapshotAt, now)).toBeCloseTo(1.2);
+  });
+
+  it("ignores a clock that runs backwards", () => {
+    const snapshotAt = 5_000_000;
+    expect(liveAccruedCost(1.2, 3600, snapshotAt, snapshotAt - 10_000)).toBeCloseTo(1.2);
+  });
+
+  it("is zero when the pod is not billing", () => {
+    expect(liveAccruedCost(0, 3600, 0, 3_600_000)).toBe(0);
+  });
+});
+
+describe("formatUsd", () => {
+  it("renders a USD amount", () => {
+    expect(formatUsd(0.69)).toBe("$0.69");
+    expect(formatUsd(12)).toBe("$12.00");
   });
 });

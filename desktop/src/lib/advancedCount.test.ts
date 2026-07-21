@@ -1,0 +1,35 @@
+import { describe, expect, it } from "vitest";
+import { advancedActiveCount } from "./advancedCount";
+import { newGenerateForm } from "./generateForm";
+
+describe("advancedActiveCount", () => {
+  it("is zero for a fresh form", () => {
+    expect(advancedActiveCount({ ...newGenerateForm(), family: "sdxl" })).toBe(0);
+  });
+
+  it("counts each non-default advanced control the family exposes", () => {
+    const form = { ...newGenerateForm(), family: "sdxl" };
+    form.negativePrompt = "blurry";
+    form.scheduler = "ddim";
+    form.loras = [{ path: "a", name: "a", scale: 1, trainedWords: [] }];
+    form.upscaleModel = "real-esrgan-x4plus";
+    expect(advancedActiveCount(form)).toBe(4);
+  });
+
+  it("ignores controls the family does not support", () => {
+    // FLUX has no negative-prompt or scheduler control, so a stale value there
+    // is not "active".
+    const form = { ...newGenerateForm(), family: "flux" };
+    form.negativePrompt = "blurry";
+    form.scheduler = "ddim";
+    expect(advancedActiveCount(form)).toBe(0);
+  });
+
+  it("counts a source image and advanced video as one section each", () => {
+    const form = { ...newGenerateForm(), family: "ltx2" };
+    form.sourceImage = "bytes";
+    form.pipeline = "keyframe";
+    form.cameraControl = "dolly-in";
+    expect(advancedActiveCount(form)).toBe(3);
+  });
+});

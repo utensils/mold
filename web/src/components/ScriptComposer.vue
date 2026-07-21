@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
+import Icon from "@ui/components/Icon.vue";
 import StageCard from "./StageCard.vue";
+import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import {
   readChainScript,
@@ -50,6 +52,9 @@ function newScript(): ChainScriptToml {
 
 const script = ref<ChainScriptToml>(newScript());
 const limits = ref<ChainLimits | null>(null);
+// Tracks whether the chain-limits probe has resolved for the current model, so
+// the UI can tell "still checking" apart from "resolved: no chain support".
+const limitsLoaded = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 
 // Stage index whose image picker is open, or null if the modal is closed.
@@ -67,6 +72,7 @@ onMounted(async () => {
     }
   }
   limits.value = await fetchChainLimits(props.model).catch(() => null);
+  limitsLoaded.value = true;
   // Normalise enable_audio against the resolved model on first mount.
   // The persisted draft might carry `enable_audio: true` from a prior
   // session that used an AV-capable model; if the current model isn't
@@ -108,7 +114,9 @@ watch(
   () => props.model,
   async (m) => {
     script.value.chain.model = m;
+    limitsLoaded.value = false;
     limits.value = await fetchChainLimits(m).catch(() => null);
+    limitsLoaded.value = true;
     // Mirror the onMounted default: switching to an AV-capable model
     // turns audio on if the user hasn't explicitly toggled it; switching
     // to a non-AV model clears it so the wire stays clean and the server
@@ -222,7 +230,7 @@ async function importToml(file: File) {
   try {
     script.value = readChainScript(text);
   } catch (err) {
-    alert(String(err));
+    toast("error", String(err));
   }
 }
 
@@ -248,7 +256,34 @@ const overCap = computed(
 
 const canAddStage = computed(() => script.value.stage.length < maxStages.value);
 
+// The model resolved to a chain-capable one but the limits probe came back
+// empty (network failure, or a video model that doesn't chain). Distinct from
+// the still-loading state so the status line reads honestly.
+const chainUnavailable = computed(
+  () => limitsLoaded.value && limits.value === null,
+);
+
+const canGenerate = computed(
+  () =>
+    limits.value !== null &&
+    !overCap.value &&
+    script.value.stage.some((s) => s.prompt.trim()),
+);
+
+const stageCountLabel = computed(() => {
+  const n = script.value.stage.length;
+  return `${n} ${n === 1 ? "stage" : "stages"}`;
+});
+
+const summaryLine = computed(
+  () =>
+    `${stageCountLabel.value} · ${totalFrames.value} frames · ${(
+      totalFrames.value / script.value.chain.fps
+    ).toFixed(1)}s @ ${script.value.chain.fps}fps`,
+);
+
 function submit() {
+  if (!canGenerate.value) return;
   emit("submit", script.value);
 }
 
@@ -275,13 +310,13 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 
 <template>
   <div class="flex flex-col gap-3">
-    <div class="flex items-center gap-2 text-sm">
-      <span class="font-semibold text-slate-100">Script mode</span>
+    <div class="flex items-center gap-2">
+      <span class="font-display text-sm font-semibold text-rebate"
+        >Script mode</span
+      >
       <div class="ml-auto flex gap-2">
-        <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
-          @click="importFileInput?.click()"
-        >
+        <button type="button" class="sc-tool" @click="importFileInput?.click()">
+          <Icon name="upload" :size="13" />
           Import
         </button>
         <input
@@ -291,16 +326,12 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
           class="hidden"
           @change="handleImportChange"
         />
-        <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
-          @click="downloadToml()"
-        >
+        <button type="button" class="sc-tool" @click="downloadToml()">
+          <Icon name="download" :size="13" />
           Export
         </button>
-        <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
-          @click="copyToml()"
-        >
+        <button type="button" class="sc-tool" @click="copyToml()">
+          <Icon name="copy" :size="13" />
           Copy TOML
         </button>
       </div>
@@ -328,37 +359,37 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 
     <div
       class="flex items-center justify-between text-xs"
-      :class="overCap ? 'text-red-400' : 'text-slate-400'"
+      :class="overCap ? 'text-stop' : 'text-ink-3'"
       :title="
         overCap
           ? 'Reduce frames or stages — server will reject this script'
           : undefined
       "
     >
-      <span>
-        {{ script.stage.length }} stages · {{ totalFrames }} frames ·
-        {{ (totalFrames / script.chain.fps).toFixed(1) }}s @
-        {{ script.chain.fps }}fps
-      </span>
+      <span class="font-mono" data-test="script-summary">{{
+        summaryLine
+      }}</span>
       <button
         v-if="canAddStage"
-        class="rounded-lg bg-slate-900/60 px-3 py-1 text-slate-200 hover:bg-slate-800/80"
+        type="button"
+        class="sc-tool"
         @click="addStage"
       >
-        + Add stage
+        <Icon name="plus" :size="13" />
+        Add stage
       </button>
-      <span v-else class="text-slate-500">Max stages reached</span>
+      <span v-else class="font-mono text-ink-3">max stages reached</span>
     </div>
 
     <label
       v-if="limits?.supports_audio"
-      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-slate-300"
+      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-ink-2"
       title="Generate per-stage audio and mux it into the stitched MP4 (LTX-2 / LTX-2.3 only). Smooth/Cut/Fade transitions stitch audio to match the visual transition."
     >
       <input
         type="checkbox"
         data-test="script-composer-enable-audio"
-        class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
+        class="h-4 w-4 rounded border-ce bg-bench text-safelight focus:ring-safelight"
         :checked="script.chain.enable_audio === true"
         @change="
           script.chain.enable_audio = ($event.target as HTMLInputElement)
@@ -370,16 +401,29 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       Generate audio
     </label>
 
-    <p v-if="limits === null" class="text-center text-sm text-amber-400">
-      This model doesn't support chain generation.
+    <p
+      v-if="!limitsLoaded && limits === null"
+      class="text-center font-mono text-[11px] text-ink-3"
+      data-test="chain-limits-pending"
+    >
+      checking sequence limits…
+    </p>
+    <p
+      v-else-if="chainUnavailable"
+      class="text-center font-mono text-[11px] text-warning"
+      data-test="chain-unavailable"
+    >
+      this model can't chain sequences.
     </p>
     <button
-      class="w-full rounded-xl bg-brand-500 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
-      :disabled="
-        limits === null ||
-        overCap ||
-        script.stage.every((s) => !s.prompt.trim())
+      class="w-full rounded-control-lg py-2.5 text-sm font-semibold transition"
+      :class="
+        canGenerate
+          ? 'bg-safelight text-on-accent hover:brightness-110'
+          : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
       "
+      :disabled="!canGenerate"
+      data-test="script-generate"
       @click="submit"
     >
       Generate
@@ -392,3 +436,26 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
     />
   </div>
 </template>
+
+<style scoped>
+.sc-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.sc-tool:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
+}
+</style>

@@ -1,4 +1,5 @@
 import type { PreparedExpansionInputs } from "../lib/preparedExpansion";
+import { resolveStyleId } from "../lib/stylePresets";
 import type { HostRoute } from "../stores/hosts";
 import type { MobileHost } from "./hosts";
 
@@ -58,6 +59,11 @@ export function createMobileExpansionRecovery(
   });
 }
 
+/** Legacy chip ids (e.g. "photographic") equal their canonical twin. */
+function sameStyle(current: string | null, frozen: string | null): boolean {
+  return (current ? resolveStyleId(current) : null) === (frozen ? resolveStyleId(frozen) : null);
+}
+
 function sameInputs(
   current: PreparedExpansionInputs,
   frozen: Readonly<PreparedExpansionInputs>,
@@ -67,6 +73,9 @@ function sameInputs(
     current.model === frozen.model &&
     current.family === frozen.family &&
     current.requestedCount === frozen.requestedCount &&
+    // The frozen style chip is part of the recovery record so a resumed pull
+    // re-requests with exactly the style the user reviewed.
+    sameStyle(current.stylePreset, frozen.stylePreset) &&
     current.selectedHostPolicy === frozen.selectedHostPolicy
   );
 }

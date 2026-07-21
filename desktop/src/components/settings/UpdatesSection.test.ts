@@ -45,6 +45,7 @@ beforeEach(() => {
     saveRemoteOutputs: true,
     navRailWidth: null,
     generateParamsWidth: null,
+    sidebarCollapsed: false,
   };
 });
 

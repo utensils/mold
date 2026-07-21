@@ -4,6 +4,7 @@ import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { isGenerationModel, useModelStore } from "../../stores/models";
 import { useToastStore } from "../../stores/toasts";
+import { useUiStore } from "../../stores/ui";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
@@ -11,9 +12,8 @@ import { sortInstalledFirst } from "../../lib/catalog";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
-import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
+import CatalogDetailDrawer, { type DrawerVariant } from "./CatalogDetailDrawer.vue";
 import DownloadTargetDialog from "./DownloadTargetDialog.vue";
-import InstalledTab from "./InstalledTab.vue";
 import { installedModelToEntry } from "../../lib/catalogDetail";
 import type { CatalogEntry, ModelEntry } from "../../lib/api/types";
 
@@ -21,9 +21,10 @@ type LibraryModelEntry = ModelEntry & { hostIds?: string[] };
 
 const props = defineProps<{
   query: string;
-  layout: "grid" | "table";
-  /** Installed models (all hosts, with hostIds) merged into the unified
-   *  list as host-tagged rows; the Installed source tab scopes to them. */
+  /** Optional layout override; otherwise the session-persisted ui store wins. */
+  layout?: "grid" | "table";
+  /** Installed models (all hosts, with hostIds) merged into the unified list
+   *  as host-tagged rows — the Discover feed still surfaces what you have. */
   installedEntries?: LibraryModelEntry[];
   mediaType?: MediaType;
 }>();
@@ -34,6 +35,11 @@ const downloads = useDownloadsStore();
 const toasts = useToastStore();
 const hosts = useHostsStore();
 const models = useModelStore();
+const ui = useUiStore();
+
+/** Grid or table — the layout toggle lives here now (Discover's secondary
+ *  control); an explicit `layout` prop still overrides for embeddings/tests. */
+const effectiveLayout = computed(() => props.layout ?? ui.catalogLayout);
 
 const PAGE_SIZE = 24;
 /**
@@ -43,7 +49,7 @@ const PAGE_SIZE = 24;
  * has content or the results run out.
  */
 const MAX_AUTO_PAGES = 5;
-type Source = "all" | "hf" | "civitai" | "installed";
+type Source = "all" | "hf" | "civitai";
 
 const source = ref<Source>("all");
 const family = ref("");
@@ -203,9 +209,6 @@ function catalogTarget(): { target: ApiTarget | undefined; forward: boolean } {
 let searchEpoch = 0;
 
 async function runSearch(reset: boolean) {
-  // "installed" is a client-side scope, not a server source — the API would
-  // 400 it, and resetting `entries` would blank the list behind the tab.
-  if (source.value === "installed") return;
   const epoch = ++searchEpoch;
   if (reset) {
     page.value = 1;
@@ -290,6 +293,28 @@ function pull(entry: CatalogEntry) {
 /** The detail drawer fetches on the same host the catalog list came from. */
 const detailTarget = computed(() => catalogTarget());
 
+/**
+ * Quantization variants for a manifest model (`base:tag`) — the sibling rows
+ * the manifest already describes, so the drawer's variant chips repoint a Pull
+ * without changing which runnable model it targets. Live HF/Civitai rows carry
+ * no colon base and get no chips (their precedence is decided in the list).
+ */
+function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
+  const base = entry.name.split(":")[0]!;
+  if (base === entry.name) return undefined;
+  const siblings = models.all.filter((model) => model.name.split(":")[0] === base);
+  if (siblings.length < 2) return undefined;
+  return siblings.map((model) => ({
+    id: model.name,
+    label: model.name.slice(base.length + 1) || model.name,
+    sizeBytes: model.size_gb > 0 ? Math.round(model.size_gb * 1_000_000_000) : null,
+  }));
+}
+
+const detailVariants = computed(() =>
+  detailEntry.value ? variantsFor(detailEntry.value) : undefined,
+);
+
 /** Pull (or Repair — same endpoint, missing files only) from the drawer. */
 function pullFromDrawer(entry: CatalogEntry) {
   detailEntry.value = null;
@@ -297,9 +322,6 @@ function pullFromDrawer(entry: CatalogEntry) {
 }
 
 watch([() => props.query, source, family, includeNsfw], () => {
-  // Entering the Installed tab fires no live search (runSearch also guards);
-  // leaving it re-fires so the list is fresh after a stay on the tab.
-  if (source.value === "installed") return;
   scheduleSearch();
 });
 
@@ -308,7 +330,6 @@ watch([() => props.query, source, family, includeNsfw], () => {
 watch(
   () => props.mediaType,
   () => {
-    if (source.value === "installed") return;
     if ((props.mediaType ?? "all") === "all" || loading.value) return;
     if (!combinedEntries.value.some(matchesMediaType) && hasMore.value) loadMore();
   },
@@ -331,7 +352,7 @@ onMounted(async () => {
     <div class="flex flex-wrap items-center gap-2">
       <div class="flex items-center gap-1" data-test="catalog-source-chips">
         <button
-          v-for="s in ['all', 'hf', 'civitai', 'installed'] as const"
+          v-for="s in ['all', 'hf', 'civitai'] as const"
           :key="s"
           type="button"
           class="border-edge h-7 rounded-full border px-2.5 text-caption"
@@ -339,46 +360,92 @@ onMounted(async () => {
           :aria-pressed="source === s"
           @click="source = s"
         >
-          {{
-            s === "all"
-              ? "All"
-              : s === "hf"
-                ? "HuggingFace"
-                : s === "civitai"
-                  ? "Civitai"
-                  : "Installed"
-          }}
+          {{ s === "all" ? "All" : s === "hf" ? "HuggingFace" : "Civitai" }}
         </button>
       </div>
 
-      <template v-if="source !== 'installed'">
-        <select
-          v-model="family"
-          class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
-        >
-          <option value="">All families</option>
-          <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
-        </select>
+      <select
+        v-model="family"
+        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+      >
+        <option value="">All families</option>
+        <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
+      </select>
 
-        <label class="flex items-center gap-1 text-caption text-ink-2">
-          <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
-          NSFW
-        </label>
-      </template>
+      <label class="flex items-center gap-1 text-caption text-ink-2">
+        <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
+        NSFW
+      </label>
+
+      <!-- Grid/table toggle — Discover's secondary control (session-persisted
+           in the ui store; table is the default). -->
+      <div
+        class="border-control-edge ml-auto flex h-7 items-center gap-0.5 rounded-control border bg-bath p-0.5"
+        role="radiogroup"
+        aria-label="Catalog layout"
+      >
+        <button
+          type="button"
+          role="radio"
+          data-test="layout-table"
+          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
+          :class="
+            ui.catalogLayout === 'table'
+              ? 'bg-safelight text-on-accent'
+              : 'text-ink-3 hover:text-ink'
+          "
+          :aria-checked="ui.catalogLayout === 'table'"
+          title="Table view"
+          @click="ui.setCatalogLayout('table')"
+        >
+          <svg
+            viewBox="0 0 12 12"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M1.75 2.5h8.5M1.75 6h8.5M1.75 9.5h8.5" />
+          </svg>
+          Table
+        </button>
+        <button
+          type="button"
+          role="radio"
+          data-test="layout-grid"
+          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
+          :class="
+            ui.catalogLayout === 'grid'
+              ? 'bg-safelight text-on-accent'
+              : 'text-ink-3 hover:text-ink'
+          "
+          :aria-checked="ui.catalogLayout === 'grid'"
+          title="Grid view"
+          @click="ui.setCatalogLayout('grid')"
+        >
+          <svg
+            viewBox="0 0 12 12"
+            width="11"
+            height="11"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            aria-hidden="true"
+          >
+            <rect x="1.5" y="1.5" width="3.6" height="3.6" rx="0.8" />
+            <rect x="6.9" y="1.5" width="3.6" height="3.6" rx="0.8" />
+            <rect x="1.5" y="6.9" width="3.6" height="3.6" rx="0.8" />
+            <rect x="6.9" y="6.9" width="3.6" height="3.6" rx="0.8" />
+          </svg>
+          Grid
+        </button>
+      </div>
     </div>
 
-    <!-- Installed tab: the full-featured installed rows (Load / unload /
-         delete / per-host actions) scoped to what you already have. -->
-    <InstalledTab
-      v-if="source === 'installed'"
-      class="-mx-4 -mt-3"
-      :query="query"
-      :media-type="mediaType"
-      :entries="installedEntries"
-      @browse-catalog="source = 'all'"
-    />
-
-    <p v-else-if="error" class="text-caption text-stop">{{ error }}</p>
+    <p v-if="error" class="text-caption text-stop">{{ error }}</p>
 
     <!-- Empty state — keyed on the FILTERED list so an all-image page under
          the Video chip explains itself instead of rendering a blank grid. -->
@@ -410,14 +477,14 @@ onMounted(async () => {
     <div
       v-else
       :class="
-        layout === 'grid'
+        effectiveLayout === 'grid'
           ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2'
           : 'border-edge divide-edge flex flex-col divide-y overflow-hidden rounded-control border bg-bench'
       "
     >
       <template v-for="entry in displayEntries" :key="entry.id">
         <CatalogCard
-          v-if="layout === 'grid'"
+          v-if="effectiveLayout === 'grid'"
           :entry="entry"
           :pulling="pulling.has(entry.id)"
           :hosts="hostLabelsFor(entry)"
@@ -437,7 +504,7 @@ onMounted(async () => {
     </div>
 
     <button
-      v-if="source !== 'installed' && hasMore"
+      v-if="hasMore"
       type="button"
       class="border-edge mx-auto h-8 rounded-control border px-4 text-body text-ink-2 hover:text-ink disabled:opacity-50"
       :disabled="loading"
@@ -460,6 +527,7 @@ onMounted(async () => {
       :pulling="pulling.has(detailEntry.id)"
       :target="detailTarget.target"
       :forward-credentials="detailTarget.forward"
+      :variants="detailVariants"
       @close="detailEntry = null"
       @pull="pullFromDrawer"
     />

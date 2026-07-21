@@ -512,6 +512,12 @@ export interface ExpandRequestWire {
   prompt: string;
   model_family: string;
   variations: number;
+  /**
+   * Natural-language style directive (see `styleHint`) the server appends to
+   * the expander's system message so the look is woven into the rewrite —
+   * never the literal preset suffix, and never appended to the prompt text.
+   */
+  style?: string;
 }
 
 export interface ExpandResponseWire {
@@ -606,8 +612,12 @@ export function supportsLora(family: string): boolean {
 }
 
 export interface GenerateFormState {
-  version: 2;
+  version: 3;
   prompt: string;
+  /** Active style preset id (see `lib/stylePresets`). `null` = no style. The
+   * preset's extras are appended to the outgoing prompt at request time; the
+   * textarea content (`prompt`) is never rewritten by the style row. */
+  stylePreset: string | null;
   negativePrompt: string;
   model: string;
   /** Family for the selected model. Stored so request serialization can
@@ -873,6 +883,9 @@ export interface CatalogEntryWire {
    * for non-LoRA rows or when the upstream API didn't supply any. The
    * SPA renders these as click-to-insert chips inside the LoRA picker. */
   trained_words?: string[];
+  /** Upstream model page (civitai.com / huggingface.co). Absent on older
+   * servers; the model detail drawer links out to it when present. */
+  page_url?: string | null;
 }
 
 export interface CatalogListResponse {
@@ -906,7 +919,9 @@ export interface CatalogListParams {
   q?: string;
   include_nsfw?: boolean;
   max_engine_phase?: number;
-  sort?: "downloads" | "rating" | "recent" | "name";
+  /** Server vocabulary (`catalog.sort` capability); "name" was retired —
+   *  no upstream supports it and the server rejects it with a 422. */
+  sort?: "downloads" | "rating" | "recent";
   page?: number;
   page_size?: number;
 }

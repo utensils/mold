@@ -260,6 +260,10 @@ pub struct AppSettings {
     pub nav_rail_width: Option<u32>,
     /// Persisted Generate-inspector width in px; `None` uses the panel default.
     pub generate_params_width: Option<u32>,
+    /// Sidebar collapsed to the icon rail; restored on launch. Defaults to
+    /// expanded for older settings files.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for AppSettings {
@@ -285,6 +289,7 @@ impl Default for AppSettings {
             save_remote_outputs: true,
             nav_rail_width: None,
             generate_params_width: None,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -353,6 +358,7 @@ mod tests {
             save_remote_outputs: false,
             nav_rail_width: Some(240),
             generate_params_width: Some(360),
+            sidebar_collapsed: true,
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path), settings);
@@ -368,6 +374,8 @@ mod tests {
         let loaded = load(&path);
         assert_eq!(loaded.nav_rail_width, None);
         assert_eq!(loaded.generate_params_width, None);
+        // The sidebar-collapse flag postdates these files too; expanded default.
+        assert!(!loaded.sidebar_collapsed);
     }
 
     #[test]

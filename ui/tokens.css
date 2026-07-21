@@ -1,0 +1,168 @@
+/*
+ * Mold Studio — design tokens. THE single source for every UI surface
+ * (desktop, iOS, web, mobile web). See docs/design/mold-studio-spec.html §02.
+ *
+ * Two theme families — Mold (cyan & magenta) and Safelight (warm darkroom
+ * amber) — each in Dark and Light. Selected via root dataset attributes:
+ *   data-theme-family: "mold" | "safelight"   (absent = safelight)
+ *   data-theme:        "dark" | "light"       (absent = follow prefers-color-scheme)
+ *
+ * Surfaces step desk → bath → bench → surface with a family tint. The two
+ * accents have fixed jobs: safelight is warm/primary (actions, selection),
+ * halide is cool/informational (models, telemetry, links). Selection derives
+ * one set (--sel-*) from the accent — never a new hue. No component may
+ * hard-code hex; a new theme is added by extending this file only.
+ */
+
+:root {
+  /* ── Safelight · Dark (default family) ─────────────────────────── */
+  --desk: #0a0805;
+  --bath: #171210;
+  --bench: #241c15;
+  --surface: #332619;
+  --rebate: #f1e8da;
+  --halide: #8fb4c4;
+  --safelight: #f79433;
+  --success: #8fd39a;
+  --warning: #f5a623;
+  --stop: #e5715a;
+  --on-accent: #1a1206;
+  --grad: linear-gradient(96deg, #f0b429, #f0743f 55%, #d96b8f);
+  --card-hi: rgba(255, 244, 230, 0.05);
+
+  /* ── Derived (recompute automatically per palette) ─────────────── */
+  --ink-2: color-mix(in srgb, var(--rebate) 76%, transparent);
+  --ink-3: color-mix(in srgb, var(--rebate) 52%, transparent);
+  --edge: color-mix(in srgb, var(--rebate) 13%, transparent);
+  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
+  --sel-ink: var(--safelight);
+  --sel-border: var(--safelight);
+  --sel-bg: color-mix(in srgb, var(--safelight) 20%, transparent);
+  --sel-fill: color-mix(in srgb, var(--safelight) 32%, transparent);
+  --sel-ring: 0 0 0 1.5px color-mix(in srgb, var(--safelight) 60%, transparent);
+
+  /* ── Media (never inverts — prints are always viewed on a dark bed) ── */
+  --print: #141110;
+  --on-media: #f5efff;
+
+  /* ── Type ──────────────────────────────────────────────────────── */
+  --f-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --f-body: "Schibsted Grotesk", system-ui, sans-serif;
+  --f-mono: "Martian Mono", ui-monospace, monospace;
+
+  /* ── Radius: controls 6–10 · cards 12–16 · pills/chips 20 ─────── */
+  --radius-control-sm: 6px;
+  --radius-control: 9px;
+  --radius-control-lg: 10px;
+  --radius-card: 12px;
+  --radius-card-lg: 16px;
+  --radius-pill: 20px;
+
+  /* ── Motion (spec §09) ─────────────────────────────────────────── */
+  --dur-quick: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  color-scheme: dark;
+}
+
+/* ── Safelight · Light ("lights on") ─────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --desk: #e6dcc7;
+    --bath: #f7f1e6;
+    --bench: #fffdf8;
+    --surface: #f0e7d5;
+    --rebate: #231d16;
+    --halide: #3f6570;
+    --safelight: #9b4d00;
+    --success: #2f7d4f;
+    --stop: #a93629;
+    --on-accent: #ffffff;
+    --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
+    --card-hi: rgba(255, 255, 255, 0.7);
+    --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --desk: #e6dcc7;
+  --bath: #f7f1e6;
+  --bench: #fffdf8;
+  --surface: #f0e7d5;
+  --rebate: #231d16;
+  --halide: #3f6570;
+  --safelight: #9b4d00;
+  --success: #2f7d4f;
+  --stop: #a93629;
+  --on-accent: #ffffff;
+  --grad: linear-gradient(96deg, #9b4d00, #b4562a 55%, #9c3f6b);
+  --card-hi: rgba(255, 255, 255, 0.7);
+  --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
+  color-scheme: light;
+}
+
+/* ── Mold · Dark ─────────────────────────────────────────────────── */
+:root[data-theme-family="mold"] {
+  --desk: #08060f;
+  --bath: #14111f;
+  --bench: #221c34;
+  --surface: #2e2743;
+  --rebate: #f3effb;
+  --halide: #5cd0ff;
+  --safelight: #e879f9;
+  --success: #6ee7a5;
+  --stop: #fb7185;
+  --on-accent: #150f1e;
+  --grad: linear-gradient(96deg, #89dceb, #89b4fa 45%, #cba6f7);
+  --card-hi: rgba(255, 255, 255, 0.055);
+  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
+  color-scheme: dark;
+}
+
+/* ── Mold · Light ────────────────────────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root[data-theme-family="mold"]:not([data-theme="dark"]) {
+    --desk: #e5e0f1;
+    --bath: #f6f4fb;
+    --bench: #ffffff;
+    --surface: #efeaf8;
+    --rebate: #221430;
+    --halide: #0e7490;
+    --safelight: #a21caf;
+    --success: #0f8a54;
+    --stop: #b4233b;
+    --on-accent: #ffffff;
+    --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
+    --card-hi: rgba(255, 255, 255, 0.65);
+    --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
+    color-scheme: light;
+  }
+}
+:root[data-theme-family="mold"][data-theme="light"] {
+  --desk: #e5e0f1;
+  --bath: #f6f4fb;
+  --bench: #ffffff;
+  --surface: #efeaf8;
+  --rebate: #221430;
+  --halide: #0e7490;
+  --safelight: #a21caf;
+  --success: #0f8a54;
+  --stop: #b4233b;
+  --on-accent: #ffffff;
+  --grad: linear-gradient(96deg, #0e7490, #6d43d1 55%, #b4468f);
+  --card-hi: rgba(255, 255, 255, 0.65);
+  --ce: color-mix(in srgb, var(--rebate) 38%, transparent);
+  color-scheme: light;
+}
+
+/* Under reduced motion every duration collapses to near-zero; shimmer
+ * placeholders become a static tint (see kit.css). */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-quick: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+  }
+}

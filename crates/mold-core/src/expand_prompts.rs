@@ -74,21 +74,38 @@ fn resolve_family_config(family: &str, overrides: Option<&FamilyOverride>) -> (u
     }
 }
 
+/// Append the style directive to a rendered system prompt when a visual style
+/// was requested. The style reaches the LLM as a natural-language instruction
+/// woven into the system message — never as a literal suffix on the prompt.
+fn apply_style_directive(system: &mut String, style: Option<&str>) {
+    if let Some(style) = style {
+        let style = style.trim();
+        if !style.is_empty() {
+            system.push_str(&format!(
+                "\n\nSTYLE DIRECTIVE: Render the scene in this visual style — {style}. \
+                 Weave these cues naturally into the description; do not just list them."
+            ));
+        }
+    }
+}
+
 /// Build chat messages for a single prompt expansion.
 ///
-/// Accepts optional custom template and per-family overrides.
-/// Returns `Vec<(role, content)>` tuples.
+/// Accepts optional custom template, per-family overrides, and a visual style
+/// to weave into the expansion. Returns `Vec<(role, content)>` tuples.
 pub fn build_single_messages(
     prompt: &str,
     family: &str,
     custom_template: Option<&str>,
     family_override: Option<&FamilyOverride>,
+    style: Option<&str>,
 ) -> Vec<(String, String)> {
     let (word_limit, model_notes) = resolve_family_config(family, family_override);
     let template = custom_template.unwrap_or(SINGLE_SYSTEM_TEMPLATE);
-    let system = template
+    let mut system = template
         .replace("{WORD_LIMIT}", &word_limit.to_string())
         .replace("{MODEL_NOTES}", &model_notes);
+    apply_style_directive(&mut system, style);
 
     vec![
         ("system".to_string(), system),
@@ -98,21 +115,23 @@ pub fn build_single_messages(
 
 /// Build chat messages for batch variation generation.
 ///
-/// Accepts optional custom template and per-family overrides.
-/// Returns `Vec<(role, content)>` tuples.
+/// Accepts optional custom template, per-family overrides, and a visual style
+/// to weave into the expansion. Returns `Vec<(role, content)>` tuples.
 pub fn build_batch_messages(
     prompt: &str,
     family: &str,
     variations: usize,
     custom_template: Option<&str>,
     family_override: Option<&FamilyOverride>,
+    style: Option<&str>,
 ) -> Vec<(String, String)> {
     let (word_limit, model_notes) = resolve_family_config(family, family_override);
     let template = custom_template.unwrap_or(BATCH_SYSTEM_TEMPLATE);
-    let system = template
+    let mut system = template
         .replace("{N}", &variations.to_string())
         .replace("{WORD_LIMIT}", &word_limit.to_string())
         .replace("{MODEL_NOTES}", &model_notes);
+    apply_style_directive(&mut system, style);
 
     vec![
         ("system".to_string(), system),
@@ -204,7 +223,7 @@ mod tests {
 
     #[test]
     fn single_messages_flux() {
-        let msgs = build_single_messages("a cat", "flux", None, None);
+        let msgs = build_single_messages("a cat", "flux", None, None, None);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].0, "system");
         assert!(msgs[0].1.contains("150 words"));
@@ -214,7 +233,7 @@ mod tests {
 
     #[test]
     fn single_messages_sd15() {
-        let msgs = build_single_messages("a cat", "sd15", None, None);
+        let msgs = build_single_messages("a cat", "sd15", None, None, None);
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].1.contains("50 words"));
         assert!(msgs[0].1.contains("keyword"));
@@ -223,7 +242,7 @@ mod tests {
     #[test]
     fn single_messages_preserves_user_prompt() {
         let prompt = "a cyberpunk city at night with neon reflections";
-        let msgs = build_single_messages(prompt, "flux", None, None);
+        let msgs = build_single_messages(prompt, "flux", None, None, None);
         assert_eq!(msgs[1].1, prompt);
     }
 
@@ -231,7 +250,7 @@ mod tests {
 
     #[test]
     fn batch_messages_sdxl() {
-        let msgs = build_batch_messages("sunset", "sdxl", 3, None, None);
+        let msgs = build_batch_messages("sunset", "sdxl", 3, None, None, None);
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0].1.contains("3 distinct"));
         assert!(msgs[0].1.contains("JSON array"));
@@ -241,7 +260,7 @@ mod tests {
     #[test]
     fn batch_messages_count_substitution() {
         for n in [2, 5, 10] {
-            let msgs = build_batch_messages("test", "flux", n, None, None);
+            let msgs = build_batch_messages("test", "flux", n, None, None, None);
             assert!(
                 msgs[0].1.contains(&format!("{n} distinct")),
                 "should contain '{n} distinct' for variations={n}"
@@ -252,7 +271,7 @@ mod tests {
     #[test]
     fn batch_messages_preserves_user_prompt() {
         let prompt = "a dragon in a crystal cave";
-        let msgs = build_batch_messages(prompt, "sdxl", 4, None, None);
+        let msgs = build_batch_messages(prompt, "sdxl", 4, None, None, None);
         assert_eq!(msgs[1].1, prompt);
     }
 
@@ -261,7 +280,7 @@ mod tests {
     #[test]
     fn single_messages_custom_template() {
         let custom = "Custom system: limit {WORD_LIMIT}. Notes: {MODEL_NOTES}";
-        let msgs = build_single_messages("a cat", "flux", Some(custom), None);
+        let msgs = build_single_messages("a cat", "flux", Some(custom), None, None);
         assert!(msgs[0].1.contains("Custom system: limit 150"));
         assert!(msgs[0].1.contains("natural language"));
     }
@@ -269,7 +288,7 @@ mod tests {
     #[test]
     fn batch_messages_custom_template() {
         let custom = "Generate {N} prompts, max {WORD_LIMIT} words. {MODEL_NOTES}";
-        let msgs = build_batch_messages("a cat", "flux", 3, Some(custom), None);
+        let msgs = build_batch_messages("a cat", "flux", 3, Some(custom), None, None);
         assert!(msgs[0].1.contains("Generate 3 prompts"));
         assert!(msgs[0].1.contains("max 150 words"));
     }
@@ -280,7 +299,7 @@ mod tests {
             word_limit: Some(200),
             style_notes: None,
         };
-        let msgs = build_single_messages("a cat", "flux", None, Some(&ov));
+        let msgs = build_single_messages("a cat", "flux", None, Some(&ov), None);
         assert!(msgs[0].1.contains("200 words"));
         // Should still use built-in style notes
         assert!(msgs[0].1.contains("natural language"));
@@ -292,7 +311,7 @@ mod tests {
             word_limit: None,
             style_notes: Some("Use haiku style.".to_string()),
         };
-        let msgs = build_single_messages("a cat", "sd15", None, Some(&ov));
+        let msgs = build_single_messages("a cat", "sd15", None, Some(&ov), None);
         // Word limit should still be the SD1.5 default (50)
         assert!(msgs[0].1.contains("50 words"));
         // But style notes should be overridden
@@ -306,7 +325,7 @@ mod tests {
             word_limit: Some(75),
             style_notes: Some("Cinematic descriptions only.".to_string()),
         };
-        let msgs = build_batch_messages("a cat", "sdxl", 4, None, Some(&ov));
+        let msgs = build_batch_messages("a cat", "sdxl", 4, None, Some(&ov), None);
         assert!(msgs[0].1.contains("75 words"));
         assert!(msgs[0].1.contains("Cinematic descriptions only."));
     }
@@ -318,7 +337,7 @@ mod tests {
             word_limit: Some(300),
             style_notes: Some("Go wild.".to_string()),
         };
-        let msgs = build_single_messages("test", "flux", Some(custom), Some(&ov));
+        let msgs = build_single_messages("test", "flux", Some(custom), Some(&ov), None);
         assert_eq!(msgs[0].1, "Limit: 300. Style: Go wild.");
     }
 
@@ -339,6 +358,53 @@ mod tests {
         assert_eq!(limit, 100);
         // Notes should fall back to default
         assert!(notes.contains("keyword"));
+    }
+
+    // ── style directive ──────────────────────────────────────────────────
+
+    #[test]
+    fn single_messages_style_appends_directive() {
+        let msgs = build_single_messages("a cat", "flux", None, None, Some("gritty film noir"));
+        assert_eq!(msgs[0].0, "system");
+        assert!(msgs[0].1.contains(
+            "STYLE DIRECTIVE: Render the scene in this visual style — gritty film noir."
+        ));
+        assert!(msgs[0].1.contains("Weave these cues naturally"));
+        // The user message must stay the bare prompt — style never leaks there.
+        assert_eq!(msgs[1].1, "a cat");
+    }
+
+    #[test]
+    fn single_messages_no_style_no_directive() {
+        let msgs = build_single_messages("a cat", "flux", None, None, None);
+        assert!(!msgs[0].1.contains("STYLE DIRECTIVE"));
+    }
+
+    #[test]
+    fn batch_messages_style_appends_directive() {
+        let msgs = build_batch_messages("a cat", "sdxl", 3, None, None, Some("watercolor wash"));
+        assert_eq!(msgs[0].0, "system");
+        assert!(msgs[0]
+            .1
+            .contains("STYLE DIRECTIVE: Render the scene in this visual style — watercolor wash."));
+        assert!(msgs[0].1.contains("do not just list them"));
+        assert_eq!(msgs[1].1, "a cat");
+    }
+
+    #[test]
+    fn batch_messages_no_style_no_directive() {
+        let msgs = build_batch_messages("a cat", "sdxl", 3, None, None, None);
+        assert!(!msgs[0].1.contains("STYLE DIRECTIVE"));
+    }
+
+    #[test]
+    fn style_directive_applies_after_custom_template() {
+        let custom = "Custom system: limit {WORD_LIMIT}. Notes: {MODEL_NOTES}";
+        let msgs = build_single_messages("a cat", "flux", Some(custom), None, Some("pixel art"));
+        assert!(msgs[0].1.starts_with("Custom system: limit 150"));
+        assert!(msgs[0]
+            .1
+            .contains("STYLE DIRECTIVE: Render the scene in this visual style — pixel art."));
     }
 
     // ── format_chatml ────────────────────────────────────────────────────

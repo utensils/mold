@@ -55,6 +55,28 @@ describe("expandPrompt", () => {
     expect(sentBody()).toEqual({ prompt: "a cat", model_family: "sdxl", variations: 1 });
   });
 
+  it("sends the style directive as its own field, never suffixed to the prompt", async () => {
+    await expandPrompt("a cat", {
+      modelFamily: "flux",
+      variations: 3,
+      style: "Cinematic look — cinematic film still",
+    });
+    expect(sentBody()).toEqual({
+      prompt: "a cat",
+      model_family: "flux",
+      variations: 3,
+      style: "Cinematic look — cinematic film still",
+    });
+  });
+
+  it("omits a blank style and trims a padded one", async () => {
+    await expandPrompt("a cat", { style: "   " });
+    expect("style" in sentBody()).toBe(false);
+
+    await expandPrompt("a cat", { style: "  Anime look — cel shading  " });
+    expect(sentBody()["style"]).toBe("Anime look — cel shading");
+  });
+
   it("directs expansion to the selected remote host", async () => {
     const target = { baseUrl: "https://studio.tailnet.ts.net", apiKey: "secret" };
 

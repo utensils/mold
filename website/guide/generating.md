@@ -278,8 +278,8 @@ Models auto-pull if not downloaded.
 ## Browser UI
 
 `mold serve` ships with a Vue 3 SPA baked into the binary. Visit
-`http://<host>:7680/` to open the gallery, or `http://<host>:7680/generate` for
-a browser-driven composer:
+`http://<host>:7680/` to open the Gallery, or `http://<host>:7680/create` for
+the Create composer (the old `/generate` path still redirects there):
 
 - Enter submits, Shift+Enter inserts a newline, empty Enter is a no-op.
 - Per-GPU running-job cards stream SSE progress (stage, denoise step N/M, VAE

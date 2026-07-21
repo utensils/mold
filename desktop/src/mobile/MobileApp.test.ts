@@ -45,6 +45,18 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   streamableMediaUrl,
   evictMedia,
 }));
+// Keep the real reconciliation logic but collapse its re-attach poll interval
+// so tests never wait out the production cadence.
+vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./mobileGenerationRecovery")>();
+  return {
+    ...original,
+    reconcileInterruptedGenerationJobs: (
+      jobs: Parameters<typeof original.reconcileInterruptedGenerationJobs>[0],
+      options: Parameters<typeof original.reconcileInterruptedGenerationJobs>[1],
+    ) => original.reconcileInterruptedGenerationJobs(jobs, { ...options, pollIntervalMs: 0 }),
+  };
+});
 
 import MobileApp from "./MobileApp.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
@@ -74,6 +86,10 @@ const model: ModelEntry = {
   description: "Video model",
   downloaded: true,
 };
+// The kit's natural-language expansion directive for the cinematic chip
+// (`styleHint("cinematic")`) — pinned verbatim so the wire contract is explicit.
+const cinematicHint =
+  "Cinematic look — cinematic film still, cinematic lighting, anamorphic, dramatic mood, subtle film grain";
 const print: GalleryImage = {
   filename: "storm clip.mp4",
   timestamp: 1_700_000_000,
@@ -221,6 +237,221 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
   }
 
+  it("composes the chosen style preset into the outgoing prompt without mutating the textarea", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a red fox in snow");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    // The shared kit's cinematic preset templates the prompt into the look.
+    expect(openStreams[0]?.options.body.prompt).toBe(
+      "cinematic film still of a red fox in snow, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
+    );
+    // The composition is applied to a draft clone at submit — the live prompt stays the user's words.
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a red fox in snow");
+  });
+
+  it("bakes a styled quick expansion, clears the chip, and restores it on Undo", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await fieldControl("Negative prompt").setValue("text");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    // The chip travels as a natural-language directive, never a prompt suffix.
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "a lighthouse",
+      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse · prepared 1",
+    );
+    // Bake-and-clear: the rewrite absorbed the look, so the chip resets — and
+    // the curated negative moves into the form, its only remaining home.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a lighthouse");
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
+  });
+
+  it("merges the preset negative when a styled quick expansion clears the chip", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await fieldControl("Negative prompt").setValue("text");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    // Bake-and-clear drops the chip, so the curated negative has to land in the
+    // form now — the submit-time merge no longer sees a preset.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(1);
+    // …and exactly once — the cleared chip can't merge it a second time.
+    expect(openStreams[0]?.options.body.negative_prompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+  });
+
+  it("keeps the chip frozen on a prepared batch and names style drift as stale work", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three storm studies");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "three storm studies",
+      { variations: 3, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    // Prepared keeps the chip — it is the frozen-style indicator…
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
+
+    // …so style drift is specifically named stale work.
+    await wrapper.get("[data-test='mobile-style-anime']").trigger("click");
+    expect(wrapper.get(".mobile-prepared-stale").text()).toContain(
+      "Style changed from Cinematic to Anime.",
+    );
+    await wrapper.get("[data-test='mobile-style-anime']").trigger("click");
+    expect(wrapper.get(".mobile-prepared-stale").text()).toContain(
+      "Style Cinematic was removed after these variations were prepared.",
+    );
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    expect(wrapper.find(".mobile-prepared-stale").exists()).toBe(false);
+
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    // Reviewed prompts ship verbatim — the prepared submit path never suffixes.
+    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+      "three storm studies · prepared 1",
+      "three storm studies · prepared 2",
+    ]);
+  });
+
+  it("clears the chip when a prepared pair collapses into the composer", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("storm pair");
+    await fieldControl("Negative prompt").setValue("text");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    await wrapper.findAll("[data-test='mobile-prepared-remove']")[0]!.trigger("click");
+    await wrapper.get("[data-test='mobile-confirm-collapse']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "storm pair · prepared 2",
+    );
+    // The surviving reviewed text absorbed the frozen style — same bake-and-clear.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    // …so the frozen style's negative moves into the form with it.
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("storm pair");
+    // Undo restores the source prompt; the chip stays cleared because only a
+    // quick-apply snapshot re-arms it (mirrors desktop).
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
+  });
+
+  it("re-requests a recovered expansion pull with the frozen style and still bakes on apply", async () => {
+    expandPrompt
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      )
+      .mockResolvedValueOnce({ expanded: ["a lighthouse after the storm"] });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("lighthouse");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream");
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "snapshot", listing: { active_jobs: [], queued: [], history: [] } }),
+    );
+    await flushPromises();
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "started", id: "expansion-job", files_total: 2, bytes_total: 1_000 }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-retry-expansion']").trigger("click");
+    await flushPromises();
+
+    // The retried request reuses the immutable recovery record's frozen style.
+    expect(expandPrompt).toHaveBeenLastCalledWith(
+      "lighthouse",
+      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse after the storm",
+    );
+    // The retried apply is still a quick Batch 1 — it bakes and clears too.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+  });
+
   it("shows a useful retry state when the selected host cannot load models", async () => {
     apiJsonTo.mockRejectedValue(new Error("Connection refused"));
 
@@ -260,17 +491,13 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("1:1 · 1024×1024");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("1024 × 1024 px");
 
     await fieldControl("Model").setValue(model.name);
     await flushPromises();
     expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("3:2 · 768×512");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
 
     await submitPrompt("use the video defaults");
     expect(openStreams).toHaveLength(1);
@@ -2273,6 +2500,261 @@ describe("MobileApp generation queue", () => {
   });
 });
 
+describe("MobileApp transport error copy", () => {
+  it("humanizes a dead connection when saving a host", async () => {
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      if (apiTarget.baseUrl.includes("render.local")) {
+        return Promise.reject(new TypeError("Load failed"));
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await fieldControl("Address or MagicDNS name").setValue("render.local");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      "Couldn’t reach render.local. Check the connection and try again.",
+    );
+    expect(wrapper.text()).not.toContain("Load failed");
+  });
+
+  it("keeps an empty-bodied auth failure visible with API-key copy", async () => {
+    const { ApiError } = await import("../lib/api/client");
+    apiJsonTo.mockImplementation((apiTarget: { baseUrl: string }, path: string) => {
+      if (apiTarget.baseUrl.includes("render.local")) {
+        return Promise.reject(new ApiError("", 401));
+      }
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-hosts']").trigger("click");
+    await fieldControl("Address or MagicDNS name").setValue("render.local");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain(
+      "render.local didn’t accept the API key. Update it in Machines and try again.",
+    );
+  });
+
+  it("keeps background model-load failures out of the generation status line", async () => {
+    apiJsonTo.mockRejectedValue(new TypeError("Load failed"));
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    const banner = wrapper.get("[data-test='mobile-model-error']");
+    expect(banner.text()).toContain("Couldn’t load generation models from Studio.");
+    expect(banner.text()).toContain("Couldn’t reach Studio. Check the connection and try again.");
+    expect(banner.text()).not.toContain("Load failed");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("Ready");
+  });
+
+  it("reloads models automatically when the app returns to the foreground", async () => {
+    let hostReachable = false;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (!hostReachable) return Promise.reject(new TypeError("Load failed"));
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(true);
+
+    hostReachable = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-model-error']").exists()).toBe(false);
+    expect(fieldControl("Model").element).toHaveProperty("value", model.name);
+  });
+});
+
+describe("MobileApp foreground resume", () => {
+  const resumedPrint: GalleryImage = {
+    filename: "resumed print.png",
+    timestamp: 1_700_000_100,
+    format: "png",
+    metadata: {
+      prompt: "a ship crossing violet lightning",
+      model: model.name,
+      seed: 77,
+      steps: 28,
+      guidance: 4,
+      width: 768,
+      height: 512,
+    },
+  };
+
+  async function submitSeededPrompt(prompt: string, seed: number): Promise<void> {
+    const liveForm = wrapper!.getComponent(MobileLoraControls).props("form") as GenerateForm;
+    liveForm.seed = String(seed);
+    // Match resumedPrint's recorded metadata — the reconciler's gallery join
+    // requires dims and steps to agree, exactly as a real host records them.
+    liveForm.width = 768;
+    liveForm.height = 512;
+    liveForm.steps = 28;
+    await fieldControl("Prompt").setValue(prompt);
+    await wrapper!.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+  }
+
+  function killStream(index = 0, message = "Load failed"): void {
+    openStreams[index]!.options.onClose?.(new TypeError(message) as Error);
+    openStreams[index]!.resolve();
+  }
+
+  it("renders the finished print when resuming after the stream died mid-generation", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a ship crossing violet lightning", 77);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    // iOS suspension killed the socket; the print finished server-side.
+    killStream();
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    expect(wrapper.text()).not.toContain("Load failed");
+    expect(wrapper.get("img.result-media").attributes("src")).toBe(
+      "https://studio/media/full-video",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toBe(
+      "Generation completed.",
+    );
+    expect(wrapper.find("[data-test='mobile-generation-queue']").exists()).toBe(false);
+  });
+
+  it("clears a zombie queued job and explains the interruption without transport jargon", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "job-9",
+              model: model.name,
+              state: "queued",
+              position: 0,
+              started_at_unix_ms: 0,
+            },
+          ],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a print the suspension orphaned", 41);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    killStream(0, "The network connection was lost.");
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/job-9", { method: "DELETE" });
+    const summary = wrapper.get("[data-test='mobile-generation-summary']").text();
+    expect(summary).toBe(
+      "The connection dropped while this print waited in Studio’s queue. Develop again to requeue it.",
+    );
+    expect(summary).not.toContain("network connection was lost");
+    expect(wrapper.get("[data-test='mobile-generation-summary']").classes()).toContain(
+      "error-text",
+    );
+    expect(wrapper.findAll(".sr-only[aria-live='polite']")[1]?.text()).toContain(
+      "Generation failed.",
+    );
+  });
+
+  it("re-attaches to a print still developing on the host and completes it", async () => {
+    let queueCalls = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/queue") {
+        queueCalls += 1;
+        return Promise.resolve({
+          entries:
+            queueCalls <= 2
+              ? [{ id: "job-9", model: model.name, state: "running", position: 0 }]
+              : [],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([resumedPrint]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitSeededPrompt("a ship crossing violet lightning", 77);
+    openStreams[0]!.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "queued", position: 1, id: "job-9" }),
+    );
+    killStream();
+    await vi.waitFor(() => expect(wrapper!.find("img.result-media").exists()).toBe(true));
+
+    expect(queueCalls).toBeGreaterThanOrEqual(3);
+    expect(wrapper.get("[data-test='mobile-generation-summary']").text()).toBe("seed 77");
+    expect(wrapper.text()).not.toContain("Load failed");
+  });
+
+  it("renews the promoted result's expired media ticket when returning to the foreground", async () => {
+    streamableMediaUrl
+      .mockResolvedValueOnce("https://studio/media/video?media_token=old&expires=1")
+      .mockResolvedValueOnce("https://studio/media/video?media_token=new&expires=4102444800");
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("renew on resume");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "renew on resume.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 5,
+        generation_time_ms: 500,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=old");
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video.result-media").attributes("src")).toContain("media_token=new");
+  });
+});
+
 describe("MobileApp settings", () => {
   it("opens as a focused destination and returns to the unchanged primary tab", async () => {
     wrapper = mountMobileApp();
@@ -2408,9 +2890,7 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
     expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("3:2 · 768×512");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
@@ -2589,8 +3069,8 @@ describe("MobileApp gallery", () => {
 
     const hostsTab = wrapper
       .findAll("button.mobile-tab")
-      .find((button) => button.text() === "Hosts");
-    if (!hostsTab) throw new Error("Missing Hosts tab");
+      .find((button) => button.text() === "Machines");
+    if (!hostsTab) throw new Error("Missing Machines tab");
     await hostsTab.trigger("click");
     const studioRow = wrapper
       .findAll(".host-row")
@@ -2783,5 +3263,55 @@ describe("MobileApp host and catalog coordination", () => {
       .findAll("option")
       .map((option) => option.text());
     expect(options).toContain(pulledModel.name);
+  });
+});
+
+describe("MobileApp machines telemetry", () => {
+  async function openMachines(): Promise<void> {
+    const hostsTab = wrapper!
+      .findAll("button.mobile-tab")
+      .find((button) => button.text() === "Machines");
+    if (!hostsTab) throw new Error("Missing Machines tab");
+    await hostsTab.trigger("click");
+    await flushPromises();
+  }
+
+  it("mirrors VRAM usage and queue depth on an online host card", async () => {
+    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          gpu_info: {
+            name: "RTX 4090",
+            vram_total_mb: 24_000,
+            vram_used_mb: 9_840,
+            backend: "cuda",
+          },
+          queue_depth: 2,
+          queue_capacity: 8,
+        } satisfies ServerStatus);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe("9.8 / 24.0 GB");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 2");
+    expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
+  });
+
+  it("shows dashes and a zero queue when the host omits GPU info", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
   });
 });

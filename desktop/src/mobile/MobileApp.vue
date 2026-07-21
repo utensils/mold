@@ -3,10 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { invoke } from "@tauri-apps/api/core";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import type {
+  CompleteEvent,
   DownloadJob,
   ExpandCapabilities,
   GalleryImage,
@@ -29,6 +31,8 @@ import {
 } from "../lib/generateForm";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import { percent } from "../lib/format";
+import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   guidanceValidationError,
   inlineGenerationMediaBytes,
@@ -70,6 +74,7 @@ import {
 } from "../stores/generation";
 import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
+import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
 import MobileExpansionPullStatus from "./MobileExpansionPullStatus.vue";
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
@@ -82,6 +87,7 @@ import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
+import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import {
   loadMobileSettings,
@@ -94,6 +100,7 @@ import {
   mobileExpansionRecoveryStaleReason,
   type MobileExpansionRecoveryRecord,
 } from "./mobileExpansionRecovery";
+import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
 
@@ -155,6 +162,48 @@ const seedValid = ref(true);
 const parameterValid = ref(true);
 const sourceValid = ref(true);
 const resolutionValid = ref(true);
+const advancedSheetOpen = ref(false);
+
+/** Count of advanced settings that differ from their defaults — drives the
+ * "Advanced" trigger badge and the sheet header badge. */
+const advancedActiveCount = computed(() => {
+  let count = 0;
+  if (form.negativePrompt.trim()) count += 1;
+  if (form.sourceImage || form.controlImage || form.imageAttachments.length) count += 1;
+  if (form.loras.length) count += 1;
+  if (form.upscaleModel) count += 1;
+  if (form.scheduler !== "default") count += 1;
+  if (form.cfgPlus) count += 1;
+  return count;
+});
+
+function openAdvancedSheet(): void {
+  advancedSheetOpen.value = true;
+}
+
+function closeAdvancedSheet(): void {
+  advancedSheetOpen.value = false;
+}
+
+/** Restore only the advanced-tier fields to their defaults; prompt, model,
+ * dimensions, steps, guidance, seed, and batch are left untouched. */
+function resetAdvancedSettings(): void {
+  const defaults = newGenerateForm();
+  form.negativePrompt = defaults.negativePrompt;
+  form.scheduler = defaults.scheduler;
+  form.cfgPlus = defaults.cfgPlus;
+  form.upscaleModel = defaults.upscaleModel;
+  form.loras = [];
+  form.strength = defaults.strength;
+  form.sourceImage = defaults.sourceImage;
+  form.sourceImageName = defaults.sourceImageName;
+  form.imageAttachments = [];
+  form.sourceFit = { mode: "pad-repaint" };
+  form.maskImage = defaults.maskImage;
+  form.controlImage = defaults.controlImage;
+  form.controlModel = defaults.controlModel;
+  form.controlScale = defaults.controlScale;
+}
 const preparingGeneration = ref(false);
 const preparedBatch = ref<PreparedExpansionBatchState | null>(null);
 const expansionRunning = ref(false);
@@ -163,6 +212,12 @@ const expansionRecovery = ref<MobileExpansionRecoveryRecord | null>(null);
 const expansionPullAttempt = ref<MobileExpansionPullAttempt | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
+/**
+ * The negative prompt before and after a bake-and-clear merged the preset's
+ * curated fragments into it. Undo re-arms `before` alongside the prompt and
+ * chip; `baked` lets it bow out when the user has since edited the field.
+ */
+const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
@@ -177,6 +232,9 @@ const downloadConsumerId = `mobile-generate-${
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }`;
 const progress = ref("Ready");
+/** Whether the status line under Develop currently shows a failure. Set with
+ * `setGenerationStatus` so error styling never depends on string sniffing. */
+const progressIsError = ref(false);
 const generationAnnouncement = ref("");
 const gallery = ref<GalleryPrint[]>([]);
 const galleryLoading = ref(false);
@@ -207,6 +265,41 @@ const hostProbes = new Map<
 >();
 const generation = useGenerationStore();
 const mobileDownloads = useMobileDownloadsStore();
+
+// Ephemeral per-host telemetry from the /api/status probe (VRAM + queue), kept
+// out of the persisted host identity so the Machines cards can mirror the host
+// detail view's live figures. Cleared when a host goes offline.
+interface HostTelemetry {
+  vramUsedMb: number | null;
+  vramTotalMb: number | null;
+  queueDepth: number | null;
+}
+const hostTelemetry = reactive<Record<string, HostTelemetry>>({});
+
+function hostMemLabel(id: string): string {
+  const telemetry = hostTelemetry[id];
+  if (!telemetry || telemetry.vramUsedMb == null || telemetry.vramTotalMb == null) return "—";
+  return `${(telemetry.vramUsedMb / 1000).toFixed(1)} / ${(telemetry.vramTotalMb / 1000).toFixed(1)} GB`;
+}
+
+function hostVramPercent(id: string): number {
+  const telemetry = hostTelemetry[id];
+  if (!telemetry || telemetry.vramUsedMb == null || !telemetry.vramTotalMb) return 0;
+  return percent(telemetry.vramUsedMb, telemetry.vramTotalMb);
+}
+
+function hostQueueLabel(id: string): string {
+  return String(hostTelemetry[id]?.queueDepth ?? 0);
+}
+
+function captureHostTelemetry(hostId: string, status: ServerStatus): void {
+  const gpu = status.gpu_info;
+  hostTelemetry[hostId] = {
+    vramUsedMb: gpu?.vram_used_mb ?? null,
+    vramTotalMb: gpu?.vram_total_mb ?? null,
+    queueDepth: status.queue_depth ?? null,
+  };
+}
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
@@ -247,6 +340,7 @@ const preparedStaleReasons = computed(() => {
     model: form.model,
     family: form.family,
     requestedCount: effectiveBatchSize.value,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
@@ -337,7 +431,10 @@ const latestResultJob = computed(() => {
 });
 const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
 const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
-const resultPreviewError = computed(() => latestResultJob.value?.resultError ?? "");
+const resultPreviewError = computed(() => {
+  const job = latestResultJob.value;
+  return job?.resultError ? describeTransportError(job.resultError, job.hostLabel) : "";
+});
 const developButtonLabel = computed(() =>
   preparingGeneration.value
     ? "Preparing source…"
@@ -412,6 +509,25 @@ const generationStatus = computed(() => {
       return jobStatusCode(active);
   }
 });
+const generationStatusIsError = computed(() => !activeGeneration.value && progressIsError.value);
+
+/**
+ * The status line under Develop shows generation lifecycle and explicit
+ * user-action outcomes only — background poll failures must use their own
+ * surfaces (e.g. the model-load banner), never this slot.
+ */
+function setGenerationStatus(message: string, isError = false): void {
+  progress.value = message;
+  progressIsError.value = isError;
+}
+
+/** Seed/time line for a completed result; the time is omitted when a resumed
+ * reconciliation lost the true duration with the stream. */
+function completionSummary(result: CompleteEvent): string {
+  const timing =
+    result.generation_time_ms > 0 ? `${(result.generation_time_ms / 1000).toFixed(1)}s · ` : "";
+  return `${timing}seed ${result.seed_used}`;
+}
 
 function routeForMobileHost(host: MobileHost): HostRoute {
   return {
@@ -491,7 +607,8 @@ async function connectHost(address?: string, discoveredName?: string): Promise<v
     hostInput.apiKey = "";
     await refreshModels();
   } catch (error) {
-    hostError.value = error instanceof Error ? error.message : String(error);
+    const label = hostInput.name.trim() || discoveredName || (address ?? hostInput.address).trim();
+    hostError.value = describeTransportError(error, label);
   }
 }
 
@@ -501,7 +618,7 @@ async function discoverHosts(): Promise<void> {
   try {
     discovered.value = await invoke<DiscoveredHost[]>("discover_mold_hosts", { timeoutMs: 2500 });
   } catch (error) {
-    hostError.value = error instanceof Error ? error.message : String(error);
+    hostError.value = describeTransportError(error);
   } finally {
     discovering.value = false;
   }
@@ -531,6 +648,9 @@ function updateHostStatus(payload: { id: string; status: ServerStatus | null }):
     host.version = payload.status.version;
     host.hostname = payload.status.hostname ?? undefined;
     host.instanceId = payload.status.instance_id ?? host.instanceId;
+    captureHostTelemetry(host.id, payload.status);
+  } else {
+    delete hostTelemetry[host.id];
   }
 }
 
@@ -631,6 +751,7 @@ async function refreshModels(): Promise<boolean> {
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
     host.instanceId = status.instance_id ?? host.instanceId;
+    captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
     // the main Model select uses `generationModels` so those tools can never
@@ -647,9 +768,10 @@ async function refreshModels(): Promise<boolean> {
   } catch (error) {
     if (unmounted || epoch !== modelLoadEpoch || selectedHostId.value !== hostId) return false;
     host.online = false;
-    const detail = error instanceof Error ? error.message : String(error);
+    // The banner above the model select owns this failure; the generation
+    // status line keeps showing generation state, not background loads.
+    const detail = describeTransportError(error, host.name);
     modelLoadError.value = `Couldn’t load generation models from ${host.name}. ${detail}`;
-    progress.value = detail;
     return false;
   } finally {
     if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
@@ -684,9 +806,11 @@ function loadTemplate(template: GenerationTemplate): void {
   const selectedEntry = generationModels.value.find((model) => model.name === form.model);
   if (selectedEntry) reconcileModelCapabilities(form, selectedEntry);
   const available = generationModels.value.some((model) => model.name === form.model);
-  progress.value = available
-    ? `Loaded ${template.name}`
-    : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`;
+  setGenerationStatus(
+    available
+      ? `Loaded ${template.name}`
+      : `Loaded ${template.name}. Install ${form.model} from Catalog or choose another model.`,
+  );
   const mediaMessage = template.mediaReferences.length
     ? ` Re-add ${formatTemplateMediaReferences(template.mediaReferences)}.`
     : "";
@@ -701,6 +825,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     requestedCount: count,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
   };
 }
@@ -803,7 +928,7 @@ function setExpansionFailure(
   }
   return missingModel
     ? `The expansion model ${missingModel} isn't installed on ${route.label}.`
-    : `Expansion failed on ${route.label}: ${message}`;
+    : `Expansion failed on ${route.label}: ${describeTransportError(error, route.label)}`;
 }
 
 function recoveryStaleReason(recovery: MobileExpansionRecoveryRecord): string | null {
@@ -847,7 +972,7 @@ function syncExpansionDownloadConsumer(recovery: MobileExpansionRecoveryRecord):
         attempt?.recoveryId === recovery.id &&
         recovery.route.hostId === failedHost.id
       ) {
-        attempt.requestError = cause.message;
+        attempt.requestError = describeTransportError(cause, recovery.route.label);
         releaseExpansionPullLease(recovery);
       }
     },
@@ -872,9 +997,18 @@ function commitExpandedPrompts(
       expandedPrompt: prompts[0]!,
       model: inputs.model,
       family: inputs.family,
+      stylePreset: inputs.stylePreset,
       selectedHostPolicy: inputs.selectedHostPolicy,
       route: { ...route, target: { ...route.target } },
     };
+    // Bake-and-clear: the rewrite absorbed the style (the server received it
+    // as a directive), so the chip clears here — leaving it lit would apply
+    // the look twice at submit. Prepared batches below KEEP the chip: it is
+    // the frozen-style indicator for the reviewed set (a style change is a
+    // named staleness axis) and their submit path never re-composes it into
+    // the reviewed prompt text.
+    bakeStyleNegative(inputs.stylePreset ?? "", inputs.family);
+    form.stylePreset = "";
     if (replacePrepared) preparedBatch.value = null;
     clearExpansionRecovery(false);
     if (replacePrepared) restoreReplacementFocus(focus, "prompt");
@@ -923,11 +1057,15 @@ async function expandForCurrentBatch(
   expansionRunning.value = true;
   expansionError.value = "";
   try {
+    // The active chip travels as a natural-language directive the server
+    // weaves into the expander's system message — never the literal suffix.
+    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
+        ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
     );
@@ -940,11 +1078,12 @@ async function expandForCurrentBatch(
       current.model !== inputs.model ||
       current.family !== inputs.family ||
       current.requestedCount !== inputs.requestedCount ||
+      current.stylePreset !== inputs.stylePreset ||
       current.selectedHostPolicy !== inputs.selectedHostPolicy ||
       !sameFrozenHost(route, currentHost)
     ) {
       expansionError.value =
-        "The prompt, model, Batch, or host changed while expansion was running. Expand again with the current inputs.";
+        "The prompt, model, style, Batch, or host changed while expansion was running. Expand again with the current inputs.";
       return;
     }
     commitExpandedPrompts(inputs, route, prompts, token, replacePrepared, replacementFocus);
@@ -956,10 +1095,37 @@ async function expandForCurrentBatch(
   }
 }
 
+/**
+ * Bake-and-clear owes the user the preset's curated negative: the chip is
+ * about to be dropped, so submit-time composition will never see it again.
+ * The look itself already reached the rewritten prompt through the expansion
+ * directive — only the negative half has nowhere else to live (mirrors
+ * desktop).
+ */
+function bakeStyleNegative(presetId: string, family: string): void {
+  quickExpansionNegative.value = null;
+  const merged = mergeStyleNegative(form.negativePrompt, presetId, {
+    supportsNegativePrompt: generationCapabilitiesForFamily(family).supportsNegativePrompt,
+  });
+  if (merged === form.negativePrompt) return;
+  quickExpansionNegative.value = { before: form.negativePrompt, baked: merged };
+  form.negativePrompt = merged;
+}
+
 function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
   submissionGuard.invalidate();
   preparationGuard.invalidate();
+  // Undo re-arms the whole pre-expansion state, including the chip the
+  // bake-and-clear apply removed and the negative fragments it merged in —
+  // unless the user has edited the negative since, which is theirs to keep.
+  const snapshot = quickExpansionSnapshot.value;
+  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
+  const negative = quickExpansionNegative.value;
+  if (negative && form.negativePrompt === negative.baked) {
+    form.negativePrompt = negative.before;
+  }
+  quickExpansionNegative.value = null;
   form.prompt = quickExpansionOriginal.value;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
@@ -1021,6 +1187,11 @@ function collapsePreparedBatch(removedId: string): void {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
+  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
+  // absorbed the frozen style, so keeping the chip would re-apply the look —
+  // and the frozen style's negative moves into the form with it.
+  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
+  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   if (restoreFocus) {
@@ -1127,8 +1298,7 @@ async function pullExpansionModel(): Promise<void> {
     ) {
       return;
     }
-    expansionPullAttempt.value.requestError =
-      error instanceof Error ? error.message : String(error);
+    expansionPullAttempt.value.requestError = describeTransportError(error, recovery.route.label);
     releaseExpansionPullLease(recovery);
   }
 }
@@ -1152,11 +1322,15 @@ async function retryExpansionAfterPull(): Promise<void> {
   expansionRunning.value = true;
   expansionError.value = "";
   try {
+    // The immutable recovery record owns the style: a resumed pull re-requests
+    // with exactly the directive the user saw frozen, not the live chip.
+    const styleDirective = styleHint(recovery.inputs.stylePreset ?? "");
     const response = await expandPrompt(
       recovery.inputs.sourcePrompt,
       {
         variations: recovery.inputs.requestedCount,
         ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
+        ...(styleDirective ? { style: styleDirective } : {}),
       },
       recovery.route.target,
     );
@@ -1181,9 +1355,10 @@ async function retryExpansionAfterPull(): Promise<void> {
     if (unmounted || retryId !== recoveryRetryId || expansionRecovery.value?.id !== recovery.id) {
       return;
     }
-    expansionError.value = `Expansion failed on ${recovery.route.label}: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
+    expansionError.value = `Expansion failed on ${recovery.route.label}: ${describeTransportError(
+      error,
+      recovery.route.label,
+    )}`;
   } finally {
     if (!unmounted && retryId === recoveryRetryId) expansionRunning.value = false;
   }
@@ -1218,11 +1393,11 @@ async function prepareGenerationRequest(
             model,
             target,
             onProgress: (message) => {
-              if (isCurrent()) progress.value = message;
+              if (isCurrent()) setGenerationStatus(message);
             },
           }),
         onStatus: (message) => {
-          if (isCurrent()) progress.value = message;
+          if (isCurrent()) setGenerationStatus(message);
         },
       },
     );
@@ -1301,6 +1476,19 @@ async function generate(): Promise<void> {
 
   const draft = cloneGenerateForm(form);
   const draftCaps = generationCapabilitiesForFamily(draft.family);
+  // The composer style preset is baked into the OUTGOING request at submit —
+  // the textarea and negative field are never mutated. Reviewed prepared
+  // prompts ship verbatim (the style already reached them through the
+  // expansion directive; staleness pins the chip to the frozen style), so the
+  // prompt half only applies to the ordinary path. The preset negative is
+  // separate from the reviewed prompt text and merges for BOTH paths, gated
+  // on the family's negative-prompt support (mirrors desktop).
+  const styled = composeStyle(draft.prompt, draft.stylePreset, {
+    supportsNegativePrompt: draftCaps.supportsNegativePrompt,
+    negative: draft.negativePrompt,
+  });
+  if (!preparedSubmission) draft.prompt = styled.prompt;
+  draft.negativePrompt = styled.negative ?? "";
   const batchSize = preparedSubmission
     ? preparedSubmission.prompts.length
     : draftCaps.forcesBatchSizeOne
@@ -1325,7 +1513,7 @@ async function generate(): Promise<void> {
     request = await prepareGenerationRequest(target, draft, () => submissionGuard.isCurrent(token));
   } catch (error) {
     if (!ownsPreparedSubmission()) return;
-    progress.value = error instanceof Error ? error.message : String(error);
+    setGenerationStatus(describeTransportError(error, route.label), true);
     generationAnnouncement.value = `Couldn’t prepare the source image. ${progress.value}`;
     releasePreparedSubmission();
     return;
@@ -1337,7 +1525,7 @@ async function generate(): Promise<void> {
     return;
   }
   if (guardedSubmission && JSON.stringify(cloneGenerateForm(form)) !== liveFormIdentity) {
-    progress.value = "The generation inputs changed while the source was being prepared.";
+    setGenerationStatus("The generation inputs changed while the source was being prepared.");
     generationAnnouncement.value = `${progress.value} Review the current inputs before developing.`;
     releasePreparedSubmission();
     return;
@@ -1378,13 +1566,13 @@ async function generate(): Promise<void> {
 
   const chainRouting = decideGenerateRequestRouting(request, draft.family);
   if (chainRouting.kind === "reject") {
-    progress.value = chainRouting.reason;
+    setGenerationStatus(chainRouting.reason);
     generationAnnouncement.value = chainRouting.reason;
     releasePreparedSubmission();
     return;
   }
   if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
-    progress.value = "These options can’t be preserved during long-video chaining.";
+    setGenerationStatus("These options can’t be preserved during long-video chaining.");
     generationAnnouncement.value = `${progress.value} Remove the highlighted options or reduce Frames to 97 or fewer.`;
     releasePreparedSubmission();
     return;
@@ -1429,10 +1617,26 @@ async function generate(): Promise<void> {
   ) {
     quickExpansionSnapshot.value = null;
   }
-  progress.value = "Queued";
+  setGenerationStatus("Queued");
   generationAnnouncement.value = "";
-  void settled.then((jobs) => {
+  void settled.then(async (jobs) => {
     if (unmounted || jobs.length === 0) return;
+    // iOS suspension kills every held SSE socket: jobs that settled with a
+    // dead-transport error are re-queried against their frozen submission
+    // route (finished prints render, still-running jobs re-attach, zombies
+    // are cleared) BEFORE any summary copy is composed, so raw transport
+    // text never reaches the status line or the announcement channel.
+    await reconcileInterruptedGenerationJobs(jobs, {
+      target: { ...route.target },
+      hostLabel: route.label,
+      chain: chainRouting.kind === "chain",
+      refreshResultUrl: (clientId) =>
+        void generation.refreshRemoteResultUrl(clientId).catch(() => {
+          // The reactive job carries the directed, user-visible error.
+        }),
+      isActive: () => !unmounted,
+    });
+    if (unmounted) return;
     for (const candidate of jobs) handledGenerationClientIds.add(candidate.clientId);
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
@@ -1442,12 +1646,18 @@ async function generate(): Promise<void> {
       candidate.error?.includes("remote cancellation was not confirmed"),
     );
     const failed = jobs.find((candidate) => candidate.error && !isCancelledError(candidate.error));
+    const failedError = failed?.error ? describeTransportError(failed.error, route.label) : null;
     const failedVariations = preparedSubmission
       ? jobs.flatMap((candidate, index) => {
           if (!candidate.error || isCancelledError(candidate.error)) return [];
           const prompt =
             candidate.prompt.length > 120 ? `${candidate.prompt.slice(0, 117)}…` : candidate.prompt;
-          return [`Variation ${index + 1}, “${prompt}”, failed: ${candidate.error}`];
+          return [
+            `Variation ${index + 1}, “${prompt}”, failed: ${describeTransportError(
+              candidate.error,
+              route.label,
+            )}`,
+          ];
         })
       : [];
     const preparedFailureSummary = failedVariations.join(" ");
@@ -1459,31 +1669,37 @@ async function generate(): Promise<void> {
     if (latestCompleted?.result) {
       latestResultClientId.value = latestCompleted.clientId;
       if (latestCompleted.resultError) {
-        progress.value = latestCompleted.resultError;
-        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${latestCompleted.resultError}`;
+        const previewDetail = describeTransportError(latestCompleted.resultError, route.label);
+        setGenerationStatus(previewDetail, true);
+        generationAnnouncement.value = `${completed.length} of ${jobs.length} generations completed, but the latest preview is unavailable. ${previewDetail}`;
       } else {
-        progress.value = `${completed.length > 1 ? `${completed.length} prints · ` : ""}${(
-          latestCompleted.result.generation_time_ms / 1000
-        ).toFixed(1)}s · seed ${latestCompleted.result.seed_used}`;
+        setGenerationStatus(
+          `${completed.length > 1 ? `${completed.length} prints · ` : ""}${completionSummary(
+            latestCompleted.result,
+          )}`,
+        );
         generationAnnouncement.value =
           completed.length === 1 && jobs.length === 1
             ? "Generation completed."
             : `${completed.length} of ${jobs.length} generations completed.`;
       }
-      if (unconfirmedCancellation?.error || failed?.error) {
-        progress.value = [
-          `${completed.length} of ${jobs.length} completed`,
-          failed?.error,
-          unconfirmedCancellation?.error,
-        ]
-          .filter(Boolean)
-          .join(" · ");
+      if (unconfirmedCancellation?.error || failedError) {
+        setGenerationStatus(
+          [
+            `${completed.length} of ${jobs.length} completed`,
+            failedError,
+            unconfirmedCancellation?.error,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          true,
+        );
         generationAnnouncement.value = [
           `${completed.length} generations completed.`,
-          failed?.error
+          failedError
             ? preparedSubmission
               ? `${failedCount} failed. ${preparedFailureSummary}`
-              : `${failedCount} failed. ${failed.error}`
+              : `${failedCount} failed. ${failedError}`
             : "",
           unconfirmedCancellation?.error
             ? `Cancellation failed. ${unconfirmedCancellation.error}`
@@ -1493,13 +1709,16 @@ async function generate(): Promise<void> {
           .join(" ");
       }
       if (tab.value === "gallery") void refreshGallery();
-    } else if (unconfirmedCancellation?.error || failed?.error) {
-      progress.value = [failed?.error, unconfirmedCancellation?.error].filter(Boolean).join(" · ");
+    } else if (unconfirmedCancellation?.error || failedError) {
+      setGenerationStatus(
+        [failedError, unconfirmedCancellation?.error].filter(Boolean).join(" · "),
+        true,
+      );
       generationAnnouncement.value = [
-        failed?.error
+        failedError
           ? preparedSubmission
             ? `Generation failed. ${preparedFailureSummary}`
-            : `Generation failed. ${failed.error}`
+            : `Generation failed. ${failedError}`
           : "",
         unconfirmedCancellation?.error
           ? `Cancellation failed. ${unconfirmedCancellation.error}`
@@ -1508,7 +1727,7 @@ async function generate(): Promise<void> {
         .filter(Boolean)
         .join(" ");
     } else if (cancelled) {
-      progress.value = "Cancelled";
+      setGenerationStatus("Cancelled");
       generationAnnouncement.value = `${jobs.length} generation${jobs.length === 1 ? "" : "s"} cancelled.`;
     }
     // Only terminal jobs whose callbacks have run are eligible: multiple
@@ -1528,18 +1747,19 @@ async function cancelGeneration(job: Job): Promise<void> {
     await generation.cancel(job.clientId);
     if (job.status === "complete" && job.result) {
       latestResultClientId.value = job.clientId;
-      progress.value = `${(job.result.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result.seed_used}`;
+      setGenerationStatus(completionSummary(job.result));
       generationAnnouncement.value = "Generation completed.";
       if (tab.value === "gallery") void refreshGallery();
     } else if (job.error && !isCancelledError(job.error)) {
-      progress.value = job.error;
-      generationAnnouncement.value = `Generation failed. ${job.error}`;
+      const detail = describeTransportError(job.error, job.hostLabel);
+      setGenerationStatus(detail, true);
+      generationAnnouncement.value = `Generation failed. ${detail}`;
     } else {
-      progress.value = "Cancelled";
+      setGenerationStatus("Cancelled");
       generationAnnouncement.value = "Generation cancelled.";
     }
   } catch (error) {
-    progress.value = error instanceof Error ? error.message : String(error);
+    setGenerationStatus(describeTransportError(error, job.hostLabel), true);
     generationAnnouncement.value = `Cancellation failed. ${progress.value}`;
   }
 }
@@ -1553,7 +1773,7 @@ function renewGeneratedResult(force: boolean): void {
     .then(() => {
       if (latestResultClientId.value !== job.clientId || job.resultError || !job.resultUrl) return;
       if (force) resultMediaLoadKey.value += 1;
-      progress.value = `${(job.result!.generation_time_ms / 1000).toFixed(1)}s · seed ${job.result!.seed_used}`;
+      setGenerationStatus(completionSummary(job.result!));
       if (force || job.resultUrl !== previousUrl) {
         generationAnnouncement.value = "Result preview refreshed.";
       }
@@ -1713,9 +1933,11 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     const reuse = applyMobileGalleryMetadata(form, print.metadata, generationModels.value);
-    progress.value = reuse.substitutedModel
-      ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
-      : "Prompt settings restored";
+    setGenerationStatus(
+      reuse.substitutedModel
+        ? `The original model isn’t installed on ${print.hostName}; using ${reuse.modelName}.`
+        : "Prompt settings restored",
+    );
     selectedPrint.value = null;
     // The next Gallery visit performs its normal refresh; do not refetch the
     // grid while navigating directly to the restored prompt.
@@ -1751,17 +1973,17 @@ async function useSelectedPrintAsSource(): Promise<void> {
     const base64 = await blobToBase64(blob);
     if (qwenEdit) {
       form.imageAttachments = [base64, ...form.imageAttachments];
-      progress.value = "Added gallery print as the edit target";
+      setGenerationStatus("Added gallery print as the edit target");
     } else {
       form.sourceImage = base64;
       form.sourceImageName = print.filename;
-      progress.value = "Gallery print selected as source";
+      setGenerationStatus("Gallery print selected as source");
     }
     selectedPrint.value = null;
     galleryRefreshDeferred = false;
     tab.value = "generate";
   } catch (error) {
-    reusePrintError.value = error instanceof Error ? error.message : String(error);
+    reusePrintError.value = describeTransportError(error, print.hostName);
   } finally {
     usingPrintAsSource.value = false;
   }
@@ -1905,9 +2127,37 @@ watch(tab, (next) => {
   if (next !== "hosts") hostDetailId.value = "";
 });
 
+// One failed model load must not become a manual-Retry dead end: the 10s
+// probe already self-heals `host.online`, so a false→true transition on the
+// selected host re-runs the (epoch-guarded) model load automatically.
+watch(
+  () => selectedHost.value?.online ?? false,
+  (online, wasOnline) => {
+    if (online && !wasOnline && modelLoadError.value && !loadingModels.value) {
+      void refreshModels();
+    }
+  },
+);
+
+/**
+ * iOS froze this WebView and tore down every socket while the app was
+ * backgrounded. On return: probe hosts immediately (instead of waiting out
+ * the 10s cadence), recover a failed model list, renew the promoted result's
+ * media ticket if it aged out, and refresh the Library if it is on screen.
+ * Interrupted generation streams settle through their own reconciliation in
+ * the submit path's settled handler.
+ */
+function handleForegroundResume(): void {
+  if (unmounted || document.visibilityState === "hidden") return;
+  probeHosts();
+  if (modelLoadError.value && !loadingModels.value) void refreshModels();
+  renewGeneratedResult(false);
+  if (tab.value === "gallery") void refreshGallery();
+}
+
 watch(resultPreviewError, (error) => {
   if (!error) return;
-  progress.value = error;
+  setGenerationStatus(error, true);
   generationAnnouncement.value = `Generation completed, but its preview is unavailable. ${error}`;
 });
 
@@ -1925,6 +2175,8 @@ onMounted(async () => {
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
+  document.addEventListener("visibilitychange", handleForegroundResume);
+  window.addEventListener("pageshow", handleForegroundResume);
   if (selectedHost.value) {
     await Promise.all([
       refreshModels(),
@@ -1945,6 +2197,8 @@ onBeforeUnmount(() => {
   recoveryRetryId += 1;
   expansionPullRequestId += 1;
   clearExpansionRecovery();
+  document.removeEventListener("visibilitychange", handleForegroundResume);
+  window.removeEventListener("pageshow", handleForegroundResume);
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
@@ -2013,7 +2267,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <template v-else>
-          <h1 class="section-title">Generate</h1>
+          <h1 class="section-title">Create</h1>
           <p class="section-note">Develop on {{ selectedHost.name }}</p>
           <label v-if="hosts.length > 1" class="field">
             <span>Host</span>
@@ -2082,6 +2336,7 @@ onBeforeUnmount(() => {
               placeholder="Describe the print…"
             />
           </label>
+          <MobileStyleChips v-model="form.stylePreset" />
           <MobilePromptTools
             v-if="selectedTarget"
             :form="form"
@@ -2133,33 +2388,6 @@ onBeforeUnmount(() => {
             @discard="discardPreparedBatch"
             @generate="generate"
           />
-          <label v-if="form.model && caps.supportsNegativePrompt" class="field">
-            <span>Negative prompt</span>
-            <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
-          </label>
-
-          <details
-            v-if="form.model && caps.supportsImg2img"
-            class="mobile-native-disclosure"
-            :open="
-              !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
-              caps.sourceImageMode === 'qwen-edit'
-            "
-            data-test="mobile-source-disclosure"
-          >
-            <summary>
-              <span>{{ sourceSectionTitle }}</span>
-              <small>{{ sourceSectionSummary }}</small>
-            </summary>
-            <MobileSourceControls
-              :form="form"
-              :target="selectedTarget"
-              :control-models="controlModels"
-              :upscalers="upscalers"
-              @validity-change="sourceValid = $event"
-            />
-          </details>
-
           <p
             v-if="mobileMediaBudgetError"
             class="mobile-generate-validation"
@@ -2215,26 +2443,77 @@ onBeforeUnmount(() => {
             :last-seed="generation.lastSeedUsed"
             @validity-change="seedValid = $event"
           />
-          <label class="field"
-            ><span>Format</span
-            ><select v-model="form.outputFormat" class="control">
-              <option v-for="format in outputFormats" :key="format" :value="format">
-                {{ format.toUpperCase() }}
-              </option>
-            </select></label
-          >
 
-          <MobileGenerateParameters
-            :form="form"
-            :upscalers="upscalers"
-            @validity-change="parameterValid = $event"
-          />
-          <MobileLoraControls
-            v-if="selectedTarget"
-            :form="form"
-            :target="selectedTarget"
-            @append-word="appendPromptWord"
-          />
+          <button
+            class="mobile-advanced-trigger"
+            type="button"
+            data-test="mobile-open-advanced"
+            @click="openAdvancedSheet"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            <span>Advanced (sampler, LoRA, source)</span>
+            <span
+              v-if="advancedActiveCount > 0"
+              class="mobile-advanced-trigger-badge"
+              data-test="mobile-advanced-trigger-count"
+              >{{ advancedActiveCount }}</span
+            >
+          </button>
+
+          <MobileAdvancedSheet
+            :open="advancedSheetOpen"
+            :count="advancedActiveCount"
+            @close="closeAdvancedSheet"
+            @reset="resetAdvancedSettings"
+          >
+            <MobileGenerateParameters
+              :form="form"
+              :upscalers="upscalers"
+              @validity-change="parameterValid = $event"
+            />
+            <label v-if="form.model && caps.supportsNegativePrompt" class="field">
+              <span>Negative prompt</span>
+              <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
+            </label>
+            <details
+              v-if="form.model && caps.supportsImg2img"
+              class="mobile-native-disclosure"
+              :open="
+                !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
+                caps.sourceImageMode === 'qwen-edit'
+              "
+              data-test="mobile-source-disclosure"
+            >
+              <summary>
+                <span>{{ sourceSectionTitle }}</span>
+                <small>{{ sourceSectionSummary }}</small>
+              </summary>
+              <MobileSourceControls
+                :form="form"
+                :target="selectedTarget"
+                :control-models="controlModels"
+                :upscalers="upscalers"
+                @validity-change="sourceValid = $event"
+              />
+            </details>
+            <MobileLoraControls
+              v-if="selectedTarget"
+              :form="form"
+              :target="selectedTarget"
+              @append-word="appendPromptWord"
+            />
+            <label class="field"
+              ><span>Format</span
+              ><select v-model="form.outputFormat" class="control">
+                <option v-for="format in outputFormats" :key="format" :value="format">
+                  {{ format.toUpperCase() }}
+                </option>
+              </select></label
+            >
+          </MobileAdvancedSheet>
+
           <MobileTemplates :form="form" :host-id="selectedHost.id" @load="loadTemplate" />
 
           <div class="mobile-estimate">
@@ -2298,7 +2577,7 @@ onBeforeUnmount(() => {
           </section>
           <div
             class="status-line"
-            :class="{ 'error-text': generationStatus.toLowerCase().includes('error') }"
+            :class="{ 'error-text': generationStatusIsError }"
             data-test="mobile-generation-summary"
           >
             {{ generationStatus }}
@@ -2333,7 +2612,7 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else-if="tab === 'gallery'">
-        <h1 class="section-title">Gallery</h1>
+        <h1 class="section-title">Library</h1>
         <p class="section-note">Prints from every saved host</p>
         <p v-if="galleryError" class="status-line error-text">{{ galleryError }}</p>
         <div v-if="galleryLoading" class="empty-state">Loading prints…</div>
@@ -2380,7 +2659,7 @@ onBeforeUnmount(() => {
           @status="updateHostStatus"
         />
         <template v-else>
-          <h1 class="section-title">Hosts</h1>
+          <h1 class="section-title">Machines</h1>
           <p class="section-note">LAN discovery, Tailscale MagicDNS, or an address</p>
           <button
             class="secondary-button"
@@ -2458,6 +2737,22 @@ onBeforeUnmount(() => {
                 </span>
               </span>
             </button>
+            <div v-if="host.online" class="host-telemetry" data-test="mobile-host-telemetry">
+              <div class="host-telemetry-row">
+                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
+                <span class="host-telemetry-queue">queue {{ hostQueueLabel(host.id) }}</span>
+              </div>
+              <div
+                class="meter host-telemetry-meter"
+                role="meter"
+                :aria-label="`VRAM usage on ${host.name}`"
+                :aria-valuenow="Math.round(hostVramPercent(host.id))"
+                aria-valuemin="0"
+                aria-valuemax="100"
+              >
+                <span :style="{ width: `${hostVramPercent(host.id)}%` }" />
+              </div>
+            </div>
             <div class="row-actions">
               <button
                 class="secondary-button"
@@ -2514,7 +2809,10 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-generate"
         @click="tab = 'generate'"
       >
-        Generate
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" />
+        </svg>
+        <span>Create</span>
       </button>
       <button
         class="mobile-tab"
@@ -2523,7 +2821,13 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-gallery"
         @click="tab = 'gallery'"
       >
-        Gallery
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="3" width="7.5" height="7.5" rx="1.5" />
+          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" />
+          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" />
+          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" />
+        </svg>
+        <span>Library</span>
       </button>
       <button
         class="mobile-tab"
@@ -2532,7 +2836,11 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-catalog"
         @click="openCatalog()"
       >
-        Catalog
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3l8.5 4.3-8.5 4.3L3.5 7.3z" />
+          <path d="M3.5 12L12 16.3 20.5 12" />
+        </svg>
+        <span>Models</span>
       </button>
       <button
         class="mobile-tab"
@@ -2541,7 +2849,11 @@ onBeforeUnmount(() => {
         data-test="mobile-tab-hosts"
         @click="tab = 'hosts'"
       >
-        Hosts
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="7" rx="2" />
+          <rect x="3" y="13" width="18" height="7" rx="2" />
+        </svg>
+        <span>Machines</span>
       </button>
     </nav>
   </main>

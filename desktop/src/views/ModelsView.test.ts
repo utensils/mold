@@ -41,8 +41,6 @@ import { useModelStore } from "../stores/models";
 import { useUiStore } from "../stores/ui";
 import type { DownloadJob } from "../lib/api/types";
 
-const stub = { template: "<div />" };
-
 function model(name: string, family: string): ModelEntry {
   return {
     name,
@@ -94,7 +92,7 @@ let router: Router;
 async function mountView(path = "/models") {
   router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: "/models", component: stub }],
+    routes: [{ path: "/models", component: { template: "<div />" } }],
   });
   await router.push(path);
   const pinia = createPinia();
@@ -104,6 +102,17 @@ async function mountView(path = "/models") {
   const wrapper = mount(ModelsView, { global: { plugins: [pinia, router] } });
   await flushPromises();
   return wrapper;
+}
+
+/** Click one of the Installed | Discover segment buttons. */
+async function selectSegment(
+  wrapper: Awaited<ReturnType<typeof mountView>>,
+  label: "Installed" | "Discover",
+) {
+  const seg = wrapper.get('[aria-label="Model view"]');
+  const button = seg.findAll("button").find((b) => b.text() === label);
+  await button!.trigger("click");
+  await flushPromises();
 }
 
 beforeEach(() => {
@@ -117,31 +126,32 @@ beforeEach(() => {
   });
 });
 
-describe("ModelsView unified catalog", () => {
-  it("renders ONE list — no Installed shelf; installed models appear tagged in place", async () => {
+describe("ModelsView segments", () => {
+  it("defaults to the Installed segment showing the full-featured inventory", async () => {
     const wrapper = await mountView();
-    expect(wrapper.find('[aria-label="Model availability"]').exists()).toBe(false);
-    // The old stacked Installed shelf is gone…
-    expect(wrapper.find("#installed-models-heading").exists()).toBe(false);
-    // …but installed models and catalog results share the unified list.
+    // Installed models render; the live catalog is not fetched into view yet.
+    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).not.toContain("FLUX.2 Klein");
+    // No Discover source chips while on Installed.
+    expect(wrapper.find("[data-test='catalog-source-chips']").exists()).toBe(false);
+  });
+
+  it("Discover shows the unified merged list — installed models and live catalog together", async () => {
+    const wrapper = await mountView();
+    await selectSegment(wrapper, "Discover");
     expect(wrapper.text()).toContain("flux-dev:q8");
     expect(wrapper.text()).toContain("FLUX.2 Klein");
   });
 
-  it("offers an Installed source tab, with All as the default", async () => {
+  it("Discover source chips are All / HuggingFace / Civitai with All the default", async () => {
     const wrapper = await mountView();
+    await selectSegment(wrapper, "Discover");
     const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
-    expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai", "Installed"]);
+    expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai"]);
     expect(chips[0]!.attributes("aria-pressed")).toBe("true");
-
-    await chips[3]!.trigger("click");
-    await flushPromises();
-    // Installed-only: the full-featured installed rows, no live catalog.
-    expect(wrapper.text()).toContain("flux-dev:q8");
-    expect(wrapper.text()).not.toContain("FLUX.2 Klein");
   });
 
-  it("tags NSFW catalog entries while keeping the include checkbox", async () => {
+  it("tags NSFW catalog entries while keeping the include checkbox in Discover", async () => {
     searchCatalog.mockResolvedValue({
       entries: [{ ...entry("Spicy Model", "sdxl"), nsfw: true }],
       page: 1,
@@ -149,18 +159,45 @@ describe("ModelsView unified catalog", () => {
       total: 1,
     });
     const wrapper = await mountView();
+    await selectSegment(wrapper, "Discover");
     expect(wrapper.find("[data-test='nsfw-tag']").exists()).toBe(true);
     expect(wrapper.find("input[type='checkbox']").exists()).toBe(true);
   });
 
-  it("pins the downloads tray above the unified list", async () => {
+  it("routes the empty Installed CTA to the Discover segment", async () => {
+    const wrapper = await mountView();
+    useModelStore().all = [];
+    await flushPromises();
+    const cta = wrapper.findAll("button").find((b) => b.text() === "Browse the catalog");
+    expect(cta).toBeDefined();
+    await cta!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-test='catalog-source-chips']").exists()).toBe(true);
+  });
+
+  it("treats the legacy ?tab=catalog deep link as the Discover view", async () => {
+    const wrapper = await mountView("/models?tab=catalog");
+    expect(wrapper.find("[data-test='catalog-source-chips']").exists()).toBe(true);
+    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).toContain("LTX-2 Distilled");
+    const all = wrapper.get('[aria-label="Media type"]').findAll("button")[0]!;
+    expect(all.attributes("aria-pressed")).toBe("true");
+  });
+});
+
+describe("ModelsView downloads and remote hosts", () => {
+  it("pins the downloads tray above the content in both segments, tagged with its host", async () => {
     const wrapper = await mountView();
     useDownloadsStore().activeJobs = [job()];
     await flushPromises();
-    const html = wrapper.html();
-    const downloadsAt = html.indexOf("Downloads");
-    expect(downloadsAt).toBeGreaterThan(-1);
-    expect(downloadsAt).toBeLessThan(html.indexOf("catalog-source-chips"));
+    // Installed segment: the tray sits above the installed inventory.
+    let html = wrapper.html();
+    expect(html.indexOf("downloads-tray")).toBeGreaterThan(-1);
+    expect(html.indexOf("downloads-tray")).toBeLessThan(html.indexOf("flux-dev:q8"));
+
+    await selectSegment(wrapper, "Discover");
+    html = wrapper.html();
+    expect(html.indexOf("downloads-tray")).toBeLessThan(html.indexOf("catalog-source-chips"));
   });
 
   it("shows installed models and active downloads from a connected remote host", async () => {
@@ -220,21 +257,28 @@ describe("ModelsView unified catalog", () => {
 
     expect(useDownloadsStore().hostStates["hal9000-7680"]?.target.apiKey).toBe("rotated-key");
   });
+});
 
-  it("filters installed and catalog entries to video families for ?type=video", async () => {
+describe("ModelsView media-type filter", () => {
+  it("filters the Installed inventory to video families for ?type=video", async () => {
     const wrapper = await mountView("/models?type=video");
     expect(wrapper.text()).toContain("ltx-2:q8");
     expect(wrapper.text()).not.toContain("flux-dev:q8");
-    expect(wrapper.text()).toContain("LTX-2 Distilled");
-    expect(wrapper.text()).not.toContain("FLUX.2 Klein");
   });
 
-  it("filters to image families for ?type=image", async () => {
+  it("filters the Installed inventory to image families for ?type=image", async () => {
     const wrapper = await mountView("/models?type=image");
     expect(wrapper.text()).toContain("flux-dev:q8");
     expect(wrapper.text()).not.toContain("ltx-2:q8");
-    expect(wrapper.text()).toContain("FLUX.2 Klein");
-    expect(wrapper.text()).not.toContain("LTX-2 Distilled");
+  });
+
+  it("filters the Discover merged list by media type too", async () => {
+    const wrapper = await mountView("/models?type=video");
+    await selectSegment(wrapper, "Discover");
+    expect(wrapper.text()).toContain("ltx-2:q8");
+    expect(wrapper.text()).toContain("LTX-2 Distilled");
+    expect(wrapper.text()).not.toContain("flux-dev:q8");
+    expect(wrapper.text()).not.toContain("FLUX.2 Klein");
   });
 
   it("updates the route query when a media-type chip is selected", async () => {
@@ -252,53 +296,27 @@ describe("ModelsView unified catalog", () => {
     expect(router.currentRoute.value.query.type).toBeUndefined();
     expect(wrapper.text()).toContain("flux-dev:q8");
   });
-
-  it("treats the legacy catalog deep link as the unfiltered view", async () => {
-    const wrapper = await mountView("/models?tab=catalog");
-    expect(wrapper.text()).toContain("flux-dev:q8");
-    expect(wrapper.text()).toContain("LTX-2 Distilled");
-    const all = wrapper.get('[aria-label="Media type"]').findAll("button")[0]!;
-    expect(all.attributes("aria-pressed")).toBe("true");
-  });
-
-  it("routes the empty Installed tab's CTA back to the All list", async () => {
-    const wrapper = await mountView();
-    useModelStore().all = [];
-    await flushPromises();
-    const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
-    await chips[3]!.trigger("click");
-    await flushPromises();
-
-    const cta = wrapper.findAll("button").find((b) => b.text() === "Browse the catalog");
-    expect(cta).toBeDefined();
-    await cta!.trigger("click");
-    await flushPromises();
-    expect(
-      wrapper
-        .get("[data-test='catalog-source-chips']")
-        .findAll("button")[0]!
-        .attributes("aria-pressed"),
-    ).toBe("true");
-  });
 });
 
-describe("ModelsView catalog layout", () => {
+describe("ModelsView Discover layout toggle", () => {
   it("defaults to the table layout", async () => {
     const wrapper = await mountView();
+    await selectSegment(wrapper, "Discover");
     expect(wrapper.get("[data-test='layout-table']").attributes("aria-checked")).toBe("true");
     expect(wrapper.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("false");
   });
 
-  it("persists the chosen layout for the app session, not just the mounted view", async () => {
+  it("persists the chosen layout for the app session", async () => {
     const wrapper = await mountView();
+    await selectSegment(wrapper, "Discover");
     await wrapper.get("[data-test='layout-grid']").trigger("click");
     expect(useUiStore().catalogLayout).toBe("grid");
     wrapper.unmount();
 
-    // Same pinia = same app session: leaving Catalog and coming back keeps
-    // the choice, while a fresh session (new pinia) resets to table.
+    // Same pinia = same app session: a fresh mount keeps the choice.
     const again = mount(ModelsView, { global: { plugins: [getActivePinia()!, router] } });
     await flushPromises();
+    await selectSegment(again, "Discover");
     expect(again.get("[data-test='layout-grid']").attributes("aria-checked")).toBe("true");
     expect(again.get("[data-test='layout-table']").attributes("aria-checked")).toBe("false");
     again.unmount();

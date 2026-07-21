@@ -6,6 +6,12 @@ export interface ExpandPromptOptions {
   modelFamily?: string;
   /** Number of prompt candidates to return (server default 1). */
   variations?: number;
+  /**
+   * Natural-language style directive (see `styleHint`) the server appends to
+   * the expander's system message so the look is woven into the rewrite —
+   * never the literal preset suffix, and never appended to the prompt text.
+   */
+  style?: string;
 }
 
 /**
@@ -23,6 +29,8 @@ export function expandPrompt(
   const body: ExpandRequest = { prompt, variations: opts.variations ?? 1 };
   const family = opts.modelFamily?.trim();
   if (family) body.model_family = family;
+  const style = opts.style?.trim();
+  if (style) body.style = style;
   const init = {
     method: "POST",
     headers: { "Content-Type": "application/json" },

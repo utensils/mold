@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
-import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
+import { appIsBackground } from "./lib/notify";
+import {
+  detectOfflineTransitions,
+  newlyCompletedJobs,
+  shouldToastGenerationComplete,
+  snapshotHostStatuses,
+} from "./lib/notifications";
 import {
   allowsNativeContextMenu,
   allowsNativeSelectAll,
@@ -27,7 +33,6 @@ import { useUiStore } from "./stores/ui";
 import { useUpdaterStore } from "./stores/updater";
 
 const router = useRouter();
-const sidebarOpen = ref(true);
 const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
@@ -55,6 +60,44 @@ watch(
   ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
 );
 
+// Cross-surface notifications (§08 G11). A generation finishing while the user
+// is somewhere other than Create raises a toast that jumps to Library; the
+// native notification (dispatched by the generation store) covers the
+// backgrounded case, so the foreground toast bows out then.
+const notifiedComplete = new Set<number>();
+watch(
+  () => generation.jobs.map((j) => `${j.clientId}:${j.status}`).join("|"),
+  () => {
+    const done = newlyCompletedJobs(generation.jobs, notifiedComplete);
+    for (const job of done) notifiedComplete.add(job.clientId);
+    // Bound the seen-set to live jobs so it can't grow across a long session.
+    for (const id of [...notifiedComplete]) {
+      if (!generation.jobs.some((j) => j.clientId === id)) notifiedComplete.delete(id);
+    }
+    if (done.length === 0) return;
+    if (!shouldToastGenerationComplete(router.currentRoute.value.path)) return;
+    if (appIsBackground()) return;
+    toasts.push("Generated — saved to Library", "info", {
+      onClick: () => void router.push("/library"),
+    });
+  },
+);
+
+// A connected host dropping offline (ready → error) raises a sticky error toast
+// once per transition, regardless of the active workspace.
+let hostStatusSnapshot: Record<string, string> = {};
+watch(
+  () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
+  () => {
+    const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
+    for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
+      toasts.push(`Can't reach ${host.label} — check Machines.`, "error", { sticky: true });
+    }
+    hostStatusSnapshot = snapshotHostStatuses(current);
+  },
+  { immediate: true },
+);
+
 function onKeydown(e: KeyboardEvent) {
   // WebKit honors ⌘A even under `user-select: none`, painting the whole app
   // chrome as selected. Editable fields keep their native in-field Select All.
@@ -71,7 +114,7 @@ function onKeydown(e: KeyboardEvent) {
       void router.push(action.route);
       break;
     case "toggle-sidebar":
-      sidebarOpen.value = !sidebarOpen.value;
+      void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });
       break;
     case "command-palette":
       ui.togglePalette();
@@ -85,10 +128,10 @@ function onKeydown(e: KeyboardEvent) {
     }
     case "new-generation":
       ui.newGeneration();
-      void router.push("/generate");
+      void router.push("/create");
       break;
     case "randomize-seed":
-      if (route === "/generate") ui.randomizeSeed();
+      if (route === "/create") ui.randomizeSeed();
       break;
     case "copy-seed":
       ui.copySeed();
@@ -127,7 +170,7 @@ async function listenForMenu() {
         if (generation.active) void generation.cancel().then(() => toasts.push("Cancelled"));
         return;
       case "toggle-sidebar":
-        sidebarOpen.value = !sidebarOpen.value;
+        void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });
         return;
       case "zoom-in":
         contextMenu.close();
@@ -208,16 +251,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col">
+  <div class="relative flex h-full flex-col overflow-hidden">
     <TitleBar class="h-11 shrink-0" />
     <UpdateBanner />
     <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr]">
-      <NavRail v-if="sidebarOpen" />
+      <NavRail />
       <main class="min-h-0 min-w-0 overflow-hidden">
         <router-view />
       </main>
     </div>
-    <BenchRail class="h-7 shrink-0" />
     <Toasts />
     <CommandPalette />
     <ContextMenu />

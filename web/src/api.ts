@@ -24,6 +24,7 @@ import type {
   QueueListing,
 } from "./types";
 import { postSseJsonStream, type StreamError } from "./lib/apiStream";
+import { catalogAuthHeaders } from "./lib/accountsStore";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
@@ -153,6 +154,26 @@ export async function updateQueueJobTargetGpu(
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ target_gpu: targetGpu }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`PATCH /api/queue/${id} failed: ${res.status}`);
+  return (await res.json()) as QueueEntry;
+}
+
+/**
+ * Move a queued job to a new zero-based position via `PATCH /api/queue/:id`
+ * with a `position` field. Gated behind `capabilities.queue.can_reorder` —
+ * older servers reject the field, so callers must check the capability first.
+ */
+export async function reorderQueueJob(
+  id: string,
+  position: number,
+  signal?: AbortSignal,
+): Promise<QueueEntry> {
+  const res = await fetch(`${base}/api/queue/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ position }),
     signal,
   });
   if (!res.ok) throw new Error(`PATCH /api/queue/${id} failed: ${res.status}`);
@@ -451,7 +472,9 @@ export async function fetchCatalogSearch(
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/search?${sp.toString()}`);
+  const r = await fetch(`/api/catalog/search?${sp.toString()}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/search ${r.status}`);
   return r.json();
 }
@@ -468,19 +491,25 @@ export async function fetchCatalogInstalled(params: {
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/installed?${sp.toString()}`);
+  const r = await fetch(`/api/catalog/installed?${sp.toString()}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/installed ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
-  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
-  const r = await fetch(`/api/catalog/families`);
+  const r = await fetch(`/api/catalog/families`, {
+    headers: catalogAuthHeaders(),
+  });
   if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
   return r.json();
 }
@@ -505,6 +534,7 @@ export async function postCatalogDownload(
 ): Promise<CatalogDownloadResponse> {
   const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
     method: "POST",
+    headers: catalogAuthHeaders(),
   });
   if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
   return r.json();
@@ -518,4 +548,72 @@ export async function postCatalogDownload(
 /// separates `model` from `tag`, and the head never starts with `cv`/`hf`.
 export function looksLikeCatalogId(input: string): boolean {
   return input.startsWith("cv:") || input.startsWith("hf:");
+}
+
+// ─── Installed-model management ─────────────────────────────────────────────
+// Thin wrappers over the server's model routes, consumed by the Models
+// workspace detail drawer (Load / Unload / Delete).
+
+/// Response of `DELETE /api/models/:model` — what was deleted, what was
+/// kept for other models, and how many bytes were actually freed on disk.
+/// Mirrors `mold_core::ModelRemovalResponse`.
+export interface ModelRemovalResult {
+  removed: string[];
+  kept: { name: string; kept_for: string[] }[];
+  freed_bytes: number;
+}
+
+/// Load a downloaded model into GPU memory (`POST /api/models/load`).
+export async function loadModel(model: string, gpu?: number): Promise<void> {
+  const body: { model: string; gpu?: number } = { model };
+  if (gpu !== undefined) body.gpu = gpu;
+  const res = await fetch(`${base}/api/models/load`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST /api/models/load failed: ${res.status}`);
+}
+
+/// Unload a model (or the active model when `model` is omitted) from GPU
+/// memory (`DELETE /api/models/unload`).
+export async function unloadModel(model?: string): Promise<void> {
+  const res = await fetch(`${base}/api/models/unload`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(model ? { model } : {}),
+  });
+  if (!res.ok)
+    throw new Error(`DELETE /api/models/unload failed: ${res.status}`);
+}
+
+/// Delete a downloaded model's on-disk files (`DELETE /api/models/:model`).
+/// Rejects with a 409-derived error when the model is currently loaded.
+export async function deleteModel(model: string): Promise<ModelRemovalResult> {
+  const res = await fetch(`${base}/api/models/${encodeURIComponent(model)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok)
+    throw new Error(`DELETE /api/models/${model} failed: ${res.status}`);
+  return (await res.json()) as ModelRemovalResult;
+}
+
+/// Prompt history for ↑/↓ recall in the Create composer (`GET /api/history`,
+/// newest-first). Returns just the prompt strings; the server also carries the
+/// model + timestamp, which the composer doesn't need. Never throws — a server
+/// without the history route just yields an empty list so ↑/↓ falls back to
+/// plain caret movement.
+export async function fetchPromptHistory(limit = 100): Promise<string[]> {
+  try {
+    const res = await fetch(`${base}/api/history?limit=${limit}`);
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      entries?: { prompt?: string }[];
+    };
+    return (body.entries ?? [])
+      .map((e) => (e.prompt ?? "").trim())
+      .filter((p) => p.length > 0);
+  } catch {
+    return [];
+  }
 }

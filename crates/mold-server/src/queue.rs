@@ -788,6 +788,12 @@ pub async fn run_queue_worker(
         // it into dispatch.
         state.queue_pause.wait_if_paused().await;
 
+        // Honor user reorders (`PATCH /api/queue/:id {position}`) before the
+        // model-swap picker runs — the registry is the single source of truth
+        // for order, so aligning the buffer to it makes a reorder change real
+        // dispatch order rather than only the `GET /api/queue` snapshot.
+        align_buffer_to_registry_order(&mut buffer, &state.job_registry.queued_ids_in_order());
+
         let loaded = single_gpu_loaded_models(&state).await;
         let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
         let job_id = job.id.clone();
@@ -917,6 +923,47 @@ pub(crate) fn pick_next_job(
     }
 
     buffer.remove(pick_idx).expect("pick_idx in range").job
+}
+
+/// Reorder the lookahead `buffer` to follow the registry's queued order — the
+/// single source of truth that `PATCH /api/queue/:id {position}` mutates.
+///
+/// The dispatch loops pull jobs off the channel in submission order into a
+/// bounded buffer and hand it to [`pick_next_job`], which treats the buffer
+/// front as highest priority. Without this step a `reorder_queued` would only
+/// change the `GET /api/queue` snapshot while the loop kept consuming its FIFO
+/// buffer, so a user's "run this next" would be silently ignored. Aligning the
+/// buffer to `order` here makes the reorder drive real dispatch order, while
+/// the model-swap picker still runs on top of the (now user-ordered) sequence,
+/// bounded by the starvation budget.
+///
+/// Jobs are stably reordered by their index in `order`; a job whose id isn't
+/// present — an empty-id test job, one cancelled out of the registry while it
+/// still holds a buffer slot, or one not yet registered — keeps its relative
+/// arrival order behind every registry-tracked job, so nothing untracked is
+/// promoted ahead of tracked work. When the buffer already matches the
+/// registry (the no-reorder steady state) this is a stable no-op that
+/// preserves each job's `deferred` starvation count.
+pub(crate) fn align_buffer_to_registry_order(buffer: &mut VecDeque<BufferedJob>, order: &[String]) {
+    if buffer.len() < 2 {
+        return;
+    }
+    let rank: std::collections::HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    // `sort_by_key` is stable, so jobs sharing the fallback rank (unknown ids)
+    // keep their arrival order relative to one another.
+    let mut items: Vec<BufferedJob> = buffer.drain(..).collect();
+    items.sort_by_key(|b| {
+        if b.job.id.is_empty() {
+            usize::MAX
+        } else {
+            rank.get(b.job.id.as_str()).copied().unwrap_or(usize::MAX)
+        }
+    });
+    buffer.extend(items);
 }
 
 pub(crate) const DEFAULT_LOOKAHEAD_BUFFER: usize = 8;
@@ -1367,6 +1414,14 @@ async fn run_queue_dispatcher_with_tuning(
         // parked waiting for work must hold the job that woke it, not leak
         // it into dispatch.
         state.queue_pause.wait_if_paused().await;
+
+        // Honor user reorders (`PATCH /api/queue/:id {position}`) before the
+        // model-swap picker runs — the registry is the single source of truth
+        // for order, so aligning the buffer to it makes a reorder change real
+        // dispatch order rather than only the `GET /api/queue` snapshot.
+        // Reorder is within-host; per-lane `target_gpu` semantics are applied
+        // later when a worker is selected for the picked job.
+        align_buffer_to_registry_order(&mut buffer, &state.job_registry.queued_ids_in_order());
 
         let loaded = multi_gpu_loaded_models(&state);
         let job = pick_next_job(&mut buffer, &loaded, max_deferrals);
@@ -2769,6 +2824,88 @@ mod tests {
         })
     }
 
+    fn buf_job_with_id(id: &str, model: &str) -> BufferedJob {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        BufferedJob::new(crate::state::GenerationJob {
+            id: id.to_string(),
+            request: fake_request(model),
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx: tx,
+            output_dir: None,
+        })
+    }
+
+    #[test]
+    fn align_buffer_reorders_to_match_registry_queued_order() {
+        use std::collections::VecDeque;
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        for id in ["a", "b", "c"] {
+            buffer.push_back(buf_job_with_id(id, &format!("model-{id}")));
+        }
+        // Registry moved c to the front, then a, then b.
+        let order = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        align_buffer_to_registry_order(&mut buffer, &order);
+        let ids: Vec<&str> = buffer.iter().map(|b| b.job.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn align_buffer_is_a_noop_when_already_in_registry_order() {
+        use std::collections::VecDeque;
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        buffer.push_back(buf_job_with_id("a", "model-a"));
+        // Give the middle job a non-zero deferral count so we can prove the
+        // no-op path preserves per-job starvation accounting.
+        let mut b = buf_job_with_id("b", "model-b");
+        b.deferred = 2;
+        buffer.push_back(b);
+        buffer.push_back(buf_job_with_id("c", "model-c"));
+        let order = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        align_buffer_to_registry_order(&mut buffer, &order);
+        let ids: Vec<&str> = buffer.iter().map(|b| b.job.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        assert_eq!(
+            buffer[1].deferred, 2,
+            "a no-op align must preserve the deferred starvation count"
+        );
+    }
+
+    #[test]
+    fn align_buffer_keeps_unregistered_jobs_in_arrival_order_at_the_back() {
+        use std::collections::VecDeque;
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        // "x" and "y" aren't in the registry order (e.g. cancelled out but
+        // still holding a buffer slot); "b" and "a" are.
+        for id in ["x", "b", "y", "a"] {
+            buffer.push_back(buf_job_with_id(id, "m"));
+        }
+        let order = vec!["a".to_string(), "b".to_string()];
+        align_buffer_to_registry_order(&mut buffer, &order);
+        let ids: Vec<&str> = buffer.iter().map(|b| b.job.id.as_str()).collect();
+        // Registry-tracked jobs first in registry order (a, b), then the
+        // untracked ones in their original arrival order (x, y).
+        assert_eq!(ids, vec!["a", "b", "x", "y"]);
+    }
+
+    #[test]
+    fn align_buffer_leaves_empty_id_jobs_untouched() {
+        // Tests that submit `GenerationJob`s directly (empty ids) never
+        // register in the registry, so the align pass must be a stable no-op
+        // that preserves the model-swap picker's interleaving assumptions.
+        use std::collections::VecDeque;
+        let mut buffer: VecDeque<BufferedJob> = VecDeque::new();
+        for model in ["a", "b", "a", "b"] {
+            buffer.push_back(buf_job(model));
+        }
+        align_buffer_to_registry_order(&mut buffer, &[]);
+        let models: Vec<&str> = buffer
+            .iter()
+            .map(|b| b.job.request.model.as_str())
+            .collect();
+        assert_eq!(models, vec!["a", "b", "a", "b"]);
+    }
+
     #[test]
     fn pick_next_job_picks_head_when_head_model_loaded() {
         use std::collections::{HashSet, VecDeque};
@@ -2976,6 +3113,82 @@ mod tests {
                 "b".to_string(),
             ],
             "lookahead reorder should batch all `a` jobs together before swapping to `b`"
+        );
+    }
+
+    /// A `PATCH /api/queue/:id {position}` reorder must change *real* dispatch
+    /// order, not just the `GET /api/queue` snapshot. Pause the queue so the
+    /// dispatcher parks before pulling anything, submit A, B, C (all buffered
+    /// together on resume), move C to the front of the registry, then resume —
+    /// the worker must receive C first, then A, B. Distinct models with nothing
+    /// warm keep the model-swap picker on the buffer head, so the registry
+    /// reorder is the only thing that can change the order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queue_dispatcher_honors_registry_reorder_in_real_dispatch() {
+        let (worker, worker_rx) = test_worker(0, 8);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(8);
+        let queue = QueueHandle::new(job_tx.clone());
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            }),
+            8,
+        );
+
+        // Pause *before* the dispatcher exists so its first `wait_if_paused`
+        // parks it ahead of the pre-recv gate — nothing is pulled off the
+        // channel until we resume, so all three jobs buffer together.
+        state.queue_pause.pause();
+        let dispatcher = tokio::spawn(run_queue_dispatcher(job_rx, state.clone()));
+
+        // Register + submit A, B, C with matching ids so the dispatcher's
+        // registry lookups line up with the queue payloads.
+        let mut result_rxs = Vec::new();
+        for id in ["a", "b", "c"] {
+            state
+                .job_registry
+                .register_job(id, format!("model-{id}"), None, None, None);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let job = crate::state::GenerationJob {
+                id: id.to_string(),
+                request: fake_request(&format!("model-{id}")),
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: None,
+                result_tx: tx,
+                output_dir: None,
+            };
+            queue.submit(job, 8).await.unwrap();
+            result_rxs.push(rx);
+        }
+
+        // Move C to the front of the registry — the single source of truth for
+        // dispatch order.
+        state.job_registry.reorder_queued("c", 0).unwrap();
+
+        // Resume: the dispatcher drains A, B, C (still submission-ordered in the
+        // channel), aligns its buffer to the registry, and dispatches.
+        state.queue_pause.resume();
+
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            let dispatched = worker_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("worker should receive the dispatched job");
+            order.push(dispatched.model);
+        }
+        drop(job_tx);
+        dispatcher.abort();
+
+        assert_eq!(
+            order,
+            vec![
+                "model-c".to_string(),
+                "model-a".to_string(),
+                "model-b".to_string(),
+            ],
+            "registry reorder must drive real dispatch order, not just the snapshot"
         );
     }
 

@@ -61,6 +61,45 @@ describe("mobile navigation", () => {
     expect(css).not.toMatch(/\.mobile-tab\[aria-selected="true"\]\s*\{/);
   });
 
+  it("gives every tab a Mold Studio icon column and a 10px monospace caption", () => {
+    const tab = css.match(/\.mobile-tab\s*\{([^}]*)\}/s);
+    const icon = css.match(/\.mobile-tab svg\s*\{([^}]*)\}/s);
+    expect(tab?.[1]).toMatch(/flex-direction:\s*column\s*;/);
+    expect(tab?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(tab?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(icon?.[1]).toMatch(/width:\s*22px\s*;/);
+  });
+});
+
+describe("mobile advanced sheet", () => {
+  it("is a full-screen overlay that only becomes visible when opened", () => {
+    const sheet = css.match(/\.mobile-advanced-sheet\s*\{([^}]*)\}/s);
+    const open = css.match(/\.mobile-advanced-sheet\.is-open\s*\{([^}]*)\}/s);
+    expect(sheet?.[1]).toMatch(/position:\s*fixed\s*;/);
+    expect(sheet?.[1]).toMatch(/display:\s*none\s*;/);
+    expect(open?.[1]).toMatch(/display:\s*flex\s*;/);
+  });
+
+  it("scrolls its own body with the pinned mobile containment invariants", () => {
+    const body = css.match(/\.mobile-advanced-sheet-body\s*\{([^}]*)\}/s);
+    expect(body?.[1]).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body?.[1]).toMatch(/overscroll-behavior:\s*none\s*;/);
+    expect(body?.[1]).toMatch(/touch-action:\s*manipulation\s*;/);
+    expect(body?.[1]).toContain("env(safe-area-inset-left)");
+    expect(body?.[1]).toContain("env(safe-area-inset-right)");
+    expect(body?.[1]).toContain("env(safe-area-inset-bottom)");
+  });
+
+  it("keeps the advanced trigger, close, and reset controls at least 44px", () => {
+    const trigger = css.match(/\.mobile-advanced-trigger\s*\{([^}]*)\}/s);
+    const close = css.match(/\.mobile-advanced-sheet-close\s*\{([^}]*)\}/s);
+    const reset = css.match(/\.mobile-advanced-sheet-reset\s*\{([^}]*)\}/s);
+    expect(Number(trigger?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(close?.[1]?.match(/min-width:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(close?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+    expect(Number(reset?.[1]?.match(/min-height:\s*(\d+)px/)?.[1])).toBeGreaterThanOrEqual(44);
+  });
+
   it("keeps four primary tabs and gives Settings a full-size header control", () => {
     const tabs = css.match(/\.mobile-tabs\s*\{([^}]*)\}/s);
     const settingsControls = css.match(
@@ -70,6 +109,25 @@ describe("mobile navigation", () => {
     expect(tabs?.[1]).toMatch(/grid-template-columns:\s*repeat\(4,\s*1fr\)\s*;/);
     expect(settingsControls?.[1]).toMatch(/min-width:\s*44px\s*;/);
     expect(settingsControls?.[1]).toMatch(/min-height:\s*44px\s*;/);
+  });
+});
+
+describe("mobile style row", () => {
+  it("renders the collapsed head value as a compact pill, not a 44pt tap chip", () => {
+    const styleComponent = readFileSync("src/mobile/MobileStyleChips.vue", "utf8");
+    // The head button is itself the 44pt tap target; its value indicator must
+    // use the compact class — reusing .mobile-style-chip blockifies the span
+    // to 44pt inside the flex head and balloons it into an egg beside STYLE.
+    expect(styleComponent).toMatch(/data-test="mobile-style-active"/);
+    expect(styleComponent).toMatch(/class="mobile-style-value"/);
+    const value = css.match(/\.mobile-style-value\s*\{([^}]*)\}/s);
+    expect(value?.[1]).not.toMatch(/min-height/);
+    expect(value?.[1]).toMatch(/border-radius:\s*var\(--radius-pill\)\s*;/);
+    // The whole-row head keeps the 44pt target; expanded presets stay 44pt.
+    const head = css.match(/\.mobile-style-head\s*\{([^}]*)\}/s);
+    expect(head?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    const chip = css.match(/\.mobile-style-chip\s*\{([^}]*)\}/s);
+    expect(chip?.[1]).toMatch(/min-height:\s*44px\s*;/);
   });
 });
 
@@ -91,7 +149,9 @@ describe("mobile safe areas", () => {
   it("keeps frequent resolution and catalog controls at least 44px tall", () => {
     for (const selector of [
       ".mobile-resolution-segment",
+      ".mobile-resolution-tier .ms-seg .ms-seg__btn",
       ".mobile-resolution-aspect",
+      ".mobile-catalog-segment button",
       ".mobile-catalog-media button",
       ".mobile-catalog-sources button",
       ".mobile-section-head > button",
@@ -132,7 +192,7 @@ describe("mobile safe areas", () => {
     );
 
     expect(media?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
-    expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
     expect(containers?.[1]).toMatch(/gap:\s*8px/);
     expect(buttons?.[1]).toMatch(/min-width:\s*0/);
     expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--control-edge\)/);
@@ -151,6 +211,21 @@ describe("mobile safe areas", () => {
     expect(aspects?.[1]).toMatch(/minmax\(64px,\s*84px\)/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
     expect(shape?.[1]).toMatch(/border:\s*1px solid currentColor\s*;/);
+  });
+
+  it("keeps the kit tier segments at touch size with legible sublabels", () => {
+    // Mobile-scoped overrides of the shared @ui SegmentedControl: the kit's
+    // default 7px-padded segments and 9px sub-line are below the iPhone 44pt /
+    // 10px floors. Three-class selectors outrank the kit's scoped two-part
+    // rules regardless of stylesheet order.
+    const button = css.match(/\.mobile-resolution-tier \.ms-seg \.ms-seg__btn\s*\{([^}]*)\}/s);
+    const sub = css.match(/\.mobile-resolution-tier \.ms-seg \.ms-seg__sub\s*\{([^}]*)\}/s);
+    const dims = css.match(/\.mobile-resolution-tier-dims\s*\{([^}]*)\}/s);
+
+    expect(button?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    expect(sub?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(dims?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(dims?.[1]).toMatch(/color:\s*var\(--ink-3\)/);
   });
 
   it("does not keep the redundant resolution summary card", () => {

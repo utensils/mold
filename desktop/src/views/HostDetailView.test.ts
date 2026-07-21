@@ -116,6 +116,8 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
     routes: [
       { path: "/", component: stub },
       { path: "/hosts/:id", component: stub },
+      { path: "/machines", component: stub },
+      { path: "/machines/:id", component: stub },
       { path: "/settings", component: stub },
       { path: "/models", component: stub },
       { path: "/jobs", component: stub },
@@ -210,7 +212,7 @@ describe("HostDetailView header", () => {
     expect(wrapper.find("[data-test='host-title']").exists()).toBe(false);
     const missing = wrapper.get("[data-test='host-missing']");
     expect(missing.text()).toContain("Host not found");
-    expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/settings");
+    expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/machines");
     // No stream is opened for a host that doesn't exist.
     expect(sseCalls).toHaveLength(0);
   });
@@ -627,13 +629,19 @@ describe("HostDetailView queue drawer", () => {
 });
 
 describe("HostDetailView loaded-chip unload", () => {
-  it("unloads the model on THIS host and hides the chip until the poll confirms", async () => {
+  it("unloads on the confirming second click and hides the chip until the poll confirms", async () => {
     const wrapper = await mountView();
     expect(wrapper.findAll("[data-test='loaded-model-chip']")).toHaveLength(1);
 
-    await wrapper.get("[data-test='unload-chip']").trigger("click");
+    // First click only arms the inline confirm.
+    const chip = wrapper.get("[data-test='unload-chip']");
+    await chip.trigger("click");
     await flushPromises();
+    expect(unloadModel).not.toHaveBeenCalled();
+    expect(chip.text()).toBe("Unload?");
 
+    await chip.trigger("click");
+    await flushPromises();
     expect(unloadModel).toHaveBeenCalledWith("flux-dev:q8", {
       baseUrl: "http://hal9000:7680",
       apiKey: "sekrit",
@@ -645,7 +653,9 @@ describe("HostDetailView loaded-chip unload", () => {
   it("keeps the chip and surfaces an error toast when the unload fails", async () => {
     unloadModel.mockRejectedValueOnce(new Error("model is busy"));
     const wrapper = await mountView();
-    await wrapper.get("[data-test='unload-chip']").trigger("click");
+    const chip = wrapper.get("[data-test='unload-chip']");
+    await chip.trigger("click");
+    await chip.trigger("click");
     await flushPromises();
     expect(wrapper.findAll("[data-test='loaded-model-chip']")).toHaveLength(1);
   });
@@ -673,7 +683,7 @@ describe("HostDetailView layout", () => {
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
 
-  it("places the downloads tray in the models section, below the queue header", async () => {
+  it("places the downloads tray in its own card below the telemetry panel", async () => {
     const wrapper = await mountView();
     const stream = lastStream("/api/downloads/stream");
     stream.options.onEvent(
@@ -698,9 +708,9 @@ describe("HostDetailView layout", () => {
       }),
     );
     await flushPromises();
-    const queue = wrapper.get("[data-test='queue-depth']").element;
+    const telemetry = wrapper.get("[data-test='telemetry-panel']").element;
     const tray = wrapper.get("[data-test='host-downloads']").element;
-    expect(queue.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(telemetry.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("summarizes installed model count and total size in the models header", async () => {
@@ -710,16 +720,21 @@ describe("HostDetailView layout", () => {
 });
 
 describe("HostDetailView forget", () => {
-  it("requires a confirming second click, then drops the host and returns to Hosts", async () => {
+  it("confirms with blunt copy, then drops the host and returns to Machines", async () => {
     const wrapper = await mountView();
-    const btn = wrapper.get("[data-test='forget-host']");
-    await btn.trigger("click");
+    await wrapper.get("[data-test='forget-host']").trigger("click");
     expect(forgetRemoteHost).not.toHaveBeenCalled();
-    expect(btn.text()).toBe("Forget?");
-    await btn.trigger("click");
+
+    // The confirm dialog teleports to <body>; it carries the §11 copy.
+    const dialog = document.querySelector("[data-test='confirm-dialog']");
+    expect(dialog?.textContent).toContain("Forget studio?");
+    expect(dialog?.textContent).toContain("Its API key is discarded.");
+
+    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
     await flushPromises();
     expect(forgetRemoteHost).toHaveBeenCalledWith(REMOTE_ID);
     expect(useHostsStore().extras).toHaveLength(0);
-    expect(router.currentRoute.value.path).toBe("/settings");
+    expect(router.currentRoute.value.path).toBe("/machines");
+    document.body.innerHTML = "";
   });
 });

@@ -15,6 +15,7 @@ import {
   type CapableHost,
   type RoutableHost,
   type SavedHostLike,
+  readyHostSignature,
 } from "./hosts";
 
 describe("hostIdFromUrl", () => {
@@ -392,5 +393,27 @@ describe("normalizeTargetHost", () => {
   it("reads a ghost host id as Auto — matching the Host selector's display", () => {
     expect(normalizeTargetHost("gone-7680", hosts)).toBeNull();
     expect(normalizeTargetHost("gone-7680", [])).toBeNull();
+  });
+});
+
+describe("readyHostSignature", () => {
+  const host = (id: string, status: string) => ({ id, status });
+
+  it("includes only ready hosts, sorted for stability", () => {
+    expect(
+      readyHostSignature([host("b", "ready"), host("a", "ready"), host("c", "connecting")]),
+    ).toBe("a,b");
+  });
+
+  it("changes when a remote finishes its boot reconnect", () => {
+    const before = readyHostSignature([host("local", "ready"), host("plato", "connecting")]);
+    const after = readyHostSignature([host("local", "ready"), host("plato", "ready")]);
+    expect(before).not.toBe(after);
+  });
+
+  it("is stable across reorderings of the same ready set", () => {
+    expect(readyHostSignature([host("x", "ready"), host("y", "ready")])).toBe(
+      readyHostSignature([host("y", "ready"), host("x", "ready")]),
+    );
   });
 });

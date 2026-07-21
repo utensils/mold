@@ -39,55 +39,56 @@ instead.
 
 ## Current product surface
 
-The primary tabs are Generate, Gallery, Catalog, and Hosts. Settings is a
+The primary tabs are Create, Library, Models, and Machines. Settings is a
 pushed screen opened from the header.
 
-- **Generate** supports model-aware image and video controls, Batch 1 quick
+- **Create** supports model-aware image and video controls, Batch 1 quick
   expansion/undo, Batch N prepared-variation review, remote prompt history,
   local templates, independently cancellable siblings, source/edit images,
   masks, ControlNet, LoRA, scheduler and CFG++, post-generation upscaling,
   target-host estimates, proportional resolution choices, and explicit Random
-  or Fixed seeds.
-- **Gallery** merges saved media from every configured host. Its full-screen
+  or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
+  prompt **style** presets compose at submit without rewriting the prompt text.
+- **Library** merges saved media from every configured host. Its full-screen
   viewer shows uncropped images, streams videos with native controls, swipes
   horizontally between prints, restores recorded prompt settings, and can use
   a still as the next source or Qwen edit target.
-- **Catalog** merges installed models with Hugging Face and Civitai results,
+- **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family filters, exposes model details and
   components, and routes pull/load/unload/remove actions to the owning or
   selected host. Pull actions progress through `Connecting...`, `Starting...`,
   `Queued`, and `Pulling N%`; active downloads can be cancelled.
-- **Hosts** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and
+- **Machines** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and
   Tailscale MagicDNS. Host detail shows telemetry, models-disk usage, queue,
   downloads, loaded models, and installed models, with rename, retry, select,
-  unload, catalog, and forget actions.
-- **Settings** persists Mold or Safelight color families and System, Dark, or
-  Light appearance. Fresh installs start with Safelight + System; valid saved
-  choices remain authoritative. Settings also links to host management and
-  shows the app version, remote-only processing policy, and TestFlight update
-  channel.
+  unload, open-in-Models, and forget actions.
+- **Settings** persists the Mold Studio theme families (Mold or Safelight) and
+  System, Dark, or Light appearance. Fresh installs start with Safelight +
+  System; valid saved choices remain authoritative. Settings also links to host
+  management and shows the app version, remote-only processing policy, and
+  TestFlight update channel.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
-overscroll. The gallery viewer keeps its scoped horizontal swipe gesture.
+overscroll. The Library viewer keeps its scoped horizontal swipe gesture.
 
 Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch N requires exactly N non-empty
 prompts before its inline review workspace appears; edits and specifically named
 stale work remain local until explicit approval, refresh, collapse, or discard.
-`useMobileDownloadsStore` is the sole Catalog/Generate pull authority and keeps
+`useMobileDownloadsStore` is the sole Models/Create pull authority and keeps
 missing-model Connecting/Starting/Queued/Pulling/Ready/error recovery on that
-frozen host. Generate retains one immutable input/route recovery record and an
-attempt-scoped lease that temporarily outranks ordinary Catalog credentials;
-compatible Catalog and Generate pulls already in `Starting` share one POST and
+frozen host. Create retains one immutable input/route recovery record and an
+attempt-scoped lease that temporarily outranks ordinary Models credentials;
+compatible Models and Create pulls already in `Starting` share one POST and
 returned job ID. Terminal, failed, stale, superseded, and aborted attempts
-release back to Catalog while preserving the record for an exact-route Retry.
+release back to Models while preserving the record for an exact-route Retry.
 Editing or removing reviewed work supersedes a pending replacement;
 view-unique consumer IDs and unmount guards revoke deferred work without
 touching a remounted view. Approved siblings preserve order, deterministic seeds,
 `original_prompt`, and `batch_id`/`batch_index`/`batch_count` through normal and
 long-video requests. Partial failures announce each one-based variation and its
 reviewed prompt together with any separate unconfirmed-cancellation warning
-while successful prints remain. Gallery shows the sibling
+while successful prints remain. Library shows the sibling
 position and source prompt when those optional metadata fields are present.
 
 The initial mobile scope does not include a local engine, the desktop Chains
@@ -119,11 +120,17 @@ Enter the Nix development shell on macOS. Xcode and CocoaPods are required.
 
 ```bash
 nix develop
-ios-dev        # Tauri hot reload on an iPhone or simulator
+ios-dev        # Tauri hot reload — defaults to an iPhone simulator
 ios-run        # production-mode run on a selected device or simulator
 ios-check      # Rust check for aarch64-apple-ios-sim
 ios-build      # signed App Store Connect archive/export
 ```
+
+With no arguments `ios-dev` boots an iPhone simulator and deploys there, even
+when a physical iPhone is plugged in (Tauri's own picker would otherwise grab
+the phone and start a provisioning device build). It prefers `iPhone 17 Pro`,
+falls back to the first available iPhone, and `MOLD_IOS_DEVICE` overrides the
+preference. Pass a device name to target hardware: `ios-dev "James’s iPhone"`.
 
 The underlying script also exposes setup and a deterministic simulator build:
 

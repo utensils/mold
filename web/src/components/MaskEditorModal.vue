@@ -205,19 +205,19 @@ function applyMask() {
   <Teleport to="body">
     <div
       v-if="open && sourceImage"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-bath/75 p-4 backdrop-blur-sm"
       @click.self="emit('close')"
     >
       <div
-        class="glass flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl p-4"
+        class="bg-bench border border-edge flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl p-4"
       >
         <div class="flex items-center justify-between gap-3">
-          <h2 class="truncate text-lg font-semibold text-slate-100">
+          <h2 class="truncate text-lg font-semibold text-rebate">
             Mask editor
           </h2>
           <button
             type="button"
-            class="text-slate-400 hover:text-slate-100"
+            class="text-ink-3 hover:text-rebate"
             @click="emit('close')"
           >
             ✕
@@ -225,15 +225,15 @@ function applyMask() {
         </div>
 
         <div
-          class="mt-4 flex flex-wrap items-center gap-2 border-y border-slate-800 py-3"
+          class="mt-4 flex flex-wrap items-center gap-2 border-y border-edge py-3"
         >
           <button
             type="button"
             class="rounded-lg px-3 py-1 text-sm"
             :class="
               mode === 'brush'
-                ? 'bg-brand-500 text-white'
-                : 'bg-slate-900/60 text-slate-200'
+                ? 'bg-safelight text-white'
+                : 'bg-bench/60 text-ink-2'
             "
             data-test="mask-mode-brush"
             @click="mode = 'brush'"
@@ -245,15 +245,15 @@ function applyMask() {
             class="rounded-lg px-3 py-1 text-sm"
             :class="
               mode === 'erase'
-                ? 'bg-brand-500 text-white'
-                : 'bg-slate-900/60 text-slate-200'
+                ? 'bg-safelight text-white'
+                : 'bg-bench/60 text-ink-2'
             "
             data-test="mask-mode-erase"
             @click="mode = 'erase'"
           >
             Erase
           </button>
-          <label class="ml-2 flex items-center gap-2 text-sm text-slate-300">
+          <label class="ml-2 flex items-center gap-2 text-sm text-ink-2">
             Size
             <input
               v-model.number="brushSize"
@@ -267,7 +267,7 @@ function applyMask() {
           </label>
           <button
             type="button"
-            class="rounded-lg bg-slate-900/60 px-3 py-1 text-sm text-slate-200"
+            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2"
             data-test="mask-clear"
             @click="clearMask"
           >
@@ -275,14 +275,14 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="rounded-lg bg-slate-900/60 px-3 py-1 text-sm text-slate-200"
+            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2"
             @click="invertMask"
           >
             Invert
           </button>
           <button
             type="button"
-            class="rounded-lg bg-slate-900/60 px-3 py-1 text-sm text-slate-200 disabled:opacity-40"
+            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2 disabled:opacity-40"
             :class="{ 'opacity-40': undoStack.length === 0 }"
             data-test="mask-undo"
             @click="undo"
@@ -291,7 +291,7 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="rounded-lg bg-slate-900/60 px-3 py-1 text-sm text-slate-200 disabled:opacity-40"
+            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2 disabled:opacity-40"
             :class="{ 'opacity-40': redoStack.length === 0 }"
             data-test="mask-redo"
             @click="redo"
@@ -324,14 +324,14 @@ function applyMask() {
         <div class="mt-4 flex justify-end gap-2">
           <button
             type="button"
-            class="rounded-lg bg-slate-900/60 px-4 py-2 text-sm text-slate-200"
+            class="rounded-lg bg-bench/60 px-4 py-2 text-sm text-ink-2"
             @click="emit('close')"
           >
             Cancel
           </button>
           <button
             type="button"
-            class="rounded-lg bg-brand-500 px-4 py-2 text-sm text-white"
+            class="rounded-lg bg-safelight px-4 py-2 text-sm text-white"
             data-test="mask-apply"
             @click="applyMask"
           >

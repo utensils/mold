@@ -32,7 +32,14 @@ const model: ModelEntry = {
 } as ModelEntry;
 
 function mountView() {
-  return mount(GenerateView, { shallow: true, attachTo: document.body });
+  // The composer textarea lives in ComposerCard and the model picker in
+  // InspectorPanel — keep both real so the persisted form + picker close-on
+  // outside-click still resolve through the view's DOM.
+  return mount(GenerateView, {
+    shallow: true,
+    attachTo: document.body,
+    global: { stubs: { ComposerCard: false, InspectorPanel: false } },
+  });
 }
 
 describe("GenerateView form persistence", () => {

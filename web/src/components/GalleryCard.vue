@@ -1,6 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref } from "vue";
+import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { imageUrl, thumbnailUrl } from "../api";
+import { getHost } from "../lib/hostRegistry";
+import {
+  directMediaUrl,
+  directThumbnailUrl,
+  needsAuthedMedia,
+  resolveStreamableSrc,
+  resolveThumbnailSrc,
+} from "../lib/galleryMedia";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import {
@@ -25,6 +33,8 @@ const props = withDefaults(
     selectMode?: boolean;
     selected?: boolean;
     showRecreate?: boolean;
+    /** Composite `hostId|filename` identity, stamped for marquee selection. */
+    printKey?: string;
   }>(),
   {
     variant: "grid",
@@ -32,6 +42,7 @@ const props = withDefaults(
     selectMode: false,
     selected: false,
     showRecreate: false,
+    printKey: undefined,
   },
 );
 
@@ -118,10 +129,65 @@ const aspectStyle = computed(() => {
     : { aspectRatio: "1 / 1" };
 });
 
+/*
+ * Media addressing is per-host. A merged entry carries the host it came from;
+ * resolving it against the serving origin 404s (or, worse, serves a same-named
+ * local file). Keyless hosts — the origin included — use plain direct URLs so
+ * the first paint is instant; a keyed host blob-fetches its thumbnail and
+ * exchanges its key for a short-lived media ticket, so no key ever hits a URL.
+ */
+const hostEntry = computed(() => {
+  const id = (props.item as { hostId?: string }).hostId;
+  return id ? getHost(id) : null;
+});
+
+const thumbSrc = ref("");
+const fullSrc = ref("");
+let resolveGeneration = 0;
+
+function resolveSources() {
+  const host = hostEntry.value;
+  const name = props.item.filename;
+  const generation = ++resolveGeneration;
+  if (!host) {
+    thumbSrc.value = thumbnailUrl(name);
+    fullSrc.value = imageUrl(name);
+    return;
+  }
+  if (!needsAuthedMedia(host)) {
+    thumbSrc.value = directThumbnailUrl(host, name);
+    fullSrc.value = directMediaUrl(host, name);
+    return;
+  }
+  thumbSrc.value = "";
+  fullSrc.value = "";
+  void resolveThumbnailSrc(host, name)
+    .then((url) => {
+      if (generation === resolveGeneration) thumbSrc.value = url;
+    })
+    .catch(() => {
+      /* the fallback chain lands on the "can't render" tile */
+    });
+  void resolveStreamableSrc(host, name, {
+    // Never buffer a whole video to satisfy a ticket-less legacy host.
+    allowLegacyBlob: mediaKind(props.item.format, name) !== "video",
+  })
+    .then((url) => {
+      if (generation === resolveGeneration) fullSrc.value = url;
+    })
+    .catch(() => {
+      if (generation === resolveGeneration) stage.value = "broken";
+    });
+}
+
+watch(() => [props.item.filename, hostEntry.value?.id], resolveSources, {
+  immediate: true,
+});
+
 // Image fallback chain: thumbnail → full file → broken.
 const imageCurrentSrc = computed(() => {
-  if (stage.value === "thumb") return thumbnailUrl(props.item.filename);
-  if (stage.value === "full") return imageUrl(props.item.filename);
+  if (stage.value === "thumb") return thumbSrc.value;
+  if (stage.value === "full") return fullSrc.value;
   return "";
 });
 
@@ -129,8 +195,8 @@ const imageCurrentSrc = computed(() => {
 // thumbnail won't decode in a <video> element). We use the thumbnail URL
 // as a static `poster` so the browser shows the first frame while the
 // video loads, and fall back to the full file if even that fails.
-const videoSrc = computed(() => imageUrl(props.item.filename));
-const videoPoster = computed(() => thumbnailUrl(props.item.filename));
+const videoSrc = computed(() => fullSrc.value);
+const videoPoster = computed(() => thumbSrc.value);
 
 const relative = computed(() => formatRelativeTime(props.item.timestamp));
 const modelLabel = computed(() => shortModel(props.item.metadata.model));
@@ -179,15 +245,16 @@ function onRecreate(evt: Event) {
   <article
     ref="root"
     :data-filename="item.filename"
+    :data-print-key="printKey"
     :data-selected="selected ? 'true' : 'false'"
-    class="group relative block w-full overflow-hidden bg-ink-900/80 shadow-[var(--shadow-card)] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+    class="group relative block w-full overflow-hidden bg-bench/80 shadow-[inset_0_1px_0_var(--card-hi)] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight"
     :class="[
       variant === 'feed'
         ? 'ring-0 sm:rounded-3xl sm:ring-1 sm:ring-white/5'
         : 'rounded-2xl ring-1 ring-white/5',
-      selectMode ? 'cursor-pointer' : 'cursor-zoom-in hover:ring-brand-400/50',
+      selectMode ? 'cursor-pointer' : 'cursor-zoom-in hover:ring-safelight/50',
       selected
-        ? 'ring-2 ring-brand-400 sm:ring-2'
+        ? 'ring-2 ring-safelight sm:ring-2'
         : selectMode
           ? 'ring-1 ring-white/10'
           : '',
@@ -242,7 +309,9 @@ function onRecreate(evt: Event) {
            its natural aspect ratio (no edge cropping, Tumblr-style);
            `object-cover` in grid so tiles pack tightly. -->
       <img
-        v-if="visible && stage !== 'broken' && kind !== 'video'"
+        v-if="
+          visible && stage !== 'broken' && kind !== 'video' && imageCurrentSrc
+        "
         :src="imageCurrentSrc"
         :alt="item.metadata.prompt || item.filename"
         loading="lazy"
@@ -256,7 +325,7 @@ function onRecreate(evt: Event) {
 
       <!-- Video -->
       <video
-        v-if="visible && stage !== 'broken' && kind === 'video'"
+        v-if="visible && stage !== 'broken' && kind === 'video' && videoSrc"
         ref="videoEl"
         :src="videoSrc"
         :poster="videoPoster"
@@ -312,7 +381,7 @@ function onRecreate(evt: Event) {
       <button
         v-if="showRecreate && !selectMode"
         type="button"
-        class="absolute left-3 top-3 z-[6] rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-semibold text-white/90 opacity-0 backdrop-blur transition hover:bg-brand-500/80 group-hover:opacity-100 focus:opacity-100"
+        class="absolute left-3 top-3 z-[6] rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-semibold text-white/90 opacity-0 backdrop-blur transition hover:bg-safelight/80 group-hover:opacity-100 focus:opacity-100"
         title="Recreate with these settings"
         aria-label="Recreate with these settings"
         @click="onRecreate"
@@ -328,7 +397,7 @@ function onRecreate(evt: Event) {
         class="pointer-events-none absolute left-3 top-3 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border-2 transition"
         :class="
           selected
-            ? 'border-brand-400 bg-brand-500 text-white shadow'
+            ? 'border-safelight bg-safelight text-white shadow'
             : 'border-white/60 bg-black/40 text-transparent backdrop-blur'
         "
         aria-hidden="true"
@@ -356,7 +425,7 @@ function onRecreate(evt: Event) {
             <div
               class="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider"
             >
-              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" />
               <span class="truncate">{{ modelLabel }}</span>
             </div>
             <p
@@ -382,12 +451,12 @@ function onRecreate(evt: Event) {
       class="flex flex-col gap-2.5 border-t border-white/5 px-5 py-4 sm:px-6 sm:py-5"
     >
       <div
-        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-300"
+        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-3"
       >
         <span
-          class="inline-flex items-center gap-1.5 font-semibold text-ink-50"
+          class="inline-flex items-center gap-1.5 font-semibold text-rebate"
         >
-          <span class="h-1.5 w-1.5 rounded-full bg-brand-400" />
+          <span class="h-1.5 w-1.5 rounded-full bg-safelight" />
           {{ modelLabel }}
         </span>
         <span v-if="resolution" class="tabular-nums">{{ resolution }}</span>
@@ -402,13 +471,13 @@ function onRecreate(evt: Event) {
         </span>
         <span
           v-if="item.metadata_synthetic"
-          class="italic text-ink-500"
+          class="italic text-ink-3"
           title="No mold:parameters chunk was embedded in this file."
         >
           no metadata
         </span>
         <time
-          class="ml-auto shrink-0 text-[12px] tabular-nums text-ink-400"
+          class="ml-auto shrink-0 text-[12px] tabular-nums text-ink-3"
           :title="new Date(item.timestamp * 1000).toLocaleString()"
         >
           {{ relative }}
@@ -416,11 +485,11 @@ function onRecreate(evt: Event) {
       </div>
       <p
         v-if="item.metadata.prompt"
-        class="line-clamp-3 text-[15px] leading-relaxed text-ink-100"
+        class="line-clamp-3 text-[15px] leading-relaxed text-rebate"
       >
         {{ item.metadata.prompt }}
       </p>
-      <p v-else class="text-[13px] italic text-ink-400">
+      <p v-else class="text-[13px] italic text-ink-3">
         No prompt recorded for this file.
       </p>
     </div>

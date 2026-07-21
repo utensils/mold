@@ -32,6 +32,36 @@ describe("catalog api", () => {
     expect(call).toContain("page=2");
   });
 
+  it("forwards stored account tokens as catalog auth headers", async () => {
+    localStorage.setItem(
+      "mold.web.accounts.v1",
+      JSON.stringify({ hfToken: "hf_x1234", civitaiToken: "cv_y5678" }),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ entries: [], page: 1, page_size: 48 }),
+    });
+    await fetchCatalogSearch({ q: "flux" });
+    const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as { headers: Record<string, string> };
+    expect(opts.headers["x-mold-hf-token"]).toBe("hf_x1234");
+    expect(opts.headers["x-mold-civitai-token"]).toBe("cv_y5678");
+    localStorage.clear();
+  });
+
+  it("sends no auth headers when no token is stored", async () => {
+    localStorage.clear();
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => ({ entries: [], page: 1, page_size: 48 }),
+    });
+    await fetchCatalogSearch({ q: "flux" });
+    const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as { headers: Record<string, string> };
+    expect(opts.headers["x-mold-hf-token"]).toBeUndefined();
+    expect(opts.headers["x-mold-civitai-token"]).toBeUndefined();
+  });
+
   it("fetchCatalogSearch passes component kind filters as query params", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,

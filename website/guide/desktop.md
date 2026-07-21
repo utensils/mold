@@ -2,14 +2,16 @@
 
 ::: tip Looking for Mold on iPhone?
 The remote-only companion has its own [iPhone App guide](/guide/iphone),
-including LAN/Tailscale setup, Generate, Gallery, Catalog, Hosts, themes, and
+including LAN/Tailscale setup, Create, Library, Models, Machines, themes, and
 TestFlight distribution.
 :::
 
 mold ships a native macOS and Linux desktop app — a Tauri 2 shell around a
-Vue 3 + TypeScript frontend. Its shared Mold and Safelight theme families create
-a disciplined "digital darkroom" that treats every generation as a print being
-developed without recoloring the media itself.
+Vue 3 + TypeScript frontend built on the **Mold Studio** design system. Its Mold
+and Safelight theme families create a disciplined "digital darkroom" that treats
+every generation as a print being developed without recoloring the media itself.
+The workspace rail collapses between 210 px and 62 px, and a StatusPopover at
+its foot summarizes engine and queue activity.
 
 ::: info
 The desktop app lives in `desktop/`. Local generation uses Metal on Apple
@@ -40,34 +42,37 @@ surface powers it, so anything the app does maps to a documented endpoint.
 
 ## Features
 
-- **Generation workspace** — a capability-driven inspector that shows only the
+- **Create** — a capability-driven inspector that shows only the
   controls a model's family supports (negative prompt, scheduler, CFG++, LoRA
   stack, img2img source/mask/control, video frames/fps/audio). Generation is
   visualized as a print _developing_: a deterministic grain field, seeded from
   the job's real seed, resolves in lockstep with `DenoiseStep` events. Batches
   run sequentially with `base_seed + i`, and a VRAM preflight forecasts fit
   before you press Generate. Drop a PNG or JPEG from the file manager anywhere
-  in Generate to attach it as the current family's source; Mold images with
+  in Create to attach it as the current family's source; Mold images with
   embedded generation metadata also restore their complete saved settings.
   Prompt expansion follows Batch: Batch 1 is a quick rewrite with undo, while
   Batch N greater than 1 prepares exactly N editable variations for review
   before generation. Mold shows and freezes the resolved host for expansion
   and every sibling. Source, model, host, or count changes keep the reviewed
-  work visible but require refresh or discard before it can run. Gallery shows
+  work visible but require refresh or discard before it can run. Library shows
   each prepared print's durable batch identity and sibling position. When the
   expansion model is missing, the same inline area follows its pull on that
   frozen host through connection, queue, byte/file/ETA progress, readiness, or
   retry; it never redirects away from the composer or hides prepared work.
-- **Gallery** — a justified, virtualized contact-sheet grid. **Space** opens
-  Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Generate with
+- **Library** — a justified, virtualized contact-sheet grid (the renamed
+  gallery), with NEW badges on fresh prints, a two-pane lightbox, and a History
+  drawer holding Runs and Prompts. **Space** opens
+  Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Create with
   every parameter restored. All merges every connected host without repeating
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and
   lightbox right-click menus.
-- **Catalog** — one searchable model screen: installed models stacked above
-  the live Hugging Face/Civitai catalog, filtered by **All / Images / Video**
-  media chips, with compact Grid and Table layouts. Active downloads pin to
+- **Models** — one searchable model workspace split into **Installed** and
+  **Discover** segments: installed models in the Installed segment, above
+  the live Hugging Face/Civitai catalog in Discover, filtered by
+  **All / Images / Video** media chips, with compact Grid and Table layouts. Active downloads pin to
   the top of the view, each showing its source glyph and the host receiving
   the pull. The desktop reuses cacheable 512 px Civitai thumbnails across both
   layouts, lazily decodes them, and contains each card's layout and paint
@@ -75,7 +80,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   image request. The catalog renders **SIZE vs FETCH** honestly. With several
   hosts connected, Pull asks which host should store the model, and each
   host's installed-model inventory refreshes when its pull completes. The
-  Installed shelf merges every ready host with per-host badges and routes its
+  Installed segment merges every ready host with per-host badges and routes its
   model actions to the host that owns the row. Primary model **weights** are
   labeled separately from the larger footprint **with shared runtime** (text
   encoders and VAEs), so shared dependencies are not mistaken for checkpoint
@@ -85,18 +90,19 @@ surface powers it, so anything the app does maps to a documented endpoint.
   collections likewise select one runnable adapter variant instead of summing
   mutually exclusive adapters and fused checkpoints. A host that accepts a
   pull without returning any queued job is reported as an error. The
-  Chains and video Generate empty states deep-link straight to the video
+  Chains and video Create empty states deep-link straight to the video
   catalog.
-- **Chains** — a filmstrip editing bench for multi-stage video
+- **Chains** (inside Create) — a filmstrip editing bench for multi-stage video
   (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
   import/export, and a durable jobs list with resume, cancel, and retake. Its
   picker includes video models installed on every connected host; limits,
   creation, events, previews, and job actions stay routed to the model's host.
-- **History** — a fast, searchable list of past prompts from every ready host;
-  ↩ refills the composer, while Up/Down recalls the same merged history inline.
-- **RunPod** — secure account setup, balance and live spend, GPU and
+- **History** (the Runs + Prompts drawer inside Library) — a fast, searchable
+  list of past prompts from every ready host; ↩ refills the composer, while
+  Up/Down recalls the same merged history inline.
+- **RunPod** (inside Machines) — secure account setup, balance and live spend, GPU and
   datacenter discovery, pod launch/lifecycle/connection, and persistent network
   volume create/select/rename/grow/delete. A selected volume is remembered,
   forces Secure Cloud in its datacenter, replaces the ordinary workspace disk,
@@ -108,19 +114,19 @@ surface powers it, so anything the app does maps to a documented endpoint.
   validation enforce that live bound before launch. Region selectors show both
   the geographic location and RunPod ID, while the volume form limits choices
   to datacenters that currently support persistent volumes.
-- **Settings** — a full preferences bench with a section rail and
-  cross-section search: Hosts (this device's engine and API key, remote hosts,
-  network discovery, native folder pickers for the models/output
-  directories), Performance (the `MOLD_*` engine knobs as real
-  controls, applied on engine restart), Generation defaults, a Prompt
+- **Settings** — a single-column preferences workspace. Appearance
+  (the website-aligned Mold palette by default or the original Safelight,
+  each with System/Dark/Light; media never inverts), Updates, and About sit up
+  top; a **Hosts** link jumps to the **Machines** workspace, where host,
+  API-key, and network-discovery management now live. The deeper controls
+  collapse into accordion sections: Performance (the `MOLD_*` engine knobs as
+  real controls, applied on engine restart), Generation defaults, a Prompt
   expansion form, Accounts & tokens (Hugging Face / Civitai keys in an
   owner-only local file under the app's data directory — no Keychain prompts —
-  exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Appearance
-  (the website-aligned Mold palette by default or the original Safelight,
-  each with System/Dark/Light; media never inverts), Profiles (switch or create), and
-  Advanced — every remaining `/api/config` row with its provenance tag (⌂ db /
-  ⛁ file / ⚿ env); environment-overridden rows are locked with the variable
-  that owns them.
+  exported to the engine as `HF_TOKEN`/`CIVITAI_TOKEN`), Profiles (switch or
+  create), and Advanced — every remaining `/api/config` row with its provenance
+  tag (⌂ db / ⛁ file / ⚿ env); environment-overridden rows are locked with the
+  variable that owns them.
 - **Command palette** — **Cmd/Ctrl+K** for navigation, actions, model search, and
   prompt-history search in one field.
 - **Native desktop integration** — platform menus and shortcuts, Linux native
@@ -180,35 +186,35 @@ release is published.
 
 ### Keyboard map
 
-| Shortcut            | Action                                 |
-| ------------------- | -------------------------------------- |
-| Cmd/Ctrl+1–6, comma | Screens / Settings                     |
-| Cmd/Ctrl+K          | Command palette                        |
-| Cmd/Ctrl+N          | New generation (clear composer, focus) |
-| Cmd/Ctrl+Enter      | Generate                               |
-| Cmd/Ctrl+E          | Expand prompt                          |
-| Cmd/Ctrl+R          | Randomize seed                         |
-| Cmd/Ctrl+.          | Cancel the running job                 |
-| Cmd/Ctrl+\          | Toggle sidebar                         |
-| Space               | Quick Look in Gallery                  |
-| ←/→, ⌫              | Gallery navigate / delete              |
-| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                   |
-| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller    |
+| Shortcut            | Action                                          |
+| ------------------- | ----------------------------------------------- |
+| Cmd/Ctrl+1–4, comma | Create / Library / Models / Machines / Settings |
+| Cmd/Ctrl+K          | Command palette                                 |
+| Cmd/Ctrl+N          | New generation (clear composer, focus)          |
+| Cmd/Ctrl+Enter      | Generate                                        |
+| Cmd/Ctrl+E          | Expand prompt                                   |
+| Cmd/Ctrl+R          | Randomize seed                                  |
+| Cmd/Ctrl+.          | Cancel the running job                          |
+| Cmd/Ctrl+\          | Toggle sidebar                                  |
+| Space               | Quick Look in Library                           |
+| ←/→, ⌫              | Library navigate / delete                       |
+| Shift+Cmd/Ctrl+C    | Copy seed (lightbox)                            |
+| Cmd/Ctrl+0 / + / −  | Interface size reset/larger/smaller             |
 
 Interface scaling applies to the complete app, including fixed overlays and
 right-click menus. Choose 80–130% from **Settings → Appearance & app → Interface size**, or
 use the View menu and keyboard shortcuts. The selected level is restored on
 the next launch.
 
-Appearance offers Safelight and Mold theme families in System, Light, or Dark
-mode. New iPhone installs start with Safelight and System; existing saved choices
-are preserved. All combinations keep text and interactive boundaries at WCAG AA
+Appearance offers the Mold Studio theme families — Mold and Safelight — in
+System, Light, or Dark mode. New iPhone installs start with Safelight and System;
+existing saved choices are preserved. All combinations keep text and interactive boundaries at WCAG AA
 contrast; an empty generation canvas follows the selected chrome, while actual
 generated media remains on a color-stable viewing surface.
 
 ## Generation templates
 
-Save the current Generate form as a named, recallable preset. Open the
+Save the current Create form as a named, recallable preset. Open the
 **Templates** panel below the LoRA stack, give the current settings a name, and
 it is stored as a template you can load, rename, or delete later. Loading a
 template restores every parameter — model, prompt, dimensions, steps, guidance,
@@ -252,14 +258,14 @@ wire types as the CLI and web UI:
 - **Built-in engine and LAN server** — embeds the server in-process and runs on
   Metal on macOS or CUDA on Linux, so no separate `mold serve` is required. It
   listens on port 7680, advertises itself over mDNS, and is always the app's
-  own engine — **This device** in the host list. Settings → Hosts exposes
-  the persistent per-device API
+  own engine — **This device** in the host list. The **Machines** workspace
+  exposes the persistent per-device API
   key that another Mold client needs to connect. If an unrelated process owns
   7680, Mold uses and advertises an ephemeral port instead.
 - **Existing server** — auto-detects a running `mold serve` on
   `localhost:7680`.
-- **Hosts** — remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
-  added in Settings → Hosts: an **Add host** row with Test connection, a
+- **Machines** — remote GPU boxes (e.g. a Linux CUDA machine for LTX-2) are
+  added in the **Machines** workspace: an **Add host** row with Test connection, a
   **Connected** list, **Remembered** hosts for one-click reconnect (each with
   its own API key, stored in an owner-only file under the app's data
   directory — never the macOS Keychain, so connecting never triggers Keychain
@@ -285,30 +291,32 @@ wire types as the CLI and web UI:
 - **Upscaling** — pick a Real-ESRGAN model in the Print panel to upscale every
   print as it develops (the engine pulls the model on first use and retains
   both the original and `-upscaled` result), or
-  right-click any gallery image → **Upscale**; the result lands in this Mac's
-  gallery. **Reuse settings** always restores the generation canvas, not the
+  right-click any Library image → **Upscale**; the result lands in this Mac's
+  Library. **Reuse settings** always restores the generation canvas, not the
   upscaled file's physical dimensions.
-- **Jobs (Cmd/Ctrl+6)** — a queue console for every connected host: the full
+- **Queue (in Machines)** — a queue console for every connected host: the full
   server-side queue (other clients' jobs included), live thumbnails and step
-  progress for this app's own jobs, per-job cancel, **Pause/Resume** of a
+  progress for this app's own jobs, per-job cancel, drag-to-reorder
+  (`PATCH /api/queue/:id` with a new position), **Pause/Resume** of a
   host's queue (the running job finishes; nothing new starts), a two-step
   **Cancel all**, and a "Finished this session" list with one-click reuse.
-  Pause and cancel-all are feature-detected via `/api/capabilities`, so older
-  servers simply hide the controls.
-- **History** — two lenses: **Runs** (every finished generation with its
+  Reorder, Pause, and Cancel all are feature-detected via `/api/capabilities`
+  (`queue.can_reorder` gates reorder), so older servers simply hide the
+  controls. The same queue mirrors as an activity strip on Create.
+- **History (in Library)** — two lenses: **Runs** (every finished generation with its
   thumbnail, model, size, seed, and step count — click to reuse the full
   settings including the seed) and **Prompts** (the raw prompt log, searchable,
   for prompts whose outputs are gone).
 - **Remote prints saved locally** — generations from remote hosts and RunPod
   are also written into this Mac's output directory (Settings → App → "Save
   remote prints locally", on by default), with embedded metadata intact, so
-  your local gallery stays the complete record even when the GPU lives
-  elsewhere. The gallery's right-click menu adds **Save to this Mac** for
+  your local Library stays the complete record even when the GPU lives
+  elsewhere. The Library's right-click menu adds **Save to this Mac** for
   pulling any older remote print down on demand.
 - **Several hosts at once** — alongside this device, any number of remote
-  hosts can be live simultaneously (**Add host** in Settings → Hosts, or the
-  **+** next to a detected server in the sidebar's HOSTS
-  section). With more than one live host, the Generate inspector grows a
+  hosts can be live simultaneously (**Add host** in the Machines workspace, or
+  the **+** next to a detected server in Machines). With more than one live
+  host, the Create inspector grows a
   **Host** selector: pick one explicitly, leave it on **Auto** to route
   each batch to the least-busy host by live queue depth, or choose **Most
   capable** to always target the strongest GPU (CUDA over Metal, then most
@@ -320,19 +328,19 @@ wire types as the CLI and web UI:
   long LTX-2 render on a CUDA box never blocks quick local prints. Host
   connections are remembered and restored on the next launch.
 
-  The Generate workspace waits for those remembered hosts and their model
+  The Create workspace waits for those remembered hosts and their model
   inventories before deciding the machine is empty. The “pull your first
   model” screen appears only when every connected host reports zero installed
   generation models; a remote-only model is selected and routed without a
   local download.
 
-- **Host detail** — click a host in the sidebar to open its detail view:
+- **Host detail** — click a host in the Machines workspace to open its detail view:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
   models, current queue state, active model-download progress, and a freshly
   fetched inventory of the models installed on that host.
 - **Launch reconnect** — every remembered host is attempted immediately on
   every app launch, in parallel with This Mac. An unreachable host stays in
-  the sidebar as an errored row and periodic polling lets it self-heal.
+  the Machines workspace as an errored row and periodic polling lets it self-heal.
 
 ## Development
 

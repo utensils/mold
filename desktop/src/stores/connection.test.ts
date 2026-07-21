@@ -48,6 +48,7 @@ const defaults = {
   saveRemoteOutputs: true,
   navRailWidth: null,
   generateParamsWidth: null,
+  sidebarCollapsed: false,
 };
 
 beforeEach(() => {

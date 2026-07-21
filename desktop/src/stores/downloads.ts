@@ -11,7 +11,7 @@ import {
 import { sseStream } from "../lib/api/sse";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../lib/downloads";
-import { notifyPulled } from "../lib/notify";
+import { notifyPulled, notifyPullFailed } from "../lib/notify";
 import { useModelStore } from "./models";
 import { useHostModelsStore } from "./hostModels";
 import { useToastStore } from "./toasts";
@@ -281,6 +281,7 @@ export const useDownloadsStore = defineStore("downloads", {
             const ev = JSON.parse(data) as DownloadEvent;
             this.apply(ev);
             if (ev.type === "job_done") this.onJobComplete(ev.model);
+            else if (ev.type === "job_failed") this.onJobFailed(ev.id);
           } catch {
             /* skip malformed frame */
           }
@@ -342,6 +343,7 @@ export const useDownloadsStore = defineStore("downloads", {
             const ev = JSON.parse(data) as DownloadEvent;
             this.applyForHost(host.id, ev);
             if (ev.type === "job_done") this.onJobComplete(ev.model, host.id);
+            else if (ev.type === "job_failed") this.onJobFailed(ev.id, host.id);
           } catch {
             /* skip malformed frame */
           }
@@ -379,6 +381,20 @@ export const useDownloadsStore = defineStore("downloads", {
       notifyPulled(model);
       if (host) void useHostModelsStore().refresh(true);
       else void useModelStore().fetch();
+    },
+    /**
+     * A pull failed on some host (§08 G11). `job_failed` carries no model, so
+     * recover it from the just-settled history row, then toast + notify (native
+     * only fires while backgrounded).
+     */
+    onJobFailed(id: string, hostId?: string) {
+      const host = hostId ? this.hostStates[hostId] : null;
+      const job = (host?.history ?? this.history).find((j) => j.id === id);
+      const model = job?.model ?? "the model";
+      const suffix = host ? ` on ${host.label}` : "";
+      const detail = job?.error ? ` — ${job.error}` : "";
+      useToastStore().push(`Couldn't pull ${model}${suffix}${detail}`, "error");
+      notifyPullFailed(model, job?.error ?? undefined);
     },
     /** Enqueue a plain-name model. A 409 means it's already queued/installed. */
     async createDownload(model: string) {

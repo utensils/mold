@@ -36,36 +36,107 @@ const baseEntry: CatalogEntryWire = {
   added_at: 0,
 };
 
-describe("CatalogCard", () => {
-  it("renders name + size + author + downloads", () => {
+describe("CatalogCard (discover)", () => {
+  it("renders kind badge, name, and family · size", () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.text()).toContain("checkpoint");
     expect(w.text()).toContain("Alpha");
-    expect(w.text()).toContain("alice");
+    expect(w.text()).toContain("flux");
     expect(w.text()).toContain("6.0 GB");
-    expect(w.text()).toContain("1,234");
   });
 
-  it("shows unsupported badge for engine_phase >= 6", () => {
+  it("Pull button emits pull", async () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    const pull = w.find("[data-test=pull-btn]");
+    expect(pull.text()).toContain("Pull");
+    await pull.trigger("click");
+    expect(w.emitted("pull")).toBeTruthy();
+  });
+
+  it("Details button emits open", async () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    await w.find("[data-test=details-btn]").trigger("click");
+    expect(w.emitted("open")).toBeTruthy();
+  });
+
+  it("card name line emits open", async () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    await w.find("[data-test=card-open]").trigger("click");
+    expect(w.emitted("open")).toBeTruthy();
+  });
+
+  it("disables Pull with an unsupported tooltip for engine_phase >= 6", () => {
     const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 6 };
     const w = mount(CatalogCard, { props: { entry } });
-    expect(w.text()).toMatch(/unsupported/i);
-    expect(w.text()).not.toMatch(/phase 6|coming/i);
+    const pull = w.find("[data-test=pull-btn]");
+    expect((pull.element as HTMLButtonElement).disabled).toBe(true);
+    expect(pull.attributes("title")).toMatch(/unsupported/i);
+    expect(w.text()).not.toMatch(/phase 6/i);
   });
 
-  it("does not show phase badge for engine_phase 5 (LTX single-file, now downloadable)", () => {
-    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 5 };
-    const w = mount(CatalogCard, { props: { entry } });
-    expect(w.text()).not.toMatch(/phase 5/i);
-  });
-
-  it("shows Installed badge when entry.installed is true", () => {
+  it("labels Pull as Repair and shows an installed badge when installed", () => {
     const entry: CatalogEntryWire = { ...baseEntry, installed: true };
     const w = mount(CatalogCard, { props: { entry } });
+    expect(w.find("[data-test=pull-btn]").text()).toContain("Repair");
     expect(w.text()).toMatch(/installed/i);
   });
 
-  it("does not show Installed badge when entry.installed is false", () => {
+  it("does not show an installed badge when not installed", () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
     expect(w.text()).not.toMatch(/installed/i);
+  });
+
+  it("renders a lazy preview image when the entry has a thumbnail", () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    const img = w.get("[data-test=card-thumb]");
+    expect(img.attributes("src")).toBe("https://example.test/preview.jpeg");
+    expect(img.attributes("loading")).toBe("lazy");
+    expect(img.attributes("decoding")).toBe("async");
+    expect(w.find("[data-test=card-thumb-placeholder]").exists()).toBe(false);
+  });
+
+  it("normalizes a Civitai CDN thumbnail to one shared width derivative", () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url:
+        "https://image.civitai.com/token/id/original=true/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.get("[data-test=card-thumb]").attributes("src")).toBe(
+      "https://image.civitai.com/token/id/width=512/preview.jpeg",
+    );
+  });
+
+  it("renders the family placeholder and no image without a thumbnail", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    const placeholder = w.get("[data-test=card-thumb-placeholder]");
+    expect(placeholder.text()).toContain("FLUX");
+    expect(w.find("[data-test=card-thumb]").exists()).toBe(false);
+  });
+
+  it("falls back to the placeholder when the thumbnail fails to load", async () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/gone.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    await w.get("[data-test=card-thumb]").trigger("error");
+    expect(w.find("[data-test=card-thumb]").exists()).toBe(false);
+    expect(w.find("[data-test=card-thumb-placeholder]").exists()).toBe(true);
+  });
+
+  it("hides the loading shimmer once the thumbnail loads", async () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.find("[data-test=card-thumb-shimmer]").exists()).toBe(true);
+    await w.get("[data-test=card-thumb]").trigger("load");
+    expect(w.find("[data-test=card-thumb-shimmer]").exists()).toBe(false);
   });
 });

@@ -3,12 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import GenerationTemplatesPanel from "./GenerationTemplatesPanel.vue";
 import type { GenerateFormState } from "../types";
 import { saveGenerationTemplate } from "../lib/generationTemplates";
+import {
+  resetNotifications,
+  settleConfirm,
+  useNotifications,
+} from "../lib/toasts";
 
 function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
   return {
-    version: 2,
+    version: 3,
+    stylePreset: null,
     prompt: "template prompt",
     negativePrompt: "",
     model: "flux-dev:q4",
@@ -54,6 +60,7 @@ describe("GenerationTemplatesPanel", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+    resetNotifications();
   });
 
   it("saves the current form as a named template", async () => {
@@ -87,10 +94,6 @@ describe("GenerationTemplatesPanel", () => {
   it("searches, sorts, renames, and deletes templates", async () => {
     saveGenerationTemplate("Zebra", makeForm({ prompt: "z" }));
     saveGenerationTemplate("Alpha", makeForm({ prompt: "a" }));
-    Object.defineProperty(window, "prompt", {
-      configurable: true,
-      value: vi.fn(() => "Beta"),
-    });
     const w = mount(GenerationTemplatesPanel, {
       props: { modelValue: makeForm() },
     });
@@ -99,7 +102,11 @@ describe("GenerationTemplatesPanel", () => {
     expect(w.text()).toContain("Alpha");
     expect(w.text()).not.toContain("Zebra");
 
+    // Rename now flows through the app dialog store (requestText).
     await w.find("[data-test='template-rename']").trigger("click");
+    expect(useNotifications().confirm?.kind).toBe("text");
+    settleConfirm("Beta");
+    await w.vm.$nextTick();
     await w.find("[data-test='template-search']").setValue("");
     expect(w.text()).toContain("Beta");
 

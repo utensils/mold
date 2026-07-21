@@ -115,7 +115,7 @@ describe("event routing", () => {
       hostId: "local",
       entries: [],
       paused: false,
-      caps: { canPause: true, canCancelAll: true },
+      caps: { canPause: true, canCancelAll: true, canReorder: false },
       gpuOrdinals: [],
       error: null,
     };

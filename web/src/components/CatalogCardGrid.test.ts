@@ -52,6 +52,7 @@ let mockState: {
   errorMsg: any;
   loadMore: ReturnType<typeof vi.fn>;
   openDetail: ReturnType<typeof vi.fn>;
+  startDownload: ReturnType<typeof vi.fn>;
 };
 
 vi.mock("../composables/useCatalog", () => ({
@@ -68,6 +69,7 @@ beforeEach(() => {
     errorMsg: ref<string | null>(null),
     loadMore: vi.fn(),
     openDetail: vi.fn(),
+    startDownload: vi.fn(),
   };
 });
 

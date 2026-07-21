@@ -39,6 +39,10 @@ watch(sentinel, attach);
 function openCard(id: string) {
   void cat.openDetail(id);
 }
+
+function pullCard(id: string) {
+  void cat.startDownload(id);
+}
 </script>
 
 <template>
@@ -46,7 +50,7 @@ function openCard(id: string) {
     <!-- Loading state -->
     <div
       v-if="cat.loading.value"
-      class="flex items-center justify-center py-12 text-sm text-ink-400"
+      class="flex items-center justify-center py-12 text-sm text-ink-3"
     >
       Loading…
     </div>
@@ -54,7 +58,7 @@ function openCard(id: string) {
     <!-- Error state -->
     <div
       v-else-if="cat.errorMsg.value"
-      class="glass flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
+      class="bg-bench border border-edge flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
     >
       <span class="mt-0.5">⚠</span>
       <div>
@@ -66,34 +70,31 @@ function openCard(id: string) {
     <!-- Empty state -->
     <div
       v-else-if="cat.entries.value.length === 0"
-      class="flex flex-col items-center justify-center gap-2 py-16 text-ink-400"
+      class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
       <p class="text-sm">No models found.</p>
       <p class="text-xs">
         Try adjusting filters or click
-        <span class="text-ink-200">Refresh catalog</span>
+        <span class="text-ink-2">Refresh catalog</span>
         in the top bar.
       </p>
     </div>
 
     <!-- Grid -->
     <template v-else>
-      <div
-        class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
-      >
-        <button
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <CatalogCard
           v-for="entry in cat.entries.value"
           :key="entry.id"
-          class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/60"
-          @click="openCard(entry.id)"
-        >
-          <CatalogCard :entry="entry" />
-        </button>
+          :entry="entry"
+          @open="openCard(entry.id)"
+          @pull="pullCard(entry.id)"
+        />
       </div>
 
       <div
         v-if="cat.loadingMore.value"
-        class="py-6 text-center text-sm text-ink-400"
+        class="py-6 text-center text-sm text-ink-3"
       >
         Loading more…
       </div>

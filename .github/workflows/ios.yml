@@ -6,6 +6,7 @@ on:
     paths:
       [
         "apps/mobile/**",
+        "ui/**",
         "desktop/src/mobile/**",
         "desktop/src/components/**",
         "desktop/src/lib/**",
@@ -20,6 +21,8 @@ on:
         "scripts/ios.sh",
         "scripts/generate-ios-icons.sh",
         "scripts/tests/ios-release-assets.sh",
+        "scripts/ios-sim.sh",
+        "scripts/tests/ios-sim-pick.sh",
         "scripts/ensure-testflight-tester.rb",
         "scripts/wait-for-testflight.rb",
         "flake.nix",
@@ -30,6 +33,7 @@ on:
     paths:
       [
         "apps/mobile/**",
+        "ui/**",
         "desktop/src/mobile/**",
         "desktop/src/components/**",
         "desktop/src/lib/**",
@@ -44,6 +48,8 @@ on:
         "scripts/ios.sh",
         "scripts/generate-ios-icons.sh",
         "scripts/tests/ios-release-assets.sh",
+        "scripts/ios-sim.sh",
+        "scripts/tests/ios-sim-pick.sh",
         "scripts/ensure-testflight-tester.rb",
         "scripts/wait-for-testflight.rb",
         "flake.nix",
@@ -67,6 +73,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: ../scripts/tests/ios-release-assets.sh
+      - run: ../scripts/tests/ios-sim-pick.sh
       - run: bun run test
       - run: bun run fmt:check
 

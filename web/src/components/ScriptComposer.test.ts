@@ -3,6 +3,17 @@ import { flushPromises, mount } from "@vue/test-utils";
 import ScriptComposer from "./ScriptComposer.vue";
 import * as api from "../api";
 
+// Stub the network at the module boundary. ScriptComposer renders
+// ImagePickerModal, which calls listGallery() on mount, so a spy on
+// fetchChainLimits alone still let a real request escape and surface as an
+// unhandled ECONNREFUSED that failed the whole run despite every assertion
+// passing.
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api")>()),
+  fetchChainLimits: vi.fn(),
+  listGallery: vi.fn(async () => []),
+}));
+
 /** Minimum props ScriptComposer needs. We always mount with an LTX-2 model
  * by default so the audio toggle is in scope; non-AV cases override `model`
  * AND the mocked chain-limits response below. */
@@ -47,6 +58,10 @@ function ltxVideoLimits(): api.ChainLimits {
 describe("ScriptComposer — audio toggle visibility & default", () => {
   beforeEach(() => {
     localStorage.clear();
+    // Standing stub so a re-fetch (model change, remount) never falls through
+    // to the real implementation and hits the network; the per-test
+    // mockResolvedValueOnce calls below still take precedence.
+    vi.spyOn(api, "fetchChainLimits").mockResolvedValue(ltx2Limits());
   });
 
   afterEach(() => {
@@ -88,6 +103,22 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     expect(w.find('[data-test="script-composer-enable-audio"]').exists()).toBe(
       false,
     );
+  });
+
+  it("pluralizes the stage count in the summary line (1 stage vs N stages)", async () => {
+    vi.spyOn(api, "fetchChainLimits").mockResolvedValue(ltx2Limits());
+    const w = mount(ScriptComposer, { props: props() });
+    await flushPromises();
+
+    const summary = () => w.find('[data-test="script-summary"]').text();
+    expect(summary()).toContain("1 stage");
+    expect(summary()).not.toContain("1 stages");
+
+    const addStage = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add stage"))!;
+    await addStage.trigger("click");
+    expect(summary()).toContain("2 stages");
   });
 
   it("clears stale enable_audio from the persisted draft when the current model has no audio path", async () => {
