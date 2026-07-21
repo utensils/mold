@@ -50,6 +50,9 @@ web/*.tsbuildinfo
 !docs/**/*.png
 !website/public/**/*.png
 !web/public/**/*.png
+!desktop/src/assets/**/*.png
+!docs/design/**/*.jpg
+!docs/design/**/*.png
 !apps/mobile/src-tauri/app-icon.png
 !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
 apps/mobile/src-tauri/gen/schemas/
