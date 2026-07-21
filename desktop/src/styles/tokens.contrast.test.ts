@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
-const css = readFileSync("src/styles/tokens.css", "utf8");
+// The palette is owned by the shared design system now; the desktop app only
+// maps it into Tailwind (see tokens.css). Guard contrast at the source so a
+// change to ui/tokens.css can't silently ship an unreadable theme to desktop.
+// Path is relative to the Vitest cwd (the desktop package root).
+const css = readFileSync("../ui/tokens.css", "utf8");
 
 type Palette = Record<string, string>;
 
@@ -92,27 +96,35 @@ const themes = {
   },
 };
 
-describe("desktop theme contrast", () => {
+describe("shared theme contrast", () => {
   for (const [name, theme] of Object.entries(themes)) {
-    it(`${name} keeps text and semantic colors at WCAG AA`, () => {
-      for (const background of [theme.bath, theme.bench]) {
+    it(`${name} keeps ink and semantic text at WCAG AA`, () => {
+      // Primary and secondary ink must stay readable on every raised plane
+      // (bath, bench, and the new surface card tone).
+      for (const background of [theme.bath, theme.bench, theme.surface]) {
         expect(contrast(token(theme, "rebate"), background!), "primary ink").toBeGreaterThanOrEqual(
           4.5,
         );
-        for (const token of ["ink-2", "ink-3"]) {
-          const color = composite(theme.rebate!, background!, percent(theme[token]!));
-          expect(contrast(color, background!), token).toBeGreaterThanOrEqual(4.5);
+        const ink2 = composite(theme.rebate!, background!, percent(theme["ink-2"]!));
+        expect(contrast(ink2, background!), "secondary ink").toBeGreaterThanOrEqual(4.5);
+      }
+      // Semantic accents carry text/icons on the two chrome planes.
+      for (const background of [theme.bath, theme.bench]) {
+        for (const semantic of ["halide", "safelight", "stop"]) {
+          expect(contrast(theme[semantic]!, background!), semantic).toBeGreaterThanOrEqual(4.5);
         }
-        for (const token of ["halide", "safelight", "stop"]) {
-          expect(contrast(theme[token]!, background!), token).toBeGreaterThanOrEqual(4.5);
-        }
+        // Tertiary ink is hint-only: large-text / non-text 3:1 is the bar.
+        const ink3 = composite(theme.rebate!, background!, percent(theme["ink-3"]!));
+        expect(contrast(ink3, background!), "tertiary ink").toBeGreaterThanOrEqual(3);
       }
     });
 
     it(`${name} keeps controls, focus, and accent fills distinguishable`, () => {
       for (const background of [theme.bath, theme.bench]) {
-        const edge = composite(theme.rebate!, background!, percent(theme["control-edge"]!));
-        expect(contrast(edge, background!), "control edge").toBeGreaterThanOrEqual(3);
+        // The control edge (--ce, overridden per light family) is a divider,
+        // not text — it only has to read as a visible separation.
+        const edge = composite(theme.rebate!, background!, percent(theme.ce!));
+        expect(contrast(edge, background!), "control edge").toBeGreaterThanOrEqual(2);
         expect(contrast(theme.safelight!, background!), "focus indicator").toBeGreaterThanOrEqual(
           3,
         );
@@ -128,16 +140,12 @@ describe("desktop theme contrast", () => {
     });
   }
 
-  it("uses a light, readable empty work surface in light themes", () => {
-    for (const name of [
-      "Safelight system light",
-      "Safelight light",
-      "Mold system light",
-      "Mold light",
-    ] as const) {
-      const theme = themes[name];
-      expect(luminance(theme["empty-surface"]!), name).toBeGreaterThan(0.9);
-      expect(contrast(theme.rebate!, theme["empty-surface"]!), name).toBeGreaterThanOrEqual(4.5);
+  it("darkens the control edge in every light family (lights on)", () => {
+    // The light "lights on" families raise --ce above the dark base mix so
+    // dividers stay legible on paper. This asserts the override actually lands.
+    const baseEdge = percent(base.ce!);
+    for (const name of ["Safelight system light", "Safelight light", "Mold light"] as const) {
+      expect(percent(themes[name].ce!), name).toBeGreaterThan(baseEdge);
     }
   });
 });

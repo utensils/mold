@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, watch } from "vue";
 import { useRouter } from "vue-router";
 import TitleBar from "./components/shell/TitleBar.vue";
 import NavRail from "./components/shell/NavRail.vue";
-import BenchRail from "./components/shell/BenchRail.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
@@ -27,7 +26,6 @@ import { useUiStore } from "./stores/ui";
 import { useUpdaterStore } from "./stores/updater";
 
 const router = useRouter();
-const sidebarOpen = ref(true);
 const appPrefs = useAppPrefsStore();
 const connection = useConnectionStore();
 const contextMenu = useContextMenuStore();
@@ -71,7 +69,7 @@ function onKeydown(e: KeyboardEvent) {
       void router.push(action.route);
       break;
     case "toggle-sidebar":
-      sidebarOpen.value = !sidebarOpen.value;
+      void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });
       break;
     case "command-palette":
       ui.togglePalette();
@@ -127,7 +125,7 @@ async function listenForMenu() {
         if (generation.active) void generation.cancel().then(() => toasts.push("Cancelled"));
         return;
       case "toggle-sidebar":
-        sidebarOpen.value = !sidebarOpen.value;
+        void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });
         return;
       case "zoom-in":
         contextMenu.close();
@@ -208,16 +206,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col">
+  <div class="relative flex h-full flex-col overflow-hidden">
     <TitleBar class="h-11 shrink-0" />
     <UpdateBanner />
     <div class="grid min-h-0 flex-1 grid-cols-[auto_1fr]">
-      <NavRail v-if="sidebarOpen" />
+      <NavRail />
       <main class="min-h-0 min-w-0 overflow-hidden">
         <router-view />
       </main>
     </div>
-    <BenchRail class="h-7 shrink-0" />
     <Toasts />
     <CommandPalette />
     <ContextMenu />

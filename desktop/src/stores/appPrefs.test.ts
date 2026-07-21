@@ -25,6 +25,7 @@ vi.mock("../lib/ipc", () => ({
       saveRemoteOutputs: true,
       navRailWidth: null,
       generateParamsWidth: null,
+      sidebarCollapsed: false,
     }),
     appSettingsSet: vi.fn().mockResolvedValue(undefined),
   },
@@ -209,6 +210,7 @@ describe("appPrefs panel widths", () => {
       saveRemoteOutputs: true,
       navRailWidth: null,
       generateParamsWidth: null,
+      sidebarCollapsed: false,
       ...overrides,
     };
   }
@@ -249,6 +251,19 @@ describe("appPrefs panel widths", () => {
     await prefs.init();
     expect(prefs.navRailWidth).toBe(320);
     expect(prefs.generateParamsWidth).toBe(280);
+  });
+
+  it("defaults the sidebar to expanded and persists a collapse toggle", async () => {
+    vi.mocked(ipc.appSettingsGet).mockResolvedValue(panelSettings() as never);
+    const prefs = useAppPrefsStore();
+    expect(prefs.sidebarCollapsed).toBe(false);
+    await prefs.init();
+    expect(prefs.sidebarCollapsed).toBe(false);
+    await prefs.update({ sidebarCollapsed: true });
+    expect(prefs.sidebarCollapsed).toBe(true);
+    expect(vi.mocked(ipc.appSettingsSet)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sidebarCollapsed: true }),
+    );
   });
 
   it("persists a committed width and a null reset through update()", async () => {

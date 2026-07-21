@@ -10,6 +10,7 @@ vi.mock("../../lib/api/models", () => ({ loadModel: vi.fn(), unloadModel: vi.fn(
 import CommandPalette from "./CommandPalette.vue";
 import { useGalleryStore } from "../../stores/gallery";
 import { useUiStore } from "../../stores/ui";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { GalleryImage } from "../../lib/api/types";
 
 beforeEach(() => {
@@ -40,6 +41,23 @@ describe("CommandPalette command registry", () => {
     texts = wrapper.findAll("[role='option']").map((o) => o.text());
     expect(texts.some((t) => t.includes("Go to Catalog"))).toBe(true);
     expect(texts.some((t) => t.includes("Go to Models"))).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("offers theme + appearance commands wired to the shared prefs plumbing", async () => {
+    const wrapper = await openPalette();
+    const prefs = useAppPrefsStore();
+    const update = vi.spyOn(prefs, "update").mockResolvedValue();
+
+    await wrapper.get("input").setValue("theme");
+    const options = wrapper.findAll("[role='option']");
+    const texts = options.map((o) => o.text());
+    expect(texts.some((t) => t.includes("Theme: Mold"))).toBe(true);
+    expect(texts.some((t) => t.includes("Theme: Safelight"))).toBe(true);
+    expect(texts.some((t) => t.includes("Appearance: Dark"))).toBe(true);
+
+    await options.find((o) => o.text().includes("Theme: Safelight"))!.trigger("click");
+    expect(update).toHaveBeenCalledWith({ themeFamily: "safelight" });
     wrapper.unmount();
   });
 

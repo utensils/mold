@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
-import BenchRail from "./BenchRail.vue";
+import StatusPopover from "./StatusPopover.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
@@ -27,13 +27,19 @@ vi.mock("../../lib/api/sse", () => ({
   },
 }));
 
-function mountRail() {
+function mountPopover() {
   const pinia = createPinia();
   setActivePinia(pinia);
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
   conn.status = "ready";
-  return mount(BenchRail, { global: { plugins: [pinia] } });
+  return mount(StatusPopover, { global: { plugins: [pinia] } });
+}
+
+/** The telemetry lives in the popover now; the trigger only shows a mini bar. */
+async function openPopover(wrapper: ReturnType<typeof mountPopover>) {
+  await wrapper.get("[data-test='status-trigger']").trigger("click");
+  await flushPromises();
 }
 
 function addRemoteHost() {
@@ -69,19 +75,19 @@ beforeEach(() => {
   });
 });
 
-describe("BenchRail host-aware display", () => {
+describe("StatusPopover host-aware display", () => {
   it("shows the primary engine when nothing is generating remotely", async () => {
-    const wrapper = mountRail();
+    const wrapper = mountPopover();
     await flushPromises();
+    await openPopover(wrapper);
     expect(wrapper.text()).toContain("local");
-    expect(wrapper.text()).toContain("QUEUE 0/200");
+    expect(wrapper.text()).toContain("queue 0/200");
   });
 
   it("follows a live remote job: chip, queue, and models come from that host", async () => {
-    const wrapper = mountRail();
+    const wrapper = mountPopover();
     addRemoteHost();
     const generation = useGenerationStore();
-    // Simulate a routed live job without the network layer.
     generation.jobs.push({
       clientId: 1,
       status: "denoising",
@@ -89,13 +95,14 @@ describe("BenchRail host-aware display", () => {
       hostLabel: "hal9000",
     } as never);
     await flushPromises();
+    await openPopover(wrapper);
     expect(wrapper.text()).toContain("hal9000");
-    expect(wrapper.text()).toContain("QUEUE 2/200");
+    expect(wrapper.text()).toContain("queue 2/200");
     expect(wrapper.text()).toContain("flux2-klein:q4");
   });
 
   it("re-targets the resources stream at the display host", async () => {
-    mountRail();
+    mountPopover();
     addRemoteHost();
     const generation = useGenerationStore();
     generation.jobs.push({
@@ -111,7 +118,7 @@ describe("BenchRail host-aware display", () => {
   });
 
   it("reverts to the primary when the last routed job settles", async () => {
-    const wrapper = mountRail();
+    const wrapper = mountPopover();
     addRemoteHost();
     const generation = useGenerationStore();
     generation.jobs.push({
@@ -121,18 +128,19 @@ describe("BenchRail host-aware display", () => {
       hostLabel: "hal9000",
     } as never);
     await flushPromises();
+    await openPopover(wrapper);
     expect(wrapper.text()).toContain("hal9000");
     generation.jobs[0]!.status = "complete" as never;
     await flushPromises();
     // Chip and queue fall back to the primary...
     expect(wrapper.text()).toContain("local");
-    expect(wrapper.text()).toContain("QUEUE 0/200");
+    expect(wrapper.text()).toContain("queue 0/200");
     // ...and the resources stream re-targets the primary (no explicit target).
     expect(streamCalls.at(-1)?.target ?? null).toBeNull();
   });
 
   it("keeps polling the PRIMARY status for engine recovery while displaying a remote host", async () => {
-    mountRail();
+    mountPopover();
     addRemoteHost();
     const generation = useGenerationStore();
     generation.jobs.push({
@@ -155,13 +163,14 @@ describe("BenchRail host-aware display", () => {
       queue_capacity: 200,
       gpu_info: { name: "Apple M3 Ultra", vram_total_mb: 196608, vram_used_mb: 32768 },
     });
-    const wrapper = mountRail();
+    const wrapper = mountPopover();
     await flushPromises();
+    await openPopover(wrapper);
     expect(wrapper.text()).toContain("Apple M3 Ultra");
   });
 
   it("falls back to telemetry VRAM when the remote resources stream is silent", async () => {
-    const wrapper = mountRail();
+    const wrapper = mountPopover();
     addRemoteHost();
     const generation = useGenerationStore();
     generation.jobs.push({
@@ -171,6 +180,19 @@ describe("BenchRail host-aware display", () => {
       hostLabel: "hal9000",
     } as never);
     await flushPromises();
+    await openPopover(wrapper);
     expect(wrapper.text()).toContain("NVIDIA GeForce RTX 4090");
+  });
+});
+
+describe("StatusPopover trigger", () => {
+  it("is always visible and toggles the popover open", async () => {
+    const wrapper = mountPopover();
+    await flushPromises();
+    const trigger = wrapper.get("[data-test='status-trigger']");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    await trigger.trigger("click");
+    expect(wrapper.get("[data-test='status-trigger']").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find("[role='dialog']").exists()).toBe(true);
   });
 });

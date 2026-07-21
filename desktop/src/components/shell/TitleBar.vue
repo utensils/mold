@@ -1,36 +1,59 @@
 <script setup lang="ts">
-// Overlay titlebar: macOS traffic lights occupy the leading edge of this strip,
-// so the wordmark reserves their full width and the remaining chrome can drag.
+// Unified toolbar: macOS traffic lights occupy the leading edge, then a
+// sidebar-collapse toggle, a centered workspace title, and the ⌘K search chip.
+// The whole strip is a drag region except the interactive controls.
+import { computed } from "vue";
+import { useRoute } from "vue-router";
+import Icon from "@ui/components/Icon.vue";
 import { useUiStore } from "../../stores/ui";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { PLATFORM_UI, shortcutLabel } from "../../lib/platform";
 
+const route = useRoute();
 const ui = useUiStore();
+const appPrefs = useAppPrefsStore();
+
+const workspace = computed(() => (route.meta.title as string | undefined) ?? "");
+
+function toggleSidebar() {
+  void appPrefs.update({ sidebarCollapsed: !appPrefs.sidebarCollapsed });
+}
 </script>
 
 <template>
   <header
     data-tauri-drag-region
-    class="border-edge flex items-center border-b bg-bench pr-3"
+    class="flex items-center gap-3.5 border-b border-edge bg-bench pr-3"
     :class="PLATFORM_UI.isMacOS ? 'pl-[84px]' : 'pl-3'"
   >
-    <span
-      data-tauri-drag-region
-      class="brand-wordmark font-display text-display-sm font-bold tracking-[0.08em] text-ink-2 select-none"
-      style="font-stretch: 90%"
-    >
-      mold
-    </span>
-    <div data-tauri-drag-region class="flex-1" />
     <button
       type="button"
-      class="border-edge text-ink-3 hover:text-ink-2 flex h-7 items-center gap-2 rounded-control border px-3 text-caption transition-colors duration-100"
+      class="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-chrome text-ink-3 transition-colors duration-100 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)] hover:text-ink-2"
+      title="Toggle sidebar"
+      aria-label="Toggle sidebar"
+      :aria-keyshortcuts="`${PLATFORM_UI.modifier}+\\`"
+      @click="toggleSidebar"
+    >
+      <Icon name="sidebar" :size="16" />
+    </button>
+
+    <div
+      data-tauri-drag-region
+      class="flex-1 text-center font-utility text-[11px] tracking-[0.04em] text-ink-3 select-none"
+    >
+      Mold Studio<template v-if="workspace"> — {{ workspace }}</template>
+    </div>
+
+    <button
+      type="button"
+      class="flex items-center gap-1.5 rounded-chrome border border-edge px-2.5 py-1 font-utility text-[10px] text-ink-3 transition-colors duration-100 hover:text-ink-2"
       title="Command palette"
       aria-label="Open command palette"
       :aria-keyshortcuts="`${PLATFORM_UI.modifier}+K`"
       @click="ui.togglePalette()"
     >
-      <span>Search or run a command…</span>
-      <kbd class="data-mono text-ink-3">{{ shortcutLabel("K") }}</kbd>
+      <span>Search</span>
+      <span class="text-[11px]">{{ shortcutLabel("K") }}</span>
     </button>
   </header>
 </template>

@@ -1,5 +1,6 @@
 @import "./tokens.css";
 @import "../../../ui/fonts/fonts.css";
+@import "../../../ui/kit.css";
 
 html,
 body,

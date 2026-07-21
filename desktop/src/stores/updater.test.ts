@@ -53,6 +53,7 @@ function settings(updateChannel: AppSettings["updateChannel"] = "stable"): AppSe
     saveRemoteOutputs: true,
     navRailWidth: null,
     generateParamsWidth: null,
+    sidebarCollapsed: false,
   };
 }
 

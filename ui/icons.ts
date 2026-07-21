@@ -59,6 +59,12 @@ export const ICONS = {
     '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/>',
   negative: '<circle cx="12" cy="12" r="9"/><path d="M6 6l12 12"/>',
   layers: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  // Linked stages (multi-prompt chains) — git-commit-horizontal geometry.
+  chain:
+    '<path d="M2 12h5.5"/><path d="M16.5 12H22"/><circle cx="12" cy="12" r="4.5"/>',
+  // Rewind clock — recent history / prompt log.
+  history:
+    '<path d="M3.5 12a8.5 8.5 0 1 0 2.9-6.4L3 8"/><path d="M3 3.5V8h4.5"/><path d="M12 7.5V12l3 1.8"/>',
   upscale: '<path d="M4 14v6h6M20 10V4h-6"/><path d="M14 10l6-6M10 14l-6 6"/>',
   output: '<path d="M4 4h16v16H4z"/><path d="M4 15l4-4 4 4 3-3 5 5"/>',
   mask: '<path d="M12 3s7 3 7 9-7 9-7 9-7-3-7-9 7-9 7-9z"/>',

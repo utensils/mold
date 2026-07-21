@@ -100,6 +100,8 @@ export interface AppSettings {
   navRailWidth: number | null;
   /** Persisted Generate-inspector width in px; null uses the panel default. */
   generateParamsWidth: number | null;
+  /** Sidebar collapsed to the 62px icon rail; restored on launch. */
+  sidebarCollapsed: boolean;
 }
 
 export interface HostTest {
@@ -161,6 +163,7 @@ const browserFallbackSettings = (): AppSettings => ({
   saveRemoteOutputs: true,
   navRailWidth: null,
   generateParamsWidth: null,
+  sidebarCollapsed: false,
 });
 
 export const ipc = {

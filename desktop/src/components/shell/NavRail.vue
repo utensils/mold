@@ -1,17 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { RouterLink, useRouter } from "vue-router";
-import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
-import PanelResizeHandle from "./PanelResizeHandle.vue";
-import {
-  useGenerationStore,
-  jobPhase,
-  jobProgress,
-  jobStatusCode,
-  railOrder,
-  type Job,
-} from "../../stores/generation";
+import { useRoute, useRouter } from "vue-router";
+import NavItem from "@ui/components/NavItem.vue";
+import Keycap from "@ui/components/Keycap.vue";
+import type { IconName } from "@ui/icons";
+import logoUrl from "../../assets/logo.png";
+import StatusPopover from "./StatusPopover.vue";
 import RenameDialog from "./RenameDialog.vue";
+import { useGenerationStore, jobStatusCode, railOrder, type Job } from "../../stores/generation";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
@@ -20,10 +16,10 @@ import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
 import { detectedHosts as computeDetectedHosts } from "../../lib/discovery";
-import { dragWidth } from "../../lib/panelResize";
 import { ipc, type DiscoveredHost, type SavedHost } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
 
+const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
@@ -32,27 +28,9 @@ const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
 const toasts = useToastStore();
 
-// Live width while dragging the right-edge handle; null follows the
-// persisted preference (appPrefs.navRailWidth). Persistence happens only on
-// commit, never per pointermove.
-const draftRailWidth = ref<number | null>(null);
-const railWidth = computed(() => draftRailWidth.value ?? appPrefs.navRailWidth);
-
-function onRailResize(dx: number) {
-  draftRailWidth.value = dragWidth("navRail", appPrefs.navRailWidth, dx, "right");
-}
-
-async function onRailCommit() {
-  const width = draftRailWidth.value;
-  if (width === null) return;
-  if (width !== appPrefs.navRailWidth) await appPrefs.update({ navRailWidth: width });
-  draftRailWidth.value = null;
-}
-
-function onRailReset() {
-  draftRailWidth.value = null;
-  void appPrefs.update({ navRailWidth: null });
-}
+// Fixed widths per the prototype (210 ↔ 62). The old drag-resize handle is
+// gone; the persisted navRailWidth pref is left untouched but no longer read.
+const collapsed = computed(() => appPrefs.sidebarCollapsed);
 
 // Quiet background mDNS scan so nearby `mold serve` instances surface in the
 // rail without a trip to Settings.
@@ -259,15 +237,28 @@ function hostMenu(host: HostView): MenuEntry[] {
   return entries;
 }
 
-const destinations = [
-  { route: "/generate", label: "Generate", key: shortcutLabel("1") },
-  { route: "/gallery", label: "Gallery", key: shortcutLabel("2") },
-  { route: "/chains", label: "Chains", key: shortcutLabel("3") },
-  { route: "/models", label: "Catalog", key: shortcutLabel("4") },
-  { route: "/history", label: "History", key: shortcutLabel("5") },
-  { route: "/jobs", label: "Jobs", key: shortcutLabel("6") },
-  { route: "/runpod", label: "RunPod", key: "" },
+interface Destination {
+  route: string;
+  label: string;
+  icon: IconName;
+  key: string;
+}
+
+// The eight destinations are unchanged; only markup and icons are new.
+// Settings is pinned separately at the bottom.
+const destinations: Destination[] = [
+  { route: "/generate", label: "Generate", icon: "create", key: shortcutLabel("1") },
+  { route: "/gallery", label: "Gallery", icon: "library", key: shortcutLabel("2") },
+  { route: "/chains", label: "Chains", icon: "chain", key: shortcutLabel("3") },
+  { route: "/models", label: "Catalog", icon: "models", key: shortcutLabel("4") },
+  { route: "/history", label: "History", icon: "history", key: shortcutLabel("5") },
+  { route: "/jobs", label: "Jobs", icon: "sliders", key: shortcutLabel("6") },
+  { route: "/runpod", label: "RunPod", icon: "cloud", key: "" },
 ];
+
+function isActive(path: string): boolean {
+  return route.path === path;
+}
 
 /** Queue order: every live job first (submission order), then the freshest
  *  finished prints — the rail is a working queue, not a full history. */
@@ -281,6 +272,16 @@ const railJobs = computed<Job[]>(() => {
     .reverse();
   return [...live, ...done];
 });
+
+function jobRunning(job: Job): boolean {
+  return job.status === "denoising" || job.status === "finishing" || job.status === "loading";
+}
+
+/** Lowercase mono progress line for the developing strip. */
+function developingLabel(job: Job): string {
+  if (job.status === "denoising") return `developing ${job.step}/${job.total}`;
+  return jobStatusCode(job).toLowerCase();
+}
 
 function jobMenu(job: Job): MenuEntry[] {
   const live = job.status !== "complete" && job.status !== "error";
@@ -324,141 +325,162 @@ function jobMenu(job: Job): MenuEntry[] {
 
 <template>
   <nav
-    class="border-edge relative flex flex-col border-r bg-bench pt-2 pb-2"
-    :style="{ width: `${railWidth}px` }"
+    class="nav-rail relative flex shrink-0 flex-col border-r border-edge bg-bench pt-3.5 pb-3"
+    :class="collapsed ? 'px-1.5' : 'px-2.5'"
+    :style="{ width: collapsed ? '62px' : '210px' }"
     aria-label="Primary"
   >
-    <PanelResizeHandle
-      class="absolute inset-y-0 -right-0.5 z-10"
-      label="Resize sidebar"
-      @resize="onRailResize"
-      @commit="onRailCommit"
-      @reset="onRailReset"
-    />
-    <RouterLink
-      v-for="d in destinations"
-      :key="d.route"
-      :to="d.route"
-      class="group mx-2 flex h-7 items-center justify-between rounded-control px-2.5 text-body text-ink-2 transition-colors duration-100 hover:text-ink"
-      active-class="!text-ink bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]"
-    >
-      <span class="font-medium">{{ d.label }}</span>
-      <kbd
-        class="kbd-hint text-ink-3 opacity-0 transition-opacity duration-100 group-hover:opacity-100"
-      >
-        {{ d.key }}
-      </kbd>
-    </RouterLink>
-
-    <div class="mx-4 mt-4 mb-1 flex items-center gap-2">
-      <span class="edge-code">HOSTS</span>
-      <div class="border-edge h-px flex-1 border-t" />
+    <!-- header: logo + gradient wordmark + STUDIO kicker -->
+    <div class="mb-4 flex items-center gap-2.5 px-2" :class="collapsed ? 'justify-center' : ''">
+      <img :src="logoUrl" alt="mold" class="h-6 w-6 shrink-0 object-contain" />
+      <span v-if="!collapsed" class="ms-wordmark select-none">mold</span>
+      <span v-if="!collapsed" class="rail-studio mt-[3px] select-none">STUDIO</span>
     </div>
-    <div data-test="hosts-section">
+
+    <!-- nav destinations -->
+    <div class="flex flex-col gap-[3px]">
+      <NavItem
+        v-for="d in destinations"
+        :key="d.route"
+        :icon="d.icon"
+        :label="d.label"
+        :collapsed="collapsed"
+        :active="isActive(d.route)"
+        @select="router.push(d.route)"
+      />
+    </div>
+
+    <!-- now developing -->
+    <template v-if="!collapsed">
+      <div class="mt-5 mb-1.5 flex items-center gap-2 px-3">
+        <span class="rail-kicker">Now developing</span>
+        <span v-if="generation.pending.length > 1" class="rail-kicker ml-auto">
+          {{ generation.pending.length }}
+        </span>
+      </div>
+      <div
+        v-if="railJobs.length > 0"
+        class="flex max-h-44 min-h-0 flex-col gap-2 overflow-y-auto px-2"
+      >
+        <a
+          v-for="job in railJobs"
+          :key="job.clientId"
+          href="#"
+          class="flex items-center gap-2.5 rounded-[8px] px-1 py-1 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+          @click.prevent="router.push('/generate')"
+          @contextmenu.prevent="contextMenu.open($event, jobMenu(job))"
+        >
+          <span
+            class="h-[30px] w-[30px] shrink-0 overflow-hidden rounded-[6px] border border-[color-mix(in_srgb,var(--rebate)_12%,transparent)] bg-print-surface"
+          >
+            <img
+              v-if="job.resultUrl && !job.result?.video_frames"
+              :src="job.resultUrl"
+              alt=""
+              class="h-full w-full object-cover"
+            />
+            <img
+              v-else-if="job.previewUrl"
+              :src="job.previewUrl"
+              alt=""
+              class="h-full w-full object-cover"
+              style="filter: blur(1px)"
+            />
+            <span v-else-if="jobRunning(job)" class="ms-shimmer block h-full w-full" />
+            <span v-else class="block h-full w-full bg-print-surface" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-[11.5px] text-ink-2" :title="job.prompt">
+              {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
+            </span>
+            <span
+              class="block font-utility text-[9.5px]"
+              :class="job.status === 'error' ? 'text-stop' : 'text-safelight'"
+            >
+              {{ developingLabel(job) }}
+            </span>
+          </span>
+        </a>
+      </div>
+      <p v-else class="px-3 text-caption text-ink-3">nothing developing</p>
+    </template>
+
+    <!-- hosts -->
+    <div v-if="!collapsed" class="mt-5 mb-1.5 flex items-center gap-2 px-3">
+      <span class="rail-kicker">Hosts</span>
+      <div class="h-px flex-1 border-t border-edge" />
+    </div>
+    <div v-else class="mt-4 mb-1 h-px border-t border-edge" />
+    <div data-test="hosts-section" class="flex flex-col gap-[2px]">
       <button
         v-for="host in hosts.all"
         :key="host.id"
         type="button"
         data-test="host-row"
-        class="mx-2 flex h-7 cursor-pointer items-center gap-2 rounded-control px-2.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-        :title="host.baseUrl ?? undefined"
+        class="flex h-8 cursor-pointer items-center gap-2.5 rounded-[9px] hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+        :class="collapsed ? 'justify-center px-0' : 'px-2.5'"
+        :title="collapsed ? host.label : (host.baseUrl ?? undefined)"
         @click="router.push(`/hosts/${host.id}`)"
         @contextmenu.prevent="contextMenu.open($event, hostMenu(host))"
       >
-        <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="hostDot(host)" />
-        <span class="min-w-0 truncate text-caption text-ink-2">{{ host.label }}</span>
-        <span v-if="host.queueDepth !== null" class="edge-code ml-auto shrink-0">
-          {{ host.queueDepth }}
-        </span>
+        <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="hostDot(host)" />
+        <template v-if="!collapsed">
+          <span class="min-w-0 flex-1 truncate text-caption text-ink-2">{{ host.label }}</span>
+          <span v-if="host.queueDepth !== null" class="font-utility text-[9.5px] text-ink-3">
+            {{ host.queueDepth }}
+          </span>
+        </template>
       </button>
       <div
         v-for="d in detectedHosts"
         :key="d.url"
         data-test="detected-host-row"
-        class="mx-2 flex h-7 items-center gap-2 rounded-control px-2.5"
+        class="flex h-8 items-center gap-2.5 rounded-[9px]"
+        :class="collapsed ? 'justify-center px-0' : 'px-2.5'"
         :title="d.url"
         @contextmenu.prevent="contextMenu.open($event, detectedMenu(d))"
       >
-        <span class="h-1.5 w-1.5 shrink-0 rounded-full border border-control-edge" />
-        <span class="min-w-0 truncate text-caption text-ink-3">{{ d.name }}</span>
-        <button
-          type="button"
-          data-test="detected-host-connect"
-          class="ml-auto shrink-0 rounded-control px-1 text-caption text-ink-3 hover:text-ink"
-          :aria-label="`Connect to ${d.name}`"
-          @click="connectDetected(d)"
-        >
-          +
-        </button>
+        <span class="h-[7px] w-[7px] shrink-0 rounded-full border border-control-edge" />
+        <template v-if="!collapsed">
+          <span class="min-w-0 flex-1 truncate text-caption text-ink-3">{{ d.name }}</span>
+          <button
+            type="button"
+            data-test="detected-host-connect"
+            class="shrink-0 rounded-[6px] px-1 text-caption text-ink-3 hover:text-ink"
+            :aria-label="`Connect to ${d.name}`"
+            @click="connectDetected(d)"
+          >
+            +
+          </button>
+        </template>
       </div>
       <p
-        v-if="hosts.all.length === 0 && detectedHosts.length === 0"
-        class="mx-4 text-caption text-ink-3"
+        v-if="!collapsed && hosts.all.length === 0 && detectedHosts.length === 0"
+        class="px-3 text-caption text-ink-3"
       >
         No hosts
       </p>
     </div>
 
-    <div class="mx-4 mt-4 mb-1 flex items-center gap-2">
-      <span class="edge-code">JOBS</span>
-      <div class="border-edge h-px flex-1 border-t" />
-      <span v-if="generation.pending.length > 1" class="edge-code">
-        {{ generation.pending.length }}
-      </span>
-    </div>
-    <div v-if="railJobs.length > 0" class="min-h-0 overflow-y-auto">
-      <RouterLink
-        v-for="job in railJobs"
-        :key="job.clientId"
-        to="/generate"
-        class="mx-2 flex items-center gap-2 rounded-control px-2 py-1.5 hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-        @contextmenu="contextMenu.open($event, jobMenu(job))"
-      >
-        <div
-          class="h-8 w-8 shrink-0 overflow-hidden rounded-media border border-[color-mix(in_srgb,var(--rebate)_14%,transparent)] bg-print-surface"
-        >
-          <img
-            v-if="job.resultUrl && !job.result?.video_frames"
-            :src="job.resultUrl"
-            alt=""
-            class="h-full w-full object-cover"
-          />
-          <img
-            v-else-if="job.previewUrl"
-            :src="job.previewUrl"
-            alt=""
-            class="h-full w-full object-cover"
-            style="filter: blur(1px)"
-          />
-          <DevelopCanvas
-            v-else
-            :seed="job.visualSeed"
-            :progress="jobProgress(job)"
-            :phase="jobPhase(job)"
-          />
-        </div>
-        <div class="min-w-0">
-          <div class="truncate text-caption text-ink-2" :title="job.prompt">
-            {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
-          </div>
-          <div class="edge-code" :class="job.status === 'error' ? 'text-stop' : ''">
-            {{ jobStatusCode(job) }}
-          </div>
-        </div>
-      </RouterLink>
-    </div>
-    <p v-else class="mx-4 text-caption text-ink-3">Nothing developing</p>
-
     <div class="flex-1" />
 
-    <RouterLink
-      to="/settings"
-      class="mx-2 flex h-7 items-center justify-between rounded-control px-2.5 text-body text-ink-2 transition-colors duration-100 hover:text-ink"
-      active-class="!text-ink bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)]"
-    >
-      <span class="font-medium">Settings</span>
-      <kbd class="kbd-hint text-ink-3">{{ shortcutLabel(",") }}</kbd>
-    </RouterLink>
+    <!-- status + settings -->
+    <StatusPopover :collapsed="collapsed" />
+    <div class="relative mt-1">
+      <NavItem
+        icon="settings"
+        label="Settings"
+        :collapsed="collapsed"
+        :active="isActive('/settings')"
+        @select="router.push('/settings')"
+      />
+      <Keycap
+        v-if="!collapsed"
+        class="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2"
+      >
+        {{ shortcutLabel(",") }}
+      </Keycap>
+    </div>
 
     <RenameDialog
       :open="!!renameTarget"
@@ -469,3 +491,37 @@ function jobMenu(job: Job): MenuEntry[] {
     />
   </nav>
 </template>
+
+<style scoped>
+.nav-rail {
+  transition: width var(--dur-base) var(--ease);
+}
+
+.ms-wordmark {
+  font-family: var(--f-display);
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.rail-studio {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+}
+
+.rail-kicker {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+</style>

@@ -38,6 +38,7 @@ function baseSettings(): AppSettings {
     saveRemoteOutputs: true,
     navRailWidth: null,
     generateParamsWidth: null,
+    sidebarCollapsed: false,
   };
 }
 

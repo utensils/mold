@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 import NavRail from "./NavRail.vue";
 import { ipc } from "../../lib/ipc";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
 import { useHostsStore, type HostView } from "../../stores/hosts";
@@ -19,6 +20,7 @@ function makeRouter(): Router {
       "/chains",
       "/models",
       "/history",
+      "/jobs",
       "/runpod",
       "/settings",
       "/hosts/:id",
@@ -40,9 +42,9 @@ async function mountAt(path: string) {
   return mount(NavRail, {
     global: {
       plugins: [pinia, router],
-      // DevelopCanvas paints to <canvas>, which happy-dom can't; stub it out
-      // (it only renders inside job rows, of which there are none here anyway).
-      stubs: { DevelopCanvas: stub },
+      // StatusPopover opens its own telemetry streams on mount; the rail tests
+      // don't exercise it, so stub it out to keep them off the network.
+      stubs: { StatusPopover: stub },
     },
   });
 }
@@ -330,12 +332,57 @@ describe("NavRail a11y", () => {
     expect(wrapper.get("nav").attributes("aria-label")).toBe("Primary");
   });
 
-  it("marks the active route link with aria-current=page", async () => {
+  it("marks the active nav item with aria-current=page", async () => {
     const wrapper = await mountAt("/gallery");
-    const links = wrapper.findAll("a");
-    const gallery = links.find((a) => a.text().includes("Gallery"));
-    const generate = links.find((a) => a.text().includes("Generate"));
+    // Destinations render as @ui NavItem buttons now, not RouterLink anchors.
+    const buttons = wrapper.findAll("button");
+    const gallery = buttons.find((b) => b.text().includes("Gallery"));
+    const generate = buttons.find((b) => b.text().includes("Generate"));
     expect(gallery?.attributes("aria-current")).toBe("page");
     expect(generate?.attributes("aria-current")).toBeUndefined();
+  });
+
+  it("keeps all eight destinations", async () => {
+    const wrapper = await mountAt("/generate");
+    for (const label of [
+      "Generate",
+      "Gallery",
+      "Chains",
+      "Catalog",
+      "History",
+      "Jobs",
+      "RunPod",
+      "Settings",
+    ]) {
+      expect(wrapper.text()).toContain(label);
+    }
+  });
+});
+
+describe("NavRail collapse", () => {
+  function setCollapsed(collapsed: boolean) {
+    const prefs = useAppPrefsStore();
+    prefs.settings = { sidebarCollapsed: collapsed } as never;
+  }
+
+  it("expands to 210px with visible labels by default", async () => {
+    const wrapper = await mountAt("/generate");
+    expect(wrapper.get("nav").attributes("style")).toContain("210px");
+    expect(wrapper.text()).toContain("Generate");
+    // Gradient wordmark shows when expanded.
+    expect(wrapper.find(".ms-wordmark").exists()).toBe(true);
+  });
+
+  it("collapses to a 62px icon rail with labels and wordmark hidden", async () => {
+    const wrapper = await mountAt("/generate");
+    setCollapsed(true);
+    await flushPromises();
+    expect(wrapper.get("nav").attributes("style")).toContain("62px");
+    // Icon-only: nav labels and the wordmark are gone.
+    expect(wrapper.text()).not.toContain("Generate");
+    expect(wrapper.find(".ms-wordmark").exists()).toBe(false);
+    // Destinations are still present as accessible icon buttons.
+    const buttons = wrapper.findAll("button");
+    expect(buttons.some((b) => b.attributes("aria-label") === "Generate")).toBe(true);
   });
 });

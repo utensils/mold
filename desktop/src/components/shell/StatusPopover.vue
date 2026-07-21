@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import ProgressBar from "@ui/components/ProgressBar.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
@@ -11,17 +12,21 @@ import { pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
 import type { ResourceSnapshot, ServerStatus } from "../../lib/api/types";
 
+defineProps<{ collapsed?: boolean }>();
+
 const conn = useConnectionStore();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
 const snapshot = ref<ResourceSnapshot | null>(null);
 const status = ref<ServerStatus | null>(null);
+const open = ref(false);
+const rootEl = ref<HTMLElement | null>(null);
 
 let resourceAbort: AbortController | null = null;
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * The bar follows the action: while a routed job is live, it mirrors THAT
+ * The status follows the action: while a routed job is live, it mirrors THAT
  * host (chip, VRAM, queue, models) and reverts to the primary once the last
  * remote job settles. The embedded-engine recovery poll below stays bound to
  * the primary connection no matter what is displayed.
@@ -35,19 +40,17 @@ const displayHost = computed(() => {
   return hosts.all.find((h) => h.id === id) ?? hosts.primaryHost;
 });
 const displayingRemote = computed(() => !!displayHost.value && !displayHost.value.primary);
+const anyJobRunning = computed(() =>
+  generation.jobs.some((j) => j.status !== "complete" && j.status !== "error"),
+);
 
 /** MB-based `/api/status` GPU summary as a snapshot-shaped fallback, for
- *  display hosts whose resources stream is unavailable (older servers).
- *  Covers the primary too — a remote primary on an old server would
- *  otherwise show no GPU at all despite `gpu_info` sitting in `status`. */
+ *  display hosts whose resources stream is unavailable (older servers). */
 const telemetryGpu = computed(() => {
   const host = displayHost.value;
   if (!host) return null;
   const info = displayingRemote.value ? hosts.telemetry[host.id]?.gpuInfo : status.value?.gpu_info;
   if (!info) return null;
-  // Decimal MB, matching formatGB (/1e9) and the server's resources path
-  // ("1 MiB = 1_000_000 for display consistency with the rest of mold") —
-  // binary here would show ~5% more VRAM than the live stream.
   return {
     name: info.name,
     vram_total: info.vram_total_mb * 1_000_000,
@@ -62,6 +65,11 @@ const vramPct = computed(() =>
 const vramCritical = computed(
   () => gpu.value !== null && vramLevel(gpu.value.vram_used, gpu.value.vram_total) === "critical",
 );
+/** Halide when idle/latent, safelight while a job develops, stop past 92%. */
+const vramTone = computed(() => {
+  if (vramCritical.value) return "danger";
+  return anyJobRunning.value ? "accent" : "info";
+});
 
 const engineChip = computed(() => {
   if (conn.status === "starting") return "⌁ starting…";
@@ -77,7 +85,15 @@ const engineChip = computed(() => {
   }
 });
 
-/** Queue + loaded models for whichever host the bar is displaying. */
+/** Trigger dot color mirrors the engine/host status. */
+const dotClass = computed(() => {
+  if (conn.status === "error") return "bg-stop";
+  if (conn.status === "starting") return "bg-halide animate-pulse";
+  if (displayingRemote.value) return "bg-halide";
+  return conn.ready ? "bg-success" : "bg-ink-3";
+});
+
+/** Queue + loaded models for whichever host the status is displaying. */
 const displayStatus = computed(() => {
   if (displayingRemote.value) {
     const t = hosts.telemetry[displayHost.value!.id];
@@ -104,9 +120,6 @@ async function refreshStatus() {
     status.value = await apiJson<ServerStatus>("/api/status");
     statusFailures = 0;
   } catch {
-    // Two consecutive failures = the engine is gone, not a blip. For the
-    // built-in engine, restart it (the backend detects the dead thread);
-    // remote hosts surface the error chip instead.
     statusFailures += 1;
     if (shouldRestartEmbeddedEngine(conn.mode, statusFailures)) {
       statusFailures = 0;
@@ -128,7 +141,6 @@ function startResourceStream() {
   const host = displayHost.value;
   void sseStream("/api/resources/stream", {
     signal: resourceAbort.signal,
-    // Default (primary) target unless the bar is following a remote host.
     ...(displayingRemote.value && host?.baseUrl
       ? { target: { baseUrl: host.baseUrl, apiKey: host.apiKey } }
       : {}),
@@ -172,62 +184,113 @@ watch(
     if (conn.ready) startResourceStream();
   },
 );
+
+function toggle() {
+  open.value = !open.value;
+}
+function onDocPointer(e: MouseEvent) {
+  if (open.value && rootEl.value && !rootEl.value.contains(e.target as Node)) open.value = false;
+}
+function onKey(e: KeyboardEvent) {
+  if (e.key === "Escape" && open.value) open.value = false;
+}
+
 onMounted(() => {
   if (conn.ready) startTelemetry();
+  document.addEventListener("mousedown", onDocPointer);
+  document.addEventListener("keydown", onKey);
 });
-onUnmounted(stopTelemetry);
+onUnmounted(() => {
+  stopTelemetry();
+  document.removeEventListener("mousedown", onDocPointer);
+  document.removeEventListener("keydown", onKey);
+});
 </script>
 
 <template>
-  <footer
-    class="border-edge flex items-center gap-4 border-t bg-bath px-3"
-    role="complementary"
-    aria-label="Engine and resource status"
-  >
-    <span
-      class="data-mono"
-      :class="
-        conn.status === 'error'
-          ? 'text-stop'
-          : displayingRemote
-            ? 'text-halide'
-            : conn.ready
-              ? 'text-ink-2'
-              : 'text-ink-3'
-      "
-      :title="conn.error ?? displayHost?.baseUrl ?? conn.baseUrl ?? undefined"
-      role="status"
-      aria-live="polite"
+  <div ref="rootEl" class="relative">
+    <!-- popover: engine + telemetry, contained inside the app frame (§05) -->
+    <div
+      v-if="open"
+      class="ms-fade-up absolute bottom-[calc(100%+8px)] left-0 z-50 w-64 rounded-card border border-ce bg-bench p-3.5 shadow-raised"
+      role="dialog"
+      aria-label="Engine and resource status"
     >
-      <span class="sr-only">Engine status: </span>{{ engineChip }}
-    </span>
-
-    <template v-if="gpu">
-      <span class="data-mono text-ink-3">{{ gpu.name }}</span>
-      <div class="flex items-center gap-2" :title="`VRAM ${vramPct.toFixed(0)}%`">
-        <div class="h-1.5 w-20 overflow-hidden rounded-full bg-bench">
-          <div
-            class="h-full transition-[width] duration-500"
-            :class="vramCritical ? 'bg-stop' : 'bg-halide'"
-            :style="{ width: `${vramPct}%` }"
-          />
-        </div>
-        <span class="data-mono text-ink-3">
-          {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}
+      <div class="mb-2.5 flex items-center justify-between">
+        <span
+          class="data-mono"
+          :class="
+            conn.status === 'error'
+              ? 'text-stop'
+              : displayingRemote
+                ? 'text-halide'
+                : conn.ready
+                  ? 'text-ink-2'
+                  : 'text-ink-3'
+          "
+          :title="conn.error ?? displayHost?.baseUrl ?? conn.baseUrl ?? undefined"
+        >
+          {{ engineChip }}
+        </span>
+        <span class="edge-code">
+          queue {{ displayStatus.queueDepth ?? "—"
+          }}<template v-if="displayStatus.queueCapacity"
+            >/{{ displayStatus.queueCapacity }}</template
+          >
         </span>
       </div>
-    </template>
-    <span v-if="snapshot" class="data-mono text-ink-3">
-      RAM {{ formatGB(snapshot.system_ram.used) }}
-    </span>
 
-    <div class="flex-1" />
-    <span v-if="displayStatus.modelsLoaded.length" class="data-mono text-ink-3">
-      {{ displayStatus.modelsLoaded.join(" · ") }}
-    </span>
-    <span class="edge-code">
-      QUEUE {{ displayStatus.queueDepth ?? "—"
-      }}<template v-if="displayStatus.queueCapacity">/{{ displayStatus.queueCapacity }}</template>
-    </span>
-  </footer>
+      <template v-if="gpu">
+        <div class="mb-1 truncate text-caption text-ink-2" :title="gpu.name">{{ gpu.name }}</div>
+        <ProgressBar :value="vramPct" :tone="vramTone" :height="6" label="VRAM in use" />
+        <div class="mt-1.5 flex items-center justify-between">
+          <span class="edge-code">vram</span>
+          <span class="data-mono text-ink-3">
+            {{ formatGB(gpu.vram_used) }} / {{ formatGB(gpu.vram_total) }}
+          </span>
+        </div>
+      </template>
+      <p v-else class="text-caption text-ink-3">no gpu telemetry</p>
+
+      <div v-if="snapshot" class="mt-2 flex items-center justify-between">
+        <span class="edge-code">ram</span>
+        <span class="data-mono text-ink-3">{{ formatGB(snapshot.system_ram.used) }}</span>
+      </div>
+
+      <template v-if="displayStatus.modelsLoaded.length">
+        <div class="mt-3 mb-1 border-t border-edge pt-2">
+          <span class="edge-code">loaded</span>
+        </div>
+        <div class="flex flex-col gap-1">
+          <div v-for="m in displayStatus.modelsLoaded" :key="m" class="flex items-center gap-2">
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" />
+            <span class="min-w-0 truncate text-caption text-ink-2">{{ m }}</span>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- trigger: always visible; mini VRAM + queue when expanded, dot only when collapsed -->
+    <button
+      type="button"
+      data-test="status-trigger"
+      class="flex h-8 w-full items-center rounded-[9px] hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
+      :class="collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5'"
+      :aria-expanded="open"
+      aria-label="Engine and resource status"
+      :title="engineChip"
+      @click="toggle"
+    >
+      <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="dotClass" />
+      <template v-if="!collapsed">
+        <span v-if="gpu" class="min-w-0 flex-1">
+          <ProgressBar :value="vramPct" :tone="vramTone" :height="4" label="VRAM in use" />
+        </span>
+        <span v-else class="flex-1 text-left text-caption text-ink-3">status</span>
+        <span class="shrink-0 font-utility text-[9.5px] text-ink-3">
+          {{ displayStatus.queueDepth ?? 0 }}
+        </span>
+      </template>
+    </button>
+  </div>
 </template>

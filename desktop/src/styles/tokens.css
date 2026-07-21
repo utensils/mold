@@ -1,34 +1,46 @@
 /*
  * Safelight — mold desktop design tokens.
  *
- * The app is a digital darkroom. State color encodes development stage:
- *   Halide (cold)    = queued / latent
- *   Safelight (warm) = running / active / primary
- *   Rebate (paper)   = done / developed / text
- *   Stop             = failed / destructive
+ * The palette itself now lives in the shared Mold Studio design system
+ * (ui/tokens.css) so every surface — desktop, iOS, web, mobile web — draws
+ * from one source. This file only maps those shared CSS variables onto the
+ * Tailwind utility layer the desktop app already uses, and defines the few
+ * legacy aliases the shared system doesn't carry.
  *
- * Chrome inverts in light mode ("lights on"); media surfaces never invert —
- * prints are always viewed on Bath (see --color-print-surface).
+ * The app is a digital darkroom: Halide (cold) = queued/latent, Safelight
+ * (warm) = running/active/primary, Rebate (paper) = done/text, Stop = failed.
+ * Chrome inverts in light mode ("lights on"); media surfaces never invert.
  */
 @import "tailwindcss";
+@import "../../../ui/tokens.css";
 
 @theme {
-  /* Color */
+  /* Color — every hue resolves through the shared palette variables, so a
+     theme-family / appearance switch re-tints the whole utility layer. */
+  --color-desk: var(--desk);
   --color-bath: var(--bath);
   --color-bench: var(--bench);
+  --color-surface: var(--surface);
   --color-rebate: var(--rebate);
   --color-halide: var(--halide);
   --color-safelight: var(--safelight);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-stop: var(--stop);
   --color-ink: var(--rebate);
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
   --color-edge: var(--edge);
-  --color-control-edge: var(--control-edge);
+  --color-ce: var(--ce);
+  /* Alias kept so existing `*-control-edge` utilities keep resolving. */
+  --color-control-edge: var(--ce);
+  --color-sel-bg: var(--sel-bg);
+  --color-sel-ink: var(--sel-ink);
+  --color-card-hi: var(--card-hi);
   --color-on-accent: var(--on-accent);
-  --color-on-media: #f5efff;
+  --color-on-media: var(--on-media);
   /* Media surfaces never invert. */
-  --color-print-surface: #141110;
+  --color-print-surface: var(--print);
   /* Empty work areas follow the active chrome theme. */
   --color-empty-surface: var(--empty-surface);
 
@@ -56,90 +68,10 @@
   --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
+/* Legacy aliases the shared palette (ui/tokens.css) doesn't define. Kept in
+   :root — NOT @theme — because they only feed other CSS variables, never a
+   Tailwind utility of their own. */
 :root {
-  --bath: #141110;
-  --bench: #211b16;
-  --rebate: #efe7da;
-  --halide: #93a7b0;
-  --safelight: #f08a24;
-  --stop: #df6955;
-  --ink-2: color-mix(in srgb, var(--rebate) 78%, transparent);
-  --ink-3: color-mix(in srgb, var(--rebate) 68%, transparent);
-  --edge: color-mix(in srgb, var(--rebate) 8%, transparent);
-  --control-edge: color-mix(in srgb, var(--rebate) 37%, transparent);
-  --on-accent: #141110;
-  --empty-surface: #141110;
-  color-scheme: dark;
-}
-
-/* "Lights on": chrome inverts to warm paper; accents darken for AA contrast. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bath: #f2ebde;
-    --bench: #fbf6ec;
-    --rebate: #231d18;
-    --halide: #4f6570;
-    --safelight: #9b4d00;
-    --stop: #a93629;
-    --on-accent: #ffffff;
-    --empty-surface: #ffffff;
-    --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
-    color-scheme: light;
-  }
-}
-:root[data-theme="light"] {
-  --bath: #f2ebde;
-  --bench: #fbf6ec;
-  --rebate: #231d18;
-  --halide: #4f6570;
-  --safelight: #9b4d00;
-  --stop: #a93629;
-  --on-accent: #ffffff;
-  --empty-surface: #ffffff;
-  --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
-  color-scheme: light;
-}
-
-/* Mold — the website/logo family. The cyan-to-magenta identity is translated
- * into two solid semantic colors: cyan remains latent/reference, while
- * magenta marks active/selected work. Generated media keeps its fixed surface. */
-:root[data-theme-family="mold"] {
-  --bath: #12101d;
-  --bench: #201b30;
-  --rebate: #f5efff;
-  --halide: #67e8f9;
-  --safelight: #e879f9;
-  --stop: #fb7185;
-  --on-accent: #141110;
-  --empty-surface: #12101d;
-  --control-edge: color-mix(in srgb, var(--rebate) 37%, transparent);
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: light) {
-  :root[data-theme-family="mold"]:not([data-theme="dark"]) {
-    --bath: #f7f5fa;
-    --bench: #ffffff;
-    --rebate: #25182d;
-    --halide: #0e7490;
-    --safelight: #a21caf;
-    --stop: #b4233b;
-    --on-accent: #ffffff;
-    --empty-surface: #ffffff;
-    --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
-    color-scheme: light;
-  }
-}
-
-:root[data-theme-family="mold"][data-theme="light"] {
-  --bath: #f7f5fa;
-  --bench: #ffffff;
-  --rebate: #25182d;
-  --halide: #0e7490;
-  --safelight: #a21caf;
-  --stop: #b4233b;
-  --on-accent: #ffffff;
-  --empty-surface: #ffffff;
-  --control-edge: color-mix(in srgb, var(--rebate) 49%, transparent);
-  color-scheme: light;
+  --control-edge: var(--ce);
+  --empty-surface: var(--bath);
 }
