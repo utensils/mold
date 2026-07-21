@@ -431,6 +431,12 @@ onBeforeUnmount(() => {
   bottom: auto;
 }
 
+/* The cell deliberately clips intrinsic media. Keep keyboard focus inside that
+ * paint boundary so the shared tile's outward ring remains fully visible. */
+:deep(.ms-tile:focus-visible) {
+  outline-offset: -2px;
+}
+
 .gg__vbadge {
   display: inline-flex;
   align-items: center;
@@ -512,7 +518,7 @@ onBeforeUnmount(() => {
 }
 .gg__hit:focus-visible {
   outline: 2px solid var(--safelight);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .gg__check {
