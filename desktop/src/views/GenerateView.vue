@@ -1376,7 +1376,10 @@ onBeforeUnmount(() => {
           />
 
           <!-- Developing / result -->
-          <div v-else-if="job" class="flex min-h-0 flex-col items-center">
+          <!-- Must stretch to the canvas: the preview region's flex-1 height
+               is what the frame is measured against — a content-sized column
+               would collapse the frame to 0×0 (an invisible develop view). -->
+          <div v-else-if="job" class="flex h-full w-full min-h-0 flex-col items-center">
             <div
               ref="previewRegion"
               data-test="preview-region"
