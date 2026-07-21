@@ -13,6 +13,7 @@ pub mod progress;
 pub mod script_composer;
 pub mod settings;
 pub mod theme;
+pub mod theme_cards;
 pub mod timeline;
 pub mod widgets;
 
