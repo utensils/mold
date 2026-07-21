@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MoldClient` gains typed queue access: `list_queue()` wraps `GET /api/queue` and `cancel_queue_job(id)` wraps `DELETE /api/queue/:id`, backed by new `QueueJobEntryWire` / `QueueListingWire` wire types in `mold-ai-core`. The entry `state` stays a plain string and the additive fields (`gpu`, `target_gpu`, `seed_pinned`, `metadata`) default when absent, so older and newer servers interoperate; cancel errors carry the server's response body (e.g. the 409 already-running reason). Purely additive — no behavior change for existing consumers.
+
 ### Fixed
 
 - **Repeated source-fit generations now reuse preprocessed images.** Desktop, web, and iPhone keep per-Create-form caches for the expensive Upscale then fit pass and the final canvas fit/mask. Prompt, seed, and generation-parameter iterations no longer rerun or retransmit unchanged source preprocessing; changing dimensions only invalidates the fit layer, while source, upscaler, fit-policy, and mask changes invalidate the layers they affect. Concurrent Batch siblings share an in-flight pass, and processed bytes stay request-local so the editable source remains intact.
