@@ -241,13 +241,12 @@ mod apple {
         let mut found = Vec::new();
         for state in resolves {
             unsafe { DNSServiceRefDeallocate(state.service) };
-            if let Some(host) = state.host {
-                if !found
+            if let Some(host) = state.host
+                && !found
                     .iter()
                     .any(|item: &DiscoveredHost| item.host == host.host && item.port == host.port)
-                {
-                    found.push(host);
-                }
+            {
+                found.push(host);
             }
         }
         found.sort_by(|left, right| left.name.cmp(&right.name));
