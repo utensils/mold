@@ -180,6 +180,32 @@ describe("ConnectModal", () => {
     vi.useRealTimers();
   });
 
+  it("does not overlap slow discovery refreshes", async () => {
+    vi.useFakeTimers();
+    hostCapabilities.mockResolvedValue({ discovery: { can_browse: true } });
+    let finishRefresh: ((peers: []) => void) | undefined;
+    const slowRefresh = new Promise<[]>((resolve) => {
+      finishRefresh = resolve;
+    });
+    hostDiscoveryPeers
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(slowRefresh);
+
+    const w = mountModal();
+    await flushPromises();
+    await w.get('[data-test="type-lan"]').trigger("click");
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(hostDiscoveryPeers).toHaveBeenCalledTimes(2);
+
+    finishRefresh?.([]);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(hostDiscoveryPeers).toHaveBeenCalledTimes(3);
+    w.unmount();
+  });
+
   it("shows an on-voice empty result after scanning", async () => {
     hostCapabilities.mockResolvedValue({ discovery: { can_browse: true } });
     const w = mountModal();

@@ -9,9 +9,9 @@
 //!
 //! The module splits cleanly into pure, unit-testable helpers (name sanitising,
 //! env toggles, TXT assembly, resolved-service → [`DiscoveredServer`] mapping)
-//! and the two network entry points [`register`] and [`discover`] that talk to
-//! the `mdns-sd` daemon. Only the latter touch multicast, so the pure helpers
-//! carry the bulk of the test coverage.
+//! and the network entry points [`register`], [`start_browser`], and
+//! [`discover`] that talk to the `mdns-sd` daemon. Only those entry points
+//! touch multicast, so the pure helpers carry the bulk of the test coverage.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -387,11 +387,10 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
     Ok(MdnsGuard { daemon, fullname })
 }
 
-/// Browse the local network for mold servers for up to `timeout`.
+/// Start the server's long-lived DNS-SD browser and cache updater.
 ///
-/// Collects `ServiceResolved` events, dedupes by fullname (last wins), and
-/// returns the results sorted by name. Blocking — call from a blocking context
-/// (CLI, or `spawn_blocking` in async).
+/// The background thread tracks resolved and removed services by fullname.
+/// If browsing stops, it marks discovery unavailable and clears cached peers.
 pub fn start_browser(
     discovery: Arc<crate::state::DiscoveryState>,
     own_instance_id: Arc<String>,
@@ -401,6 +400,8 @@ pub fn start_browser(
         .browse(SERVICE_TYPE)
         .context("failed to start mDNS discovery browse")?;
 
+    discovery.set_can_browse(true);
+    let thread_discovery = discovery.clone();
     let thread = std::thread::Builder::new()
         .name("mold-mdns-browser".to_string())
         .spawn(move || {
@@ -445,13 +446,20 @@ pub fn start_browser(
                     _ => continue,
                 }
                 let peers = found.values().cloned().collect();
-                *discovery
+                *thread_discovery
                     .peers
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = peers;
             }
-        })
-        .context("failed to spawn mDNS discovery browser thread")?;
+            thread_discovery.mark_unavailable();
+        });
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            discovery.mark_unavailable();
+            return Err(error).context("failed to spawn mDNS discovery browser thread");
+        }
+    };
 
     tracing::info!(
         service_type = SERVICE_TYPE,

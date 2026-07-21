@@ -44,6 +44,7 @@ const scanning = ref(false);
 const discovered = ref<DiscoveryPeer[]>([]);
 const selectedPeer = ref<DiscoveryPeer | null>(null);
 let openSequence = 0;
+let discoveryRefreshInFlight = false;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
 
 const visiblePeers = computed(() => {
@@ -107,6 +108,8 @@ function toStep2() {
 }
 
 async function refreshDiscovery(initial = false) {
+  if (discoveryRefreshInFlight) return;
+  discoveryRefreshInFlight = true;
   if (initial) scanning.value = true;
   try {
     discovered.value = await hostDiscoveryPeers(originHost());
@@ -114,6 +117,7 @@ async function refreshDiscovery(initial = false) {
   } catch {
     error.value = "Couldn't scan this server's local network. Try again.";
   } finally {
+    discoveryRefreshInFlight = false;
     if (initial) scanning.value = false;
   }
 }

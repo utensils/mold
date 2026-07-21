@@ -492,10 +492,7 @@ pub async fn run_server(
     #[cfg(feature = "mdns")]
     let mdns_browser_guard = if mdns::enabled_from_env() {
         match mdns::start_browser(state.discovery.clone(), state.instance_id.clone()) {
-            Ok(guard) => {
-                state.discovery.set_can_browse(true);
-                Some(guard)
-            }
+            Ok(guard) => Some(guard),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "mDNS peer browsing disabled");
                 None

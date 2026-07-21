@@ -3395,9 +3395,6 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Server-reported capabilities the SPA uses to decide which UI affordances
-/// to surface. Additive — clients that deserialize older responses simply
-/// see `None` for fields they don't know about.
 /// One server-assisted DNS-SD result returned by `GET /api/discovery/peers`.
 /// The browser connects to `url` directly; the serving host is discovery-only
 /// and never proxies generation traffic.
