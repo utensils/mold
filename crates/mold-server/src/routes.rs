@@ -2339,9 +2339,30 @@ async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::
     Json(state.job_registry.snapshot())
 }
 
+/// Wrap any present JSON value (including `null`) in `Some`, so a field using
+/// this as its `deserialize_with` distinguishes *absent* (`None`) from an
+/// explicit `null` (`Some(None)`). Lets a `position`-only PATCH omit
+/// `target_gpu` without resetting the lane to Auto.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct QueuePatchRequest {
-    target_gpu: Option<usize>,
+    /// Preferred GPU lane. Absent leaves the lane unchanged; `null` means Auto;
+    /// a number pins that ordinal. The double `Option` distinguishes absent
+    /// from an explicit `null` so a `position`-only reorder never clobbers it.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<usize>)]
+    target_gpu: Option<Option<usize>>,
+    /// New 0-based index for the job among the queued jobs. Clamped into range
+    /// (a large value sends it to the back). Absent means no reorder.
+    #[serde(default)]
+    position: Option<usize>,
 }
 
 #[utoipa::path(
@@ -2361,7 +2382,7 @@ async fn patch_queue_job(
     Path(id): Path<String>,
     Json(req): Json<QueuePatchRequest>,
 ) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
-    if let Some(target) = req.target_gpu {
+    if let Some(Some(target)) = req.target_gpu {
         let available = state
             .gpu_pool
             .workers
@@ -2374,19 +2395,40 @@ async fn patch_queue_job(
         }
     }
 
-    state
-        .job_registry
-        .set_target_gpu(&id, req.target_gpu)
-        .map_err(|e| match e {
-            crate::job_registry::TargetGpuUpdateError::NotFound => {
-                ApiError::queue_job_not_found(format!("queue job {id} not found"))
-            }
-            crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
-                ApiError::queue_job_running(format!(
-                    "queue job {id} is already running; lane changes only apply to queued jobs"
-                ))
-            }
-        })?;
+    // Both edits are independent and additive — apply whichever the request
+    // supplied. `target_gpu` only when the field was present (absent leaves the
+    // lane untouched); `position` only when a reorder was requested.
+    if let Some(target_gpu) = req.target_gpu {
+        state
+            .job_registry
+            .set_target_gpu(&id, target_gpu)
+            .map_err(|e| match e {
+                crate::job_registry::TargetGpuUpdateError::NotFound => {
+                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                }
+                crate::job_registry::TargetGpuUpdateError::AlreadyRunning => {
+                    ApiError::queue_job_running(format!(
+                        "queue job {id} is already running; lane changes only apply to queued jobs"
+                    ))
+                }
+            })?;
+    }
+
+    if let Some(position) = req.position {
+        state
+            .job_registry
+            .reorder_queued(&id, position)
+            .map_err(|e| match e {
+                crate::job_registry::QueueReorderError::NotFound => {
+                    ApiError::queue_job_not_found(format!("queue job {id} not found"))
+                }
+                crate::job_registry::QueueReorderError::AlreadyRunning => {
+                    ApiError::queue_job_running(format!(
+                        "queue job {id} is already running; only queued jobs can be reordered"
+                    ))
+                }
+            })?;
+    }
 
     let entry = state
         .job_registry
