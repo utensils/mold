@@ -24,7 +24,7 @@ import {
   outputFormatsForFamily,
   pruneRequestForFamily,
 } from "./capabilities";
-import { coerceSourceFitForMaskless, type SourceFitPolicy } from "./sourceFit";
+import { coerceSourceFitForMaskless, type SourceFitPolicy } from "@studio/lib/sourceFit";
 import { findInstalledModel } from "./generateModels";
 
 /** A LoRA row in the stack: wire fields plus display metadata (name, triggers). */

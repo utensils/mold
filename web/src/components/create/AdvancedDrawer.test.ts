@@ -416,8 +416,7 @@ describe("AdvancedDrawer interactions", () => {
 
     await wrapper.get("[data-test='upscale-toggle']").trigger("click");
     let next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
-      | GenerateFormState
-      | undefined;
+      GenerateFormState | undefined;
     Object.assign(form.state.value, next);
     expect(form.state.value.upscaleModel).toBe("real-esrgan-x4plus:fp16");
     expect(form.toRequest().upscale_model).toBe("real-esrgan-x4plus:fp16");
@@ -425,8 +424,7 @@ describe("AdvancedDrawer interactions", () => {
     await wrapper.setProps({ modelValue: { ...form.state.value } });
     await wrapper.get("[data-test='upscale-toggle']").trigger("click");
     next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
-      | GenerateFormState
-      | undefined;
+      GenerateFormState | undefined;
     Object.assign(form.state.value, next);
     expect(form.state.value.upscaleModel).toBe("");
     expect(form.toRequest().upscale_model).toBeUndefined();

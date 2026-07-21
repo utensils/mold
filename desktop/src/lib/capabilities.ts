@@ -115,14 +115,6 @@ export function isVideoFamily(family: string): boolean {
   return generationCapabilitiesForFamily(family).supportsVideo;
 }
 
-export function supportsNegativePrompt(family: string): boolean {
-  return generationCapabilitiesForFamily(family).supportsNegativePrompt;
-}
-
-export function supportsLora(family: string): boolean {
-  return generationCapabilitiesForFamily(family).supportsLora;
-}
-
 export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
 }

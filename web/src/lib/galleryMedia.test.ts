@@ -95,9 +95,7 @@ describe("resolveThumbnailSrc", () => {
 
 describe("resolveStreamableSrc", () => {
   it("returns the plain direct URL for a keyless host", async () => {
-    const src = await resolveStreamableSrc(keylessRemote, "clip.mp4", {
-      allowLegacyBlob: false,
-    });
+    const src = await resolveStreamableSrc(keylessRemote, "clip.mp4");
     expect(src).toBe("http://hal9000:7680/api/gallery/image/clip.mp4");
   });
 
@@ -114,9 +112,7 @@ describe("resolveStreamableSrc", () => {
         }),
       };
     });
-    const src = await resolveStreamableSrc(authedRemote, "clip.mp4", {
-      allowLegacyBlob: false,
-    });
+    const src = await resolveStreamableSrc(authedRemote, "clip.mp4");
     const url = new URL(src);
     expect(url.origin + url.pathname).toBe(
       "http://halcyon:7680/api/gallery/image/clip.mp4",
@@ -135,21 +131,18 @@ describe("resolveStreamableSrc", () => {
         auth_required: false,
       }),
     }));
-    const src = await resolveStreamableSrc(authedRemote, "clip.mp4", {
-      allowLegacyBlob: false,
-    });
+    const src = await resolveStreamableSrc(authedRemote, "clip.mp4");
     expect(src).toBe("http://halcyon:7680/api/gallery/image/clip.mp4");
   });
 
-  it("falls back to a bounded blob for images on ticket-less hosts", async () => {
+  it("rejects images on hosts without the current ticket endpoint", async () => {
     mockFetch((url) => {
       if (url.endsWith("/media-token")) return { ok: false, status: 404 };
       return { ok: true, blob: async () => new Blob(["img"]) };
     });
-    const src = await resolveStreamableSrc(authedRemote, "cat.png", {
-      allowLegacyBlob: true,
-    });
-    expect(src).toBe("blob:mock-1");
+    await expect(
+      resolveStreamableSrc(authedRemote, "cat.png"),
+    ).rejects.toBeInstanceOf(MediaUpgradeRequiredError);
   });
 
   it("raises MediaUpgradeRequiredError for videos on ticket-less hosts", async () => {
@@ -158,9 +151,7 @@ describe("resolveStreamableSrc", () => {
       throw new Error("must not blob-fetch a video");
     });
     await expect(
-      resolveStreamableSrc(authedRemote, "clip.mp4", {
-        allowLegacyBlob: false,
-      }),
+      resolveStreamableSrc(authedRemote, "clip.mp4"),
     ).rejects.toBeInstanceOf(MediaUpgradeRequiredError);
   });
 });

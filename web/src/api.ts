@@ -8,11 +8,9 @@ import type {
   ExpandRequestWire,
   ExpandResponseWire,
   GalleryImage,
-  GenerationMemoryEstimate,
   GenerateRequestWire,
   ModelInfoExtended,
   ModelComponentsResponse,
-  ServerCapabilities,
   ServerStatus,
   SseChainCompleteEvent,
   SseCompleteEvent,
@@ -52,24 +50,6 @@ export async function deleteGalleryImage(filename: string): Promise<void> {
   }
 }
 
-/**
- * Fetch server capabilities. Delete is always enabled on current builds;
- * the capability struct is kept so older clients still see a stable shape.
- */
-export async function fetchCapabilities(): Promise<ServerCapabilities> {
-  try {
-    const res = await fetch(`${base}/api/capabilities`);
-    if (!res.ok) return defaultCapabilities();
-    return (await res.json()) as ServerCapabilities;
-  } catch {
-    return defaultCapabilities();
-  }
-}
-
-function defaultCapabilities(): ServerCapabilities {
-  return { gallery: { can_delete: true } };
-}
-
 export interface ChainLimits {
   model: string;
   frames_per_clip_cap: number;
@@ -96,21 +76,6 @@ export async function fetchModels(
   const res = await fetch(`${base}/api/models`, { signal });
   if (!res.ok) throw new Error(`GET /api/models failed: ${res.status}`);
   return (await res.json()) as ModelInfoExtended[];
-}
-
-export async function fetchGenerationEstimate(
-  req: GenerateRequestWire,
-  signal?: AbortSignal,
-): Promise<GenerationMemoryEstimate> {
-  const res = await fetch(`${base}/api/generate/estimate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(req),
-    signal,
-  });
-  if (!res.ok)
-    throw new Error(`POST /api/generate/estimate failed: ${res.status}`);
-  return (await res.json()) as GenerationMemoryEstimate;
 }
 
 export async function fetchModelComponents(
@@ -162,8 +127,8 @@ export async function updateQueueJobTargetGpu(
 
 /**
  * Move a queued job to a new zero-based position via `PATCH /api/queue/:id`
- * with a `position` field. Gated behind `capabilities.queue.can_reorder` —
- * older servers reject the field, so callers must check the capability first.
+ * with a `position` field. Callers check `capabilities.queue.can_reorder`
+ * because queue reordering is an optional current-server capability.
  */
 export async function reorderQueueJob(
   id: string,
@@ -466,17 +431,6 @@ export function downloadsStreamUrl(): string {
 }
 
 export type { DownloadJobWire, DownloadsListingWire };
-// ── Resource telemetry (Agent B) ─────────────────────────────────────────────
-import type { ResourceSnapshot } from "./types";
-
-export async function fetchResources(
-  signal?: AbortSignal,
-): Promise<ResourceSnapshot> {
-  const res = await fetch("/api/resources", { signal });
-  if (!res.ok) throw new Error(`fetchResources failed: ${res.status}`);
-  return (await res.json()) as ResourceSnapshot;
-}
-
 // ─── Catalog (live HF + Civitai) ──────────────────────────────────────────
 import type {
   CatalogEntryWire,
