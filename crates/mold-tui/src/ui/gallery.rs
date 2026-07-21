@@ -3,37 +3,22 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui_image::picker::ProtocolType;
 use ratatui_image::{Image, Resize, StatefulImage};
 
-use crate::app::{App, GalleryEntry, GalleryViewMode};
-use crate::ui::widgets::{kv_row_line, panel_block};
+use crate::app::{App, GalleryViewMode};
+use crate::ui::library_details::{show_details_panel, DETAILS_PANEL_W};
+use crate::ui::widgets::panel_block;
 
 /// Width of a single gallery tile.
 pub(crate) const CELL_W: u16 = 24;
 /// Height of a single gallery tile including its 2 border rows.
 ///
 /// The cell used to reserve two rows for a filename label, which never fit
-/// on disk-era names and was redundant with the Selected panel below the
-/// grid. Removing the label lets the thumbnail fill the full inner area
-/// *and* fits one extra tile row on typical terminal heights.
+/// on disk-era names and was redundant with the old Selected panel below
+/// the grid. Removing the label lets the thumbnail fill the full inner
+/// area *and* fits one extra tile row on typical terminal heights.
 ///
 /// Shared with the mouse hit-test in `app::handle_mouse` so click
 /// detection can never drift from the rendered cell size.
 pub(crate) const CELL_H: u16 = 12;
-
-/// Height of the bottom row (Selected + Prompt panels) in the Grid view.
-const GRID_BOTTOM_HEIGHT: u16 = 8;
-
-/// Minimum total Gallery area height that still leaves room for at least one
-/// thumbnail *and* the Selected + Prompt inspector row. The grid panel frames
-/// a thumbnail in `CELL_H + 2` cells (cell + top/bottom border), so we need
-/// `GRID_BOTTOM_HEIGHT + CELL_H + 2` before the inspector is safe to show.
-const GRID_INSPECTOR_MIN_HEIGHT: u16 = GRID_BOTTOM_HEIGHT + CELL_H + 2;
-
-/// Whether the Grid view has enough vertical room to render the inspector row
-/// without starving the thumbnail grid. Extracted as a pure helper so the
-/// threshold is exercised by unit tests — see the `#[cfg(test)]` block below.
-fn show_grid_inspector(area_height: u16, has_entries: bool) -> bool {
-    has_entries && area_height >= GRID_INSPECTOR_MIN_HEIGHT
-}
 
 /// Compute a centered sub-rect for an image within the thumbnail area.
 ///
@@ -77,7 +62,7 @@ fn centered_thumb_rect(
     Rect::new(area.x + offset_x, area.y + offset_y, used_w, used_h)
 }
 
-fn center_rect(area: Rect, used_w: u16, used_h: u16) -> Rect {
+pub(crate) fn center_rect(area: Rect, used_w: u16, used_h: u16) -> Rect {
     let width = used_w.min(area.width);
     let height = used_h.min(area.height);
     let offset_x = area.width.saturating_sub(width) / 2;
@@ -94,38 +79,35 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_grid(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Top: the thumbnail grid. Bottom: Selected metadata + Prompt, matching
-    // the design system's gallery wireframe. If the area is too short to
-    // fit both the inspector *and* at least one thumbnail cell the inspector
-    // is suppressed — see `show_grid_inspector`/`GRID_INSPECTOR_MIN_HEIGHT`.
-    let show_bottom = show_grid_inspector(area.height, !app.gallery.entries.is_empty());
-    let constraints = if show_bottom {
-        vec![
-            Constraint::Min(CELL_H + 2),
-            Constraint::Length(GRID_BOTTOM_HEIGHT),
-        ]
+    // Left: the thumbnail grid. Right: the Details side panel (selected
+    // print's thumbnail, prompt, KV rows incl. Machine, action hints).
+    // The panel is suppressed on narrow terminals so the grid always
+    // keeps at least one tile column — see `show_details_panel`.
+    let show_details = show_details_panel(area.width) && !app.gallery.entries.is_empty();
+    if show_details {
+        let [grid_area, details_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(CELL_W + 2),
+                Constraint::Length(DETAILS_PANEL_W),
+            ])
+            .areas(area);
+        render_grid_panel(frame, app, grid_area);
+        crate::ui::library_details::render(frame, app, details_area);
     } else {
-        vec![Constraint::Min(1)]
-    };
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    render_grid_panel(frame, app, rows[0]);
-    if show_bottom {
-        render_grid_bottom_row(frame, app, rows[1]);
+        render_grid_panel(frame, app, area);
     }
 }
 
 fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
 
-    let hint = if app.gallery.entries.is_empty() {
-        None
-    } else {
-        Some(format!("{} images", app.gallery.entries.len()))
-    };
+    let hint = crate::gallery_scan::library_hint(
+        &app.gallery.entries,
+        &app.gallery.filter,
+        app.gallery.filtered.len(),
+        app.gallery.offline_hosts,
+    );
     let block = panel_block(theme, "Library", true, hint.as_deref());
 
     let inner = block.inner(area);
@@ -151,13 +133,30 @@ fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // The grid shows the filtered list; caches stay keyed by entry index.
+    if app.gallery.filtered.is_empty() {
+        let empty = Paragraph::new(format!("No prints match /{}", app.gallery.filter))
+            .style(theme.dim())
+            .alignment(Alignment::Center);
+        let center = Rect {
+            x: inner.x,
+            y: inner.y + inner.height / 2,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(empty, center);
+        return;
+    }
+
     // Compute grid dimensions
     let cols = (inner.width / CELL_W).max(1) as usize;
     app.gallery.grid_cols = cols;
     let visible_rows = (inner.height / CELL_H).max(1) as usize;
 
-    // Ensure selected item is visible
-    let selected_row = app.gallery.selected / cols;
+    // Ensure the selected item is visible (positions are within the
+    // filtered list — the same coordinate space the mouse hit-test uses).
+    let selected_pos = app.gallery.selected_pos().unwrap_or(0);
+    let selected_row = selected_pos / cols;
     if selected_row < app.gallery.grid_scroll {
         app.gallery.grid_scroll = selected_row;
     } else if selected_row >= app.gallery.grid_scroll + visible_rows {
@@ -168,10 +167,11 @@ fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     for vis_row in 0..visible_rows {
         let grid_row = app.gallery.grid_scroll + vis_row;
         for col in 0..cols {
-            let idx = grid_row * cols + col;
-            if idx >= app.gallery.entries.len() {
+            let pos = grid_row * cols + col;
+            if pos >= app.gallery.filtered.len() {
                 break;
             }
+            let idx = app.gallery.filtered[pos];
 
             let cell_x = inner.x + (col as u16) * CELL_W;
             let cell_y = inner.y + (vis_row as u16) * CELL_H;
@@ -186,111 +186,6 @@ fn render_grid_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
             render_grid_cell(frame, app, cell_area, idx, is_selected);
         }
-    }
-}
-
-/// Render the Selected + Prompt panels beneath the gallery grid.
-///
-/// The row is 8 cells tall (6 content + 2 borders). Selected holds file
-/// metadata as KV rows; Prompt shows the positive prompt plus a single dim
-/// `neg: …` line for the negative prompt when present.
-fn render_grid_bottom_row(frame: &mut Frame, app: &App, area: Rect) {
-    let [selected_area, prompt_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .areas(area);
-
-    let entry = app.gallery.entries.get(app.gallery.selected);
-    render_selected_panel(frame, &app.theme, entry, selected_area);
-    render_prompt_panel(frame, &app.theme, entry, prompt_area);
-}
-
-fn render_selected_panel(
-    frame: &mut Frame,
-    theme: &crate::ui::theme::Theme,
-    entry: Option<&GalleryEntry>,
-    area: Rect,
-) {
-    let block = panel_block(theme, "Selected", false, None);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let Some(entry) = entry else {
-        let empty = Paragraph::new("No image selected").style(theme.dim());
-        frame.render_widget(empty, inner);
-        return;
-    };
-
-    let filename = entry.filename();
-    let dim = format!("{}×{}", entry.metadata.width, entry.metadata.height);
-    let seed = entry.metadata.seed.to_string();
-    let steps = entry.metadata.steps.to_string();
-
-    let lines = vec![
-        kv_row_line(theme, "File", &filename, 7, false),
-        kv_row_line(theme, "Model", &entry.metadata.model, 7, false),
-        kv_row_line(theme, "Dim", &dim, 7, false),
-        kv_row_line(theme, "Steps", &steps, 7, false),
-        kv_row_line(theme, "Seed", &seed, 7, true),
-    ];
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, inner);
-}
-
-fn render_prompt_panel(
-    frame: &mut Frame,
-    theme: &crate::ui::theme::Theme,
-    entry: Option<&GalleryEntry>,
-    area: Rect,
-) {
-    let block = panel_block(theme, "Prompt", false, None);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let Some(entry) = entry else {
-        let empty = Paragraph::new("No image selected").style(theme.dim());
-        frame.render_widget(empty, inner);
-        return;
-    };
-
-    let has_neg = entry.metadata.negative_prompt.is_some();
-    let prompt_rows = if has_neg {
-        inner.height.saturating_sub(1).max(1)
-    } else {
-        inner.height
-    };
-
-    let prompt = Paragraph::new(entry.metadata.prompt.clone())
-        .style(Style::default().fg(theme.text))
-        .wrap(Wrap { trim: true });
-    let prompt_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: prompt_rows,
-    };
-    frame.render_widget(prompt, prompt_area);
-
-    if let (Some(neg), true) = (
-        entry.metadata.negative_prompt.as_deref(),
-        inner.height > prompt_rows,
-    ) {
-        let neg_line = Paragraph::new(format!("neg: {neg}")).style(theme.dim());
-        let neg_area = Rect {
-            x: inner.x,
-            y: inner.y + prompt_rows,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(neg_line, neg_area);
     }
 }
 
@@ -415,10 +310,7 @@ fn render_grid_cell(frame: &mut Frame, app: &mut App, area: Rect, idx: usize, se
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{
-        center_rect, centered_thumb_rect, render_grid_cell, show_grid_inspector, CELL_H, CELL_W,
-        GRID_INSPECTOR_MIN_HEIGHT,
-    };
+    use super::{center_rect, centered_thumb_rect, render_grid_cell, CELL_H, CELL_W};
     use crate::app::{App, GalleryEntry};
     use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::layout::Rect;
@@ -527,6 +419,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            origins: Vec::new(),
         }];
         // No thumbnail loaded — we only care about the text rendering path.
         app.gallery.thumbnail_states = vec![None];
@@ -585,6 +478,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            origins: Vec::new(),
         }];
         app.gallery.thumbnail_states = vec![Some(app.picker.new_resize_protocol(img.clone()))];
         app.gallery.thumb_dimensions = vec![Some((512, 1024))];
@@ -618,36 +512,102 @@ mod tests {
         std::fs::remove_file(&thumb_path).ok();
     }
 
-    // ── Codex P2: inspector must not starve the thumbnail grid ───────
+    // ── Details side panel layout contract ───────────────────────────
+    // The old bottom Selected + Prompt inspector row is retired; its
+    // content lives in the Details side panel. These tests pin the grid
+    // split so the panel can never starve the grid of its one tile column.
 
     #[test]
-    fn show_grid_inspector_hidden_below_minimum_height() {
-        // Minimum is `GRID_BOTTOM_HEIGHT (8) + CELL_H + 2 borders`.
-        // At heights below that, showing the inspector would leave zero
-        // room for a thumbnail row.
-        let min = GRID_INSPECTOR_MIN_HEIGHT;
-        assert!(!show_grid_inspector(0, true));
-        assert!(!show_grid_inspector(min.saturating_sub(1), true));
-        assert!(!show_grid_inspector(min.saturating_sub(10), true));
+    #[serial_test::serial(mold_env)]
+    fn grid_shows_details_panel_when_wide_enough() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        app.gallery.entries = vec![GalleryEntry {
+            path: PathBuf::from("wide-terminal-print.png"),
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            origins: Vec::new(),
+        }];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
+
+        let wide = CELL_W + 2 + crate::ui::library_details::DETAILS_PANEL_W;
+        let backend = TestBackend::new(wide, CELL_H + 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_grid(frame, &mut app, Rect::new(0, 0, wide, CELL_H + 4));
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("Details"),
+            "wide grid must render the Details side panel; got: {rendered:?}"
+        );
     }
 
     #[test]
-    fn show_grid_inspector_visible_at_and_above_minimum_height() {
-        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT, true));
-        assert!(show_grid_inspector(GRID_INSPECTOR_MIN_HEIGHT + 20, true));
-    }
+    #[serial_test::serial(mold_env)]
+    fn grid_hides_details_panel_below_min_width() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
 
-    #[test]
-    fn show_grid_inspector_hidden_when_gallery_is_empty() {
-        // With no entries there's nothing to inspect; skip the bottom row so
-        // the empty-state message fills the whole panel.
-        assert!(!show_grid_inspector(100, false));
-    }
+        let mut picker = Picker::from_fontsize((8, 16));
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        let mut app = App::new(None, true, picker).unwrap();
+        app.gallery.entries = vec![GalleryEntry {
+            path: PathBuf::from("narrow-terminal-print.png"),
+            metadata: test_metadata(64, 64),
+            generation_time_ms: None,
+            timestamp: 0,
+            server_url: None,
+            origins: Vec::new(),
+        }];
+        app.gallery.thumbnail_states = vec![None];
+        app.gallery.thumb_dimensions = vec![None];
+        app.gallery.thumb_fixed_cache = vec![None];
+        app.gallery.refresh_filter();
 
-    // Compile-time guard: if someone bumps CELL_H or GRID_BOTTOM_HEIGHT
-    // without updating the threshold, the build breaks instead of the
-    // gallery quietly hiding thumbnails at runtime.
-    const _: () = assert!(GRID_INSPECTOR_MIN_HEIGHT >= CELL_H + 2);
+        let narrow = CELL_W + 2 + crate::ui::library_details::DETAILS_PANEL_W - 1;
+        let backend = TestBackend::new(narrow, CELL_H + 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_grid(frame, &mut app, Rect::new(0, 0, narrow, CELL_H + 4));
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            !rendered.contains("Details"),
+            "narrow grid must suppress the Details side panel; got: {rendered:?}"
+        );
+    }
 }
 
 fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
