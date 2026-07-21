@@ -34,6 +34,14 @@ const entry: GalleryImage = {
 };
 
 const submitMock = vi.hoisted(() => vi.fn());
+const upscaleStreamMock = vi.hoisted(() =>
+  vi.fn<
+    (
+      request: unknown,
+      handlers: { onComplete: (event: { image: string }) => void },
+    ) => Promise<void>
+  >(async () => undefined),
+);
 const createChainJobMock = vi.hoisted(() =>
   vi.fn(async () => ({ job_id: "job-1" })),
 );
@@ -51,7 +59,7 @@ vi.mock("../api", () => ({
   fetchQueue: vi.fn(async () => ({ entries: [] })),
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
-  upscaleStream: vi.fn(async () => undefined),
+  upscaleStream: upscaleStreamMock,
   fetchPromptHistory: vi.fn(async () => []),
   imageUrl: (name: string) => `/api/gallery/image/${name}`,
   thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
@@ -120,6 +128,8 @@ describe("GeneratePage layout and behavior", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    upscaleStreamMock.mockReset();
+    upscaleStreamMock.mockResolvedValue(undefined);
     createChainJobMock.mockClear();
     createChainJobMock.mockResolvedValue({ job_id: "job-1" });
     chainJobDetailRef.value = null;
@@ -194,6 +204,40 @@ describe("GeneratePage layout and behavior", () => {
     expect(req.edit_images).toEqual(["TARGET"]);
     expect(req.mask_image).toBeUndefined();
     expect(req.source_image).toBeUndefined();
+  });
+
+  it("reuses source preprocessing without replacing the editable source", async () => {
+    upscaleStreamMock.mockImplementation(async (_request, handlers) => {
+      handlers.onComplete({ image: "UPSCALED" });
+    });
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.frames = 9;
+    form.state.value.imageAttachments = [
+      { kind: "upload", filename: "source.png", base64: "SOURCE" },
+    ];
+    form.state.value.sourceFitPolicy = {
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x4plus:fp16",
+      fit: { mode: "crop-fill" },
+    };
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await vi.waitFor(() => expect(submitMock).toHaveBeenCalledTimes(2));
+
+    expect(upscaleStreamMock).toHaveBeenCalledTimes(1);
+    expect(
+      submitMock.mock.calls.map(([request]) => request.source_image),
+    ).toEqual(["UPSCALED", "UPSCALED"]);
+    expect(form.state.value.imageAttachments[0]).toMatchObject({
+      filename: "source.png",
+      base64: "SOURCE",
+    });
   });
 
   it("asks before replacing a source image while a mask exists", async () => {

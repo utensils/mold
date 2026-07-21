@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Rect, SourceFitTransform } from "./sourceFit";
+import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
+import type { Rect, SourceFitPolicy, SourceFitTransform } from "./sourceFit";
 import {
   applySourceFitPreprocess,
   drawableFitPolicy,
   type SourceFitCanvasOps,
+  type SourceFitInput,
 } from "./sourceFitPreprocess";
 
 /** Canvas ops fake: pure string transforms so assertions stay exact. */
@@ -139,6 +141,125 @@ describe("applySourceFitPreprocess", () => {
     // drawableFitPolicy maps upscale-then-fit to pad-repaint (web parity),
     // so the pad mask is generated.
     expect(result.mask).toBe("mask(none)");
+  });
+
+  it("reuses cached upscale and fit results for unchanged inputs", async () => {
+    const sizes = new Map([
+      ["SRC", { width: 640, height: 480 }],
+      ["up(SRC)", { width: 1280, height: 960 }],
+    ]);
+    const ops = fakeOps({ width: 0, height: 0 });
+    ops.imageSize = (b64: string) => Promise.resolve(sizes.get(b64)!);
+    const upscale = vi.fn((image: string) => Promise.resolve(`up(${image})`));
+    const cache = new SourceFitPreprocessCache();
+    const input: SourceFitInput = {
+      source: "SRC",
+      mask: null,
+      policy: {
+        mode: "upscale-then-fit",
+        upscalerModel: "real-esrgan-x2plus:fp16",
+        fit: { mode: "pad-repaint" },
+      },
+      target: TARGET,
+    };
+
+    const first = await applySourceFitPreprocess(input, { ops, upscale, cache });
+    const second = await applySourceFitPreprocess(input, { ops, upscale, cache });
+
+    expect(second).toEqual(first);
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(ops.fitCalls).toHaveLength(1);
+    expect(ops.maskCalls).toHaveLength(1);
+  });
+
+  it("keeps the upscale cache across target changes but invalidates the fit", async () => {
+    const sizes = new Map([
+      ["SRC", { width: 640, height: 480 }],
+      ["up(SRC)", { width: 1280, height: 960 }],
+    ]);
+    const ops = fakeOps({ width: 0, height: 0 });
+    ops.imageSize = (b64: string) => Promise.resolve(sizes.get(b64)!);
+    const upscale = vi.fn((image: string) => Promise.resolve(`up(${image})`));
+    const cache = new SourceFitPreprocessCache();
+    const policy: SourceFitPolicy = {
+      mode: "upscale-then-fit",
+      upscalerModel: "real-esrgan-x2plus:fp16",
+      fit: { mode: "crop-fill" },
+    };
+
+    await applySourceFitPreprocess(
+      { source: "SRC", mask: null, policy, target: TARGET },
+      { ops, upscale, cache },
+    );
+    await applySourceFitPreprocess(
+      { source: "SRC", mask: null, policy, target: { width: 768, height: 768 } },
+      { ops, upscale, cache },
+    );
+
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(ops.fitCalls).toHaveLength(2);
+  });
+
+  it("invalidates cache layers for source, model, fit policy, and mask changes", async () => {
+    const ops = fakeOps({ width: 640, height: 480 });
+    const upscale = vi.fn((image: string, model: string) =>
+      Promise.resolve(`up(${model}:${image})`),
+    );
+    ops.imageSize = () => Promise.resolve({ width: 640, height: 480 });
+    const cache = new SourceFitPreprocessCache();
+    const run = (
+      source: string,
+      model: string,
+      fit: Exclude<SourceFitPolicy, { mode: "upscale-then-fit" }>,
+      mask: string | null,
+    ) =>
+      applySourceFitPreprocess(
+        {
+          source,
+          mask,
+          policy: { mode: "upscale-then-fit", upscalerModel: model, fit },
+          target: TARGET,
+        },
+        { ops, upscale, cache },
+      );
+
+    await run("SRC", "up:a", { mode: "crop-fill" }, null);
+    await run("SRC", "up:a", { mode: "pad-fit" }, null);
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(ops.fitCalls).toHaveLength(2);
+
+    await run("SRC", "up:a", { mode: "pad-fit" }, "MASK");
+    expect(upscale).toHaveBeenCalledTimes(1);
+    expect(ops.fitCalls).toHaveLength(3);
+
+    await run("SRC", "up:b", { mode: "pad-fit" }, "MASK");
+    await run("OTHER", "up:b", { mode: "pad-fit" }, "MASK");
+    expect(upscale).toHaveBeenCalledTimes(3);
+  });
+
+  it("shares an in-flight cache entry between concurrent batch siblings", async () => {
+    const ops = fakeOps({ width: 1024, height: 1024 });
+    let finish!: (value: string) => void;
+    const upscale = vi.fn(() => new Promise<string>((resolve) => (finish = resolve)));
+    const cache = new SourceFitPreprocessCache();
+    const input: SourceFitInput = {
+      source: "SRC",
+      mask: null,
+      policy: {
+        mode: "upscale-then-fit",
+        upscalerModel: "up:model",
+        fit: { mode: "crop-fill" },
+      },
+      target: TARGET,
+    };
+
+    const first = applySourceFitPreprocess(input, { ops, upscale, cache });
+    const second = applySourceFitPreprocess(input, { ops, upscale, cache });
+    await vi.waitFor(() => expect(upscale).toHaveBeenCalledTimes(1));
+    finish("UPSCALED");
+    await Promise.all([first, second]);
+
+    expect(upscale).toHaveBeenCalledTimes(1);
   });
 
   it("upscale-then-fit without an upscaler model skips the upscale but still fits", async () => {

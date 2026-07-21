@@ -29,6 +29,7 @@ import { blobToBase64 } from "../lib/base64";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { ASPECTS } from "@ui/lib/resolution";
+import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
   createChainJob,
   deleteGalleryImage,
@@ -480,121 +481,154 @@ function openLatestResult() {
   if (latestDone.value) openJob(latestDone.value);
 }
 
-// ── Source preprocessing / fitting (preserved) ────────────────────────
-async function preprocessSourceIfNeeded(): Promise<boolean> {
-  const policy = form.state.value.sourceFitPolicy;
-  const source = form.state.value.imageAttachments[0];
-  if (policy?.mode !== "upscale-then-fit" || !source) return true;
-  const model = policy.upscalerModel || form.state.value.upscaleModel;
-  if (!model) return true;
-  preprocessingStatus.value = `Preprocessing source with ${model}`;
-  let completed = false;
-  await upscaleStream(
-    { model, image: source.base64, output_format: "png" },
-    {
-      onProgress: (evt) => {
-        if (evt.type === "stage_start") preprocessingStatus.value = evt.name;
-        if (evt.type === "stage_done")
-          preprocessingStatus.value = `${evt.name} (done)`;
-        if (evt.type === "info") preprocessingStatus.value = evt.message;
-      },
-      onComplete: (evt) => {
-        form.state.value.imageAttachments = [
-          {
-            ...source,
-            filename: source.filename.replace(/(\.[^.]+)?$/, "-prefit.png"),
-            base64: evt.image,
-            width: undefined,
-            height: undefined,
-            mime: "image/png",
-          },
-        ];
-        completed = true;
-      },
-      onError: (err) => {
-        composerError.value =
-          err.kind === "http"
-            ? `Source preprocessing failed: ${err.body}`
-            : `Source preprocessing failed: ${err.message}`;
-      },
-    },
-  );
-  preprocessingStatus.value = null;
-  return completed;
-}
+// ── Source preprocessing / fitting (desktop/mobile parity) ────────────
+type PreparedStillSource = {
+  source: SourceImageState | null;
+  mask: SourceImageState | null;
+};
 
-async function fitStillSourceToRequest(): Promise<void> {
+const sourceFitCache = new SourceFitPreprocessCache();
+
+/** Prepare request-only source bytes while preserving the user's editable source. */
+async function prepareStillSourceToRequest(): Promise<
+  PreparedStillSource | false
+> {
+  let source = form.state.value.imageAttachments[0] ?? null;
+  const mask = form.state.value.maskImage;
+  if (!source) return { source, mask };
+
+  const outerPolicy = form.state.value.sourceFitPolicy;
+  if (outerPolicy?.mode === "upscale-then-fit") {
+    const model = outerPolicy.upscalerModel || form.state.value.upscaleModel;
+    if (model) {
+      try {
+        const original = source;
+        const base64 = await sourceFitCache.upscale(
+          original.base64,
+          model,
+          async () => {
+            preprocessingStatus.value = `Preprocessing source with ${model}`;
+            let output: string | null = null;
+            await upscaleStream(
+              { model, image: original.base64, output_format: "png" },
+              {
+                onProgress: (evt) => {
+                  if (evt.type === "stage_start")
+                    preprocessingStatus.value = evt.name;
+                  if (evt.type === "stage_done")
+                    preprocessingStatus.value = `${evt.name} (done)`;
+                  if (evt.type === "info")
+                    preprocessingStatus.value = evt.message;
+                },
+                onComplete: (evt) => (output = evt.image),
+                onError: (err) => {
+                  composerError.value =
+                    err.kind === "http"
+                      ? `Source preprocessing failed: ${err.body}`
+                      : `Source preprocessing failed: ${err.message}`;
+                },
+              },
+            );
+            if (output === null)
+              throw new Error("Source preprocessing did not return an image");
+            return output;
+          },
+        );
+        source = {
+          ...original,
+          filename: original.filename.replace(/(\.[^.]+)?$/, "-prefit.png"),
+          base64,
+          width: undefined,
+          height: undefined,
+          mime: "image/png",
+        };
+      } catch (error) {
+        if (!composerError.value) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          composerError.value = `Source preprocessing failed: ${message}`;
+        }
+        return false;
+      } finally {
+        preprocessingStatus.value = null;
+      }
+    }
+  }
+
   const family = currentModel.value?.family ?? form.state.value.modelFamily;
-  if (isQwenImageEditFamily(family) || form.state.value.frames) return;
-  const source = form.state.value.imageAttachments[0];
-  if (!source) return;
+  if (isQwenImageEditFamily(family) || form.state.value.frames)
+    return { source, mask };
   const target = {
     width: form.state.value.width,
     height: form.state.value.height,
   };
-  const sourceImg = await loadHtmlImage(source);
-  if (
-    sourceImg.naturalWidth === target.width &&
-    sourceImg.naturalHeight === target.height
-  ) {
-    return;
-  }
-  const policy = drawableFitPolicy(form.state.value.sourceFitPolicy);
-  const transform = resolveSourceFitTransform(
-    { width: sourceImg.naturalWidth, height: sourceImg.naturalHeight },
-    target,
+  const policy = drawableFitPolicy(outerPolicy);
+  return sourceFitCache.fit(
+    source.base64,
+    mask?.base64 ?? null,
     policy,
-  );
-  const canvas = document.createElement("canvas");
-  canvas.width = transform.outputWidth;
-  canvas.height = transform.outputHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  ctx.fillStyle = "black";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(
-    sourceImg,
-    transform.offsetX,
-    transform.offsetY,
-    transform.drawWidth,
-    transform.drawHeight,
-  );
-  form.state.value.imageAttachments = [
-    canvasToSourceImage(canvas, source, "-fit"),
-  ];
+    target,
+    async () => {
+      const sourceImg = await loadHtmlImage(source!);
+      if (
+        sourceImg.naturalWidth === target.width &&
+        sourceImg.naturalHeight === target.height
+      ) {
+        return { source, mask };
+      }
+      const transform = resolveSourceFitTransform(
+        { width: sourceImg.naturalWidth, height: sourceImg.naturalHeight },
+        target,
+        policy,
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = transform.outputWidth;
+      canvas.height = transform.outputHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return { source, mask };
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(
+        sourceImg,
+        transform.offsetX,
+        transform.offsetY,
+        transform.drawWidth,
+        transform.drawHeight,
+      );
+      const fittedSource = canvasToSourceImage(canvas, source!, "-fit");
 
-  if (policy.mode !== "pad-repaint" && !form.state.value.maskImage) return;
-  const maskCanvas = document.createElement("canvas");
-  maskCanvas.width = transform.outputWidth;
-  maskCanvas.height = transform.outputHeight;
-  const maskCtx = maskCanvas.getContext("2d");
-  if (!maskCtx) return;
-  maskCtx.fillStyle = "black";
-  maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-  if (form.state.value.maskImage) {
-    const maskImg = await loadHtmlImage(form.state.value.maskImage);
-    maskCtx.drawImage(
-      maskImg,
-      transform.offsetX,
-      transform.offsetY,
-      transform.drawWidth,
-      transform.drawHeight,
-    );
-  }
-  if (policy.mode === "pad-repaint") {
-    maskCtx.fillStyle = "white";
-    for (const rect of maskPaddingRectangles(transform)) {
-      maskCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
-    }
-  }
-  form.state.value.maskImage = canvasToSourceImage(
-    maskCanvas,
-    form.state.value.maskImage ?? {
-      kind: source.kind,
-      filename: "pad-mask.png",
-      base64: "",
+      if (policy.mode !== "pad-repaint" && !mask)
+        return { source: fittedSource, mask };
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = transform.outputWidth;
+      maskCanvas.height = transform.outputHeight;
+      const maskCtx = maskCanvas.getContext("2d");
+      if (!maskCtx) return { source: fittedSource, mask };
+      maskCtx.fillStyle = "black";
+      maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+      if (mask) {
+        const maskImg = await loadHtmlImage(mask);
+        maskCtx.drawImage(
+          maskImg,
+          transform.offsetX,
+          transform.offsetY,
+          transform.drawWidth,
+          transform.drawHeight,
+        );
+      }
+      if (policy.mode === "pad-repaint") {
+        maskCtx.fillStyle = "white";
+        for (const rect of maskPaddingRectangles(transform)) {
+          maskCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
+        }
+      }
+      const fittedMask = canvasToSourceImage(
+        maskCanvas,
+        mask ?? { kind: source!.kind, filename: "pad-mask.png", base64: "" },
+        "-fit-mask",
+      );
+      return { source: fittedSource, mask: fittedMask };
     },
-    "-fit-mask",
   );
 }
 
@@ -651,7 +685,7 @@ async function onSubmit() {
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
   // list is empty, so a model check first would blame the model instead), and
-  // the upscale pass has to land on the same machine as the render.
+  // an upscale cache miss has to land on the same machine as the render.
   const route = resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
@@ -660,9 +694,14 @@ async function onSubmit() {
     toast("error", decision.reason);
     return;
   }
-  if (!(await preprocessSourceIfNeeded())) return;
-  await fitStillSourceToRequest();
+  const preparedSource = await prepareStillSourceToRequest();
+  if (preparedSource === false) return;
   const req = form.toRequest();
+  if ("source_image" in req) {
+    req.source_image = preparedSource.source?.base64 ?? null;
+    if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
+    else delete req.mask_image;
+  }
   stream.submit(req, decision, route);
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
