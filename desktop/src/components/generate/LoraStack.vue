@@ -97,7 +97,7 @@ watch(
       </div>
     </div>
 
-    <div class="relative">
+    <div>
       <button
         type="button"
         class="text-body text-halide hover:text-ink disabled:opacity-40"
@@ -108,7 +108,8 @@ watch(
       </button>
       <div
         v-if="pickerOpen"
-        class="border-edge absolute z-10 mt-1 max-h-60 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
+        data-test="lora-picker"
+        class="border-edge mt-2 max-h-60 w-full overflow-y-auto rounded-chrome border bg-bench shadow-raised"
       >
         <p v-if="loading" class="px-2 py-2 text-caption text-ink-3">Loading…</p>
         <p v-else-if="error" class="px-2 py-2 text-caption text-stop">{{ error }}</p>

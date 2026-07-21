@@ -10,9 +10,8 @@
  *   - Full-size media (lightbox image + video) uses the server's short-lived
  *     `POST /api/gallery/media-token` ticket, appended to the direct URL as a
  *     `media_token`/`expires` query pair so WebKit can Range-stream a video
- *     without buffering it and without the durable key in the URL. Older hosts
- *     that lack the endpoint fall back to a bounded blob fetch for IMAGES only;
- *     a video on such a host surfaces an "upgrade to stream" state instead.
+ *     without buffering it and without the durable key in the URL. Hosts that
+ *     lack the current endpoint are rejected with an upgrade message.
  *
  * The serving origin ("this server") is same-origin and keyless in the web
  * registry, so it always uses plain relative URLs — exactly today's behaviour.
@@ -114,92 +113,45 @@ interface GalleryMediaTicket {
   auth_required?: boolean;
 }
 
-/** Thrown when a video lives on an authenticated host too old to issue a
- *  streaming ticket — the caller shows an upgrade prompt rather than buffering. */
+/** Thrown when an authenticated host cannot issue the required media ticket. */
 export class MediaUpgradeRequiredError extends Error {
   constructor() {
-    super("Connect a newer Mold host to stream this video.");
+    super("Upgrade this Mold host before loading authenticated gallery media.");
     this.name = "MediaUpgradeRequiredError";
   }
-}
-
-export interface StreamableOptions {
-  /** Images may fall back to a bounded blob fetch on ticket-less hosts;
-   *  videos must not (an unbounded buffer), so they pass this false. */
-  allowLegacyBlob: boolean;
 }
 
 /**
  * A URL an `<img>`/`<video>` can load directly for full-size media. Keyless
  * hosts use the plain direct URL (Range-friendly). Authenticated hosts exchange
- * the key for a short-lived read ticket appended to the URL. Ticket-less legacy
- * hosts fall back to a blob for images; for videos they raise
- * `MediaUpgradeRequiredError`.
+ * the key for a short-lived read ticket appended to the URL.
  */
 export async function resolveStreamableSrc(
   host: HostEntry,
   filename: string,
-  opts: StreamableOptions,
 ): Promise<string> {
   const path = mediaPath(filename);
   const directUrl = directMediaUrl(host, filename);
   if (!needsAuthedMedia(host)) return directUrl;
 
-  try {
-    const res = await fetch(`${hostMediaBase(host)}/api/gallery/media-token`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(host) },
-      body: JSON.stringify({ path }),
-    });
-    if (res.status === 404 || res.status === 405) {
-      return legacyStreamableFallback(host, filename, opts);
-    }
-    if (!res.ok) throw new Error(`media-token failed: ${res.status}`);
-    const ticket = (await res.json()) as GalleryMediaTicket;
-    // A key can linger after a host turns auth off; the server says so
-    // explicitly so we use the plain URL instead of treating it as a failure.
-    if (ticket.auth_required === false) return directUrl;
-    if (!ticket.token || !Number.isSafeInteger(ticket.expires_at)) {
-      throw new Error("host returned an invalid gallery media ticket");
-    }
-    const url = new URL(
-      directUrl,
-      hostMediaBase(host) || window.location.origin,
-    );
-    url.searchParams.set("media_token", ticket.token);
-    url.searchParams.set("expires", String(ticket.expires_at));
-    return url.toString();
-  } catch (err) {
-    if (err instanceof MediaUpgradeRequiredError) throw err;
-    // Network / transport error reaching the token endpoint. Images can still
-    // try the bounded blob; videos surface the upgrade state.
-    return legacyStreamableFallback(host, filename, opts);
+  const res = await fetch(`${hostMediaBase(host)}/api/gallery/media-token`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeaders(host) },
+    body: JSON.stringify({ path }),
+  });
+  if (res.status === 404 || res.status === 405) {
+    throw new MediaUpgradeRequiredError();
   }
-}
-
-async function legacyStreamableFallback(
-  host: HostEntry,
-  filename: string,
-  opts: StreamableOptions,
-): Promise<string> {
-  if (!opts.allowLegacyBlob) throw new MediaUpgradeRequiredError();
-  const path = mediaPath(filename);
-  const key = keyOf(host.id, path);
-  let url = cache.get(key);
-  if (!url) {
-    url = fetchAuthedObjectUrl(host, path);
-    cache.set(key, url);
-    url.catch(() => cache.delete(key));
+  if (!res.ok) throw new Error(`media-token failed: ${res.status}`);
+  const ticket = (await res.json()) as GalleryMediaTicket;
+  if (ticket.auth_required === false) return directUrl;
+  if (!ticket.token || !Number.isSafeInteger(ticket.expires_at)) {
+    throw new Error("host returned an invalid gallery media ticket");
   }
-  return url;
-}
-
-/** Revoke and drop one cached object URL (host bucket + path). */
-export function evictMedia(hostId: string, path: string): void {
-  const key = keyOf(hostId, path);
-  const cached = cache.get(key);
-  cache.delete(key);
-  void cached?.then((u) => revokeIfObjectUrl(u)).catch(() => {});
+  const url = new URL(directUrl, hostMediaBase(host) || window.location.origin);
+  url.searchParams.set("media_token", ticket.token);
+  url.searchParams.set("expires", String(ticket.expires_at));
+  return url.toString();
 }
 
 /** Drop every cached object URL for one host (e.g. host removed / refetched). */

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The TUI gains a `^K` command palette.** `Ctrl+K` from any workspace or focus opens a filterable launcher — the terminal translation of the GUI surfaces' ⌘K — covering navigation to all five workspaces and the chain composer, actions (toggle Advanced, randomize seed, expand prompt, prompt history search, help, quit), and one-keystroke switching between all eleven theme presets. Typing filters case-insensitively, Enter runs the selection, Esc closes; while open the palette swallows every key, so `q` filters instead of quitting. As part of the rebind, `Ctrl+K` no longer performs kill-to-end-of-line in the prompt fields.
 - **The TUI ships the four Mold Studio themes.** Studio Dark, Studio Light, Safelight Dark, and Safelight Light join the seven existing presets in the Appearance picker (now two rows of swatches), each carrying the design system's dual-accent model — safelight for focus/selection/primary action, halide for info/live state — via new `frame`, `surface2`, `faint`, and `info` theme tokens. Selection tints are pre-blended solids derived from the design mockup's CSS rgba values.
+- **Web and Tauri now share one frontend workspace.** Repo-root `bun.lock` and `bun.nix` pin the exact Vue 3, Pinia, Vite 7, Tailwind v4, TypeScript, Vitest, and formatting toolchain for `studio/`, `ui/`, `web/`, and `desktop/`. The browser-safe `studio/` package owns explicit-target HTTP contracts, platform adapters, Pinia runtime state, prompt cycling, and source fitting; Tauri-only packages remain in `desktop/`. Web now uses the canonical `/create`, `/library`, `/models`, `/machines`, and `/settings` routes, rejects incompatible current-server shapes with an upgrade error, and no longer accepts retired routes or persisted form/job schemas. Knip and architecture gates prevent dead modules, duplicate locks, and Tauri imports from entering the shared package.
 
 ### Changed
 
@@ -21,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.
 - **Repeated source-fit generations now reuse preprocessed images.** Desktop, web, and iPhone keep per-Create-form caches for the expensive Upscale then fit pass and the final canvas fit/mask. Prompt, seed, and generation-parameter iterations no longer rerun or retransmit unchanged source preprocessing; changing dimensions only invalidates the fit layer, while source, upscaler, fit-policy, and mask changes invalidate the layers they affect. Concurrent Batch siblings share an in-flight pass, and processed bytes stay request-local so the editable source remains intact.
+- Keep the desktop Advanced LoRA picker inside its accordion and ensure modal drawers cover floating workbench controls such as Templates.
 
 ## [0.20.2] - 2026-07-21
 

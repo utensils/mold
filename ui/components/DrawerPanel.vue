@@ -93,6 +93,7 @@ watch(
 .ms-drawer {
   position: absolute;
   inset: 0;
+  z-index: 40;
   background: rgba(6, 5, 10, 0.72);
   backdrop-filter: blur(5px);
   display: flex;
