@@ -142,7 +142,7 @@ scripts/tui-uat.sh quit
 | View | Key | Unique landmark | Content |
 |------|-----|----------------|---------|
 | Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt; Parameters (6 essentials + `▸ Advanced` accordion + `↺ Reset to model defaults`); Preview; Timeline |
-| Library | 2 | `┌ Library` | Print thumbnails in grid, detail view on Enter |
+| Library | 2 | `┌ Library` | All-machines print grid (local + connected server + every Machines host, deduped by filename) + Details side panel on wide terminals; header hint `{n} prints [· host \| · all machines] [· k hosts offline]` |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
 | Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
 | Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme picker + config values |
@@ -158,7 +158,7 @@ scripts/tui-uat.sh quit
 
 **Create (Parameters focus):** j/k = flat row traversal (essentials → `▸ Advanced` header → section rows → `↺ Reset`), +/- or ←/→ = adjust a field / expand-collapse a section, Enter = activate (Model picker, Size `WxH` popup, Seed value popup, section expand, Negative inline editor focus), A = toggle the accordion. Essentials order: Model (first row — `model <name>` relies on this), Size, Detail, Prompt strength, Seed, Batch. Accordion landmarks: `▸ Advanced` collapsed / `▾ Advanced` open with section rows (`Scheduler & sampling`, `Negative prompt`, `Source image`, `LoRA`, `Upscale after generate`, `Output format`, `Video` on video models). Persisted keys for `db-get`: `tui.advanced_open` (`true`/`false`), `tui.advanced_section` (section slug or empty).
 
-**Library (grid):** hjkl/arrows = navigate, Enter = detail, e = edit, d = delete, u = upscale, o = open
+**Library (grid):** hjkl/arrows = navigate, Enter = detail, e/r = recall into Create, d = delete (multi-host prints delete on every owning host; confirm names the count), u = upscale (routes to the owning host), o = open, / = filter by prompt/model/filename (typed chars edit, Enter applies, Esc clears; Esc with a filter applied clears it before leaving the view)
 
 **Models:** j/k = navigate, Enter = select, p = pull, r = remove, u = unload, / = filter
 

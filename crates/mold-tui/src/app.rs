@@ -31,8 +31,8 @@ pub enum BackgroundEvent {
     },
     /// Generation or background task failed.
     Error(String),
-    /// Gallery scan completed.
-    GalleryScanComplete(Vec<GalleryEntry>),
+    /// Merged all-hosts gallery scan completed.
+    GalleryScanComplete(crate::gallery_scan::MergedScan),
     /// Model pull completed.
     PullComplete(String),
     /// Background thumbnail generation finished.
@@ -751,6 +751,10 @@ pub enum GalleryViewMode {
     Detail,
 }
 
+/// How long a Library scan stays fresh before re-entering the view
+/// triggers a merged rescan.
+pub(crate) const LIBRARY_RESCAN_STALE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// State for the Gallery view.
 pub struct GalleryState {
     pub entries: Vec<GalleryEntry>,
@@ -772,6 +776,166 @@ pub struct GalleryState {
     pub grid_cols: usize,
     /// Scroll offset in rows for the grid view.
     pub grid_scroll: usize,
+    /// The `/` filter query (matches prompt, model, filename).
+    pub filter: String,
+    /// True while the filter line is being edited (keys route to it).
+    pub filtering: bool,
+    /// Indices into `entries` that pass the filter, in display order.
+    /// Identity when the filter is empty. Thumbnail caches stay keyed by
+    /// the underlying entry index, so filtering never invalidates them.
+    pub filtered: Vec<usize>,
+    /// One-slot fixed-protocol cache for the details side panel's
+    /// thumbnail: (entry index, area width, area height, protocol).
+    pub details_thumb: Option<(usize, u16, u16, ratatui_image::protocol::Protocol)>,
+    /// When the last merged scan finished (None = never).
+    pub last_scan: Option<std::time::Instant>,
+    /// Set when the host registry changed — the next Library visit
+    /// rescans regardless of staleness.
+    pub dirty: bool,
+    /// Remote sources that failed the last merged scan (header honesty).
+    pub offline_hosts: usize,
+}
+
+impl Default for GalleryState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            preview_image: None,
+            image_state: None,
+            animation: None,
+            scanning: false,
+            view_mode: GalleryViewMode::Grid,
+            thumbnail_states: Vec::new(),
+            thumb_dimensions: Vec::new(),
+            thumb_fixed_cache: Vec::new(),
+            grid_cols: 3,
+            grid_scroll: 0,
+            filter: String::new(),
+            filtering: false,
+            filtered: Vec::new(),
+            details_thumb: None,
+            last_scan: None,
+            dirty: false,
+            offline_hosts: 0,
+        }
+    }
+}
+
+impl GalleryState {
+    /// Recompute `filtered` from the current entries + query, keeping the
+    /// selection when it still matches (else snapping to the first match).
+    pub fn refresh_filter(&mut self) {
+        self.filtered = crate::gallery_scan::filter_entries(&self.entries, &self.filter);
+        if !self.filtered.contains(&self.selected) {
+            if let Some(&first) = self.filtered.first() {
+                self.selected = first;
+            }
+        }
+    }
+
+    /// Position of the selected entry within the filtered list.
+    pub fn selected_pos(&self) -> Option<usize> {
+        self.filtered.iter().position(|&i| i == self.selected)
+    }
+
+    /// Whether entering the Library should kick a merged rescan: never
+    /// while one is already running, always when the host registry
+    /// changed, otherwise when the last scan is missing or stale.
+    pub fn rescan_due(&self) -> bool {
+        if self.scanning {
+            return false;
+        }
+        self.dirty
+            || self
+                .last_scan
+                .is_none_or(|t| t.elapsed() >= LIBRARY_RESCAN_STALE)
+    }
+
+    /// Handle one key while the `/` filter line is being edited. Returns
+    /// true when the key was consumed. Esc clears the filter, Enter
+    /// confirms it (keeps it applied), typed chars/Backspace edit it;
+    /// modified keys (e.g. Ctrl+C) fall through to the normal map.
+    pub fn handle_filter_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        match code {
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.filtering = false;
+                self.refresh_filter();
+                true
+            }
+            KeyCode::Enter => {
+                self.filtering = false;
+                true
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.refresh_filter();
+                true
+            }
+            KeyCode::Char(c)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.filter.push(c);
+                self.refresh_filter();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One machine a gallery print exists on. The first origin in
+/// `GalleryEntry::origins` is the primary fetch route (the local copy
+/// when one exists, else the first host that listed the print).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GalleryOrigin {
+    /// Host id — `hosts::LOCAL_HOST_ID` for this machine, the registry
+    /// slug (or URL slug for the unregistered `--host` server) otherwise.
+    pub host_id: String,
+    /// Origin URL; `None` for the local machine.
+    pub url: Option<String>,
+    /// Display name for the details panel ("This Mac", "hal9000", …).
+    pub name: String,
+}
+
+impl GalleryOrigin {
+    pub(crate) fn local() -> Self {
+        Self {
+            host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+            url: None,
+            name: crate::hosts::local_display_name().to_string(),
+        }
+    }
+
+    pub(crate) fn from_host_entry(entry: &crate::hosts::HostEntry) -> Self {
+        Self {
+            host_id: entry.id.clone(),
+            url: Some(entry.url.clone()),
+            name: entry.display_name(),
+        }
+    }
+
+    /// Synthesize an origin for a bare URL (the connected `--host` server
+    /// when it isn't a registered machine, or legacy entries).
+    pub(crate) fn remote_from_url(url: &str) -> Self {
+        Self {
+            host_id: crate::hosts::host_id_from_url(url),
+            url: Some(url.to_string()),
+            name: crate::hosts::host_port_label(url),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.url.is_none()
+    }
+
+    /// Whether this origin is THIS machine — either the plain local
+    /// output dir, or the connected loopback server whose gallery is
+    /// authoritative for it (one box, not a separate "machine").
+    pub fn is_this_machine(&self) -> bool {
+        self.host_id == crate::hosts::LOCAL_HOST_ID
+    }
 }
 
 /// A single gallery entry backed by PNG metadata.
@@ -784,6 +948,9 @@ pub struct GalleryEntry {
     pub timestamp: u64,
     /// When set, this entry is served by the remote server at this URL.
     pub server_url: Option<String>,
+    /// Every machine this print exists on (first = primary fetch route).
+    /// Empty is the legacy form — interpreted via `server_url`.
+    pub origins: Vec<GalleryOrigin>,
 }
 
 impl GalleryEntry {
@@ -792,6 +959,47 @@ impl GalleryEntry {
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".into())
+    }
+
+    /// Every machine this print exists on. Legacy entries (empty
+    /// `origins`) synthesize one origin from `server_url`.
+    pub(crate) fn owning_origins(&self) -> Vec<GalleryOrigin> {
+        if !self.origins.is_empty() {
+            return self.origins.clone();
+        }
+        match &self.server_url {
+            Some(url) => vec![GalleryOrigin::remote_from_url(url)],
+            None => vec![GalleryOrigin::local()],
+        }
+    }
+
+    /// The primary origin — where previews/opens/upscales fetch from.
+    pub(crate) fn primary_origin(&self) -> GalleryOrigin {
+        self.owning_origins()
+            .into_iter()
+            .next()
+            .unwrap_or_else(GalleryOrigin::local)
+    }
+
+    /// The details panel's Machine value: "This Mac" / host display name,
+    /// or a count once the print exists on more than one machine.
+    pub(crate) fn machine_label(&self) -> String {
+        let origins = self.owning_origins();
+        if origins.len() > 1 {
+            format!("{} machines", origins.len())
+        } else {
+            origins[0].name.clone()
+        }
+    }
+}
+
+/// Confirm copy for deleting a print. Names every machine it will be
+/// removed from when it exists on more than one.
+pub(crate) fn delete_confirm_message(filename: &str, machines: usize) -> String {
+    if machines > 1 {
+        format!("Delete {filename}? It exists on {machines} machines. This can't be undone.")
+    } else {
+        format!("Delete {filename}?")
     }
 }
 
@@ -1320,20 +1528,7 @@ impl App {
                 model_description,
                 last_output_path: None,
             },
-            gallery: GalleryState {
-                entries: Vec::new(),
-                selected: 0,
-                preview_image: None,
-                image_state: None,
-                animation: None,
-                scanning: false,
-                view_mode: GalleryViewMode::Grid,
-                thumbnail_states: Vec::new(),
-                thumb_dimensions: Vec::new(),
-                thumb_fixed_cache: Vec::new(),
-                grid_cols: 3,
-                grid_scroll: 0,
-            },
+            gallery: GalleryState::default(),
             models: ModelsState {
                 catalog,
                 selected: 0,
@@ -1387,20 +1582,17 @@ impl App {
         app
     }
 
-    /// Spawn a background gallery scan. Uses server API when connected,
-    /// local filesystem scan otherwise.
+    /// Spawn a merged all-hosts gallery scan: the local output dir, the
+    /// connected server (when set), and every registered Machines host,
+    /// fetched concurrently with per-host API keys. Offline hosts
+    /// contribute nothing but don't break the scan.
     pub fn spawn_gallery_scan(&self) {
         let tx = self.bg_tx.clone();
-        let server_url = self.server_url.clone();
+        let sources =
+            crate::gallery_scan::scan_sources(self.server_url.as_deref(), &self.machines.registry);
         self.tokio_handle.spawn(async move {
-            let entries = if let Some(ref url) = server_url {
-                crate::gallery_scan::scan_images_from_server(url).await
-            } else {
-                tokio::task::spawn_blocking(crate::gallery_scan::scan_images_local)
-                    .await
-                    .unwrap_or_default()
-            };
-            let _ = tx.send(BackgroundEvent::GalleryScanComplete(entries));
+            let scan = crate::gallery_scan::scan_all_hosts(sources).await;
+            let _ = tx.send(BackgroundEvent::GalleryScanComplete(scan));
         });
     }
 
@@ -1551,15 +1743,25 @@ impl App {
         }
 
         let tx = self.bg_tx.clone();
-        let server_url = self.server_url.clone();
+        // Route the upscale to the print's OWNING host when it is remote
+        // (with that host's saved API key); local prints keep the
+        // connected-server-then-local-fallback behavior.
+        let route = entry.primary_origin();
+        let server_url = match &route.url {
+            Some(url) => Some(url.clone()),
+            None => self.server_url.clone(),
+        };
+        let server_host_id = route.url.as_ref().map(|_| route.host_id.clone());
         let config = self.config.clone();
         let source_path = entry.path.clone();
 
         let handle = self.tokio_handle.spawn(async move {
             // Read image bytes
-            let image_bytes = if let Some(ref url) = entry.server_url {
+            let image_bytes = if let Some(ref url) = route.url {
                 let filename = entry.filename();
-                match crate::gallery_scan::fetch_and_cache_image(url, &filename).await {
+                match crate::gallery_scan::fetch_and_cache_image(url, &route.host_id, &filename)
+                    .await
+                {
                     Some(cached_path) => match tokio::fs::read(&cached_path).await {
                         Ok(bytes) => bytes,
                         Err(e) => {
@@ -1596,9 +1798,14 @@ impl App {
                 metadata: None,
             };
 
-            // Try server first — use SSE streaming for tile progress
+            // Try server first — use SSE streaming for tile progress.
+            // Remote-owned prints upscale on their owning host (with its
+            // saved API key); local prints use the connected server.
             if let Some(ref url) = server_url {
-                let client = mold_core::MoldClient::new(url);
+                let api_key = server_host_id
+                    .as_deref()
+                    .and_then(crate::hosts::api_key_for);
+                let client = crate::hosts::client_for(url, api_key.as_deref());
 
                 // Stream progress events from SSE to the TUI
                 let (progress_tx, mut progress_rx) =
@@ -2058,6 +2265,16 @@ impl App {
         if self.popup.is_some() {
             self.handle_popup_event(event);
             return;
+        }
+
+        // Library `/` filter editing swallows its editing keys; anything
+        // it doesn't consume (e.g. Ctrl+C) falls through to the map.
+        if self.active_view == View::Library && self.gallery.filtering {
+            if let CrosstermEvent::Key(key) = &event {
+                if self.gallery.handle_filter_key(key.code, key.modifiers) {
+                    return;
+                }
+            }
         }
 
         // If we're in a text input field, let the textarea handle the event first
@@ -2538,7 +2755,7 @@ impl App {
                 // not a stealth jump to Settings.
                 if self.layout.tab_bar.contains((col, row).into()) {
                     if let Some(view) = tab_at_column(col, self.layout.tab_bar.x) {
-                        self.active_view = view;
+                        self.set_active_view(view);
                         return;
                     }
                     // Click past all tabs — leave the active view alone.
@@ -2591,8 +2808,10 @@ impl App {
                         let rel_y = row.saturating_sub(self.layout.gallery_grid.y);
                         let grid_col = (rel_x / cell_w) as usize;
                         let grid_row = (rel_y / cell_h) as usize + self.gallery.grid_scroll;
-                        let idx = grid_row * cols + grid_col;
-                        if idx < self.gallery.entries.len() {
+                        // The grid renders the *filtered* list — a click
+                        // position maps through it to the entry index.
+                        let pos = grid_row * cols + grid_col;
+                        if let Some(&idx) = self.gallery.filtered.get(pos) {
                             if self.gallery.selected == idx {
                                 // Double-click: open detail view
                                 self.gallery.view_mode = GalleryViewMode::Detail;
@@ -2737,26 +2956,40 @@ impl App {
         }
     }
 
+    /// Switch the active workspace, running per-view entry hooks:
+    /// Machines polls immediately; Library kicks a merged rescan when the
+    /// last one is stale (>30 s), missing, or the host registry changed.
+    fn set_active_view(&mut self, view: View) {
+        self.active_view = view;
+        match view {
+            View::Machines => {
+                // Entering Machines polls immediately instead of
+                // waiting out the background cadence.
+                self.machines.force_poll();
+                self.tick_host_polling();
+            }
+            View::Library if self.gallery.rescan_due() => {
+                self.gallery.scanning = true;
+                self.spawn_gallery_scan();
+            }
+            _ => {}
+        }
+    }
+
     /// Dispatch a semantic action.
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
             Action::SwitchView(view) => {
-                self.active_view = view;
-                if view == View::Machines {
-                    // Entering Machines polls immediately instead of
-                    // waiting out the background cadence.
-                    self.machines.force_poll();
-                    self.tick_host_polling();
-                }
+                self.set_active_view(view);
             }
             Action::ViewNext => {
                 let i = self.active_view.index();
-                self.active_view = View::ALL[(i + 1) % View::ALL.len()];
+                self.set_active_view(View::ALL[(i + 1) % View::ALL.len()]);
             }
             Action::ViewPrev => {
                 let i = self.active_view.index();
-                self.active_view = View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()];
+                self.set_active_view(View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()]);
             }
             Action::ChainEnter => {
                 self.active_view = View::Create;
@@ -2819,14 +3052,18 @@ impl App {
                     let cols = self.gallery.grid_cols.max(1);
                     match self.gallery.view_mode {
                         GalleryViewMode::Grid => {
-                            if self.gallery.selected >= cols {
-                                self.gallery.selected -= cols;
+                            if let Some(pos) = self.gallery.selected_pos() {
+                                if pos >= cols {
+                                    self.gallery.selected = self.gallery.filtered[pos - cols];
+                                }
                             }
                         }
                         GalleryViewMode::Detail => {
-                            if self.gallery.selected > 0 {
-                                self.gallery.selected -= 1;
-                                self.load_gallery_preview();
+                            if let Some(pos) = self.gallery.selected_pos() {
+                                if pos > 0 {
+                                    self.gallery.selected = self.gallery.filtered[pos - 1];
+                                    self.load_gallery_preview();
+                                }
                             }
                         }
                     }
@@ -2856,18 +3093,21 @@ impl App {
                 }
                 View::Library => {
                     let cols = self.gallery.grid_cols.max(1);
-                    let len = self.gallery.entries.len();
+                    let len = self.gallery.filtered.len();
                     match self.gallery.view_mode {
                         GalleryViewMode::Grid => {
-                            let next = self.gallery.selected + cols;
-                            if next < len {
-                                self.gallery.selected = next;
+                            if let Some(pos) = self.gallery.selected_pos() {
+                                if pos + cols < len {
+                                    self.gallery.selected = self.gallery.filtered[pos + cols];
+                                }
                             }
                         }
                         GalleryViewMode::Detail => {
-                            if self.gallery.selected + 1 < len {
-                                self.gallery.selected += 1;
-                                self.load_gallery_preview();
+                            if let Some(pos) = self.gallery.selected_pos() {
+                                if pos + 1 < len {
+                                    self.gallery.selected = self.gallery.filtered[pos + 1];
+                                    self.load_gallery_preview();
+                                }
                             }
                         }
                     }
@@ -2931,7 +3171,7 @@ impl App {
                 }
                 View::Library => match self.gallery.view_mode {
                     GalleryViewMode::Grid => {
-                        if !self.gallery.entries.is_empty() {
+                        if !self.gallery.filtered.is_empty() {
                             self.gallery.view_mode = GalleryViewMode::Detail;
                             self.load_gallery_preview();
                         }
@@ -3117,17 +3357,23 @@ impl App {
             }
             Action::GridLeft
                 if self.active_view == View::Library
-                    && self.gallery.view_mode == GalleryViewMode::Grid
-                    && self.gallery.selected > 0 =>
+                    && self.gallery.view_mode == GalleryViewMode::Grid =>
             {
-                self.gallery.selected -= 1;
+                if let Some(pos) = self.gallery.selected_pos() {
+                    if pos > 0 {
+                        self.gallery.selected = self.gallery.filtered[pos - 1];
+                    }
+                }
             }
             Action::GridRight
                 if self.active_view == View::Library
-                    && self.gallery.view_mode == GalleryViewMode::Grid
-                    && self.gallery.selected + 1 < self.gallery.entries.len() =>
+                    && self.gallery.view_mode == GalleryViewMode::Grid =>
             {
-                self.gallery.selected += 1;
+                if let Some(pos) = self.gallery.selected_pos() {
+                    if pos + 1 < self.gallery.filtered.len() {
+                        self.gallery.selected = self.gallery.filtered[pos + 1];
+                    }
+                }
             }
             Action::EditAndGenerate if self.active_view == View::Library => {
                 self.load_gallery_into_generate();
@@ -3141,11 +3387,23 @@ impl App {
             Action::DeleteImage if self.active_view == View::Library => {
                 if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
                     let filename = entry.filename();
+                    let machines = entry.owning_origins().len();
                     self.popup = Some(Popup::Confirm {
-                        message: format!("Delete {filename}?"),
+                        message: delete_confirm_message(&filename, machines),
                         on_confirm: ConfirmAction::DeleteGalleryImage,
                     });
                 }
+            }
+            Action::FilterLibrary
+                if self.active_view == View::Library
+                    && self.gallery.view_mode == GalleryViewMode::Grid =>
+            {
+                self.gallery.filtering = true;
+            }
+            Action::FilterLibraryClear if self.active_view == View::Library => {
+                self.gallery.filter.clear();
+                self.gallery.filtering = false;
+                self.gallery.refresh_filter();
             }
             Action::OpenFile => {
                 self.open_gallery_file();
@@ -3436,9 +3694,11 @@ impl App {
     /// Load the currently selected gallery entry's image into the preview.
     fn load_gallery_preview(&mut self) {
         if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
-            if let Some(ref server_url) = entry.server_url {
-                // Server-backed: check cache first, then fetch async
-                let url = server_url.clone();
+            let origin = entry.primary_origin();
+            if let Some(url) = origin.url.clone() {
+                // Server-backed: check cache first, then fetch async.
+                // Cache paths and clients are scoped to the OWNING host.
+                let host_id = origin.host_id.clone();
                 let filename = entry.filename();
                 let is_video = crate::gallery_scan::is_video_filename(&filename);
 
@@ -3448,7 +3708,8 @@ impl App {
                 // cached we fetch `/api/gallery/preview/:filename` before
                 // falling back to the raw MP4.
                 if is_video {
-                    let preview_cache = crate::gallery_scan::preview_cache_path(&filename);
+                    let preview_cache =
+                        crate::gallery_scan::preview_cache_path(&host_id, &filename);
                     if preview_cache.is_file() && self.try_install_gallery_animation(&preview_cache)
                     {
                         return;
@@ -3457,9 +3718,12 @@ impl App {
                     let fetch_url = url.clone();
                     let fetch_name = filename.clone();
                     self.tokio_handle.spawn(async move {
-                        if let Some(data) =
-                            crate::gallery_scan::fetch_and_cache_preview(&fetch_url, &fetch_name)
-                                .await
+                        if let Some(data) = crate::gallery_scan::fetch_and_cache_preview(
+                            &fetch_url,
+                            &host_id,
+                            &fetch_name,
+                        )
+                        .await
                         {
                             let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
                             return;
@@ -3471,7 +3735,8 @@ impl App {
                         // image pipeline can decode it. Sending the raw MP4
                         // bytes here would leave the pane blank because
                         // `image::load_from_memory` can't parse them.
-                        let client = mold_core::MoldClient::new(&fetch_url);
+                        let api_key = crate::hosts::api_key_for(&host_id);
+                        let client = crate::hosts::client_for(&fetch_url, api_key.as_deref());
                         if let Ok(thumb) = client.get_gallery_thumbnail(&fetch_name).await {
                             let _ = tx.send(BackgroundEvent::GalleryPreviewReady(thumb));
                         }
@@ -3482,7 +3747,7 @@ impl App {
                     return;
                 }
 
-                let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
+                let cache_path = crate::gallery_scan::cached_image_path(&host_id, &filename);
                 if cache_path.is_file() {
                     // Cached locally — load synchronously
                     if self.try_install_gallery_animation(&cache_path) {
@@ -3500,7 +3765,7 @@ impl App {
                 let tx = self.bg_tx.clone();
                 self.tokio_handle.spawn(async move {
                     if let Some(cached) =
-                        crate::gallery_scan::fetch_and_cache_image(&url, &filename).await
+                        crate::gallery_scan::fetch_and_cache_image(&url, &host_id, &filename).await
                     {
                         let data = tokio::fs::read(&cached).await.unwrap_or_default();
                         let _ = tx.send(BackgroundEvent::GalleryPreviewReady(data));
@@ -3631,8 +3896,11 @@ impl App {
         self.gallery.thumbnail_states = vec![None; entries.len()];
         self.gallery.thumb_dimensions = vec![None; entries.len()];
         self.gallery.thumb_fixed_cache = vec![None; entries.len()];
+        self.gallery.details_thumb = None;
         self.gallery.entries = entries;
         self.gallery.scanning = false;
+        self.gallery.last_scan = Some(std::time::Instant::now());
+        self.gallery.dirty = false;
 
         self.gallery.selected = if self.gallery.entries.is_empty() {
             0
@@ -3646,6 +3914,7 @@ impl App {
         } else {
             previous_selected.min(self.gallery.entries.len() - 1)
         };
+        self.gallery.refresh_filter();
     }
 
     /// React to a failed server-side gallery delete: surface the server's
@@ -3674,23 +3943,35 @@ impl App {
         }
 
         let entry = &self.gallery.entries[idx];
+        let filename = entry.filename();
         let thumb_path = crate::thumbnails::thumbnail_path(&entry.path);
         let _ = std::fs::remove_file(&thumb_path);
-        // Also remove the local cached copy (image cache)
-        let cache_path = crate::gallery_scan::image_cache_dir().join(entry.filename());
+        // Also remove the legacy (pre-host-scoping) cached copy.
+        let cache_path = crate::gallery_scan::image_cache_dir().join(&filename);
         let _ = std::fs::remove_file(&cache_path);
 
-        if let Some(ref url) = entry.server_url {
-            // Delete from server via API. Propagate errors through the
-            // background channel so the UI can surface them and rescan —
-            // a silent fire-and-forget would mask transient network errors
-            // and leave the deleted tile "gone" locally while the server
-            // still holds the file.
-            let url = url.clone();
-            let filename = entry.filename();
+        // Delete on every machine the print exists on. Remote deletes go
+        // through the OWNING host's client (with its saved API key) and
+        // propagate errors through the background channel so the UI can
+        // surface them and rescan — a silent fire-and-forget would mask
+        // transient network errors and leave the deleted tile "gone"
+        // locally while a server still holds the file.
+        for origin in entry.owning_origins() {
+            let Some(url) = origin.url else { continue };
+            let _ = std::fs::remove_file(crate::gallery_scan::cached_image_path(
+                &origin.host_id,
+                &filename,
+            ));
+            let _ = std::fs::remove_file(crate::gallery_scan::preview_cache_path(
+                &origin.host_id,
+                &filename,
+            ));
+            let host_id = origin.host_id;
+            let filename = filename.clone();
             let tx = self.bg_tx.clone();
             self.tokio_handle.spawn(async move {
-                let client = mold_core::MoldClient::new(&url);
+                let api_key = crate::hosts::api_key_for(&host_id);
+                let client = crate::hosts::client_for(&url, api_key.as_deref());
                 if let Err(e) = client.delete_gallery_image(&filename).await {
                     let _ = tx.send(BackgroundEvent::GalleryDeleteFailed(e.to_string()));
                 }
@@ -3713,6 +3994,7 @@ impl App {
         if idx < self.gallery.thumb_fixed_cache.len() {
             self.gallery.thumb_fixed_cache.remove(idx);
         }
+        self.gallery.details_thumb = None;
 
         // Drop the deleted image's preview state first — load_gallery_preview
         // below will repopulate these for the new selection. Doing it in the
@@ -3727,12 +4009,14 @@ impl App {
         // to the new last entry when they were already at the end.
         if !self.gallery.entries.is_empty() {
             self.gallery.selected = idx.min(self.gallery.entries.len() - 1);
+            self.gallery.refresh_filter();
             if self.gallery.view_mode == GalleryViewMode::Detail {
                 self.load_gallery_preview();
             }
         } else {
             self.gallery.selected = 0;
             self.gallery.view_mode = GalleryViewMode::Grid;
+            self.gallery.refresh_filter();
         }
     }
 
@@ -3747,13 +4031,13 @@ impl App {
         if entry.server_url.is_none() && entry.path.is_file() {
             // Local file — open directly
             let _ = open::that(&entry.path);
-        } else if let Some(ref url) = entry.server_url {
-            // Server-backed — fetch to cache, then open
-            let url = url.clone();
+        } else if let Some(url) = entry.primary_origin().url {
+            // Server-backed — fetch to the host-scoped cache, then open
+            let host_id = entry.primary_origin().host_id;
             let filename = entry.filename();
             self.tokio_handle.spawn(async move {
                 if let Some(cached) =
-                    crate::gallery_scan::fetch_and_cache_image(&url, &filename).await
+                    crate::gallery_scan::fetch_and_cache_image(&url, &host_id, &filename).await
                 {
                     let _ = open::that(&cached);
                 }
@@ -3831,6 +4115,9 @@ impl App {
             }
             ConfirmAction::ForgetHost(id) => {
                 self.machines.forget(&id);
+                // The registry changed — the next Library visit re-merges
+                // galleries without the forgotten host.
+                self.gallery.dirty = true;
                 if self.target == crate::hosts::GenTarget::Host(id) {
                     self.target = crate::hosts::GenTarget::Auto;
                     self.target.save();
@@ -5152,11 +5439,13 @@ impl App {
                                 // Entry is local — the TUI saved this file directly.
                                 // The server has its own copy via output_dir.
                                 server_url: None,
+                                origins: vec![GalleryOrigin::local()],
                             },
                         );
                         self.gallery.thumbnail_states.insert(0, None);
                         self.gallery.thumb_dimensions.insert(0, None);
                         self.gallery.thumb_fixed_cache.insert(0, None);
+                        self.gallery.refresh_filter();
 
                         // Generate thumbnail in background
                         self.tokio_handle.spawn(async move {
@@ -5175,21 +5464,28 @@ impl App {
                     self.generate.progress.generation_started_at = None;
                     self.generate.progress.stage_started_at = None;
                 }
-                BackgroundEvent::GalleryScanComplete(entries) => {
-                    self.apply_gallery_scan(entries);
+                BackgroundEvent::GalleryScanComplete(scan) => {
+                    self.gallery.offline_hosts = scan.offline_hosts;
+                    self.apply_gallery_scan(scan.entries);
 
-                    // Spawn background thumbnail generation
-                    let entries_info: Vec<(std::path::PathBuf, Option<String>)> = self
+                    // Spawn background thumbnail generation. Remote
+                    // thumbnails are fetched from the entry's primary
+                    // origin with that host's saved API key.
+                    let entries_info: Vec<(std::path::PathBuf, Option<(String, String)>)> = self
                         .gallery
                         .entries
                         .iter()
-                        .map(|e| (e.path.clone(), e.server_url.clone()))
+                        .map(|e| {
+                            let origin = e.primary_origin();
+                            let remote = origin.url.map(|url| (url, origin.host_id));
+                            (e.path.clone(), remote)
+                        })
                         .collect();
                     let tx = self.bg_tx.clone();
                     self.tokio_handle.spawn(async move {
                         // Spawn all thumbnail fetches concurrently
                         let mut handles = Vec::new();
-                        for (path, server_url) in entries_info {
+                        for (path, remote) in entries_info {
                             if crate::thumbnails::thumbnail_exists(&path) {
                                 continue;
                             }
@@ -5198,9 +5494,10 @@ impl App {
                                     .file_name()
                                     .map(|f| f.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                if let Some(url) = server_url {
+                                if let Some((url, host_id)) = remote {
                                     // Fetch pre-generated thumbnail from server (fast, ~10KB)
-                                    let client = mold_core::MoldClient::new(&url);
+                                    let api_key = crate::hosts::api_key_for(&host_id);
+                                    let client = crate::hosts::client_for(&url, api_key.as_deref());
                                     let fetched = if let Ok(data) =
                                         client.get_gallery_thumbnail(&filename).await
                                     {
@@ -5218,8 +5515,9 @@ impl App {
 
                                     // Fallback: generate from locally cached image if server fetch failed
                                     if !fetched {
-                                        let cache_path =
-                                            crate::gallery_scan::image_cache_dir().join(&filename);
+                                        let cache_path = crate::gallery_scan::cached_image_path(
+                                            &host_id, &filename,
+                                        );
                                         if cache_path.is_file() {
                                             let key = path;
                                             tokio::task::spawn_blocking(move || {
@@ -5279,6 +5577,7 @@ impl App {
                     self.gallery.thumbnail_states = vec![None; len];
                     self.gallery.thumb_dimensions = vec![None; len];
                     self.gallery.thumb_fixed_cache = vec![None; len];
+                    self.gallery.details_thumb = None;
                 }
                 BackgroundEvent::ServerConnected { url, models } => {
                     self.connecting = false;
@@ -5506,12 +5805,14 @@ impl App {
                             generation_time_ms: Some(upscale_time_ms),
                             timestamp: ts,
                             server_url: None,
+                            origins: vec![GalleryOrigin::local()],
                         },
                     );
                     self.gallery.thumbnail_states.insert(0, None);
                     self.gallery.thumb_dimensions.insert(0, None);
                     self.gallery.thumb_fixed_cache.insert(0, None);
                     self.gallery.selected = 0;
+                    self.gallery.refresh_filter();
 
                     // Generate thumbnail in background
                     self.tokio_handle.spawn(async move {
@@ -5572,6 +5873,9 @@ impl App {
                                 ) {
                                     Ok(id) => {
                                         self.close_popup();
+                                        // The registry changed — the next
+                                        // Library visit re-merges galleries.
+                                        self.gallery.dirty = true;
                                         if let Some(entry) =
                                             self.machines.registry.get(&id).cloned()
                                         {
@@ -6369,6 +6673,7 @@ mod tests {
             generation_time_ms: Some(5000),
             timestamp: 1234,
             server_url: None,
+            origins: Vec::new(),
         };
         assert_eq!(entry.filename(), "mold-flux-1234.png");
     }
@@ -6419,6 +6724,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            origins: Vec::new(),
         };
         assert_eq!(entry.filename(), "unknown");
     }
@@ -6539,6 +6845,7 @@ mod tests {
             generation_time_ms: Some(5000),
             timestamp: 1234,
             server_url: None,
+            origins: Vec::new(),
         }
     }
 
@@ -6612,20 +6919,7 @@ mod tests {
     #[test]
     fn gallery_state_default_grid_cols() {
         // Default grid_cols should be reasonable
-        let state = GalleryState {
-            entries: Vec::new(),
-            selected: 0,
-            preview_image: None,
-            image_state: None,
-            animation: None,
-            scanning: false,
-            view_mode: GalleryViewMode::Grid,
-            thumbnail_states: Vec::new(),
-            thumb_dimensions: Vec::new(),
-            thumb_fixed_cache: Vec::new(),
-            grid_cols: 3,
-            grid_scroll: 0,
-        };
+        let state = GalleryState::default();
         assert_eq!(state.grid_cols, 3);
         assert_eq!(state.grid_scroll, 0);
         assert!(state.thumbnail_states.is_empty());
@@ -6724,20 +7018,7 @@ mod tests {
                 model_description: String::new(),
                 last_output_path: None,
             },
-            gallery: GalleryState {
-                entries: Vec::new(),
-                selected: 0,
-                preview_image: None,
-                image_state: None,
-                animation: None,
-                scanning: false,
-                view_mode: GalleryViewMode::Grid,
-                thumbnail_states: Vec::new(),
-                thumb_dimensions: Vec::new(),
-                thumb_fixed_cache: Vec::new(),
-                grid_cols: 3,
-                grid_scroll: 0,
-            },
+            gallery: GalleryState::default(),
             models: ModelsState {
                 catalog: Vec::new(),
                 selected: 0,
@@ -7558,6 +7839,7 @@ mod tests {
                 generation_time_ms: None,
                 timestamp: 0,
                 server_url: None,
+                origins: Vec::new(),
             });
             app.gallery.thumbnail_states.push(None);
             app.gallery.thumb_dimensions.push(None);
@@ -7565,6 +7847,7 @@ mod tests {
         }
         app.gallery.grid_cols = 3;
         app.gallery.grid_scroll = 0;
+        app.gallery.refresh_filter();
         // Gallery grid inner area in a representative layout.
         app.layout.gallery_grid = ratatui::layout::Rect::new(0, 3, 72, 40);
 
@@ -9608,6 +9891,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            origins: Vec::new(),
         });
         app.gallery.thumbnail_states.push(None);
         app.gallery.thumb_dimensions.push(None);
@@ -9720,6 +10004,7 @@ mod tests {
                 generation_time_ms: None,
                 timestamp: 0,
                 server_url: None,
+                origins: Vec::new(),
             });
             app.gallery.thumbnail_states.push(None);
             app.gallery.thumb_dimensions.push(None);
@@ -9810,6 +10095,7 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: Some(server),
+            origins: Vec::new(),
         });
         app.gallery.thumbnail_states.push(None);
         app.gallery.thumb_dimensions.push(None);
@@ -9939,7 +10225,249 @@ mod tests {
             generation_time_ms: None,
             timestamp: 0,
             server_url: None,
+            origins: Vec::new(),
         }
+    }
+
+    // ── Multi-host Library: filter, rescan triggers, delete routing ──
+
+    #[test]
+    fn filter_preserves_thumb_cache_indices() {
+        // The thumb caches are parallel vectors keyed by the UNDERLYING
+        // entry index. Applying/clearing a filter must never touch them —
+        // only the filtered index list changes.
+        let mut entry_a = make_test_entry_with_name("sunset.png");
+        entry_a.metadata.prompt = "golden sunset".into();
+        let mut entry_b = make_test_entry_with_name("cat.png");
+        entry_b.metadata.prompt = "a tabby cat".into();
+        let mut gallery = GalleryState {
+            entries: vec![entry_a, entry_b],
+            thumbnail_states: vec![None, None],
+            thumb_dimensions: vec![Some((100, 100)), Some((200, 200))],
+            thumb_fixed_cache: vec![None, None],
+            ..Default::default()
+        };
+        gallery.refresh_filter();
+        assert_eq!(gallery.filtered, vec![0, 1]);
+
+        gallery.filter = "cat".into();
+        gallery.refresh_filter();
+        assert_eq!(gallery.filtered, vec![1], "only cat.png matches");
+        assert_eq!(
+            gallery.thumb_dimensions,
+            vec![Some((100, 100)), Some((200, 200))],
+            "filtering must not invalidate index-keyed thumb caches"
+        );
+        assert_eq!(gallery.thumbnail_states.len(), 2);
+        assert_eq!(gallery.thumb_fixed_cache.len(), 2);
+        assert_eq!(
+            gallery.selected, 1,
+            "selection snaps to the first matching entry"
+        );
+
+        gallery.filter.clear();
+        gallery.refresh_filter();
+        assert_eq!(gallery.filtered, vec![0, 1]);
+        assert_eq!(gallery.thumb_dimensions.len(), 2);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn grid_navigation_moves_through_filtered_indices() {
+        // With a filter hiding the middle entry, Right must jump from the
+        // first match to the next match — not to the hidden neighbour.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Library;
+        let mut a = make_test_entry_with_name("cat-a.png");
+        a.metadata.prompt = "cat".into();
+        let mut b = make_test_entry_with_name("dog.png");
+        b.metadata.prompt = "dog".into();
+        let mut c = make_test_entry_with_name("cat-c.png");
+        c.metadata.prompt = "cat".into();
+        app.gallery.entries = vec![a, b, c];
+        app.gallery.thumbnail_states = vec![None; 3];
+        app.gallery.thumb_dimensions = vec![None; 3];
+        app.gallery.thumb_fixed_cache = vec![None; 3];
+        app.gallery.filter = "cat".into();
+        app.gallery.refresh_filter();
+        assert_eq!(app.gallery.filtered, vec![0, 2]);
+        app.gallery.selected = 0;
+
+        app.dispatch_action(Action::GridRight);
+        assert_eq!(app.gallery.selected, 2, "Right skips the filtered-out dog");
+        app.dispatch_action(Action::GridRight);
+        assert_eq!(app.gallery.selected, 2, "clamps at the last match");
+        app.dispatch_action(Action::GridLeft);
+        assert_eq!(app.gallery.selected, 0);
+    }
+
+    #[test]
+    fn handle_filter_key_editing_contract() {
+        let mut gallery = GalleryState {
+            entries: vec![make_test_entry_with_name("cat.png")],
+            ..Default::default()
+        };
+        gallery.refresh_filter();
+        gallery.filtering = true;
+
+        assert!(gallery.handle_filter_key(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(gallery.handle_filter_key(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(gallery.filter, "ca");
+        assert!(gallery.handle_filter_key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(gallery.filter, "c");
+
+        // Enter confirms — the query stays applied, editing stops.
+        assert!(gallery.handle_filter_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!gallery.filtering);
+        assert_eq!(gallery.filter, "c");
+
+        // Esc clears everything.
+        gallery.filtering = true;
+        assert!(gallery.handle_filter_key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!gallery.filtering);
+        assert!(gallery.filter.is_empty());
+        assert_eq!(gallery.filtered, vec![0]);
+
+        // Ctrl-modified chars are NOT consumed (Ctrl+C must still quit).
+        gallery.filtering = true;
+        assert!(!gallery.handle_filter_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(gallery.filter.is_empty());
+    }
+
+    #[test]
+    fn rescan_due_contract() {
+        let mut gallery = GalleryState::default();
+        assert!(gallery.rescan_due(), "never scanned → due");
+
+        gallery.last_scan = Some(std::time::Instant::now());
+        assert!(!gallery.rescan_due(), "fresh scan → not due");
+
+        gallery.dirty = true;
+        assert!(gallery.rescan_due(), "host registry changed → due");
+        gallery.dirty = false;
+
+        if let Some(stale) = std::time::Instant::now()
+            .checked_sub(crate::app::LIBRARY_RESCAN_STALE + std::time::Duration::from_secs(1))
+        {
+            gallery.last_scan = Some(stale);
+            assert!(gallery.rescan_due(), "stale scan (>30s) → due");
+        }
+
+        gallery.scanning = true;
+        assert!(!gallery.rescan_due(), "a running scan is never doubled");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn switching_to_library_rescans_only_when_due() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.gallery.last_scan = Some(std::time::Instant::now());
+        app.gallery.dirty = false;
+
+        app.dispatch_action(Action::SwitchView(View::Library));
+        assert!(
+            !app.gallery.scanning,
+            "fresh scan → entering Library does not rescan"
+        );
+
+        // Host registry changed (connect/forget marks dirty) → rescan.
+        app.dispatch_action(Action::SwitchView(View::Create));
+        app.gallery.dirty = true;
+        app.dispatch_action(Action::SwitchView(View::Library));
+        assert!(app.gallery.scanning, "dirty registry → merged rescan");
+    }
+
+    #[test]
+    fn delete_confirm_message_names_machine_count() {
+        assert_eq!(delete_confirm_message("a.png", 1), "Delete a.png?");
+        assert_eq!(
+            delete_confirm_message("a.png", 2),
+            "Delete a.png? It exists on 2 machines. This can't be undone."
+        );
+    }
+
+    #[test]
+    fn owning_origins_synthesizes_legacy_entries() {
+        // Legacy entries (empty origins) resolve through server_url: a
+        // remote URL becomes a slug-identified remote origin, local stays
+        // "this machine".
+        let mut entry = make_test_entry_with_name("legacy.png");
+        let origins = entry.owning_origins();
+        assert_eq!(origins.len(), 1);
+        assert!(origins[0].is_local());
+
+        entry.server_url = Some("http://hal9000:7680".into());
+        let origins = entry.owning_origins();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].host_id, "hal9000-7680");
+        assert_eq!(origins[0].url.as_deref(), Some("http://hal9000:7680"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn delete_removes_host_scoped_caches_for_every_owning_host() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            let entry = GalleryEntry {
+                path: std::path::PathBuf::from("everywhere.png"),
+                metadata: make_test_metadata(),
+                generation_time_ms: None,
+                timestamp: 0,
+                server_url: Some("http://127.0.0.1:1".into()),
+                origins: vec![
+                    GalleryOrigin {
+                        host_id: "host-a".into(),
+                        url: Some("http://127.0.0.1:1".into()),
+                        name: "host-a".into(),
+                    },
+                    GalleryOrigin {
+                        host_id: "host-b".into(),
+                        url: Some("http://127.0.0.1:1".into()),
+                        name: "host-b".into(),
+                    },
+                ],
+            };
+            let cache_a = crate::gallery_scan::cached_image_path("host-a", "everywhere.png");
+            let cache_b = crate::gallery_scan::cached_image_path("host-b", "everywhere.png");
+            std::fs::create_dir_all(cache_a.parent().unwrap()).unwrap();
+            std::fs::write(&cache_a, b"a").unwrap();
+            std::fs::write(&cache_b, b"b").unwrap();
+
+            app.gallery.entries = vec![entry];
+            app.gallery.thumbnail_states = vec![None];
+            app.gallery.thumb_dimensions = vec![None];
+            app.gallery.thumb_fixed_cache = vec![None];
+            app.gallery.refresh_filter();
+            app.gallery.selected = 0;
+
+            app.delete_selected_gallery_image();
+
+            assert!(app.gallery.entries.is_empty());
+            assert!(
+                !cache_a.exists() && !cache_b.exists(),
+                "delete must clear the host-scoped cache for EVERY owning host"
+            );
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn gallery_scan_complete_records_offline_hosts() {
+        let mut app = make_settings_test_app();
+        app.bg_tx
+            .send(BackgroundEvent::GalleryScanComplete(
+                crate::gallery_scan::MergedScan {
+                    entries: vec![make_test_entry_with_name("a.png")],
+                    offline_hosts: 2,
+                },
+            ))
+            .unwrap();
+        app.process_background_events();
+        assert_eq!(app.gallery.offline_hosts, 2);
+        assert_eq!(app.gallery.entries.len(), 1);
+        assert_eq!(app.gallery.filtered, vec![0], "scan populates the filter");
+        assert!(app.gallery.last_scan.is_some(), "scan stamps freshness");
     }
 
     #[test]

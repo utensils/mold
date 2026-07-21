@@ -65,6 +65,10 @@ pub enum Action {
     UnloadModel,
     /// Models: start filtering by name.
     FilterModels,
+    /// Library: start editing the `/` filter.
+    FilterLibrary,
+    /// Library: clear a confirmed filter (Esc with a filter applied).
+    FilterLibraryClear,
     /// Show the help overlay.
     ShowHelp,
     /// Toggle the collapsed state of the Negative prompt panel on the

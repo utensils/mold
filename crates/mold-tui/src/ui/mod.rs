@@ -3,6 +3,7 @@ pub mod create_form;
 pub mod gallery;
 pub mod generate;
 pub mod info;
+pub mod library_details;
 pub mod machines;
 pub mod models;
 pub mod param_form;
@@ -272,6 +273,8 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
         View::Library => {
             if app.upscale_in_progress {
                 vec![("Esc", "Cancel"), ("", upscale_status.as_str())]
+            } else if app.gallery.filtering {
+                vec![("type", "Filter"), ("Enter", "Apply"), ("Esc", "Clear")]
             } else if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
                 vec![
                     ("e", "Edit"),
@@ -286,10 +289,10 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                 vec![
                     ("hjkl", "Navigate"),
                     ("Enter", "Details"),
-                    ("e", "Edit"),
+                    ("r", "Recall"),
                     ("u", "Upscale"),
                     ("d", "Delete"),
-                    ("Esc", "Back"),
+                    ("/", "Filter"),
                     ("?", "Help"),
                     ("q", "Quit"),
                 ]
