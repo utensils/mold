@@ -617,6 +617,7 @@ mod tests {
             scheduler: Some(mold_core::Scheduler::EulerAncestral),
             inference_mode: crate::app::InferenceMode::Auto,
             host: None,
+            target_host_name: None,
             lora_path: Some("/path/to/lora.safetensors".to_string()),
             lora_scale: 0.7,
             expand: true,

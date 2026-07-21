@@ -505,7 +505,7 @@ cmd_view() {
         1|create|Create|generate|Generate)   key="1"; landmark="┌ Parameters|┌ Prompt";;
         2|library|Library|gallery|Gallery)   key="2"; landmark="┌ Library";;
         3|models|Models)                     key="3"; landmark="┌ Installed|┌ Available";;
-        4|machines|Machines|queue|Queue)     key="4"; landmark="┌ Queue";;
+        4|machines|Machines|queue|Queue)     key="4"; landmark="┌ Machines";;
         5|settings|Settings)                 key="5"; landmark="┌ Appearance|┌ Configuration";;
         chain|Chain|script|Script)
             # Chain is a Create sub-mode, not a tab: go to Create, press c.

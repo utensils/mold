@@ -6,8 +6,8 @@ use crate::chain_job::{
 use crate::error::MoldError;
 use crate::types::{
     ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
-    LoraInfo, ModelInfo, ModelInfoExtended, ServerStatus, SseCompleteEvent, SseErrorEvent,
-    SseProgressEvent, VideoData,
+    LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus, SseCompleteEvent,
+    SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -769,6 +769,46 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Snapshot the server's generation queue (`GET /api/queue`).
+    ///
+    /// The listing covers everything currently queued or running — completed
+    /// jobs live in the gallery, not here. Entries are wire-shaped twins of
+    /// the server's `job_registry::JobEntry`; see [`QueueListingWire`] for
+    /// the forward-compat rules (plain-string `state`, defaulted additive
+    /// fields), which let this client talk to both older and newer servers.
+    pub async fn list_queue(&self) -> Result<QueueListingWire> {
+        let resp = self
+            .client
+            .get(format!("{}/api/queue", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<QueueListingWire>()
+            .await?;
+        Ok(resp)
+    }
+
+    /// Cancel a still-queued job (`DELETE /api/queue/{id}`).
+    ///
+    /// The server answers `204` on success, `404` for unknown ids, and `409`
+    /// when the job is already running on a GPU worker (running jobs are not
+    /// cancelable — there is no safe preemption point). Non-2xx responses
+    /// surface as errors carrying the response body text, so the 409 reason
+    /// reaches the caller verbatim.
+    pub async fn cancel_queue_job(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(format!(
+                "{}/api/queue/{}",
+                self.base_url,
+                encode_path_segment(id)
+            ))
+            .send()
+            .await?;
+        error_for_status_with_body(resp).await?;
+        Ok(())
+    }
+
     /// List gallery images from the server's output directory.
     pub async fn list_gallery(&self) -> Result<Vec<GalleryImage>> {
         let resp = self
@@ -1344,6 +1384,110 @@ mod tests {
             "/models/cv-827325/fluxRealSkin-V2.safetensors"
         );
         assert_eq!(loras[0].trained_words, ["realskin"]);
+    }
+
+    // ── Queue endpoints ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_queue_parses_the_wrapped_entries_listing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [
+                    {
+                        "id": "job-1",
+                        "model": "flux-dev:q8",
+                        "state": "running",
+                        "started_at_unix_ms": 1_711_305_600_000_u64,
+                        "position": 0,
+                        "gpu": 0
+                    },
+                    {
+                        "id": "job-2",
+                        "model": "sdxl:q8",
+                        "state": "queued",
+                        "started_at_unix_ms": 1_711_305_601_000_u64,
+                        "position": 1
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let listing = client.list_queue().await.unwrap();
+
+        assert_eq!(listing.entries.len(), 2);
+        assert_eq!(listing.entries[0].id, "job-1");
+        assert_eq!(listing.entries[0].state, "running");
+        assert_eq!(listing.entries[0].gpu, Some(0));
+        assert_eq!(listing.entries[1].state, "queued");
+        assert_eq!(listing.entries[1].gpu, None);
+        assert_eq!(listing.entries[1].position, 1);
+    }
+
+    #[tokio::test]
+    async fn list_queue_sends_the_api_key_header() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .and(header("x-api-key", "sekrit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "entries": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::with_api_key(&server.uri(), "sekrit".to_string());
+        let listing = client.list_queue().await.unwrap();
+        assert!(listing.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_queue_job_succeeds_on_no_content() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        client.cancel_queue_job("job-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_queue_job_surfaces_the_409_body_for_running_jobs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/queue/job-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "queue job job-1 is already running; only queued jobs can be cancelled"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MoldClient::new(&server.uri());
+        let err = client.cancel_queue_job("job-1").await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("409"), "status missing from error: {msg}");
+        assert!(
+            msg.contains("already running"),
+            "body text missing from error: {msg}"
+        );
     }
 
     #[test]

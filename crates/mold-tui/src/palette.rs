@@ -116,9 +116,7 @@ pub fn command_action(id: CommandId) -> Action {
         CommandId::GoSettings => Action::SwitchView(View::Settings),
         CommandId::ComposeChain => Action::ChainEnter,
         CommandId::ToggleAdvanced => Action::ToggleAdvanced,
-        // Interim target: the Machines workspace. The Machines PR retargets
-        // this at its connect flow — a single arm to change.
-        CommandId::ConnectMachine => Action::SwitchView(View::Machines),
+        CommandId::ConnectMachine => Action::MachinesConnect,
         CommandId::RandomizeSeed => Action::RandomizeSeed,
         CommandId::ExpandPrompt => Action::ExpandPrompt,
         CommandId::SearchHistory => Action::SearchHistory,

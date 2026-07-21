@@ -84,6 +84,23 @@ pub enum BackgroundEvent {
     },
     /// Chain generation failed.
     ChainError(String),
+    /// Per-host `/api/status` poll result for the Machines workspace.
+    /// `None` marks the row Offline — it stays listed and self-heals.
+    HostStatusUpdate {
+        host_id: String,
+        status: Option<Box<ServerStatus>>,
+    },
+    /// Per-host queue snapshot for the selected Machines row.
+    HostQueueUpdate {
+        host_id: String,
+        queue: Option<mold_core::QueueListingWire>,
+    },
+    /// Result of the connect-a-machine test fetch.
+    MachineConnectTested {
+        url: String,
+        api_key: Option<String>,
+        result: Result<Box<ServerStatus>, String>,
+    },
 }
 
 /// A single entry in the progress log.
@@ -561,6 +578,10 @@ pub struct GenerateParams {
     pub scheduler: Option<Scheduler>,
     pub inference_mode: InferenceMode,
     pub host: Option<String>,
+    /// Display name of the Machines generation target when this run was
+    /// routed at a specific registered host — used only to compose the
+    /// no-fallback "Can't reach {name} ({url})" error.
+    pub target_host_name: Option<String>,
     // Advanced
     pub lora_path: Option<String>,
     pub lora_scale: f64,
@@ -627,6 +648,7 @@ impl GenerateParams {
             scheduler: None,
             inference_mode: InferenceMode::Auto,
             host: None,
+            target_host_name: None,
             lora_path: None,
             lora_scale: 1.0,
             expand: false,
@@ -974,6 +996,11 @@ pub enum Popup {
     HostInput {
         input: String,
     },
+    /// Stepped connect-a-machine flow (Machines workspace):
+    /// Url → optional ApiKey → Testing → saved or Failed with retry.
+    MachineConnect {
+        form: crate::hosts::ConnectForm,
+    },
     SeedInput {
         input: String,
     },
@@ -1016,6 +1043,13 @@ pub enum ConfirmAction {
     RemoveModel(String),
     /// Delete the currently selected script stage.
     DeleteScriptStage,
+    /// Forget a registered machine (also deletes its saved API key).
+    ForgetHost(String),
+    /// Cancel a queued job on a registered machine.
+    CancelHostJob {
+        host_id: String,
+        job_id: String,
+    },
 }
 
 /// The root application state.
@@ -1026,6 +1060,11 @@ pub struct App {
     pub generate: GenerateState,
     pub gallery: GalleryState,
     pub models: ModelsState,
+    /// Machines workspace state: host registry, per-host telemetry,
+    /// selected-host queue snapshot. Logic lives in `crate::hosts`.
+    pub machines: crate::hosts::MachinesState,
+    /// Sticky generation target (persisted at `tui.generate_target`).
+    pub target: crate::hosts::GenTarget,
     pub settings: SettingsState,
     /// DB-backed user preferences (Settings → Preferences), loaded once
     /// at boot and persisted per-key on toggle.
@@ -1336,6 +1375,14 @@ impl App {
                 filter: String::new(),
                 filtering: false,
             },
+            machines: crate::hosts::MachinesState::load(),
+            target: if local {
+                // `mold tui --local` pins this run to the local engine;
+                // the persisted target is left untouched.
+                crate::hosts::GenTarget::Local
+            } else {
+                crate::hosts::GenTarget::load()
+            },
             settings: {
                 let first_model = config.models.keys().next().cloned();
                 SettingsState {
@@ -1462,6 +1509,45 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Multi-host polling tick — driven by the 2 s resource-refresh timer.
+    /// The plan (which hosts, whether a queue fetch rides along) lives in
+    /// `hosts::MachinesState::poll_plan`.
+    pub fn tick_host_polling(&mut self) {
+        if !self.machines.poll_due() {
+            return;
+        }
+        let plan = self
+            .machines
+            .poll_plan(self.active_view == View::Machines, &self.target);
+        for entry in plan.status_hosts {
+            self.spawn_host_status_fetch(entry);
+        }
+        if let Some(entry) = plan.queue_host {
+            self.spawn_host_queue_fetch(entry);
+        }
+    }
+
+    /// Spawn a `/api/status` fetch for one registered host.
+    pub fn spawn_host_status_fetch(&self, entry: crate::hosts::HostEntry) {
+        self.tokio_handle
+            .spawn(crate::hosts::fetch_host_status(entry, self.bg_tx.clone()));
+    }
+
+    /// Spawn a queue-listing fetch for one registered host.
+    pub fn spawn_host_queue_fetch(&self, entry: crate::hosts::HostEntry) {
+        self.tokio_handle
+            .spawn(crate::hosts::fetch_host_queue(entry, self.bg_tx.clone()));
+    }
+
+    /// Spawn the connect-flow test fetch against `url`.
+    fn spawn_machine_connect_test(&self, url: String, api_key: Option<String>) {
+        self.tokio_handle.spawn(crate::hosts::test_connection(
+            url,
+            api_key,
+            self.bg_tx.clone(),
+        ));
     }
 
     /// Apply model defaults from the server's catalog to the current model.
@@ -2264,6 +2350,30 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::MachineConnect { form }) => {
+                    use crate::hosts::{connect_advance, ConnectEffect, ConnectInput};
+                    let input = match key.code {
+                        KeyCode::Esc => Some(ConnectInput::Esc),
+                        KeyCode::Enter => Some(ConnectInput::Enter),
+                        KeyCode::Backspace => Some(ConnectInput::Backspace),
+                        KeyCode::Char(c) => Some(ConnectInput::Char(c)),
+                        _ => None,
+                    };
+                    if let Some(input) = input {
+                        match connect_advance(form, input) {
+                            ConnectEffect::None => {}
+                            ConnectEffect::Close => self.close_popup(),
+                            ConnectEffect::StartTest => {
+                                let url = form.url.clone();
+                                let api_key = Some(form.api_key.clone()).filter(|k| !k.is_empty());
+                                self.spawn_machine_connect_test(url, api_key);
+                            }
+                            // Save only arises from the async TestOk input,
+                            // which is fed in by the background handler.
+                            ConnectEffect::Save => {}
+                        }
+                    }
+                }
                 Some(Popup::SeedInput { input }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
@@ -2626,7 +2736,15 @@ impl App {
     pub fn dispatch_action(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::SwitchView(view) => self.active_view = view,
+            Action::SwitchView(view) => {
+                self.active_view = view;
+                if view == View::Machines {
+                    // Entering Machines polls immediately instead of
+                    // waiting out the background cadence.
+                    self.machines.force_poll();
+                    self.tick_host_polling();
+                }
+            }
             Action::ViewNext => {
                 let i = self.active_view.index();
                 self.active_view = View::ALL[(i + 1) % View::ALL.len()];
@@ -2677,6 +2795,13 @@ impl App {
                     SettingsFocus::Configuration => SettingsFocus::Appearance,
                 };
             }
+            Action::FocusNext | Action::FocusPrev if self.active_view == View::Machines => {
+                use crate::hosts::MachinesFocus;
+                self.machines.focus = match self.machines.focus {
+                    MachinesFocus::HostList => MachinesFocus::Detail,
+                    MachinesFocus::Detail => MachinesFocus::HostList,
+                };
+            }
             Action::Up => match self.active_view {
                 View::Create => {
                     if self.generate.focus == GenerateFocus::Parameters
@@ -2706,7 +2831,14 @@ impl App {
                         self.models.selected -= 1;
                     }
                 }
-                View::Machines => {}
+                View::Machines => match self.machines.focus {
+                    crate::hosts::MachinesFocus::HostList => {
+                        if self.machines.select_prev() {
+                            self.spawn_selected_host_queue_fetch();
+                        }
+                    }
+                    crate::hosts::MachinesFocus::Detail => self.machines.queue_select_prev(),
+                },
                 View::Settings => self.settings_navigate(-1),
             },
             Action::Down => match self.active_view {
@@ -2740,7 +2872,14 @@ impl App {
                         self.models.selected += 1;
                     }
                 }
-                View::Machines => {}
+                View::Machines => match self.machines.focus {
+                    crate::hosts::MachinesFocus::HostList => {
+                        if self.machines.select_next() {
+                            self.spawn_selected_host_queue_fetch();
+                        }
+                    }
+                    crate::hosts::MachinesFocus::Detail => self.machines.queue_select_next(),
+                },
                 View::Settings => self.settings_navigate(1),
             },
             Action::Increment => {
@@ -3033,6 +3172,48 @@ impl App {
 
                     let message = self.build_remove_model_message(&name);
                     self.request_confirm(message, ConfirmAction::RemoveModel(name));
+                }
+            }
+            Action::MachinesConnect => {
+                self.active_view = View::Machines;
+                self.popup = Some(Popup::MachineConnect {
+                    form: crate::hosts::ConnectForm::default(),
+                });
+            }
+            Action::MachinesSetTarget if self.active_view == View::Machines => {
+                self.target = self.machines.target_for_selected(&self.target);
+                self.target.save();
+            }
+            Action::MachinesForget if self.active_view == View::Machines => {
+                if let crate::hosts::MachineRowId::Host(id) = self.machines.selected_row() {
+                    let name = self
+                        .machines
+                        .registry
+                        .get(&id)
+                        .map(|e| e.display_name())
+                        .unwrap_or_else(|| id.clone());
+                    self.popup = Some(Popup::Confirm {
+                        message: format!("Forget {name}? Its saved API key is deleted too."),
+                        on_confirm: ConfirmAction::ForgetHost(id),
+                    });
+                }
+            }
+            Action::MachinesRefresh if self.active_view == View::Machines => {
+                self.machines.force_poll();
+                self.tick_host_polling();
+            }
+            Action::MachinesCancelJob
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                if let Some((host_id, job)) = self.machines.selected_queued_job() {
+                    self.popup = Some(Popup::Confirm {
+                        message: format!("Cancel queued job for {}?", job.model),
+                        on_confirm: ConfirmAction::CancelHostJob {
+                            host_id,
+                            job_id: job.id,
+                        },
+                    });
                 }
             }
             Action::ScriptMoveDown => self.script.move_down(),
@@ -3603,6 +3784,30 @@ impl App {
             ConfirmAction::DeleteScriptStage => {
                 self.script.delete_stage();
             }
+            ConfirmAction::ForgetHost(id) => {
+                self.machines.forget(&id);
+                if self.target == crate::hosts::GenTarget::Host(id) {
+                    self.target = crate::hosts::GenTarget::Auto;
+                    self.target.save();
+                }
+            }
+            ConfirmAction::CancelHostJob { host_id, job_id } => {
+                if let Some(entry) = self.machines.registry.get(&host_id).cloned() {
+                    self.tokio_handle.spawn(crate::hosts::cancel_host_job(
+                        entry,
+                        job_id,
+                        self.bg_tx.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Kick a queue fetch for the newly selected Machines row (no-op for
+    /// the local row — its lane is composed from in-process state).
+    fn spawn_selected_host_queue_fetch(&self) {
+        if let Some(entry) = self.machines.selected_host().cloned() {
+            self.spawn_host_queue_fetch(entry);
         }
     }
 
@@ -4616,6 +4821,35 @@ impl App {
             return;
         }
 
+        // Route by the sticky Machines generation target. Auto keeps
+        // today's exact behavior; Local forces the in-process engine; a
+        // Host target pins the run to that registry entry with its API
+        // key and no silent fallback. Routing runs before any state
+        // mutation so a stale target aborts cleanly.
+        use crate::hosts::GenTarget;
+        let mut route_mode = None;
+        let mut route_host = None;
+        let mut route_name = None;
+        let mut api_key = None;
+        match &self.target {
+            GenTarget::Auto => {}
+            GenTarget::Local => route_mode = Some(InferenceMode::Local),
+            GenTarget::Host(id) => match self.machines.registry.get(id) {
+                Some(entry) => {
+                    route_mode = Some(InferenceMode::Remote);
+                    route_host = Some(entry.url.clone());
+                    route_name = Some(entry.display_name());
+                    api_key = crate::hosts::api_key_for(id);
+                }
+                None => {
+                    self.generate.error_message = Some(format!(
+                        "Machine '{id}' is no longer saved. Pick a target in Machines (4)."
+                    ));
+                    return;
+                }
+            },
+        }
+
         self.generate.generating = true;
         self.generate.batch_remaining = self.generate.params.batch;
         self.generate.error_message = None;
@@ -4642,13 +4876,27 @@ impl App {
             .resolve(self.generate.params.seed);
         let mut params = self.generate.params.clone();
         params.seed = Some(resolved_seed);
+        if let Some(mode) = route_mode {
+            params.inference_mode = mode;
+        }
+        if route_host.is_some() {
+            params.host = route_host;
+        }
+        params.target_host_name = route_name;
 
         let tx = self.bg_tx.clone();
         let server_url = self.server_url.clone();
 
         self.tokio_handle.spawn(async move {
-            crate::backend::run_generation(server_url, params, prompt_text, negative_prompt, tx)
-                .await;
+            crate::backend::run_generation(
+                server_url,
+                params,
+                prompt_text,
+                negative_prompt,
+                api_key,
+                tx,
+            )
+            .await;
         });
     }
 
@@ -5336,6 +5584,61 @@ impl App {
                 BackgroundEvent::ServerStatusUpdate(None) => {
                     // Server became unreachable — clear stale remote info
                     self.resource_info.clear_server_status();
+                }
+                BackgroundEvent::HostStatusUpdate { host_id, status } => {
+                    self.machines.apply_status(host_id, status);
+                }
+                BackgroundEvent::HostQueueUpdate { host_id, queue } => {
+                    self.machines.apply_queue(host_id, queue);
+                }
+                BackgroundEvent::MachineConnectTested {
+                    url,
+                    api_key,
+                    result,
+                } => {
+                    use crate::hosts::{connect_advance, ConnectEffect, ConnectInput, ConnectStep};
+                    // Only apply to the in-flight connect form for this URL —
+                    // a closed or re-targeted popup drops the stale result.
+                    let Some(Popup::MachineConnect { form }) = &mut self.popup else {
+                        continue;
+                    };
+                    if form.step != ConnectStep::Testing || form.url != url {
+                        continue;
+                    }
+                    match result {
+                        Ok(status) => {
+                            let effect = connect_advance(
+                                form,
+                                ConnectInput::TestOk {
+                                    hostname: status.hostname.as_deref(),
+                                },
+                            );
+                            if effect == ConnectEffect::Save {
+                                match self.machines.complete_connect(
+                                    &url,
+                                    api_key.as_deref(),
+                                    status,
+                                ) {
+                                    Ok(id) => {
+                                        self.close_popup();
+                                        if let Some(entry) =
+                                            self.machines.registry.get(&id).cloned()
+                                        {
+                                            self.spawn_host_queue_fetch(entry);
+                                        }
+                                    }
+                                    Err(crate::hosts::AddHostError::AlreadyKnown { name }) => {
+                                        self.popup = Some(Popup::Info {
+                                            message: format!("Already connected as {name}."),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            connect_advance(form, ConnectInput::TestErr(&e));
+                        }
+                    }
                 }
                 BackgroundEvent::CatalogRefreshed(models) => {
                     self.models.catalog = models;
@@ -6608,6 +6911,8 @@ mod tests {
                 filter: String::new(),
                 filtering: false,
             },
+            machines: crate::hosts::MachinesState::default(),
+            target: crate::hosts::GenTarget::default(),
             settings: SettingsState {
                 selected_model: Some("test-model:q8".to_string()),
                 row_index: 1,
@@ -10540,5 +10845,362 @@ mod tests {
         terminal
             .draw(|f| crate::ui::models::render(f, &mut app, f.area()))
             .unwrap();
+    }
+
+    // ── Machines workspace ────────────────────────────────────────
+
+    fn machines_test_host(id: &str) -> crate::hosts::HostEntry {
+        crate::hosts::HostEntry {
+            id: id.to_string(),
+            url: format!("http://{id}:7680"),
+            name: Some(id.to_string()),
+            instance_id: None,
+        }
+    }
+
+    fn render_view_to_string(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn machines_render_shows_machines_landmark() {
+        // `scripts/tui-uat.sh view machines` greps for "┌ Machines" — this
+        // is the landmark regression test for that contract.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        let text = render_view_to_string(&mut app, 100, 30);
+        assert!(text.contains("┌ Machines"), "landmark missing:\n{text}");
+        assert!(text.contains("hal9000"), "host row missing:\n{text}");
+        assert!(
+            text.contains("+ Connect a machine"),
+            "connect affordance missing:\n{text}"
+        );
+        // The local machine is always the first row.
+        let local = crate::hosts::local_display_name();
+        let local_pos = text.find(local).expect("local row rendered");
+        let host_pos = text.find("hal9000").unwrap();
+        assert!(local_pos < host_pos, "local row must render first");
+    }
+
+    #[tokio::test]
+    async fn machines_status_shortcuts_advertise_the_key_map() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        let hints = crate::ui::status_shortcuts(&app);
+        let keys: Vec<&str> = hints.iter().map(|(k, _)| k.as_str()).collect();
+        for expected in ["^K", "j/k", "Enter", "c", "d", "r", "Esc"] {
+            assert!(keys.contains(&expected), "missing {expected} in {keys:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn machines_set_target_is_sticky_and_toggles_back_to_auto() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Machines;
+            app.machines
+                .registry
+                .add(machines_test_host("hal9000"))
+                .unwrap();
+            app.machines.select_next(); // select the host row
+            app.dispatch_action(Action::MachinesSetTarget);
+            assert_eq!(app.target, crate::hosts::GenTarget::Host("hal9000".into()));
+            assert_eq!(
+                crate::hosts::GenTarget::load(),
+                crate::hosts::GenTarget::Host("hal9000".into()),
+                "target must persist"
+            );
+            // Enter on the same row reverts to Auto (escapable sticky pick).
+            app.dispatch_action(Action::MachinesSetTarget);
+            assert_eq!(app.target, crate::hosts::GenTarget::Auto);
+        });
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn machines_forget_confirm_names_key_deletion_and_resets_target() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Machines;
+            app.machines
+                .registry
+                .add(machines_test_host("hal9000"))
+                .unwrap();
+            app.machines.select_next();
+            app.target = crate::hosts::GenTarget::Host("hal9000".into());
+
+            app.dispatch_action(Action::MachinesForget);
+            let Some(Popup::Confirm {
+                message,
+                on_confirm,
+            }) = &app.popup
+            else {
+                panic!("expected the Forget confirm popup");
+            };
+            assert!(
+                message.contains("hal9000") && message.contains("API key is deleted"),
+                "confirm copy must name the host and the key deletion: {message}"
+            );
+            let action = on_confirm.clone();
+            app.popup = None;
+            app.handle_confirm_action(action);
+            assert!(app.machines.registry.hosts.is_empty());
+            assert_eq!(
+                app.target,
+                crate::hosts::GenTarget::Auto,
+                "a forgotten target host must fall back to Auto"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn machines_forget_on_local_row_is_a_noop() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        assert_eq!(app.machines.selected, 0);
+        app.dispatch_action(Action::MachinesForget);
+        assert!(app.popup.is_none(), "the local machine cannot be forgotten");
+    }
+
+    #[tokio::test]
+    async fn machines_connect_action_opens_stepped_popup() {
+        let mut app = make_settings_test_app();
+        // Reachable from any view via the ^K palette entry.
+        app.dispatch_action(Action::MachinesConnect);
+        assert_eq!(app.active_view, View::Machines);
+        assert!(matches!(app.popup, Some(Popup::MachineConnect { .. })));
+
+        // Typing routes into the form; Enter normalizes and advances.
+        use crossterm::event::{Event, KeyEvent};
+        for c in "hal9000".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let Some(Popup::MachineConnect { form }) = &app.popup else {
+            panic!("popup must stay open through the ApiKey step");
+        };
+        assert_eq!(form.step, crate::hosts::ConnectStep::ApiKey);
+        assert_eq!(form.url, "http://hal9000:7680");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn machines_connect_tested_success_registers_host() {
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.dispatch_action(Action::MachinesConnect);
+            if let Some(Popup::MachineConnect { form }) = &mut app.popup {
+                form.step = crate::hosts::ConnectStep::Testing;
+                form.url = "http://hal9000:7680".to_string();
+            }
+            let status = ServerStatus {
+                version: "0.20.2".into(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 1,
+                hostname: Some("hal9000".into()),
+                memory_status: None,
+                gpus: None,
+                queue_depth: None,
+                queue_capacity: None,
+                queue_paused: None,
+                instance_id: Some("uuid-a".into()),
+                models_disk: None,
+            };
+            let _ = app.bg_tx.send(BackgroundEvent::MachineConnectTested {
+                url: "http://hal9000:7680".into(),
+                api_key: Some("sekrit".into()),
+                result: Ok(Box::new(status)),
+            });
+            app.process_background_events();
+
+            assert!(app.popup.is_none(), "popup closes on success");
+            let entry = app
+                .machines
+                .registry
+                .get("hal9000-7680")
+                .expect("registered");
+            assert_eq!(entry.name.as_deref(), Some("hal9000"));
+            assert_eq!(
+                crate::hosts::api_key_for("hal9000-7680").as_deref(),
+                Some("sekrit")
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn machines_connect_tested_failure_shows_retryable_error() {
+        let mut app = make_settings_test_app();
+        app.dispatch_action(Action::MachinesConnect);
+        if let Some(Popup::MachineConnect { form }) = &mut app.popup {
+            form.step = crate::hosts::ConnectStep::Testing;
+            form.url = "http://down:7680".to_string();
+        }
+        let _ = app.bg_tx.send(BackgroundEvent::MachineConnectTested {
+            url: "http://down:7680".into(),
+            api_key: None,
+            result: Err("connection refused".into()),
+        });
+        app.process_background_events();
+        let Some(Popup::MachineConnect { form }) = &app.popup else {
+            panic!("popup stays open in the Failed step");
+        };
+        assert_eq!(form.step, crate::hosts::ConnectStep::Failed);
+        assert_eq!(form.error.as_deref(), Some("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn host_status_and_queue_events_feed_machines_state() {
+        let mut app = make_settings_test_app();
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        app.machines.select_next();
+
+        let _ = app.bg_tx.send(BackgroundEvent::HostStatusUpdate {
+            host_id: "hal9000".into(),
+            status: None,
+        });
+        let _ = app.bg_tx.send(BackgroundEvent::HostQueueUpdate {
+            host_id: "hal9000".into(),
+            queue: Some(mold_core::QueueListingWire::default()),
+        });
+        app.process_background_events();
+
+        assert!(matches!(
+            app.machines.statuses.get("hal9000").unwrap().health,
+            crate::hosts::HostHealth::Offline(_)
+        ));
+        assert!(app.machines.queue.is_some());
+    }
+
+    #[tokio::test]
+    async fn start_generation_with_stale_host_target_errors_with_fix() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.prompt = TextArea::new(vec!["a cat".to_string()]);
+        app.target = crate::hosts::GenTarget::Host("gone-host".into());
+        app.dispatch_action(Action::Generate);
+        assert!(
+            !app.generate.generating,
+            "stale target must not start a run"
+        );
+        let err = app.generate.error_message.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("gone-host") && err.contains("Machines"),
+            "error must name the host and point at Machines: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn machines_cancel_job_gated_on_detail_focus_and_queued_state() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        app.machines.select_next();
+        app.machines.apply_queue(
+            "hal9000".into(),
+            Some(mold_core::QueueListingWire {
+                entries: vec![
+                    mold_core::QueueJobEntryWire {
+                        id: "job-run".into(),
+                        model: "flux2-klein:q8".into(),
+                        state: "running".into(),
+                        started_at_unix_ms: 0,
+                        position: 0,
+                        gpu: Some(0),
+                        target_gpu: None,
+                        seed_pinned: None,
+                        metadata: None,
+                    },
+                    mold_core::QueueJobEntryWire {
+                        id: "job-q".into(),
+                        model: "sdxl:fp16".into(),
+                        state: "queued".into(),
+                        started_at_unix_ms: 0,
+                        position: 1,
+                        gpu: None,
+                        target_gpu: None,
+                        seed_pinned: None,
+                        metadata: None,
+                    },
+                ],
+            }),
+        );
+
+        // HostList focus: `x` is a no-op.
+        app.dispatch_action(Action::MachinesCancelJob);
+        assert!(app.popup.is_none());
+
+        // Detail focus on the running job: still a no-op (not cancelable).
+        app.machines.focus = crate::hosts::MachinesFocus::Detail;
+        app.machines.queue_selected = 0;
+        app.dispatch_action(Action::MachinesCancelJob);
+        assert!(app.popup.is_none(), "running jobs are not cancelable");
+
+        // Detail focus on the queued job: confirm gate opens.
+        app.machines.queue_selected = 1;
+        app.dispatch_action(Action::MachinesCancelJob);
+        let Some(Popup::Confirm { on_confirm, .. }) = &app.popup else {
+            panic!("expected the cancel confirm popup");
+        };
+        assert!(matches!(
+            on_confirm,
+            ConfirmAction::CancelHostJob { host_id, job_id }
+                if host_id == "hal9000" && job_id == "job-q"
+        ));
+    }
+
+    #[tokio::test]
+    async fn machines_tab_toggles_focus_and_jk_routes_by_focus() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        assert_eq!(app.machines.focus, crate::hosts::MachinesFocus::HostList);
+        app.dispatch_action(Action::FocusNext);
+        assert_eq!(app.machines.focus, crate::hosts::MachinesFocus::Detail);
+
+        // Detail focus: Down moves the queue selection, not the host row.
+        app.machines.apply_queue("hal9000".into(), None);
+        let before = app.machines.selected;
+        app.dispatch_action(Action::Down);
+        assert_eq!(app.machines.selected, before);
+        app.dispatch_action(Action::FocusPrev);
+        assert_eq!(app.machines.focus, crate::hosts::MachinesFocus::HostList);
     }
 }

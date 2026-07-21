@@ -79,7 +79,7 @@ iPhone apps, shown as tabs at the top of the screen:
 | Create    | 1   | Write prompts, tune parameters, generate images/video |
 | Library   | 2   | Browse generated prints with preview                  |
 | Models    | 3   | View installed and available models                   |
-| Machines  | 4   | Queue snapshot (full multi-host workspace coming)     |
+| Machines  | 4   | Connect remote Mold hosts, telemetry, queue, target   |
 | Settings  | 5   | Theme picker plus file-backed and DB-backed settings  |
 
 Switch workspaces with **Esc** then **1**–**5**, or click the tabs.
@@ -228,6 +228,56 @@ See all installed and available models with family, size, defaults, and status.
 | p     | Pull (download) a model       |
 | u     | Unload the active model (GPU) |
 | Esc   | Back to Create                |
+
+## Machines View
+
+Manage every Mold server the TUI can generate on — the same multi-host
+Machines workspace as the desktop, web, and iPhone apps. The left pane
+lists machines with a status dot (green ready, yellow connecting, red
+offline), the machine name, and a dim hardware line (GPU, VRAM, backend,
+`host:port`); **This Mac** (or **This machine**) is always the first row.
+The right pane shows the selected machine's telemetry (GPU, VRAM,
+models-disk storage, loaded models, uptime, version) and its live queue
+lanes — `▶` running jobs with elapsed time and GPU ordinal, `●` queued
+jobs with their position. Offline hosts stay listed and recover
+automatically when the server comes back.
+
+| Key   | Action                                                   |
+| ----- | -------------------------------------------------------- |
+| j/k   | Select a machine (or a queue lane with detail focus)     |
+| Enter | Set as the generation target (again reverts to Auto)     |
+| Tab   | Switch focus between the host list and the detail lanes  |
+| c     | Connect a machine (also in the ⌘K palette from anywhere) |
+| d     | Forget the selected host (confirms; deletes its API key) |
+| r     | Refresh telemetry and queue now                          |
+| x     | Cancel the selected queued job (detail focus, confirms)  |
+| Esc   | Back to Create                                           |
+
+### Connecting a machine
+
+Press **c** for the stepped connect flow: enter the server address (bare
+hostname, `host:port`, or full URL — bare names default to port 7680),
+then an optional API key (masked; **Enter** skips it), and the TUI tests
+the connection. On success the host is saved with its display name taken
+from the server's hostname; if the same server is already registered
+(matched by its instance ID, URL, or id) you get "Already connected as
+…" instead of a duplicate row. On failure the error is shown with
+**Enter** to retry or **e** to edit the address.
+
+Hosts persist in the settings DB (`mold.db`) under `tui.hosts.v1`, with
+each host's API key stored in its own `tui.host_key.<id>` settings row —
+keys are sent as the `x-api-key` header, never placed in URLs, and are
+deleted when the host is forgotten.
+
+### Generation target
+
+**Enter** on a machine row makes it the sticky generation target
+(persisted as `tui.generate_target`): **This Mac** forces the local
+engine, a remote host routes every Generate to that server with its API
+key — and never silently falls back to local. If a targeted host is
+unreachable the run fails with an error naming the host so you can fix
+it in Machines or press Enter on the target row again to return to
+**Auto** (remote when connected, local fallback — the default).
 
 ## Settings View
 

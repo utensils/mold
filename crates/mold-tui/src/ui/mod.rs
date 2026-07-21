@@ -2,11 +2,11 @@ pub mod chrome;
 pub mod gallery;
 pub mod generate;
 pub mod info;
+pub mod machines;
 pub mod models;
 pub mod param_form;
 pub mod popup;
 pub mod progress;
-pub mod queue;
 pub mod recent;
 pub mod script_composer;
 pub mod settings;
@@ -63,7 +63,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         View::Models => models::render(frame, app, layout[1]),
-        View::Machines => queue::render(frame, app, layout[1]),
+        View::Machines => machines::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
     }
 
@@ -311,10 +311,12 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
         ],
         View::Machines => vec![
             ("^K", "Commands"),
-            ("1-5", "Workspace"),
+            ("j/k", "Select"),
+            ("Enter", "Target"),
+            ("c", "Connect"),
+            ("d", "Forget"),
+            ("r", "Refresh"),
             ("Esc", "Back"),
-            ("?", "Help"),
-            ("q", "Quit"),
         ],
         View::Settings => {
             if app.settings.focus == crate::app::SettingsFocus::Appearance {
