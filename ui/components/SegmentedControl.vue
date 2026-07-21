@@ -1,0 +1,136 @@
+<script setup lang="ts" generic="T extends string | number">
+/*
+ * Segmented control — 2–4 exclusive options (spec §03). Accent-tinted active
+ * segment with ring. Options may carry a sub-line (e.g. resolution "Draft").
+ * Keyboard: arrow keys move the selection (roving tabindex).
+ */
+import { computed } from "vue";
+
+export interface SegmentOption<V> {
+  value: V;
+  label: string;
+  sub?: string | undefined;
+}
+
+const props = withDefaults(
+  defineProps<{
+    modelValue: T;
+    options: readonly SegmentOption<T>[];
+    /** Accessible name for the group. */
+    label?: string;
+    disabled?: boolean;
+  }>(),
+  { disabled: false },
+);
+
+const emit = defineEmits<{ "update:modelValue": [value: T] }>();
+
+const activeIndex = computed(() =>
+  props.options.findIndex(
+    (o: SegmentOption<T>) => o.value === props.modelValue,
+  ),
+);
+
+function pick(value: T) {
+  if (props.disabled) return;
+  emit("update:modelValue", value);
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (props.disabled) return;
+  const delta =
+    event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -1
+        : 0;
+  if (delta === 0) return;
+  event.preventDefault();
+  const count = props.options.length;
+  const next = (activeIndex.value + delta + count) % count;
+  const option = props.options[next];
+  if (option) emit("update:modelValue", option.value);
+}
+</script>
+
+<template>
+  <div
+    class="ms-seg"
+    role="radiogroup"
+    :aria-label="label"
+    :aria-disabled="disabled || undefined"
+    @keydown="onKeydown"
+  >
+    <button
+      v-for="option in options"
+      :key="String(option.value)"
+      type="button"
+      class="ms-seg__btn"
+      role="radio"
+      :aria-checked="option.value === modelValue"
+      :data-on="option.value === modelValue ? 'true' : undefined"
+      :tabindex="option.value === modelValue ? 0 : -1"
+      :disabled="disabled"
+      @click="pick(option.value)"
+    >
+      <span class="ms-seg__label">{{ option.label }}</span>
+      <span v-if="option.sub" class="ms-seg__sub">{{ option.sub }}</span>
+    </button>
+  </div>
+</template>
+
+<style scoped>
+.ms-seg {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bath);
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+}
+
+.ms-seg__btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  padding: 7px 8px;
+  border-radius: var(--radius-control-sm);
+  font-family: var(--f-body);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+
+.ms-seg__btn:hover:not([data-on="true"]):not(:disabled) {
+  color: var(--rebate);
+}
+
+.ms-seg__btn[data-on="true"] {
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+  font-weight: 700;
+  box-shadow: var(--sel-ring);
+}
+
+.ms-seg__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ms-seg__btn:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+.ms-seg__sub {
+  font-size: 9px;
+  color: var(--ink-3);
+}
+</style>

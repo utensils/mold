@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
+      - "ui/**"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
@@ -42,6 +43,7 @@ on:
   pull_request:
     paths:
       - "desktop/**"
+      - "ui/**"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
