@@ -73,6 +73,15 @@ Pre-built binaries on the [releases page](https://github.com/utensils/mold/relea
 
 </details>
 
+## Web app
+
+Every `mold serve` includes the Mold Studio web interface with Create, Library,
+Models, Machines, and Settings. The Machines workspace keeps the serving host
+and remembered remotes together. On builds with mDNS support, **Add machine →
+Local network** asks the primary server for DNS-SD peers, then the browser tests
+and connects to the selected peer directly; API keys remain per-host headers and
+stable instance UUIDs prevent duplicate rows. See the [Machines guide](https://utensils.io/mold/guide/machines).
+
 ## Desktop app
 
 Mold also has a native desktop app for macOS and Linux. It brings the Create,

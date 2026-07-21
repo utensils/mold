@@ -62,6 +62,7 @@ mold run "a sunset over mountains"
 - [Desktop App](/guide/desktop) — local and multi-host native studio
 - [iPhone App](/guide/iphone) — remote Create, Library, Models, Machines, and
   Settings
+- [Machines](/guide/machines) — connect, discover, and monitor web hosts
 - [Feature Support](/guide/feature-matrix) — which model families support which
   features
 - [Remote Workflows](/guide/remote-workflows) — laptop-to-GPU-server setups
