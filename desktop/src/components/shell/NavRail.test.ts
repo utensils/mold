@@ -23,6 +23,8 @@ function makeRouter(): Router {
       "/jobs",
       "/runpod",
       "/settings",
+      "/machines",
+      "/machines/:id",
       "/hosts/:id",
     ].map((path) => ({
       path,
@@ -93,10 +95,10 @@ describe("NavRail hosts section", () => {
     const rows = wrapper.findAll("[data-test='host-row']");
     await rows[1]!.trigger("click");
     await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/hosts/hal9000-7680");
+    expect(router.currentRoute.value.path).toBe("/machines/hal9000-7680");
     await rows[0]!.trigger("click");
     await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/hosts/local");
+    expect(router.currentRoute.value.path).toBe("/machines/local");
   });
 
   it("shows an empty message when nothing is connected or detected", async () => {

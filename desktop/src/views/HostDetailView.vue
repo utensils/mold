@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
+import CardSurface from "@ui/components/CardSurface.vue";
+import Chip from "@ui/components/Chip.vue";
+import Icon from "@ui/components/Icon.vue";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
-import QueueEntryDrawer from "../components/jobs/QueueEntryDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
+import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
 import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
@@ -11,25 +14,17 @@ import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
-import { formatEta, formatGB, formatUptime, percent, vramLevel } from "../lib/format";
+import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { modelDiskBytes, modelSizeLabels } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
-import type {
-  GpuSnapshot,
-  ModelEntry,
-  OutputMetadata,
-  ResourceSnapshot,
-  ServerStatus,
-} from "../lib/api/types";
+import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "../stores/appPrefs";
-import { useComposerStore } from "../stores/composer";
 import { useDownloadsStore } from "../stores/downloads";
-import { useGenerationStore } from "../stores/generation";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
-import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../stores/jobs";
+import { useJobsStore } from "../stores/jobs";
 import { useToastStore } from "../stores/toasts";
 
 /** `ResourceSnapshot` plus the additive `cpu` wire field (mold-core
@@ -42,9 +37,7 @@ type DetailSnapshot = ResourceSnapshot & {
 const route = useRoute();
 const router = useRouter();
 const appPrefs = useAppPrefsStore();
-const composer = useComposerStore();
 const downloads = useDownloadsStore();
-const generation = useGenerationStore();
 const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
@@ -143,9 +136,6 @@ function startReadyServices() {
 const detailModel = ref<ModelEntry | null>(null);
 const drawerRepairing = ref(false);
 
-// Clicking a queue row opens its info drawer (state + submitted settings).
-const queueDetail = ref<EnrichedQueueEntry | null>(null);
-
 // Loaded-model chip unload state — declared here (not with its handlers)
 // because the identity watch's immediate run resets it.
 const unloading = ref<Set<string>>(new Set());
@@ -165,7 +155,6 @@ watch(
     // optimistic unload survive a host switch.
     if (hostChanged) {
       detailModel.value = null;
-      queueDetail.value = null;
       recentlyUnloaded.value.clear();
     }
     startResourceStream(hostChanged);
@@ -241,52 +230,6 @@ const installedModels = computed(() => hostModels.installedOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
-
-/** This host's whole server queue, tagged with what belongs to this app. */
-const queueEntries = computed<EnrichedQueueEntry[]>(() => {
-  const snap = queueSnapshot.value;
-  if (!snap) return [];
-  return enrichQueueEntries(
-    snap.entries,
-    hostId.value,
-    generation.jobs,
-    hosts.primaryHost?.id ?? "local",
-  );
-});
-
-/** Same state vocabulary as the Jobs view: RUNNING · GPU 0 / QUEUED #2. */
-function entryCode(entry: EnrichedQueueEntry): string {
-  if (entry.state === "running") {
-    return entry.gpu !== undefined ? `RUNNING · GPU ${entry.gpu}` : "RUNNING";
-  }
-  return entry.position > 0 ? `QUEUED #${entry.position}` : "QUEUED";
-}
-
-/** Elapsed wall-clock for running entries; re-evaluates on each poll frame. */
-function entryElapsed(entry: EnrichedQueueEntry): string | null {
-  if (entry.state !== "running" || !entry.started_at_unix_ms) return null;
-  return formatEta((Date.now() - entry.started_at_unix_ms) / 1000);
-}
-
-// Each poll rebuilds the entry objects — keep an open drawer tracking its
-// job by id so state/elapsed stay live.
-watch(queueEntries, (entries) => {
-  const open = queueDetail.value;
-  if (!open) return;
-  const updated = entries.find((entry) => entry.id === open.id);
-  if (updated) queueDetail.value = updated;
-});
-
-/** Unpinned seeds restore as random; `seed_pinned` disambiguates an
- *  explicit seed 0 on newer servers. */
-function loadQueueSettings(metadata: OutputMetadata) {
-  const pinned = queueDetail.value?.seed_pinned ?? metadata.seed !== 0;
-  composer.set({
-    metadata: pinned ? metadata : ({ ...metadata, seed: null } as unknown as OutputMetadata),
-  });
-  queueDetail.value = null;
-  void router.push("/generate");
-}
 
 // ── Loaded-model chips: per-host unload ───────────────────────────────────
 
@@ -410,7 +353,7 @@ async function disconnect() {
   if (!h) return;
   await hosts.disconnect(h.id);
   toasts.push(`Disconnected from ${h.label}`);
-  void router.push("/settings");
+  void router.push("/machines");
 }
 
 // Forget drops the saved entry AND the stored API key — two-step confirm.
@@ -427,23 +370,31 @@ async function forget() {
   await hosts.disconnect(h.id);
   await ipc.forgetRemoteHost(h.id);
   toasts.push(`Forgot ${h.label}`);
-  void router.push("/settings");
+  void router.push("/machines");
 }
 </script>
 
 <template>
   <div class="h-full overflow-y-auto p-6">
-    <div class="mx-auto max-w-3xl">
+    <div class="mx-auto max-w-5xl">
       <template v-if="host">
-        <!-- Header -->
-        <div class="flex items-center gap-3">
+        <!-- Header: back to Machines · status · name · address · target chip -->
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <RouterLink
+            to="/machines"
+            data-test="back-to-machines"
+            class="-ml-1 flex items-center gap-1 rounded-control px-1.5 py-1 text-body font-semibold text-safelight hover:brightness-110"
+          >
+            <Icon name="chevron-left" :size="18" :stroke-width="2.4" />
+            Machines
+          </RouterLink>
           <span
             class="h-2 w-2 shrink-0 rounded-full"
             :class="statusDot(host.status)"
             data-test="host-status-dot"
           />
           <h1
-            class="min-w-0 truncate font-display text-display font-bold text-ink"
+            class="min-w-0 truncate font-display text-display-sm font-bold text-ink"
             style="font-stretch: 90%"
             data-test="host-title"
           >
@@ -455,11 +406,24 @@ async function forget() {
           <span v-if="host.version" class="edge-code shrink-0" data-test="host-version">
             v{{ host.version }}
           </span>
+          <span
+            class="data-mono truncate text-caption text-ink-3"
+            data-selectable
+            data-test="host-url"
+            >{{ host.baseUrl }}</span
+          >
+          <div class="flex-1" />
+          <Chip
+            :active="isTarget"
+            :disabled="!isTarget && host.status !== 'ready'"
+            data-test="target-toggle"
+            @click="toggleTarget"
+          >
+            <Icon v-if="isTarget" name="check" :size="14" :stroke-width="2.4" />
+            {{ isTarget ? "Generation target" : "Set as generation target" }}
+          </Chip>
         </div>
-        <div class="mt-1.5 flex items-center gap-3 pl-5">
-          <span class="data-mono text-ink-3" data-selectable data-test="host-url">{{
-            host.baseUrl
-          }}</span>
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-7">
           <span
             v-if="host.instanceId"
             class="edge-code max-w-40 truncate"
@@ -468,33 +432,11 @@ async function forget() {
           >
             {{ host.instanceId }}
           </span>
-        </div>
-        <p v-if="host.status === 'error'" class="mt-2 pl-5 text-caption text-stop">
-          Unreachable — reconnect below or check the server.
-        </p>
-
-        <!-- Actions -->
-        <div class="mt-4 flex flex-wrap items-center gap-2 pl-5">
-          <button
-            type="button"
-            data-test="target-toggle"
-            class="h-7 rounded-control border px-2.5 text-body transition-colors active:translate-y-px disabled:opacity-40"
-            :class="
-              isTarget
-                ? 'border-safelight/50 text-safelight'
-                : 'border-edge text-ink-2 hover:text-ink'
-            "
-            :aria-pressed="isTarget"
-            :disabled="!isTarget && host.status !== 'ready'"
-            @click="toggleTarget"
-          >
-            {{ isTarget ? "Used for generations" : "Use for generations" }}
-          </button>
           <button
             v-if="host.kind === 'remote'"
             type="button"
             data-test="rename-host"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+            class="text-caption text-ink-3 transition-colors hover:text-ink"
             @click="renameOpen = true"
           >
             Rename…
@@ -502,290 +444,290 @@ async function forget() {
           <button
             type="button"
             data-test="open-web-ui"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px disabled:opacity-40"
+            class="text-caption text-ink-3 transition-colors hover:text-ink disabled:opacity-40"
             :disabled="!host.baseUrl"
             @click="openHostUrl(host.baseUrl ?? '')"
           >
             Open web UI
           </button>
           <button
-            v-if="host.kind === 'remote' && host.status === 'error'"
-            type="button"
-            data-test="reconnect-host"
-            class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px"
-            @click="hosts.reconnect(host.id)"
-          >
-            Reconnect
-          </button>
-          <div class="flex-1" />
-          <button
             v-if="host.kind === 'remote'"
             type="button"
             data-test="disconnect-host"
-            class="h-7 rounded-control px-2.5 text-body text-ink-3 transition-colors hover:text-stop active:translate-y-px"
+            class="text-caption text-ink-3 transition-colors hover:text-stop"
             @click="disconnect"
           >
             Disconnect
           </button>
-          <button
-            v-if="host.kind === 'remote'"
-            type="button"
-            data-test="forget-host"
-            class="h-7 rounded-control px-2.5 text-body transition-colors active:translate-y-px"
-            :class="forgetPending ? 'text-stop' : 'text-ink-3 hover:text-stop'"
-            @click="forget"
-            @blur="forgetPending = false"
-          >
-            {{ forgetPending ? "Forget?" : "Forget" }}
-          </button>
         </div>
-
-        <!-- Telemetry — one instrument panel: GPU(s), CPU, RAM, models disk.
-             A shared grid keeps every meter's label, bar, and value in the
-             same column tracks, so the panel reads as one machine. -->
-        <div class="mt-8 flex items-center gap-2">
-          <h2 class="edge-code">TELEMETRY</h2>
-          <div class="border-edge h-px flex-1 border-t" />
-          <span v-if="uptime !== null" class="edge-code uppercase" data-test="host-uptime">
-            UP {{ formatUptime(uptime) }}
-          </span>
-          <span v-if="snapshot" class="edge-code flex items-center gap-1.5"
-            ><span class="h-1.5 w-1.5 rounded-full bg-safelight" aria-hidden="true" />LIVE</span
-          >
-        </div>
-        <div
-          v-if="hasTelemetry"
-          data-test="telemetry-panel"
-          class="border-edge mt-2 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2.5 rounded-control border bg-bench px-4 py-3"
-        >
-          <template v-for="gpu in gpus" :key="gpu.ordinal">
-            <div class="contents" data-test="gpu-card">
-              <div class="col-span-full flex min-w-0 items-baseline gap-2">
-                <span v-if="gpus.length > 1" class="edge-code">GPU {{ gpu.ordinal }}</span>
-                <span class="min-w-0 truncate text-body font-medium text-ink">{{ gpu.name }}</span>
-                <span class="edge-code shrink-0">{{ backendLabel(gpu) }}</span>
-                <div class="flex-1" />
-                <span
-                  v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
-                  class="data-mono shrink-0 text-ink-3"
-                >
-                  <span class="text-ink-2" data-test="gpu-utilization"
-                    >{{ gpu.gpu_utilization }}%</span
-                  >
-                  util
-                </span>
-              </div>
-              <span class="edge-code">VRAM</span>
-              <div
-                class="h-1.5 overflow-hidden rounded-full bg-bath"
-                role="meter"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
-                :aria-label="`VRAM used on ${gpu.name}`"
-              >
-                <div
-                  class="h-full transition-[width] duration-300"
-                  :class="vramFill(gpu)"
-                  :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
-                />
-              </div>
-              <span class="data-mono text-right text-ink-3">
-                {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}
-              </span>
-            </div>
-          </template>
-          <div v-if="cpu" class="contents" data-test="cpu-card">
-            <span class="edge-code">CPU</span>
-            <div
-              class="h-1.5 overflow-hidden rounded-full bg-bath"
-              role="meter"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              :aria-valuenow="Math.round(cpu.usage_percent)"
-              aria-label="CPU usage"
-            >
-              <div
-                class="h-full bg-halide transition-[width] duration-300"
-                :style="{ width: `${cpu.usage_percent}%` }"
-              />
-            </div>
-            <span class="data-mono text-right text-ink-3">
-              {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
-            </span>
-          </div>
-          <div v-if="ram" class="contents" data-test="ram-card">
-            <span class="edge-code">RAM</span>
-            <div
-              class="h-1.5 overflow-hidden rounded-full bg-bath"
-              role="meter"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              :aria-valuenow="Math.round(percent(ram.used, ram.total))"
-              aria-label="System RAM used"
-            >
-              <div
-                class="h-full bg-halide transition-[width] duration-300"
-                :style="{ width: `${percent(ram.used, ram.total)}%` }"
-              />
-            </div>
-            <span class="data-mono text-right text-ink-3">
-              {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
-            </span>
-          </div>
-          <div v-if="modelsDisk" class="contents" data-test="storage-card">
-            <span class="edge-code" title="Models disk">DISK</span>
-            <div
-              class="h-1.5 overflow-hidden rounded-full bg-bath"
-              role="meter"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              :aria-valuenow="Math.round(diskUsedPct)"
-              aria-label="Models disk used"
-            >
-              <div
-                class="h-full transition-[width] duration-300"
-                :class="diskUsedPct >= 92 ? 'bg-stop' : 'bg-halide'"
-                :style="{ width: `${diskUsedPct}%` }"
-              />
-            </div>
-            <span class="data-mono text-right text-ink-3">
-              {{ formatGB(modelsDisk.free_bytes) }} free of {{ formatGB(modelsDisk.total_bytes) }}
-            </span>
-          </div>
-        </div>
-        <p v-else class="mt-2 text-caption text-ink-3">No live telemetry from this host yet.</p>
-
-        <!-- Queue — the host's whole server queue (other clients' jobs
-             included), with resident models labeled LOADED so they can't
-             read as queued jobs. Management stays in the Jobs view. -->
-        <div class="mt-8 flex items-center gap-2">
-          <h2 class="edge-code">QUEUE</h2>
-          <div class="border-edge h-px flex-1 border-t" />
-          <span
-            v-if="queuePaused"
-            class="data-mono text-caption text-stop"
-            data-test="queue-paused"
-          >
-            PAUSED
-          </span>
-          <span class="edge-code" data-test="queue-depth">
-            {{ queueDepth ?? "—" }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
-          </span>
-          <RouterLink to="/jobs" class="text-caption text-ink-3 hover:text-ink">
-            Jobs →
-          </RouterLink>
-        </div>
-        <ul
-          v-if="queueEntries.length"
-          data-test="host-queue"
-          class="border-edge divide-edge mt-2 divide-y overflow-hidden rounded-control border bg-bench"
-        >
-          <li v-for="entry in queueEntries" :key="entry.id">
-            <button
-              type="button"
-              data-test="host-queue-row"
-              class="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors duration-100 hover:bg-bath"
-              :aria-label="`Show details for ${entry.model}`"
-              @click="queueDetail = entry"
-            >
-              <span
-                class="h-1.5 w-1.5 shrink-0 rounded-full"
-                :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
-                aria-hidden="true"
-              />
-              <span class="edge-code shrink-0">{{ entryCode(entry) }}</span>
-              <span class="min-w-0 truncate text-body text-ink">{{ entry.model }}</span>
-              <span v-if="!entry.mine" class="edge-code shrink-0">OTHER CLIENT</span>
-              <div class="flex-1" />
-              <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
-                {{ entryElapsed(entry) }}
-              </span>
-            </button>
-          </li>
-        </ul>
-        <p v-else class="mt-2 text-caption text-ink-3" data-test="queue-empty">Queue is empty.</p>
-        <div v-if="loadedChips.length" class="mt-2 flex flex-wrap items-center gap-1.5">
-          <span class="edge-code mr-1" data-test="loaded-label">LOADED</span>
-          <span
-            v-for="m in loadedChips"
-            :key="m"
-            data-test="loaded-model-chip"
-            class="border-edge flex items-center gap-1.5 rounded-full border py-0.5 pr-1 pl-2 text-caption text-ink-2"
-            ><span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" aria-hidden="true" /><span
-              data-test="loaded-model-name"
-              >{{ m }}</span
-            ><button
-              type="button"
-              data-test="unload-chip"
-              class="px-0.5 text-ink-3 transition-colors duration-100 hover:text-stop disabled:opacity-40"
-              :aria-label="`Unload ${m}`"
-              :title="`Unload ${m} from this host's GPU`"
-              :disabled="unloading.has(m)"
-              @click="unloadChip(m)"
-            >
-              {{ unloading.has(m) ? "…" : "✕" }}
-            </button></span
-          >
-        </div>
-        <p v-else class="mt-2 text-caption text-ink-3">
-          No models loaded — the next generation loads one first.
+        <p v-if="host.status === 'error'" class="mt-2 pl-7 text-caption text-stop">
+          Unreachable — reconnect below or check the server.
         </p>
 
-        <!-- Models installed on this host, with this host's pulls above them -->
-        <div class="mt-8 flex items-center gap-2">
-          <h2 class="edge-code">MODELS ON THIS HOST</h2>
-          <div class="border-edge h-px flex-1 border-t" />
-          <span v-if="installedModels.length" class="edge-code" data-test="models-summary">
-            {{ installedModels.length
-            }}<template v-if="installedTotalLabel"> · {{ installedTotalLabel }}</template>
-          </span>
-          <RouterLink to="/models" class="text-caption text-ink-3 hover:text-ink">
-            Catalog →
-          </RouterLink>
-        </div>
-        <DownloadsTray
-          :host-id="hostId"
-          data-test="host-downloads"
-          class="mt-2 rounded-control border"
-        />
-        <ul
-          v-if="installedModels.length"
-          class="border-edge divide-edge mt-2 divide-y overflow-hidden rounded-control border bg-bench"
-        >
-          <li v-for="m in installedModels" :key="m.name" data-test="model-row">
-            <ModelTableRow
-              :name="m.name"
-              :source="modelSource(m)"
-              :loaded="m.is_loaded"
-              :family="m.family"
-              :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
-              :size-primary="
-                modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
-              "
-              :size-secondary="
-                modelSizeLabels(m).weights && modelSizeLabels(m).runtime
-                  ? modelSizeLabels(m).runtime
-                  : null
-              "
-              :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
-              clickable
-              class="px-3 py-2"
-              @open="detailModel = m"
-            />
-          </li>
-        </ul>
-        <p v-else class="mt-2 text-caption text-ink-3">No installed models reported</p>
+        <!-- Two-column instrument layout (stacks below on narrow widths). -->
+        <div class="mt-6 flex flex-col gap-5 lg:flex-row lg:items-start">
+          <!-- Left: telemetry, downloads, queue -->
+          <div class="flex min-w-0 flex-1 flex-col gap-5">
+            <!-- Telemetry — one instrument panel: GPU(s), CPU, RAM, models disk.
+                 A shared grid keeps every meter's label, bar, and value in the
+                 same column tracks, so the panel reads as one machine. -->
+            <CardSurface large>
+              <div class="mb-3 flex items-center gap-2">
+                <h2 class="edge-code">TELEMETRY</h2>
+                <div class="border-edge h-px flex-1 border-t" />
+                <span v-if="uptime !== null" class="edge-code uppercase" data-test="host-uptime">
+                  UP {{ formatUptime(uptime) }}
+                </span>
+                <span v-if="snapshot" class="edge-code flex items-center gap-1.5"
+                  ><span
+                    class="h-1.5 w-1.5 rounded-full bg-safelight"
+                    aria-hidden="true"
+                  />LIVE</span
+                >
+              </div>
+              <div
+                v-if="hasTelemetry"
+                data-test="telemetry-panel"
+                class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2.5"
+              >
+                <template v-for="gpu in gpus" :key="gpu.ordinal">
+                  <div class="contents" data-test="gpu-card">
+                    <div class="col-span-full flex min-w-0 items-baseline gap-2">
+                      <span v-if="gpus.length > 1" class="edge-code">GPU {{ gpu.ordinal }}</span>
+                      <span class="min-w-0 truncate text-body font-medium text-ink">{{
+                        gpu.name
+                      }}</span>
+                      <span class="edge-code shrink-0">{{ backendLabel(gpu) }}</span>
+                      <div class="flex-1" />
+                      <span
+                        v-if="gpu.gpu_utilization !== null && gpu.gpu_utilization !== undefined"
+                        class="data-mono shrink-0 text-ink-3"
+                      >
+                        <span class="text-ink-2" data-test="gpu-utilization"
+                          >{{ gpu.gpu_utilization }}%</span
+                        >
+                        util
+                      </span>
+                    </div>
+                    <span class="edge-code">VRAM</span>
+                    <div
+                      class="h-1.5 overflow-hidden rounded-full bg-bath"
+                      role="meter"
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                      :aria-valuenow="Math.round(percent(gpu.vram_used, gpu.vram_total))"
+                      :aria-label="`VRAM used on ${gpu.name}`"
+                    >
+                      <div
+                        class="h-full transition-[width] duration-300"
+                        :class="vramFill(gpu)"
+                        :style="{ width: `${percent(gpu.vram_used, gpu.vram_total)}%` }"
+                      />
+                    </div>
+                    <span class="data-mono text-right text-ink-3">
+                      {{ formatGB(gpu.vram_used) }}/{{ formatGB(gpu.vram_total) }}
+                    </span>
+                  </div>
+                </template>
+                <div v-if="cpu" class="contents" data-test="cpu-card">
+                  <span class="edge-code">CPU</span>
+                  <div
+                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    role="meter"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-valuenow="Math.round(cpu.usage_percent)"
+                    aria-label="CPU usage"
+                  >
+                    <div
+                      class="h-full bg-halide transition-[width] duration-300"
+                      :style="{ width: `${cpu.usage_percent}%` }"
+                    />
+                  </div>
+                  <span class="data-mono text-right text-ink-3">
+                    {{ cpu.usage_percent.toFixed(0) }}% · {{ cpu.cores }} CORES
+                  </span>
+                </div>
+                <div v-if="ram" class="contents" data-test="ram-card">
+                  <span class="edge-code">RAM</span>
+                  <div
+                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    role="meter"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-valuenow="Math.round(percent(ram.used, ram.total))"
+                    aria-label="System RAM used"
+                  >
+                    <div
+                      class="h-full bg-halide transition-[width] duration-300"
+                      :style="{ width: `${percent(ram.used, ram.total)}%` }"
+                    />
+                  </div>
+                  <span class="data-mono text-right text-ink-3">
+                    {{ formatGB(ram.used) }}/{{ formatGB(ram.total) }}
+                  </span>
+                </div>
+                <div v-if="modelsDisk" class="contents" data-test="storage-card">
+                  <span class="edge-code" title="Models disk">DISK</span>
+                  <div
+                    class="h-1.5 overflow-hidden rounded-full bg-bath"
+                    role="meter"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-valuenow="Math.round(diskUsedPct)"
+                    aria-label="Models disk used"
+                  >
+                    <div
+                      class="h-full transition-[width] duration-300"
+                      :class="diskUsedPct >= 92 ? 'bg-stop' : 'bg-halide'"
+                      :style="{ width: `${diskUsedPct}%` }"
+                    />
+                  </div>
+                  <span class="data-mono text-right text-ink-3">
+                    {{ formatGB(modelsDisk.free_bytes) }} free of
+                    {{ formatGB(modelsDisk.total_bytes) }}
+                  </span>
+                </div>
+              </div>
+              <p v-else class="text-caption text-ink-3">No live telemetry from this host yet.</p>
+            </CardSurface>
 
-        <QueueEntryDrawer
-          v-if="queueDetail"
-          :entry="queueDetail"
-          :host-label="host.label"
-          :state-code="entryCode(queueDetail)"
-          :elapsed="entryElapsed(queueDetail)"
-          @close="queueDetail = null"
-          @load="loadQueueSettings"
-        />
+            <!-- Downloads on this host -->
+            <CardSurface large :padded="false">
+              <div class="flex items-center gap-2 px-4 pt-4">
+                <h2 class="edge-code">DOWNLOADS</h2>
+                <div class="border-edge h-px flex-1 border-t" />
+                <RouterLink to="/models" class="text-caption text-ink-3 hover:text-ink">
+                  Catalog →
+                </RouterLink>
+              </div>
+              <DownloadsTray :host-id="hostId" data-test="host-downloads" class="mt-2" />
+            </CardSurface>
+
+            <!-- Queue — the whole server queue (other clients' jobs included),
+                 with full management absorbed from the Jobs view. -->
+            <CardSurface large>
+              <div class="mb-2 flex items-center gap-2">
+                <h2 class="edge-code">QUEUE</h2>
+                <div class="border-edge h-px flex-1 border-t" />
+                <span
+                  v-if="queuePaused"
+                  class="data-mono text-caption text-stop"
+                  data-test="queue-paused"
+                >
+                  PAUSED
+                </span>
+                <span class="edge-code" data-test="queue-depth">
+                  {{ queueDepth ?? "—"
+                  }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
+                </span>
+                <RouterLink to="/jobs" class="text-caption text-ink-3 hover:text-ink">
+                  Jobs →
+                </RouterLink>
+              </div>
+              <HostQueuePanel
+                :host="host"
+                row-test-id="host-queue-row"
+                empty-label="Queue is empty."
+                :thumbnails="false"
+              />
+            </CardSurface>
+          </div>
+
+          <!-- Right: loaded models, installed models, connection actions -->
+          <div class="flex shrink-0 flex-col gap-4 lg:w-80">
+            <CardSurface large>
+              <h2 class="edge-code" data-test="loaded-label">LOADED</h2>
+              <div v-if="loadedChips.length" class="mt-3 flex flex-col gap-2">
+                <div
+                  v-for="m in loadedChips"
+                  :key="m"
+                  data-test="loaded-model-chip"
+                  class="flex items-center gap-2"
+                >
+                  <span class="shrink-0 text-safelight" aria-hidden="true">★</span>
+                  <span
+                    class="data-mono min-w-0 flex-1 truncate text-caption text-ink-2"
+                    data-test="loaded-model-name"
+                    >{{ m }}</span
+                  >
+                  <button
+                    type="button"
+                    data-test="unload-chip"
+                    class="shrink-0 text-caption text-ink-3 transition-colors hover:text-stop disabled:opacity-40"
+                    :aria-label="`Unload ${m}`"
+                    :title="`Unload ${m} from this host's GPU`"
+                    :disabled="unloading.has(m)"
+                    @click="unloadChip(m)"
+                  >
+                    {{ unloading.has(m) ? "…" : "Unload" }}
+                  </button>
+                </div>
+              </div>
+              <p v-else class="mt-2 text-caption text-ink-3">
+                No models loaded — the next generation loads one first.
+              </p>
+            </CardSurface>
+
+            <CardSurface large :padded="false">
+              <div class="flex items-center gap-2 px-4 pt-4">
+                <h2 class="edge-code">INSTALLED MODELS</h2>
+                <div class="flex-1" />
+                <span v-if="installedModels.length" class="edge-code" data-test="models-summary">
+                  {{ installedModels.length
+                  }}<template v-if="installedTotalLabel"> · {{ installedTotalLabel }}</template>
+                </span>
+              </div>
+              <ul v-if="installedModels.length" class="divide-edge mt-2 divide-y">
+                <li v-for="m in installedModels" :key="m.name" data-test="model-row">
+                  <ModelTableRow
+                    :name="m.name"
+                    :source="modelSource(m)"
+                    :loaded="m.is_loaded"
+                    :family="m.family"
+                    :page-url="m.hf_repo ? `https://huggingface.co/${m.hf_repo}` : null"
+                    :size-primary="
+                      modelSizeLabels(m).weights ?? modelSizeLabels(m).runtime ?? 'Size unavailable'
+                    "
+                    :size-secondary="
+                      modelSizeLabels(m).weights && modelSizeLabels(m).runtime
+                        ? modelSizeLabels(m).runtime
+                        : null
+                    "
+                    :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
+                    clickable
+                    class="px-4 py-2"
+                    @open="detailModel = m"
+                  />
+                </li>
+              </ul>
+              <p v-else class="px-4 pb-4 pt-2 text-caption text-ink-3">
+                No installed models reported
+              </p>
+            </CardSurface>
+
+            <div v-if="host.kind === 'remote'" class="flex gap-2">
+              <button
+                type="button"
+                data-test="reconnect-host"
+                class="border-ce h-9 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+                @click="hosts.reconnect(host.id)"
+              >
+                Reconnect
+              </button>
+              <button
+                type="button"
+                data-test="forget-host"
+                class="h-9 flex-1 rounded-control border border-[color-mix(in_srgb,var(--stop)_50%,transparent)] text-body font-semibold transition-colors active:translate-y-px"
+                :class="forgetPending ? 'bg-stop text-on-accent' : 'text-stop hover:bg-stop/10'"
+                @click="forget"
+                @blur="forgetPending = false"
+              >
+                {{ forgetPending ? "Forget?" : "Forget" }}
+              </button>
+            </div>
+          </div>
+        </div>
 
         <!-- One consistent model-detail drawer, shared with the catalog. -->
         <CatalogDetailDrawer
@@ -816,11 +758,11 @@ async function forget() {
           This host isn't connected. It may have been disconnected or forgotten.
         </p>
         <RouterLink
-          to="/settings"
+          to="/machines"
           data-test="back-to-hosts"
           class="mt-4 inline-block text-body text-safelight hover:brightness-110"
         >
-          Back to Hosts
+          Back to Machines
         </RouterLink>
       </div>
     </div>

@@ -268,6 +268,25 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <header class="border-edge flex h-11 shrink-0 items-center gap-3 border-b px-4">
+      <RouterLink
+        to="/machines"
+        class="-ml-1 flex items-center gap-0.5 rounded-control px-1.5 py-1 text-body font-semibold text-safelight hover:brightness-110"
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.4"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M15 6l-6 6 6 6" />
+        </svg>
+        Machines
+      </RouterLink>
       <span class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
         RunPod
       </span>

@@ -116,6 +116,8 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
     routes: [
       { path: "/", component: stub },
       { path: "/hosts/:id", component: stub },
+      { path: "/machines", component: stub },
+      { path: "/machines/:id", component: stub },
       { path: "/settings", component: stub },
       { path: "/models", component: stub },
       { path: "/jobs", component: stub },
@@ -210,7 +212,7 @@ describe("HostDetailView header", () => {
     expect(wrapper.find("[data-test='host-title']").exists()).toBe(false);
     const missing = wrapper.get("[data-test='host-missing']");
     expect(missing.text()).toContain("Host not found");
-    expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/settings");
+    expect(missing.find("[data-test='back-to-hosts']").attributes("href")).toBe("/machines");
     // No stream is opened for a host that doesn't exist.
     expect(sseCalls).toHaveLength(0);
   });
@@ -673,7 +675,7 @@ describe("HostDetailView layout", () => {
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
 
-  it("places the downloads tray in the models section, below the queue header", async () => {
+  it("places the downloads tray in its own card below the telemetry panel", async () => {
     const wrapper = await mountView();
     const stream = lastStream("/api/downloads/stream");
     stream.options.onEvent(
@@ -698,9 +700,9 @@ describe("HostDetailView layout", () => {
       }),
     );
     await flushPromises();
-    const queue = wrapper.get("[data-test='queue-depth']").element;
+    const telemetry = wrapper.get("[data-test='telemetry-panel']").element;
     const tray = wrapper.get("[data-test='host-downloads']").element;
-    expect(queue.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(telemetry.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("summarizes installed model count and total size in the models header", async () => {
@@ -720,6 +722,6 @@ describe("HostDetailView forget", () => {
     await flushPromises();
     expect(forgetRemoteHost).toHaveBeenCalledWith(REMOTE_ID);
     expect(useHostsStore().extras).toHaveLength(0);
-    expect(router.currentRoute.value.path).toBe("/settings");
+    expect(router.currentRoute.value.path).toBe("/machines");
   });
 });

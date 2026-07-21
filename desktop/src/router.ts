@@ -44,17 +44,28 @@ export const router = createRouter({
       component: () => import("./views/JobsView.vue"),
     },
     {
-      path: "/hosts/:id",
-      name: "host-detail",
-      meta: { title: "Host" },
-      component: () => import("./views/HostDetailView.vue"),
+      path: "/machines",
+      name: "machines",
+      meta: { title: "Machines" },
+      component: () => import("./views/MachinesView.vue"),
     },
     {
-      path: "/runpod",
+      // RunPod provisioning lives under Machines. Declared before the
+      // `/machines/:id` host-detail route so it wins the literal segment.
+      path: "/machines/runpod",
       name: "runpod",
       meta: { title: "RunPod" },
       component: () => import("./views/RunPodView.vue"),
     },
+    {
+      path: "/machines/:id",
+      name: "host-detail",
+      meta: { title: "Host" },
+      component: () => import("./views/HostDetailView.vue"),
+    },
+    // Legacy routes fold into Machines so existing links/deep-links keep working.
+    { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
+    { path: "/runpod", redirect: "/machines/runpod" },
     {
       path: "/settings",
       name: "settings",

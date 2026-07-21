@@ -55,7 +55,9 @@ function installApi({
     if (path === "/api/status")
       return Promise.resolve({ version: "0.17.0", queue_paused: paused, gpus });
     if (path === "/api/capabilities") {
-      return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
+      return Promise.resolve({
+        queue: { can_pause: true, can_cancel_all: true, can_reorder: true },
+      });
     }
     return Promise.reject(new Error(`unexpected path ${path}`));
   });
@@ -77,7 +79,7 @@ describe("jobs store", () => {
     const q = jobs.queues["local"]!;
     expect(q.entries).toHaveLength(2);
     expect(q.paused).toBe(true);
-    expect(q.caps).toEqual({ canPause: true, canCancelAll: true });
+    expect(q.caps).toEqual({ canPause: true, canCancelAll: true, canReorder: true });
   });
 
   it("refreshHost() snapshots only the given host", async () => {

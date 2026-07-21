@@ -420,7 +420,7 @@ function jobMenu(job: Job): MenuEntry[] {
         class="flex h-8 cursor-pointer items-center gap-2.5 rounded-[9px] hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
         :class="collapsed ? 'justify-center px-0' : 'px-2.5'"
         :title="collapsed ? host.label : (host.baseUrl ?? undefined)"
-        @click="router.push(`/hosts/${host.id}`)"
+        @click="router.push(`/machines/${host.id}`)"
         @contextmenu.prevent="contextMenu.open($event, hostMenu(host))"
       >
         <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="hostDot(host)" />
