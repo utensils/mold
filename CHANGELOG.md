@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The web Library grid no longer changes size as lazy thumbnails load while scrolling.** Responsive tracks now ignore media intrinsic widths, and every print carries the same host badge plus hover/focus model and seed edge label as desktop Library.
 - **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.
 - **Repeated source-fit generations now reuse preprocessed images.** Desktop, web, and iPhone keep per-Create-form caches for the expensive Upscale then fit pass and the final canvas fit/mask. Prompt, seed, and generation-parameter iterations no longer rerun or retransmit unchanged source preprocessing; changing dimensions only invalidates the fit layer, while source, upscaler, fit-policy, and mask changes invalidate the layers they affect. Concurrent Batch siblings share an in-flight pass, and processed bytes stay request-local so the editable source remains intact.
 - Keep the desktop Advanced LoRA picker inside its accordion and ensure modal drawers cover floating workbench controls such as Templates.

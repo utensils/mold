@@ -72,6 +72,26 @@ describe("GalleryGrid", () => {
     expect(badges[0]!.text()).toContain("1.0s");
   });
 
+  it("shows the owning host plus model and seed tags on each print", () => {
+    const wrapper = mount(GalleryGrid, {
+      props: {
+        entries: [
+          {
+            ...image,
+            hostId: "origin",
+            hostLabel: "this server",
+          },
+        ],
+        loading: false,
+      },
+    });
+
+    expect(wrapper.get('[data-test="host-badge"]').text()).toBe("this server");
+    expect(wrapper.get('[data-test="print-metadata"]').text()).toBe(
+      "flux-dev:fp16 · S 7",
+    );
+  });
+
   it("opens a print on tile click when not selecting", async () => {
     const wrapper = mount(GalleryGrid, {
       props: { entries: [image], loading: false },
