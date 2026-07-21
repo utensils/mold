@@ -8,10 +8,12 @@ import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import Stepper from "@ui/components/Stepper.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
+import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 import { aspectIdFor } from "../../lib/resolutions";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
 import { useGenerateFormStore } from "../../stores/generateForm";
 import { useModelStore } from "../../stores/models";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import type { ModelEntry } from "../../lib/api/types";
 
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -40,6 +42,29 @@ describe("InspectorPanel — layout", () => {
     expect(wrapper.findComponent(Stepper).exists()).toBe(true);
     expect(wrapper.find('[data-test="seed-mode-random"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="open-advanced"]').exists()).toBe(true);
+  });
+
+  it("defaults wide enough for one ratio row and persists left-edge resizing", async () => {
+    const prefs = useAppPrefsStore();
+    const update = vi.spyOn(prefs, "update").mockResolvedValue();
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("flux") } });
+    const inspector = wrapper.get('[data-test="inspector-panel"]');
+    const handle = wrapper.getComponent(PanelResizeHandle);
+
+    expect(inspector.attributes("style")).toContain("width: 340px");
+    expect(handle.props("label")).toBe("Resize generation settings");
+
+    handle.vm.$emit("resize", -40);
+    await flushPromises();
+    expect(inspector.attributes("style")).toContain("width: 380px");
+
+    handle.vm.$emit("commit");
+    await flushPromises();
+    expect(update).toHaveBeenCalledWith({ generateParamsWidth: 380 });
+
+    handle.vm.$emit("reset");
+    await flushPromises();
+    expect(update).toHaveBeenCalledWith({ generateParamsWidth: null });
   });
 });
 

@@ -28,8 +28,10 @@ import { useModelStore } from "../../stores/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
+import { dragWidth } from "../../lib/panelResize";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import { formatGB } from "../../lib/format";
+import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -48,6 +50,29 @@ const hostModels = useHostModelsStore();
 const hosts = useHostsStore();
 const appPrefs = useAppPrefsStore();
 const router = useRouter();
+
+// The inspector is docked to the window's right edge, so dragging its left
+// handle left grows it. Keep pointer moves local and persist only on commit.
+const draftInspectorWidth = ref<number | null>(null);
+const inspectorWidth = computed(() => draftInspectorWidth.value ?? appPrefs.generateParamsWidth);
+
+function onInspectorResize(dx: number) {
+  draftInspectorWidth.value = dragWidth("generateParams", appPrefs.generateParamsWidth, dx, "left");
+}
+
+async function onInspectorCommit() {
+  const width = draftInspectorWidth.value;
+  if (width === null) return;
+  if (width !== appPrefs.generateParamsWidth) {
+    await appPrefs.update({ generateParamsWidth: width });
+  }
+  draftInspectorWidth.value = null;
+}
+
+function onInspectorReset() {
+  draftInspectorWidth.value = null;
+  void appPrefs.update({ generateParamsWidth: null });
+}
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
@@ -184,222 +209,235 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
 </script>
 
 <template>
-  <aside class="ms-inspector" data-test="inspector-panel">
-    <div class="ms-inspector__kicker">Settings</div>
+  <aside class="ms-inspector" data-test="inspector-panel" :style="{ width: `${inspectorWidth}px` }">
+    <PanelResizeHandle
+      class="absolute inset-y-0 -left-0.5 z-10"
+      label="Resize generation settings"
+      @resize="onInspectorResize"
+      @commit="onInspectorCommit"
+      @reset="onInspectorReset"
+    />
+    <div class="ms-inspector__scroll">
+      <div class="ms-inspector__kicker">Settings</div>
 
-    <!-- Model -->
-    <div class="ms-field">
-      <div class="ms-field__label">Model</div>
-      <div ref="pickerEl" class="ms-model">
-        <button
-          type="button"
-          :aria-expanded="pickerOpen"
-          class="ms-model__button"
-          @click="pickerOpen = !pickerOpen"
-        >
-          <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-            selectedModel?.name ?? "Choose a model"
-          }}</span>
-          <span v-if="selectedModel?.disk_usage_bytes" class="data-mono ms-model__size">
-            {{ formatGB(selectedModel.disk_usage_bytes) }}
-          </span>
-        </button>
-        <div v-if="pickerOpen" data-test="model-picker-menu" class="ms-model__menu">
-          <template v-for="[family, list] in pickerFamilies" :key="family">
-            <div class="ms-model__group">{{ family.toUpperCase() }}</div>
-            <button
-              v-for="m in list"
-              :key="m.name"
-              type="button"
-              class="ms-model__option"
-              @click="pickModel(m)"
-            >
-              <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
-              <span class="min-w-0 flex-1">
-                <span
-                  data-test="model-option-name"
-                  class="block break-all text-ink"
-                  :title="m.name"
-                >
-                  {{ m.name }}
-                </span>
-                <span
-                  v-if="availabilityTag(m)"
-                  data-test="model-availability"
-                  class="edge-code mt-0.5 block break-all whitespace-normal"
-                >
-                  {{ availabilityTag(m) }}
-                </span>
-              </span>
-              <span
-                class="ms-model__loaded"
-                :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
-                :title="m.is_loaded ? 'On GPU' : ''"
-              />
-            </button>
-          </template>
+      <!-- Model -->
+      <div class="ms-field">
+        <div class="ms-field__label">Model</div>
+        <div ref="pickerEl" class="ms-model">
           <button
             type="button"
-            data-test="browse-catalog"
-            class="ms-model__browse"
-            @click="
-              pickerOpen = false;
-              void router.push(caps.supportsVideo ? '/models?type=video' : '/models');
-            "
+            :aria-expanded="pickerOpen"
+            class="ms-model__button"
+            @click="pickerOpen = !pickerOpen"
           >
-            Browse all models →
+            <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
+              selectedModel?.name ?? "Choose a model"
+            }}</span>
+            <span v-if="selectedModel?.disk_usage_bytes" class="data-mono ms-model__size">
+              {{ formatGB(selectedModel.disk_usage_bytes) }}
+            </span>
+          </button>
+          <div v-if="pickerOpen" data-test="model-picker-menu" class="ms-model__menu">
+            <template v-for="[family, list] in pickerFamilies" :key="family">
+              <div class="ms-model__group">{{ family.toUpperCase() }}</div>
+              <button
+                v-for="m in list"
+                :key="m.name"
+                type="button"
+                class="ms-model__option"
+                @click="pickModel(m)"
+              >
+                <SourceGlyph :source="modelSource(m)" class="mt-0.5 shrink-0 text-ink-3" />
+                <span class="min-w-0 flex-1">
+                  <span
+                    data-test="model-option-name"
+                    class="block break-all text-ink"
+                    :title="m.name"
+                  >
+                    {{ m.name }}
+                  </span>
+                  <span
+                    v-if="availabilityTag(m)"
+                    data-test="model-availability"
+                    class="edge-code mt-0.5 block break-all whitespace-normal"
+                  >
+                    {{ availabilityTag(m) }}
+                  </span>
+                </span>
+                <span
+                  class="ms-model__loaded"
+                  :class="m.is_loaded ? 'bg-safelight' : 'bg-transparent'"
+                  :title="m.is_loaded ? 'On GPU' : ''"
+                />
+              </button>
+            </template>
+            <button
+              type="button"
+              data-test="browse-catalog"
+              class="ms-model__browse"
+              @click="
+                pickerOpen = false;
+                void router.push(caps.supportsVideo ? '/models?type=video' : '/models');
+              "
+            >
+              Browse all models →
+            </button>
+          </div>
+        </div>
+        <p v-if="modelDescription" class="ms-field__hint">{{ modelDescription }}</p>
+        <p v-if="stickyHostMissingModel" class="ms-field__hint">
+          Not on {{ stickyHostMissingModel }} — will download there.
+        </p>
+      </div>
+
+      <!-- Shape -->
+      <div class="ms-field">
+        <div class="ms-field__label">Shape</div>
+        <ShapePicker :model-value="shapeId" label="Aspect ratio" @update:model-value="onShape" />
+      </div>
+
+      <!-- Resolution -->
+      <div class="ms-field">
+        <div class="ms-field__label">Resolution</div>
+        <ResolutionSelector
+          :model-value="resolutionMp"
+          :ratio="resolutionRatio"
+          @update:model-value="onResolution"
+        />
+        <p v-if="resolutionError" class="ms-field__error" role="alert">{{ resolutionError }}</p>
+      </div>
+
+      <!-- Detail (steps) -->
+      <div class="ms-field">
+        <SliderRow
+          :model-value="form.steps"
+          :min="1"
+          :max="60"
+          label="Detail"
+          :value-label="`${form.steps} steps`"
+          @update:model-value="form.steps = $event"
+        />
+        <p v-if="stepsError" class="ms-field__error" role="alert">{{ stepsError }}</p>
+      </div>
+
+      <!-- Prompt strength (guidance) -->
+      <div class="ms-field">
+        <SliderRow
+          :model-value="form.guidance"
+          :min="0"
+          :max="12"
+          :step="0.1"
+          label="Prompt strength"
+          :value-label="form.guidance.toFixed(1)"
+          @update:model-value="form.guidance = $event"
+        />
+      </div>
+
+      <!-- Seed -->
+      <div class="ms-field">
+        <div class="ms-field__label">Seed</div>
+        <div class="ms-seg" role="group" aria-label="Seed mode">
+          <button
+            type="button"
+            data-test="seed-mode-random"
+            :aria-pressed="uiSeedMode === 'random'"
+            class="ms-seg__btn"
+            :data-on="uiSeedMode === 'random' ? 'true' : undefined"
+            @click="setSeedMode('random')"
+          >
+            Random
+          </button>
+          <button
+            type="button"
+            data-test="seed-mode-fixed"
+            :aria-pressed="uiSeedMode === 'fixed'"
+            class="ms-seg__btn"
+            :data-on="uiSeedMode === 'fixed' ? 'true' : undefined"
+            @click="setSeedMode('fixed')"
+          >
+            Fixed
           </button>
         </div>
-      </div>
-      <p v-if="modelDescription" class="ms-field__hint">{{ modelDescription }}</p>
-      <p v-if="stickyHostMissingModel" class="ms-field__hint">
-        Not on {{ stickyHostMissingModel }} — will download there.
-      </p>
-    </div>
-
-    <!-- Shape -->
-    <div class="ms-field">
-      <div class="ms-field__label">Shape</div>
-      <ShapePicker :model-value="shapeId" label="Aspect ratio" @update:model-value="onShape" />
-    </div>
-
-    <!-- Resolution -->
-    <div class="ms-field">
-      <div class="ms-field__label">Resolution</div>
-      <ResolutionSelector
-        :model-value="resolutionMp"
-        :ratio="resolutionRatio"
-        @update:model-value="onResolution"
-      />
-      <p v-if="resolutionError" class="ms-field__error" role="alert">{{ resolutionError }}</p>
-    </div>
-
-    <!-- Detail (steps) -->
-    <div class="ms-field">
-      <SliderRow
-        :model-value="form.steps"
-        :min="1"
-        :max="60"
-        label="Detail"
-        :value-label="`${form.steps} steps`"
-        @update:model-value="form.steps = $event"
-      />
-      <p v-if="stepsError" class="ms-field__error" role="alert">{{ stepsError }}</p>
-    </div>
-
-    <!-- Prompt strength (guidance) -->
-    <div class="ms-field">
-      <SliderRow
-        :model-value="form.guidance"
-        :min="0"
-        :max="12"
-        :step="0.1"
-        label="Prompt strength"
-        :value-label="form.guidance.toFixed(1)"
-        @update:model-value="form.guidance = $event"
-      />
-    </div>
-
-    <!-- Seed -->
-    <div class="ms-field">
-      <div class="ms-field__label">Seed</div>
-      <div class="ms-seg" role="group" aria-label="Seed mode">
-        <button
-          type="button"
-          data-test="seed-mode-random"
-          :aria-pressed="uiSeedMode === 'random'"
-          class="ms-seg__btn"
-          :data-on="uiSeedMode === 'random' ? 'true' : undefined"
-          @click="setSeedMode('random')"
-        >
-          Random
-        </button>
-        <button
-          type="button"
-          data-test="seed-mode-fixed"
-          :aria-pressed="uiSeedMode === 'fixed'"
-          class="ms-seg__btn"
-          :data-on="uiSeedMode === 'fixed' ? 'true' : undefined"
-          @click="setSeedMode('fixed')"
-        >
-          Fixed
-        </button>
-      </div>
-      <div v-if="uiSeedMode === 'fixed'" class="ms-seed__value">
-        <input
-          v-model="form.seed"
-          data-selectable
-          data-test="seed-input"
-          type="text"
-          inputmode="numeric"
-          aria-label="Seed value"
-          class="ms-seed__input data-mono"
-        />
-        <button
-          type="button"
-          class="ms-seed__reroll"
-          title="Reroll this seed"
-          aria-label="Reroll this seed"
-          @click="rerollSeed"
-        >
-          <Icon name="reroll" :size="15" />
-        </button>
-      </div>
-      <p v-if="seedHint" data-test="seed-hint" class="ms-field__hint text-safelight">
-        {{ seedHint }}
-      </p>
-      <p v-if="uiSeedMode === 'random'" class="ms-field__hint">
-        New seed every print<template v-if="lastSeed !== null">
-          ·
+        <div v-if="uiSeedMode === 'fixed'" class="ms-seed__value">
+          <input
+            v-model="form.seed"
+            data-selectable
+            data-test="seed-input"
+            type="text"
+            inputmode="numeric"
+            aria-label="Seed value"
+            class="ms-seed__input data-mono"
+          />
           <button
             type="button"
-            data-test="lock-last-seed"
-            class="ms-seed__lock"
-            @click="form.seed = String(lastSeed)"
+            class="ms-seed__reroll"
+            title="Reroll this seed"
+            aria-label="Reroll this seed"
+            @click="rerollSeed"
           >
-            lock last ({{ lastSeed }})
-          </button></template
-        >
+            <Icon name="reroll" :size="15" />
+          </button>
+        </div>
+        <p v-if="seedHint" data-test="seed-hint" class="ms-field__hint text-safelight">
+          {{ seedHint }}
+        </p>
+        <p v-if="uiSeedMode === 'random'" class="ms-field__hint">
+          New seed every print<template v-if="lastSeed !== null">
+            ·
+            <button
+              type="button"
+              data-test="lock-last-seed"
+              class="ms-seed__lock"
+              @click="form.seed = String(lastSeed)"
+            >
+              lock last ({{ lastSeed }})
+            </button></template
+          >
+        </p>
+      </div>
+
+      <!-- Batch -->
+      <div class="ms-field ms-field--row">
+        <span class="ms-field__label ms-field__label--inline">Batch</span>
+        <Stepper
+          :model-value="form.batchSize"
+          :min="1"
+          :max="batchMax"
+          label="Batch size"
+          @update:model-value="form.batchSize = $event"
+        />
+      </div>
+      <p v-if="caps.forcesBatchSizeOne" class="ms-field__hint -mt-2">
+        Locked to 1 — edit models render one at a time.
       </p>
-    </div>
 
-    <!-- Batch -->
-    <div class="ms-field ms-field--row">
-      <span class="ms-field__label ms-field__label--inline">Batch</span>
-      <Stepper
-        :model-value="form.batchSize"
-        :min="1"
-        :max="batchMax"
-        label="Batch size"
-        @update:model-value="form.batchSize = $event"
-      />
-    </div>
-    <p v-if="caps.forcesBatchSizeOne" class="ms-field__hint -mt-2">
-      Locked to 1 — edit models render one at a time.
-    </p>
-
-    <!-- Advanced -->
-    <button
-      type="button"
-      class="ms-advanced"
-      data-test="open-advanced"
-      @click="emit('open-advanced')"
-    >
-      <Icon name="sliders" :size="14" />
-      Advanced
-      <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-count"
-        >{{ advancedCount }} on</BadgePill
+      <!-- Advanced -->
+      <button
+        type="button"
+        class="ms-advanced"
+        data-test="open-advanced"
+        @click="emit('open-advanced')"
       >
-    </button>
+        <Icon name="sliders" :size="14" />
+        Advanced
+        <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-count"
+          >{{ advancedCount }} on</BadgePill
+        >
+      </button>
+    </div>
   </aside>
 </template>
 
 <style scoped>
 .ms-inspector {
-  width: 290px;
-  flex: 0 0 290px;
+  position: relative;
+  min-height: 0;
+  flex: 0 0 auto;
   border-left: 1px solid var(--edge);
   background: var(--bench);
+}
+.ms-inspector__scroll {
+  height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 20px 18px;
