@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Models → Installed no longer lists models you don't have.** The shelf rendered every entry the server's manifest knows about — 97 rows on a machine with two models on disk — as though each were installed. It now shows only downloaded generation models, which also fixes the landing tab: a user with nothing installed was always sent to a fake Installed shelf instead of Discover.
+- **The mobile navigation menu is usable again.** On phones the nav sheet rendered as a 52-pixel sliver at the top of the screen, hiding every destination behind it.
+
 ## [0.20.1] - 2026-07-21
 
 ### Fixed
