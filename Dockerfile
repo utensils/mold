@@ -25,6 +25,7 @@ FROM oven/bun:1.3-alpine AS web-builder
 WORKDIR /web
 COPY web/package.json web/bun.lock web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts web/index.html ./
 RUN bun install --frozen-lockfile
+COPY ui /ui
 COPY web/src ./src
 COPY web/public ./public
 RUN bun run build

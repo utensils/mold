@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docker release images include the shared Mold Studio UI kit.** The container web-builder now copies repo-root `ui/` beside `/web` before running the SPA build, so `@ui/*` aliases resolve in the release-only Docker context instead of failing TypeScript compilation after otherwise-green web, desktop, and Nix checks.
+
 ## [0.20.0] - 2026-07-21
 
 ### Added
