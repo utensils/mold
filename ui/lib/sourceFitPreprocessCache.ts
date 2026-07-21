@@ -23,7 +23,7 @@ async function contentHash(value: string): Promise<string> {
   let second = 0x9e3779b9;
   for (const byte of bytes) {
     first = Math.imul(first ^ byte, 0x01000193);
-    second = Math.imul(second ^ byte, 0x85ebca6b);
+    second = Math.imul(second ^ byte, 0x01000193);
   }
   return `${bytes.length.toString(16)}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
 }
