@@ -53,20 +53,20 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
 </helmet>
 <doc-page margin="0.85in">
   <div slot="footer" style="display:flex;justify-content:space-between;align-items:center;font-family:'Martian Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#a7a1b3;padding-top:6px;">
-    <span>mold studio · design spec</span><span>v0.11 · draft</span>
+    <span>mold studio · design spec</span><span>v0.12 · draft</span>
   </div>
 
   <h1>Mold Studio — Interface Spec</h1>
-  <p class="lead">A single design system across four surfaces for a local, no-cloud diffusion studio. This document is the source of truth for the simplified UI: its principles, tokens, shared components, information architecture, and the flows an implementer should complete without drifting from the system.</p>
-  <div class="meta"><span>Product: mold · local image + video generation</span><span>Surfaces: macOS · iOS · Web · Mobile web</span><span>Status: prototype → build handoff</span></div>
+  <p class="lead">A single design system across five surfaces for a local, no-cloud diffusion studio. This document is the source of truth for the simplified UI: its principles, tokens, shared components, information architecture, and the flows an implementer should complete without drifting from the system.</p>
+  <div class="meta"><span>Product: mold · local image + video generation</span><span>Surfaces: macOS · iOS · Web · Mobile web · Terminal (TUI)</span><span>Status: prototype → build handoff</span></div>
 
-  <div class="callout"><div class="h">North star</div>Dead-simple by default; power on demand. A newcomer can type a prompt and press Generate without meeting a single advanced control. Everything else is <strong>progressively disclosed</strong> and <strong>tucked away</strong> until asked for. One shared component vocabulary drives every surface, so the product feels like one tool wearing four native shells — never a web app bolted onto a desktop frame.</p></div>
+  <div class="callout"><div class="h">North star</div>Dead-simple by default; power on demand. A newcomer can type a prompt and press Generate without meeting a single advanced control. Everything else is <strong>progressively disclosed</strong> and <strong>tucked away</strong> until asked for. One shared component vocabulary drives every surface, so the product feels like one tool wearing five native shells — four graphical and one terminal — never a web app bolted onto a desktop frame.</p></div>
 
   <h2><span class="n">01</span> Principles</h2>
   <div class="grid2">
     <div class="item"><div class="t">Simplicity first</div><div class="d">The primary path — describe, choose a look, generate — is always one screen with no scrolling to essentials. If a screen feels empty, that is correct, not a gap to fill.</div></div>
     <div class="item"><div class="t">Progressive disclosure</div><div class="d">Advanced capability lives behind one clearly-labelled entry (Advanced, More options) and opens collapsed. Never surface a control a beginner can't act on.</div></div>
-    <div class="item"><div class="t">One system, four shells</div><div class="d">Identical tokens, components, copy and state. Each surface only changes chrome and layout density — not vocabulary.</div></div>
+    <div class="item"><div class="t">One system, five shells</div><div class="d">Identical tokens, components, copy and state. Each surface only changes chrome and layout density — not vocabulary. The terminal reads the same vocabulary rendered in a monospace cell grid.</div></div>
     <div class="item"><div class="t">Shared source of truth</div><div class="d">Prompt, model, settings, theme and library are one state. An edit on any surface reflects on all; components read the same bindings.</div></div>
     <div class="item"><div class="t">Contained, not global</div><div class="d">Every overlay (drawer, sheet, lightbox, palette, modal) renders inside the frame it belongs to — never a page-level layer that escapes its window.</div></div>
     <div class="item"><div class="t">Local-first voice</div><div class="d">Terse, lowercase, technical, dry. Reinforce "runs on your machine" everywhere it's true. No cloud, no Python, no fuss.</div></div>
@@ -126,7 +126,7 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
       <tr><td><strong>Drawer</strong></td><td>Right-side panel for detail/settings on wide surfaces (model detail, Advanced). Slides in; dims its own frame.</td></tr>
       <tr><td><strong>Sheet</strong></td><td>Full-screen (viewer, model, advanced) or bottom (nav, actions) panel on phone surfaces. Same content as the wide drawer, single column.</td></tr>
       <tr><td><strong>Modal</strong></td><td>Centered, focused task (connect a machine). Stepped when multi-stage with a 3-dot progress.</td></tr>
-      <tr><td><strong>Command palette</strong></td><td>⌘K launcher: search + grouped actions (Go to / Action / Model / Theme). Enter runs top match, Esc closes.</td></tr>
+      <tr><td><strong>Command palette</strong></td><td>⌘K launcher (<span class="m">^K</span> in the terminal): search + grouped actions (Go to / Action / Model / Theme). Enter runs top match, Esc closes.</td></tr>
       <tr><td><strong>Empty state</strong></td><td>Dashed frame + one-line what-to-do. Used for the develop canvas and unpopulated filters.</td></tr>
       <tr><td><strong>Badge / Keycap</strong></td><td>Count/status pill (NEW, ★ loaded, N on, download count) · legible ⌘↵ keycap on the primary Generate action.</td></tr>
     </tbody>
@@ -166,11 +166,17 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
       <tr><td>iOS</td><td>Bottom <strong>tab bar</strong> (Create · Library · Models · Machines); Settings pushed from a gear; large titles</td></tr>
       <tr><td>Web browser</td><td>Browser chrome + omnibox (<span class="m">mold.local/…</span>) + top <strong>nav bar</strong> (logo · pills · search · Downloads · account)</td></tr>
       <tr><td>Mobile web</td><td>Omnibox + compact app bar (logo · Downloads · hamburger → bottom nav sheet)</td></tr>
+      <tr><td>Terminal (TUI)</td><td>Top <strong>tab strip</strong> (<span class="m">1–5</span> Create · Library · Models · Machines · Settings) + activity strip + status-bar key hints; <span class="m">^K</span> command palette; focus-by-border, fully keyboard-driven</td></tr>
     </tbody>
   </table>
 
   <h2><span class="n">05</span> Surfaces &amp; containment</h2>
   <p>Each surface is a real device/window frame with <span class="m">overflow:hidden</span> and its own positioning context. <strong>Overlays render inside their owning frame</strong> (position:absolute within the frame), keyed by a surface token — desktop <span class="m">d</span>, web <span class="m">w</span>, iOS <span class="m">i</span>, mobile web <span class="m">mw</span>. There is no page-level fixed overlay. The logo (3D orb mark) sits in the page header, sidebar header, and both web bars; the wordmark is always set separately in display bold.</p>
+
+  <h3>Terminal surface (TUI)</h3>
+  <p>The fifth shell runs in the terminal (<span class="m">mold tui</span>, built on <strong>ratatui</strong>). It is a <strong>translation, not a port</strong>: the same five workspaces, dual-accent role model, progressive disclosure and command palette, re-expressed in a monospace cell grid — flat planes (no shadow, 0 radius), box-drawing panels, and <strong>focus-by-border-color</strong>. Number keys <span class="m">1–5</span> switch workspace; <span class="m">⇥</span> cycles panel focus; <span class="m">^K</span> opens the palette; <span class="m">A</span> expands Advanced; a one-line <strong>activity strip</strong> above the status bar carries live job · throughput · queue depth. Parameters show four essentials with the six Advanced sections as a collapsed accordion list — the same disclosure the graphical surfaces use.</p>
+  <p>Accents map straight across: <strong>safelight</strong> → primary / focus / selection, <strong>halide</strong> → info / live / spinner. The four Studio themes ship as TUI presets — Studio Dark, Studio Light, Safelight Dark and Safelight Light — plus <strong>Catppuccin Mocha</strong> retained as the single-blue baseline the TUI ships today — added to <span class="m">theme.rs</span> alongside the existing seven. Braille spinner and ✓ / ★ / • glyphs stay the shipping vocabulary; no emoji.</p>
+  <div class="callout"><div class="h">Recommended TUI stack</div>Stay terminal-native on <span class="m">ratatui</span> — do not port to a webview; being in the terminal is the point. Layer four crates to close the feel gap with the graphical surfaces: <strong>tachyonfx</strong> <span class="tag">add</span> for the Studio's motion vocabulary (workspace fades, activity pulse, generation shimmer — the biggest single upgrade); <strong>ratatui-image</strong> <span class="tag">keep</span> (already wired for Kitty / Sixel / iTerm2) for real thumbnails in Library and the inline Create preview; <strong>tui-textarea</strong> <span class="tag">keep</span> for the prompt; <strong>tui-scrollview + tui-widget-list</strong> <span class="tag">add</span> for smooth Library-grid and Timeline scrolling. Gate all motion behind a reduce-motion setting.</div>
 
   <h2><span class="n">06</span> Key flows</h2>
   <h3>Generate</h3>
@@ -208,6 +214,8 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
   <div class="gap"><div class="t"><span class="id">G10</span> Cold start (zero models / zero hosts)</div><div class="a">First launch with nothing installed guides one model pull and confirms This Mac as a host — no dead Create screen. <b>Done when</b> a brand-new user reaches their first generate in ≤3 guided steps. <b>Resolution:</b> a guided cold start walks one model pull and confirms This Mac as a host, so a new user reaches their first generate with no dead Create screen.</div></div>
   <div class="gap"><div class="t"><span class="id">G11</span> Cross-surface notifications</div><div class="a">“Generation done”, “pull finished”, “host offline” surface as a toast + workspace badge regardless of the active workspace or surface. <b>Done when</b> a job finishing elsewhere is noticed without watching the canvas. <b>Resolution:</b> completion, pull-finished, and host-offline events surface as toasts plus a workspace badge, with native notifications while backgrounded.</div></div>
   <div class="gap"><div class="t"><span class="id">G12</span> Destructive actions &amp; undo</div><div class="a">Delete print, forget machine, unload model, cancel job share one pattern — inline undo window for reversible actions, typed confirm for irreversible ones. <b>Done when</b> nothing destructive fires without a confirm or a recoverable undo. <b>Resolution:</b> delete print, forget machine, unload model, and cancel job share one pattern — an inline undo window for reversible actions and a typed confirm for irreversible ones.</div></div>
+
+  <div class="gap"><div class="t"><span class="id">G13</span> Terminal (TUI) parity</div><div class="a">Bring <span class="m">mold tui</span> to the shared five-workspace IA, dual-accent roles and ^K palette shown in the mockup, and add the four Studio themes as presets. <b>Done when</b> the TUI navigates Create · Library · Models · Machines · Settings, opens Advanced as a collapsed accordion, renders real thumbnails via ratatui-image, and runs tachyonfx transitions behind a reduce-motion toggle. <b>Current state:</b> not yet started — <span class="m">crates/mold-tui</span> today ships generate + param-form, gallery, models, queue, and recent views on ratatui with <span class="m">ratatui-image</span> and <span class="m">tui-textarea</span> already in the stack, and seven presets in <span class="m">ui/theme.rs</span> (Mocha the guarded default). Carry two repo invariants into the migration: the Library grid's centered fixed-protocol thumbnail path (<span class="m">ui/gallery.rs</span>) must not revert to plain <span class="m">StatefulImage</span>, and key→action maps / layout constants keep their contract tests. Mockup: <span class="m">mold-tui-proposed.html</span>.</div></div>
 
   <div class="callout"><div class="h">Adherence checklist for any new UI</div>
   <ul style="margin:.2em 0 0;">

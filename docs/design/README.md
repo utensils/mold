@@ -1,16 +1,21 @@
 # Mold Studio — design system
 
-The canonical design source for mold's four UI surfaces (macOS desktop, iOS,
-web browser, mobile web). This replaces the former `desktop/docs/design-spec.md`
-(Safelight spec); its still-relevant content is carried forward as §10–§12 of
-the HTML spec.
+The canonical design source for mold's five UI surfaces (macOS desktop, iOS,
+web browser, mobile web, terminal TUI). This replaces the former
+`desktop/docs/design-spec.md` (Safelight spec); its still-relevant content is
+carried forward as §10–§12 of the HTML spec.
 
 - **`mold-studio-spec.html`** — the interface spec: principles, tokens,
   shared components, information architecture, flows, voice, motion values,
   and the open-items list. Open it directly in a browser (fonts and scripts
   are local to this directory).
-- **`mold-studio-proposed-ui.html`** — the interactive prototype of all four
-  surfaces. The layout/behavior source of truth the implementation follows.
+- **`mold-studio-proposed-ui.html`** — the interactive prototype of the four
+  graphical surfaces. The layout/behavior source of truth the implementation
+  follows.
+- **`mold-tui-proposed.html`** — the interactive mockup of the terminal
+  surface (spec §05 "Terminal surface" + gap G13). Not yet implemented:
+  `crates/mold-tui` still ships its pre-Studio layout; this mockup plus the
+  spec's recommended TUI stack is the blueprint for that migration.
 
 Implementation mapping:
 
