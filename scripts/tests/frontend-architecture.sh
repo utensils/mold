@@ -42,6 +42,9 @@ if grep -En "path: [\"']/(generate|catalog)[\"']|redirect:.*(generate|catalog)" 
   fail "web legacy routes must not remain registered"
 fi
 
+grep -Fq 'fs: { allow: [".", uiDir, studioDir, workspaceNodeModules] }' web/vite.config.ts ||
+  fail "web Vite must allow the root node_modules directory used by its aliases"
+
 for dead_file in web/src/components/Metadata.vue; do
   test ! -e "$dead_file" || fail "$dead_file is unreachable and must be removed"
 done

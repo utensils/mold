@@ -33,8 +33,10 @@ export const browserPlatform: StudioPlatform = {
     const anchor = document.createElement("a");
     anchor.href = href;
     anchor.download = filename;
+    document.body.append(anchor);
     anchor.click();
-    URL.revokeObjectURL(href);
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
   },
   async copyText(text) {
     await navigator.clipboard.writeText(text);

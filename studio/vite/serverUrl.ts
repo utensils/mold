@@ -2,11 +2,14 @@ import type { Plugin } from "vite";
 
 export function formatDevServerUrl(
   label: string,
-  host: string,
+  host: string | boolean,
   port: number,
   pathname = "/",
 ): string {
-  const usableHost = host === "0.0.0.0" || host === "::" ? "localhost" : host;
+  const usableHost =
+    host === true || host === false || host === "0.0.0.0" || host === "::"
+      ? "localhost"
+      : host;
   const path = pathname.startsWith("/") ? pathname : `/${pathname}`;
   return `${label}: http://${usableHost}:${port}${path}`;
 }
@@ -19,7 +22,7 @@ export function devServerUrlPlugin(label: string, pathname = "/"): Plugin {
       server.httpServer?.once("listening", () => {
         const address = server.httpServer?.address();
         if (!address || typeof address === "string") return;
-        const configuredHost = String(server.config.server.host ?? "localhost");
+        const configuredHost = server.config.server.host ?? "localhost";
         server.config.logger.info(
           `\n  ${formatDevServerUrl(label, configuredHost, address.port, pathname)}`,
         );

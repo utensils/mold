@@ -19,6 +19,8 @@ const apiTarget = process.env.MOLD_API_ORIGIN ?? "http://localhost:7680";
 // `vue` is pinned to this app's copy so ui/ sources resolve it.
 const uiDir = new URL("../ui", import.meta.url).pathname;
 const studioDir = new URL("../studio", import.meta.url).pathname;
+const workspaceNodeModules = new URL("../node_modules", import.meta.url)
+  .pathname;
 
 export default defineConfig({
   plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold web")],
@@ -26,13 +28,13 @@ export default defineConfig({
     alias: {
       "@ui": uiDir,
       "@studio": studioDir,
-      vue: new URL("../node_modules/vue", import.meta.url).pathname,
+      vue: `${workspaceNodeModules}/vue`,
     },
   },
   server: {
     host: "0.0.0.0",
     port: 5174,
-    fs: { allow: [".", uiDir, studioDir] },
+    fs: { allow: [".", uiDir, studioDir, workspaceNodeModules] },
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
       "/health": { target: apiTarget, changeOrigin: true },
