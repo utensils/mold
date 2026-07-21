@@ -483,7 +483,7 @@ Examples:
         /// Enable rotated file logging to ~/.mold/logs/
         #[arg(long, default_value_t = true)]
         log_file: bool,
-        /// Disable mDNS/DNS-SD advertising on the local network
+        /// Disable mDNS/DNS-SD advertising and server-assisted browsing
         #[cfg(feature = "mdns")]
         #[arg(long)]
         no_mdns: bool,
@@ -498,8 +498,9 @@ Examples:
   mold server discover --json          Machine-readable output
   mold server discover --probe         Also measure /health latency
 
-Advertising is on by default when the server is built with the `mdns` feature;
-disable it per-server with `mold serve --no-mdns` or `MOLD_MDNS=0`.")]
+Advertising and server-assisted browsing are on by default when the server is
+built with the `mdns` feature; disable both per-server with
+`mold serve --no-mdns` or `MOLD_MDNS=0`.")]
     Discover {
         /// Seconds to browse the network before reporting
         #[arg(long, default_value_t = 3)]
@@ -936,7 +937,7 @@ environment before starting mold serve.")]
         #[arg(long)]
         discord: bool,
 
-        /// Disable mDNS/DNS-SD advertising on the local network
+        /// Disable mDNS/DNS-SD advertising and server-assisted browsing
         #[cfg(feature = "mdns")]
         #[arg(long)]
         no_mdns: bool,

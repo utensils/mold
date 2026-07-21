@@ -1,22 +1,29 @@
 <script setup lang="ts">
 /*
  * Connect-a-machine wizard (spec §08 G1, prototype CONNECT MODAL). Three
- * stepped panes: pick a type, enter connection details, confirm. Only the
- * "Remote server" type is selectable in the browser — LAN auto-discovery
- * needs the desktop app, so that card is dimmed with an explanatory caption.
+ * stepped panes: pick a type, enter connection details or choose a discovered
+ * peer, then confirm. LAN discovery is server-assisted and only appears when
+ * the primary server advertises the capability.
  *
- * Step 2 probes `/api/status` with the entered key; a failure keeps the typed
- * values and shows a blunt inline error (G4). On success the host is deduped
- * by its instance id and written to the registry.
+ * Every path probes the peer's `/api/status` directly with its own key before
+ * saving. On success the host is deduped by instance id in the registry.
  */
-import { ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import Icon from "@ui/components/Icon.vue";
-import { hostStatus } from "./hostClient";
+import {
+  hostCapabilities,
+  hostDiscoveryPeers,
+  hostStatus,
+  type DiscoveryPeer,
+} from "./hostClient";
 import {
   addHost,
+  dedupeByInstanceId,
   hostIdFromUrl,
+  listStoredHosts,
   normalizeHostAddress,
+  originHost,
   type HostEntry,
 } from "../../lib/hostRegistry";
 
@@ -24,41 +31,113 @@ const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: []; added: [host: HostEntry] }>();
 
 const step = ref<1 | 2 | 3>(1);
+const mode = ref<"remote" | "lan">("remote");
 const address = ref("");
 const name = ref("");
 const apiKey = ref("");
 const probing = ref(false);
 const error = ref<string | null>(null);
 const connected = ref<HostEntry | null>(null);
+const discoveryAvailable = ref(false);
+const checkingDiscovery = ref(false);
+const scanning = ref(false);
+const discovered = ref<DiscoveryPeer[]>([]);
+const selectedPeer = ref<DiscoveryPeer | null>(null);
+let openSequence = 0;
+let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+
+const visiblePeers = computed(() => {
+  const storedIds = new Set(listStoredHosts().map((host) => host.id));
+  return discovered.value.filter(
+    (peer) =>
+      !peer.is_this_machine &&
+      !(peer.instance_id && dedupeByInstanceId(peer.instance_id)) &&
+      !storedIds.has(hostIdFromUrl(peer.url)),
+  );
+});
+
+function stopDiscoveryRefresh() {
+  if (discoveryTimer !== null) clearInterval(discoveryTimer);
+  discoveryTimer = null;
+}
 
 function reset() {
+  stopDiscoveryRefresh();
   step.value = 1;
+  mode.value = "remote";
   address.value = "";
   name.value = "";
   apiKey.value = "";
   probing.value = false;
   error.value = null;
   connected.value = null;
+  discoveryAvailable.value = false;
+  checkingDiscovery.value = true;
+  scanning.value = false;
+  discovered.value = [];
+  selectedPeer.value = null;
 }
 
 watch(
   () => props.open,
-  (open) => {
-    if (open) reset();
+  async (open) => {
+    const sequence = ++openSequence;
+    if (!open) {
+      stopDiscoveryRefresh();
+      return;
+    }
+    reset();
+    const capabilities = await hostCapabilities(originHost());
+    if (sequence !== openSequence || !props.open) return;
+    discoveryAvailable.value = capabilities.discovery?.can_browse === true;
+    checkingDiscovery.value = false;
   },
+  { immediate: true },
 );
 
 function close() {
+  stopDiscoveryRefresh();
   emit("close");
 }
 
 function toStep2() {
+  mode.value = "remote";
   error.value = null;
   step.value = 2;
 }
 
-function back() {
+async function refreshDiscovery(initial = false) {
+  if (initial) scanning.value = true;
+  try {
+    discovered.value = await hostDiscoveryPeers(originHost());
+    error.value = null;
+  } catch {
+    error.value = "Couldn't scan this server's local network. Try again.";
+  } finally {
+    if (initial) scanning.value = false;
+  }
+}
+
+async function browseLan() {
+  if (!discoveryAvailable.value) return;
+  mode.value = "lan";
+  selectedPeer.value = null;
+  apiKey.value = "";
   error.value = null;
+  step.value = 2;
+  await refreshDiscovery(true);
+  stopDiscoveryRefresh();
+  discoveryTimer = setInterval(() => {
+    if (props.open && mode.value === "lan" && step.value === 2) {
+      void refreshDiscovery();
+    }
+  }, 2000);
+}
+
+function back() {
+  stopDiscoveryRefresh();
+  error.value = null;
+  selectedPeer.value = null;
   step.value = 1;
 }
 
@@ -72,15 +151,14 @@ function describeError(message: string, url: string): string {
   return `Couldn't reach ${url}. Is it running mold serve?`;
 }
 
-async function connect() {
-  const url = normalizeHostAddress(address.value);
-  if (!url) {
-    error.value = "Enter an address like 192.168.1.20:7680.";
-    return;
-  }
+async function connectTo(
+  url: string,
+  displayName: string,
+  advertisedInstanceId?: string | null,
+) {
   const probe: HostEntry = {
     id: hostIdFromUrl(url),
-    name: name.value.trim() || url,
+    name: displayName.trim() || url,
     url,
   };
   if (apiKey.value.trim()) probe.apiKey = apiKey.value.trim();
@@ -89,13 +167,15 @@ async function connect() {
   error.value = null;
   try {
     const status = await hostStatus(probe);
+    const instanceId = status.instance_id || advertisedInstanceId;
     const entry = addHost({
       url,
-      name: name.value,
+      name: displayName,
       ...(apiKey.value.trim() ? { apiKey: apiKey.value.trim() } : {}),
-      ...(status.instance_id ? { instanceId: status.instance_id } : {}),
+      ...(instanceId ? { instanceId } : {}),
     });
     connected.value = entry;
+    stopDiscoveryRefresh();
     step.value = 3;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -105,10 +185,39 @@ async function connect() {
   }
 }
 
+async function connect() {
+  if (mode.value === "lan" && selectedPeer.value) {
+    await connectTo(
+      selectedPeer.value.url,
+      selectedPeer.value.name,
+      selectedPeer.value.instance_id,
+    );
+    return;
+  }
+  const url = normalizeHostAddress(address.value);
+  if (!url) {
+    error.value = "Enter an address like 192.168.1.20:7680.";
+    return;
+  }
+  await connectTo(url, name.value);
+}
+
+async function pickDiscovered(peer: DiscoveryPeer) {
+  apiKey.value = "";
+  error.value = null;
+  if (peer.auth_required) {
+    selectedPeer.value = peer;
+    return;
+  }
+  await connectTo(peer.url, peer.name, peer.instance_id);
+}
+
 function done() {
   if (connected.value) emit("added", connected.value);
   emit("close");
 }
+
+onBeforeUnmount(stopDiscoveryRefresh);
 </script>
 
 <template>
@@ -141,11 +250,23 @@ function done() {
             </span>
           </span>
         </button>
-        <button type="button" class="cm__type" disabled data-test="type-lan">
+        <button
+          type="button"
+          class="cm__type"
+          :disabled="checkingDiscovery || !discoveryAvailable"
+          data-test="type-lan"
+          @click="browseLan"
+        >
           <span class="cm__type-icon"><Icon name="wifi" :size="18" /></span>
           <span class="cm__type-body">
             <span class="cm__type-name">Local network</span>
-            <span class="cm__type-desc">
+            <span v-if="checkingDiscovery" class="cm__type-desc">
+              Checking this server for network discovery…
+            </span>
+            <span v-else-if="discoveryAvailable" class="cm__type-desc">
+              Find mold machines visible from this server
+            </span>
+            <span v-else class="cm__type-desc">
               Browsers can't discover LAN hosts — use the desktop app or enter
               an address.
             </span>
@@ -154,59 +275,134 @@ function done() {
       </div>
     </template>
 
-    <!-- Step 2 — details -->
+    <!-- Step 2 — manual details or server-assisted LAN results -->
     <template v-else-if="step === 2">
-      <div class="cm__title">Connection details</div>
-      <p class="cm__sub">Point at a machine running mold serve.</p>
+      <template v-if="mode === 'remote'">
+        <div class="cm__title">Connection details</div>
+        <p class="cm__sub">Point at a machine running mold serve.</p>
 
-      <label class="cm__label" for="cm-address">Address</label>
-      <div class="cm__field">
-        <Icon name="lock" :size="14" />
-        <input
-          id="cm-address"
-          v-model="address"
-          class="cm__input"
-          placeholder="192.168.1.20:7680"
-          autocomplete="off"
-          spellcheck="false"
-          data-test="connect-address"
-          @keydown.enter="connect"
-        />
-      </div>
+        <label class="cm__label" for="cm-address">Address</label>
+        <div class="cm__field">
+          <Icon name="lock" :size="14" />
+          <input
+            id="cm-address"
+            v-model="address"
+            class="cm__input"
+            placeholder="192.168.1.20:7680"
+            autocomplete="off"
+            spellcheck="false"
+            data-test="connect-address"
+            @keydown.enter="connect"
+          />
+        </div>
 
-      <label class="cm__label" for="cm-name">Display name</label>
-      <div class="cm__field">
-        <input
-          id="cm-name"
-          v-model="name"
-          class="cm__input"
-          placeholder="Studio Tower"
-          autocomplete="off"
-          data-test="connect-name"
-          @keydown.enter="connect"
-        />
-      </div>
+        <label class="cm__label" for="cm-name">Display name</label>
+        <div class="cm__field">
+          <input
+            id="cm-name"
+            v-model="name"
+            class="cm__input"
+            placeholder="Studio Tower"
+            autocomplete="off"
+            data-test="connect-name"
+            @keydown.enter="connect"
+          />
+        </div>
 
-      <label class="cm__label" for="cm-key"
-        >API key <span class="cm__opt">(optional)</span></label
-      >
-      <div class="cm__field">
-        <input
-          id="cm-key"
-          v-model="apiKey"
-          type="password"
-          class="cm__input"
-          placeholder="x-api-key"
-          autocomplete="off"
-          data-test="connect-key"
-          @keydown.enter="connect"
-        />
-      </div>
+        <label class="cm__label" for="cm-key"
+          >API key <span class="cm__opt">(optional)</span></label
+        >
+        <div class="cm__field">
+          <input
+            id="cm-key"
+            v-model="apiKey"
+            type="password"
+            class="cm__input"
+            placeholder="x-api-key"
+            autocomplete="off"
+            data-test="connect-key"
+            @keydown.enter="connect"
+          />
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="cm__title">Local network</div>
+        <p class="cm__sub">
+          Machines visible on this server's local network. Your browser connects
+          to the selected address directly.
+        </p>
+
+        <div
+          v-if="scanning"
+          class="cm__discovery-state"
+          data-test="discovery-scanning"
+        >
+          Looking for mold machines…
+        </div>
+        <div
+          v-else-if="!error && visiblePeers.length === 0"
+          class="cm__discovery-state"
+          data-test="discovery-empty"
+        >
+          No other mold machines found. Check that they are running and mDNS is
+          enabled.
+        </div>
+        <div v-else-if="!selectedPeer" class="cm__peers">
+          <div
+            v-for="peer in visiblePeers"
+            :key="peer.instance_id || peer.url"
+            class="cm__peer"
+            data-test="discovery-peer"
+          >
+            <span class="cm__peer-body">
+              <strong>{{ peer.name }}</strong>
+              <span class="cm__mono">{{ peer.host }}:{{ peer.port }}</span>
+              <small>{{
+                peer.version ? `mold ${peer.version}` : "mold"
+              }}</small>
+            </span>
+            <button
+              type="button"
+              class="cm__peer-connect"
+              :disabled="probing"
+              data-test="discovery-peer-connect"
+              @click="pickDiscovered(peer)"
+            >
+              {{ probing ? "Testing…" : "Connect" }}
+            </button>
+          </div>
+        </div>
+
+        <template v-if="selectedPeer">
+          <div class="cm__peer cm__peer--selected">
+            <span class="cm__peer-body">
+              <strong>{{ selectedPeer.name }}</strong>
+              <span class="cm__mono"
+                >{{ selectedPeer.host }}:{{ selectedPeer.port }}</span
+              >
+            </span>
+          </div>
+          <label class="cm__label" for="cm-discovery-key">API key</label>
+          <div class="cm__field">
+            <input
+              id="cm-discovery-key"
+              v-model="apiKey"
+              type="password"
+              class="cm__input"
+              placeholder="x-api-key"
+              autocomplete="off"
+              data-test="discovery-key"
+              @keydown.enter="connect"
+            />
+          </div>
+        </template>
+      </template>
 
       <p v-if="error" class="cm__error" data-test="connect-error">
         {{ error }}
       </p>
-      <div v-else class="cm__note">
+      <div v-else-if="mode === 'remote'" class="cm__note">
         <span class="cm__note-dot" />
         Connection is direct — no data leaves your network.
       </div>
@@ -253,7 +449,7 @@ function done() {
         Continue
       </button>
       <button
-        v-else-if="step === 2"
+        v-else-if="step === 2 && (mode === 'remote' || selectedPeer)"
         type="button"
         class="cm__btn cm__btn--primary"
         :disabled="probing"
@@ -422,6 +618,76 @@ function done() {
   height: 6px;
   border-radius: 50%;
   background: var(--safelight);
+}
+
+.cm__discovery-state {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  border: 1px dashed var(--ce);
+  border-radius: 12px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.cm__peers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cm__peer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--ce);
+  border-radius: 11px;
+  background: var(--bath);
+}
+
+.cm__peer--selected {
+  border-color: var(--sel-border);
+  background: var(--sel-bg);
+}
+
+.cm__peer-body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+
+.cm__peer-body strong {
+  color: var(--rebate);
+  font-size: 13px;
+}
+
+.cm__peer-body small {
+  color: var(--ink-3);
+}
+
+.cm__peer-connect {
+  border: 1px solid var(--ce);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--safelight);
+  padding: 8px 11px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cm__peer-connect:disabled {
+  opacity: 0.65;
+  cursor: progress;
 }
 
 .cm__error {

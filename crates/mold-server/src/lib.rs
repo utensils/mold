@@ -486,6 +486,26 @@ pub async fn run_server(
     // the task outlives server shutdown and keeps ticking until process exit.
     let resources_aggregator = resources::spawn_aggregator(state.resources.clone());
 
+    // Start a long-lived DNS-SD browser independently of advertising. A
+    // loopback-bound primary still needs to surface the server machine's LAN
+    // peers to its web UI; only the MOLD_MDNS/--no-mdns gate disables browse.
+    #[cfg(feature = "mdns")]
+    let mdns_browser_guard = if mdns::enabled_from_env() {
+        match mdns::start_browser(state.discovery.clone(), state.instance_id.clone()) {
+            Ok(guard) => {
+                state.discovery.set_can_browse(true);
+                Some(guard)
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "mDNS peer browsing disabled");
+                None
+            }
+        }
+    } else {
+        tracing::debug!("mDNS peer browsing skipped (disabled)");
+        None
+    };
+
     // Save start_time before state is moved into the router (needed for metrics).
     #[cfg(feature = "metrics")]
     let server_start_time = state.start_time;
@@ -605,6 +625,10 @@ pub async fn run_server(
     // Matches the aggregator handle pattern from commit 5e43886.
     #[cfg(feature = "mdns")]
     if let Some(guard) = mdns_guard {
+        guard.shutdown();
+    }
+    #[cfg(feature = "mdns")]
+    if let Some(guard) = mdns_browser_guard {
         guard.shutdown();
     }
     downloads_shutdown.cancel();

@@ -137,6 +137,24 @@ impl QueueHandle {
 
 // ── AppState ────────────────────────────────────────────────────────────────
 
+/// Cached server-assisted LAN discovery state. The mDNS browser updates this
+/// from a dedicated thread; HTTP handlers only take short read locks.
+#[derive(Default)]
+pub struct DiscoveryState {
+    can_browse: std::sync::atomic::AtomicBool,
+    pub peers: std::sync::RwLock<Vec<mold_core::DiscoveryPeer>>,
+}
+
+impl DiscoveryState {
+    pub fn can_browse(&self) -> bool {
+        self.can_browse.load(Ordering::SeqCst)
+    }
+
+    pub fn set_can_browse(&self, enabled: bool) {
+        self.can_browse.store(enabled, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// Stable UUID identifying this server installation. `run_server`
@@ -144,6 +162,8 @@ pub struct AppState {
     /// from `crate::instance::resolve_instance_id` before the router (and the
     /// mDNS TXT records) are built.
     pub instance_id: Arc<String>,
+    /// Long-lived DNS-SD browser cache used by `/api/discovery/peers`.
+    pub discovery: Arc<DiscoveryState>,
     // ── Multi-GPU fields ────────────────────────────────────────────────────
     /// GPU worker pool for multi-GPU dispatch.
     pub gpu_pool: Arc<GpuPool>,
@@ -394,6 +414,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -430,6 +451,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
@@ -481,6 +503,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -519,6 +542,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         let state = Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -555,6 +579,7 @@ impl AppState {
         let events = EventBroadcaster::new();
         Self {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
+            discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new(),
             }),

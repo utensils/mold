@@ -3398,6 +3398,27 @@ fn is_false(b: &bool) -> bool {
 /// Server-reported capabilities the SPA uses to decide which UI affordances
 /// to surface. Additive — clients that deserialize older responses simply
 /// see `None` for fields they don't know about.
+/// One server-assisted DNS-SD result returned by `GET /api/discovery/peers`.
+/// The browser connects to `url` directly; the serving host is discovery-only
+/// and never proxies generation traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DiscoveryPeer {
+    pub name: String,
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+    pub version: Option<String>,
+    pub auth_required: bool,
+    pub instance_id: Option<String>,
+    pub is_this_machine: bool,
+}
+
+/// Whether the server has an active DNS-SD browser backing the discovery API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoveryCapabilities {
+    pub can_browse: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GalleryCapabilities {
     /// Whether `DELETE /api/gallery/image/:filename` is allowed by the
@@ -3472,6 +3493,9 @@ pub struct ExpandCapabilities {
 pub struct ServerCapabilities {
     pub gallery: GalleryCapabilities,
     pub catalog: CatalogCapabilities,
+    /// Absent on older servers. Missing means LAN browsing is unavailable.
+    #[serde(default)]
+    pub discovery: DiscoveryCapabilities,
     /// Absent on older servers — `#[serde(default)]` keeps deserialization
     /// of their responses working (events.available = false).
     #[serde(default)]
@@ -3895,6 +3919,7 @@ mod server_event_tests {
         )
         .unwrap();
         assert!(!caps.events.available);
+        assert!(!caps.discovery.can_browse);
     }
 
     #[test]

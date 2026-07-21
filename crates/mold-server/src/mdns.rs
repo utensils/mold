@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -42,6 +43,13 @@ pub struct MdnsGuard {
     fullname: String,
 }
 
+/// Handle for the server's long-lived DNS-SD browser. Resolved peers are kept
+/// in a shared cache so HTTP requests never wait on multicast resolution.
+pub struct MdnsBrowserGuard {
+    daemon: ServiceDaemon,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
 impl MdnsGuard {
     /// Unregister the service and shut the daemon down. Best-effort: errors are
     /// logged, never propagated, because this runs on the server's exit path.
@@ -52,6 +60,20 @@ impl MdnsGuard {
         }
         if let Err(e) = self.daemon.shutdown() {
             tracing::warn!(error = %e, "mDNS: daemon shutdown failed");
+        }
+    }
+}
+
+impl MdnsBrowserGuard {
+    /// Stop browsing and join the cache updater thread. Best-effort on the
+    /// server shutdown path, matching [`MdnsGuard::shutdown`].
+    pub fn shutdown(mut self) {
+        let _ = self.daemon.stop_browse(SERVICE_TYPE);
+        let _ = self.daemon.shutdown();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                tracing::warn!("mDNS: discovery browser thread panicked");
+            }
         }
     }
 }
@@ -370,6 +392,77 @@ pub fn register(bind: &str, port: u16, txt: Vec<(String, String)>) -> Result<Mdn
 /// Collects `ServiceResolved` events, dedupes by fullname (last wins), and
 /// returns the results sorted by name. Blocking — call from a blocking context
 /// (CLI, or `spawn_blocking` in async).
+pub fn start_browser(
+    discovery: Arc<crate::state::DiscoveryState>,
+    own_instance_id: Arc<String>,
+) -> Result<MdnsBrowserGuard> {
+    let daemon = ServiceDaemon::new().context("failed to start mDNS discovery daemon")?;
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
+        .context("failed to start mDNS discovery browse")?;
+
+    let thread = std::thread::Builder::new()
+        .name("mold-mdns-browser".to_string())
+        .spawn(move || {
+            let mut found: BTreeMap<String, mold_core::DiscoveryPeer> = BTreeMap::new();
+            while let Ok(event) = receiver.recv() {
+                match event {
+                    ServiceEvent::ServiceResolved(info) => {
+                        let addresses: Vec<IpAddr> =
+                            info.addresses.iter().map(|a| a.to_ip_addr()).collect();
+                        let txt = info
+                            .txt_properties
+                            .iter()
+                            .map(|p| (p.key().to_string(), p.val_str().to_string()))
+                            .collect();
+                        let server = from_service_parts(
+                            &info.fullname,
+                            &info.host,
+                            info.port,
+                            addresses,
+                            txt,
+                        );
+                        let is_this_machine =
+                            server.instance_id.as_deref() == Some(own_instance_id.as_str());
+                        found.insert(
+                            info.fullname.clone(),
+                            mold_core::DiscoveryPeer {
+                                name: server.name,
+                                url: server.url,
+                                host: server.host,
+                                port: server.port,
+                                version: server.version,
+                                auth_required: server.auth_required,
+                                instance_id: server.instance_id,
+                                is_this_machine,
+                            },
+                        );
+                    }
+                    ServiceEvent::ServiceRemoved(_, fullname) => {
+                        found.remove(&fullname);
+                    }
+                    ServiceEvent::SearchStopped(_) => break,
+                    _ => continue,
+                }
+                let peers = found.values().cloned().collect();
+                *discovery
+                    .peers
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = peers;
+            }
+        })
+        .context("failed to spawn mDNS discovery browser thread")?;
+
+    tracing::info!(
+        service_type = SERVICE_TYPE,
+        "mDNS: browsing for peer servers"
+    );
+    Ok(MdnsBrowserGuard {
+        daemon,
+        thread: Some(thread),
+    })
+}
+
 pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredServer>> {
     let daemon = ServiceDaemon::new().context("failed to start mDNS daemon")?;
     let receiver = daemon
