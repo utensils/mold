@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Metadata-DB reads no longer silently miss under concurrent access.** Connections now set a 5-second SQLite busy timeout; previously a reader that landed on another process's write lock or checkpoint (running the TUI beside `mold serve`, both sharing `mold.db`) got an instant `SQLITE_BUSY` that most read paths swallowed as "no value" — surfacing as settings, theme, or host-registry values intermittently reading back empty.
+- **Metadata-DB access is now safe under concurrent processes.** Connections set a 5-second SQLite busy timeout (previously an instant `SQLITE_BUSY` that most read paths swallowed as "no value"), and schema migrations now run under an immediate transaction that re-reads `user_version` inside the write lock. Before this, `mold tui` racing its auto-spawned `mold serve` over a fresh or not-yet-migrated `mold.db` could double-apply an `ALTER TABLE` — corrupting the file so every later open failed with "duplicate column" — or intermittently read settings back empty.
 
 - **The web Library grid no longer changes size as lazy thumbnails load while scrolling.** Responsive tracks now ignore media intrinsic widths, and every print carries the same host badge plus hover/focus model and seed edge label as desktop Library.
 - **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.
