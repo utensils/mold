@@ -1,29 +1,46 @@
 <script setup lang="ts">
+/*
+ * Gallery workspace (Mold Studio W5, spec §06 + prototype WEB GALLERY /
+ * LIGHTBOX). Grid-first: session prints render as MediaTiles on a responsive
+ * grid, with a secondary feed view kept for existing users. All / Images /
+ * Video filter, a search that narrows prompt + model + filename (synced to
+ * `?q=`), marquee multi-select + bulk delete, and a two-pane / full-screen
+ * Lightbox with reuse / use-as-source / download / delete.
+ */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
-import { listGallery, deleteGalleryImage } from "../api";
-import { requestConfirm } from "../lib/toasts";
+import { useRoute, useRouter } from "vue-router";
+import Icon from "@ui/components/Icon.vue";
+import SegmentedControl, {
+  type SegmentOption,
+} from "@ui/components/SegmentedControl.vue";
+import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import { deleteGalleryImage, imageUrl, listGallery } from "../api";
+import { blobToBase64 } from "../lib/base64";
+import { requestConfirm, toast, undoableAction } from "../lib/toasts";
+import {
+  applyMetadataToForm,
+  useGenerateForm,
+} from "../composables/useGenerateForm";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
+import GalleryGrid from "../components/gallery/GalleryGrid.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
-import DetailDrawer from "../components/DetailDrawer.vue";
+import Lightbox from "../components/gallery/Lightbox.vue";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
 
-// Persist the preferred layout across reloads. `feed` is the default —
-// a single-column, Instagram-style stream with a visible caption — because
-// it's friendlier for reading prompts. Users can flip to `grid` for a
-// dense masonry view when scanning hundreds of items.
+// Persist the layout. The redesign is grid-first, so `grid` is the default;
+// `feed` stays available as a single-column, prompt-forward stream.
 const VIEW_STORAGE_KEY = "mold.gallery.view";
 function loadViewMode(): ViewMode {
   try {
     const v = localStorage.getItem(VIEW_STORAGE_KEY);
     if (v === "feed" || v === "grid") return v;
   } catch {
-    /* localStorage may be blocked (private mode, SSR, etc.) */
+    /* localStorage may be blocked */
   }
-  return "feed";
+  return "grid";
 }
 
 const entries = ref<GalleryImage[]>([]);
@@ -33,10 +50,17 @@ const filter = ref<FilterKind>("all");
 const search = ref("");
 const view = ref<ViewMode>(loadViewMode());
 
-// Seed the search from the global nav's `?q=` and keep it in sync when the
-// query param changes (the nav search routes here with `q`). The existing
-// filtering logic below reads `search` unchanged.
+const form = useGenerateForm();
 const route = useRoute();
+const router = useRouter();
+
+const filterOptions: SegmentOption<FilterKind>[] = [
+  { value: "all", label: "All" },
+  { value: "images", label: "Images" },
+  { value: "video", label: "Video" },
+];
+
+// Seed the search from the global nav's `?q=` and keep the two in sync.
 watch(
   () => route.query.q,
   (q) => {
@@ -46,16 +70,30 @@ watch(
   { immediate: true },
 );
 
+function syncSearchToUrl(value: string) {
+  const q = value.trim();
+  const current = typeof route.query.q === "string" ? route.query.q : "";
+  if (q === current) return;
+  const query = { ...route.query };
+  if (q) query.q = q;
+  else delete query.q;
+  void router.replace({ query });
+}
+function onSearchInput(value: string) {
+  search.value = value;
+  syncSearchToUrl(value);
+}
+function clearSearch() {
+  search.value = "";
+  syncSearchToUrl("");
+}
+function setFilter(next: FilterKind) {
+  filter.value = next;
+}
+
 /*
- * Global audio preference.
- *
- * Browser autoplay policies forbid unmuted autoplay without a user gesture
- * (Chrome/Safari/Firefox all enforce this). We default to muted so the feed
- * silently autoplays on load, then expose a header toggle. The first click
- * on the toggle _is_ the user gesture — from that point on every <video>
- * element picks up the preference and plays with sound.
- *
- * Persisted in localStorage so the choice sticks across reloads.
+ * Audio preference. Browsers forbid unmuted autoplay without a gesture, so we
+ * default muted; the first toggle click doubles as that gesture. Persisted.
  */
 const MUTED_STORAGE_KEY = "mold.gallery.muted";
 function loadMuted(): boolean {
@@ -77,21 +115,32 @@ function setMuted(next: boolean) {
     /* ignore */
   }
 }
-const selected = ref<GalleryImage | null>(null);
-const selectedIndex = ref<number>(-1);
 
-/*
- * Multi-select.
- *
- * `selectMode` flips the gallery into bulk-edit: clicks on cards toggle
- * their selection instead of opening the detail drawer. `selection` holds
- * filenames (stable id — survives re-fetches). `selectionAnchor` is the
- * last single-clicked filename; shift-clicking another tile selects the
- * inclusive range between them in filter order (Finder-style).
- *
- * Exiting select mode clears both the mode flag and the current selection
- * so the next entry starts from a clean slate.
- */
+// ── NEW badge tracking ──────────────────────────────────────────────────────
+// Filenames present on first load are "seen" (never badged). Anything that
+// arrives on a later refresh is fresh until the next reload.
+const seen = new Set<string>();
+const fresh = ref<Set<string>>(new Set());
+let firstLoadDone = false;
+function reconcileFresh(list: GalleryImage[]) {
+  if (!firstLoadDone) {
+    for (const e of list) seen.add(e.filename);
+    firstLoadDone = true;
+    return;
+  }
+  let changed = false;
+  const next = new Set(fresh.value);
+  for (const e of list) {
+    if (!seen.has(e.filename)) {
+      seen.add(e.filename);
+      next.add(e.filename);
+      changed = true;
+    }
+  }
+  if (changed) fresh.value = next;
+}
+
+// ── Multi-select ────────────────────────────────────────────────────────────
 const selectMode = ref(false);
 const selection = ref<Set<string>>(new Set());
 const selectionAnchor = ref<string | null>(null);
@@ -112,15 +161,10 @@ function toggleSelect(payload: {
   const { item, shift, meta } = payload;
   const name = item.filename;
   if (shift && selectionAnchor.value) {
-    // Shift-click: select the contiguous range in the currently-filtered
-    // list between the anchor and the clicked item. Doesn't touch
-    // selections outside that range — matches macOS Finder behavior.
     const list = filtered.value;
     const a = list.findIndex((e) => e.filename === selectionAnchor.value);
     const b = list.findIndex((e) => e.filename === name);
     if (a === -1 || b === -1) {
-      // Anchor is no longer in the filtered list (filter changed). Fall
-      // back to single toggle.
       toggleOne(name, meta);
       return;
     }
@@ -160,9 +204,6 @@ function clearSelection() {
 }
 
 async function handleDeleteMany(names: string[]): Promise<number> {
-  // Fire deletes in parallel — the server is local and individual DELETEs
-  // are cheap. `Promise.allSettled` lets partial failures not take down
-  // the whole batch; we surface the error count to the user.
   const results = await Promise.allSettled(
     names.map((n) => deleteGalleryImage(n)),
   );
@@ -216,7 +257,7 @@ async function deleteAllFiltered() {
   await handleDeleteMany(names);
 }
 
-// Filter pass #1: kind (all / images / video)
+// ── Filtering ────────────────────────────────────────────────────────────────
 const kindFiltered = computed(() => {
   if (filter.value === "all") return entries.value;
   return entries.value.filter((e) => {
@@ -226,9 +267,6 @@ const kindFiltered = computed(() => {
   });
 });
 
-// Filter pass #2: search. Matches prompt, model, and filename for now.
-// We normalize both sides to lowercase; fuzzy ranking would be over-engineering
-// at this scale.
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
   if (!q) return kindFiltered.value;
@@ -241,23 +279,28 @@ const filtered = computed(() => {
   });
 });
 
-const counts = computed(() => {
-  const total = entries.value.length;
-  let images = 0;
-  let video = 0;
-  for (const e of entries.value) {
-    const k = mediaKind(e.format, e.filename);
-    if (k === "image") images++;
-    else video++;
-  }
-  return { total, images, video, filtered: filtered.value.length };
-});
+const total = computed(() => entries.value.length);
+const searchActive = computed(() => search.value.trim().length > 0);
+
+// The empty-state variant to show when nothing is visible and we're not
+// mid-load. `null` means render the grid/feed (skeletons handle first load).
+const emptyKind = computed<null | "none" | "search" | "video" | "images">(
+  () => {
+    if (loading.value || filtered.value.length > 0) return null;
+    if (searchActive.value) return "search";
+    if (filter.value === "video") return "video";
+    if (filter.value === "images") return "images";
+    return "none";
+  },
+);
 
 async function refresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
-    entries.value = await listGallery();
+    const list = await listGallery();
+    entries.value = list;
+    reconcileFresh(list);
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -265,18 +308,21 @@ async function refresh() {
   }
 }
 
+// ── Lightbox ─────────────────────────────────────────────────────────────────
+const selected = ref<GalleryImage | null>(null);
+const selectedIndex = ref<number>(-1);
+
 function openItem(item: GalleryImage) {
-  const idx = filtered.value.findIndex((e) => e.filename === item.filename);
-  selectedIndex.value = idx;
+  selectedIndex.value = filtered.value.findIndex(
+    (e) => e.filename === item.filename,
+  );
   selected.value = item;
 }
-
-function closeDrawer() {
+function closeLightbox() {
   selected.value = null;
   selectedIndex.value = -1;
 }
-
-function stepDrawer(delta: number) {
+function stepLightbox(delta: number) {
   if (selectedIndex.value < 0) return;
   const list = filtered.value;
   const next = selectedIndex.value + delta;
@@ -285,17 +331,88 @@ function stepDrawer(delta: number) {
   selected.value = list[next] ?? null;
 }
 
-async function handleDelete(item: GalleryImage) {
+function onReuse(item: GalleryImage) {
+  // Existing recreate flow — restore serialized knobs, then land on Create.
+  form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
+    format: item.format,
+  });
+  closeLightbox();
+  void router.push({ name: "create" });
+}
+
+async function setAsSource(item: GalleryImage): Promise<boolean> {
   try {
-    await deleteGalleryImage(item.filename);
+    const res = await fetch(imageUrl(item.filename));
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+    const blob = await res.blob();
+    const base64 = await blobToBase64(blob);
+    form.state.value.imageAttachments = [
+      { kind: "gallery", filename: item.filename, base64 },
+    ];
+    return true;
   } catch (err) {
-    errorMessage.value = err instanceof Error ? err.message : String(err);
-    return;
+    toast("error", err instanceof Error ? err.message : String(err));
+    return false;
   }
+}
+
+async function onUseAsSource(item: GalleryImage) {
+  if (!(await setAsSource(item))) return;
+  closeLightbox();
+  void router.push({ name: "create" });
+}
+
+async function onUpscale(item: GalleryImage) {
+  if (!(await setAsSource(item))) return;
+  closeLightbox();
+  toast("info", "Added as source — pick an upscaler in Controls.");
+  void router.push({ name: "create" });
+}
+
+async function onLightboxDelete(item: GalleryImage) {
+  const accepted = await requestConfirm({
+    title: "Delete print?",
+    body: `${item.filename} — you can undo for a few seconds.`,
+    confirmLabel: "Delete",
+    danger: true,
+  });
+  if (!accepted) return;
+  const entryIdx = entries.value.findIndex((e) => e.filename === item.filename);
+  if (entryIdx === -1) return;
+  const removed = entries.value[entryIdx]!;
+
+  // Optimistic removal; commit the DELETE only once the undo window elapses.
   entries.value = entries.value.filter((e) => e.filename !== item.filename);
-  if (selected.value && selected.value.filename === item.filename) {
-    closeDrawer();
+  if (filtered.value.length === 0) {
+    closeLightbox();
+  } else {
+    selectedIndex.value = Math.min(
+      selectedIndex.value,
+      filtered.value.length - 1,
+    );
+    selected.value = filtered.value[selectedIndex.value] ?? null;
+    if (!selected.value) closeLightbox();
   }
+
+  undoableAction({
+    text: "Print deleted",
+    undo: () => {
+      const next = entries.value.slice();
+      next.splice(Math.min(entryIdx, next.length), 0, removed);
+      entries.value = next;
+    },
+    commit: async () => {
+      try {
+        await deleteGalleryImage(item.filename);
+      } catch (err) {
+        // Roll the print back into the list so the failure isn't silent.
+        const next = entries.value.slice();
+        next.splice(Math.min(entryIdx, next.length), 0, removed);
+        entries.value = next;
+        toast("error", err instanceof Error ? err.message : String(err));
+      }
+    },
+  });
 }
 
 function setView(next: ViewMode) {
@@ -307,18 +424,7 @@ function setView(next: ViewMode) {
   }
 }
 
-/*
- * "Back to top" floating action button.
- *
- * On mobile the header no longer sticks to the top of the viewport (it
- * would steal 10-15 % of vertical space on phones). To compensate, once
- * the user scrolls far enough that the header is off-screen we surface a
- * FAB in the bottom-right corner; tapping it smooth-scrolls back to top.
- *
- * The threshold is deliberately larger than `window.innerHeight` so the
- * button doesn't flicker in and out while the user is still near the
- * top of the feed.
- */
+// ── Back-to-top FAB ──────────────────────────────────────────────────────────
 const showBackToTop = ref(false);
 function onScroll() {
   showBackToTop.value = window.scrollY > window.innerHeight;
@@ -339,123 +445,71 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div
-    class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-40 sm:px-6 lg:px-10"
-  >
-    <!--
-      Page header. W2 relocates the gallery-only toolbar (view / kind filter /
-      mute / select / refresh) out of the former global TopBar; search now
-      lives in the app nav and seeds this page via `?q=`. The controls keep
-      their prior behaviors and aria-labels — the page gets a full redesign in
-      a later milestone.
-    -->
-    <header class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
-      <div class="min-w-0 flex-1">
-        <h1 class="font-display text-2xl font-bold tracking-tight text-ink">
-          Gallery
-        </h1>
-        <p class="mt-1 font-mono text-xs text-ink-3">
-          {{ counts.filtered }} / {{ counts.total }}
-        </p>
-      </div>
+  <div class="gal">
+    <header class="gal__head">
+      <h1 class="gal__title">Gallery</h1>
+      <span class="gal__count">{{ total }} prints · all hosts</span>
+      <span class="gal__flex"></span>
 
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
-        <!-- View-mode toggle -->
-        <div
-          class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5"
-          role="group"
-          aria-label="View mode"
-        >
+      <SegmentedControl
+        class="gal__filter"
+        data-test="gallery-filter"
+        :model-value="filter"
+        :options="filterOptions"
+        label="Filter prints"
+        @update:model-value="setFilter"
+      />
+
+      <label class="gal__search">
+        <Icon name="search" :size="15" />
+        <input
+          :value="search"
+          type="search"
+          placeholder="Search prompts, models…"
+          aria-label="Search gallery"
+          data-test="gallery-search"
+          @input="onSearchInput(($event.target as HTMLInputElement).value)"
+        />
+      </label>
+
+      <div class="gal__tools">
+        <div class="gal__viewtoggle" role="group" aria-label="View mode">
           <button
-            class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
-            :class="
-              view === 'feed'
-                ? 'bg-brand-500 text-white shadow-sm'
-                : 'text-ink-200 hover:text-white'
-            "
-            :aria-pressed="view === 'feed'"
-            @click="setView('feed')"
-          >
-            Feed
-          </button>
-          <button
-            class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
-            :class="
-              view === 'grid'
-                ? 'bg-brand-500 text-white shadow-sm'
-                : 'text-ink-200 hover:text-white'
-            "
+            type="button"
+            class="gal__vbtn"
+            :data-on="view === 'grid' ? 'true' : undefined"
             :aria-pressed="view === 'grid'"
+            aria-label="Grid view"
             @click="setView('grid')"
           >
-            Grid
+            <Icon name="library" :size="16" />
+          </button>
+          <button
+            type="button"
+            class="gal__vbtn"
+            :data-on="view === 'feed' ? 'true' : undefined"
+            :aria-pressed="view === 'feed'"
+            aria-label="Feed view"
+            @click="setView('feed')"
+          >
+            <Icon name="menu" :size="16" />
           </button>
         </div>
 
-        <!-- Kind filter -->
-        <nav
-          class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
-        >
-          <button
-            class="rounded-full px-3 py-1.5 transition"
-            :class="
-              filter === 'all'
-                ? 'bg-brand-500 text-white shadow-sm'
-                : 'hover:text-white'
-            "
-            @click="filter = 'all'"
-          >
-            All
-            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-              counts.total
-            }}</span>
-          </button>
-          <button
-            class="hidden rounded-full px-3 py-1.5 transition sm:inline-flex"
-            :class="
-              filter === 'images'
-                ? 'bg-brand-500 text-white shadow-sm'
-                : 'hover:text-white'
-            "
-            @click="filter = 'images'"
-          >
-            Images
-            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-              counts.images
-            }}</span>
-          </button>
-          <button
-            class="rounded-full px-3 py-1.5 transition"
-            :class="
-              filter === 'video'
-                ? 'bg-brand-500 text-white shadow-sm'
-                : 'hover:text-white'
-            "
-            @click="filter = 'video'"
-          >
-            Video
-            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
-              counts.video
-            }}</span>
-          </button>
-        </nav>
-
-        <!-- Sound toggle: the click doubles as the user gesture browsers
-             require before unmuted autoplay is allowed. -->
         <button
-          class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white"
+          type="button"
+          class="gal__icon"
+          :aria-pressed="!muted"
           :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
           :title="muted ? 'Unmute videos' : 'Mute videos'"
-          :aria-pressed="!muted"
           @click="setMuted(!muted)"
         >
           <svg
             v-if="muted"
-            class="h-4 w-4"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            stroke-width="2.2"
+            stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
             aria-hidden="true"
@@ -466,11 +520,10 @@ onMounted(async () => {
           </svg>
           <svg
             v-else
-            class="h-4 w-4 text-brand-300"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            stroke-width="2.2"
+            stroke-width="2"
             stroke-linecap="round"
             stroke-linejoin="round"
             aria-hidden="true"
@@ -481,205 +534,523 @@ onMounted(async () => {
           </svg>
         </button>
 
-        <!-- Select mode toggle -->
         <button
-          class="inline-flex h-10 items-center gap-1.5 rounded-full border border-white/5 px-3 text-[13px] font-medium transition hover:text-white"
-          :class="
-            selectMode ? 'bg-brand-500 text-white' : 'bg-white/5 text-ink-200'
-          "
+          type="button"
+          class="gal__select"
+          :class="{ 'gal__select--on': selectMode }"
           :aria-pressed="selectMode"
-          :title="selectMode ? 'Exit select mode' : 'Select multiple'"
+          data-test="gallery-select"
           @click="setSelectMode(!selectMode)"
         >
-          <span class="hidden sm:inline">
-            {{ selectMode ? `Selected ${selection.size}` : "Select" }}
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
+            />
+          </svg>
+          <span class="gal__select-label">
+            {{ selectMode ? `${selection.size} selected` : "Select" }}
           </span>
-          <span v-if="selectMode && selection.size > 0" class="sm:hidden">
-            {{ selection.size }}
-          </span>
-          <span v-else class="sm:hidden">Select</span>
         </button>
 
-        <!-- Refresh -->
         <button
-          class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white disabled:opacity-60"
+          type="button"
+          class="gal__icon"
           :disabled="loading"
           :aria-busy="loading"
           aria-label="Refresh gallery"
           @click="refresh"
         >
-          <svg
-            class="h-4 w-4"
-            :class="{ 'animate-spin': loading }"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
-            <path d="M21 3v5h-5" />
-            <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
-            <path d="M3 21v-5h5" />
-          </svg>
+          <Icon name="refresh" :size="16" :class="{ gal__spin: loading }" />
         </button>
       </div>
     </header>
 
-    <main class="mt-4 sm:mt-6">
-      <div
-        v-if="errorMessage"
-        class="glass flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
-      >
-        <span class="mt-0.5">⚠</span>
-        <div>
-          <p class="font-medium text-rose-100">Couldn't load the gallery.</p>
-          <p class="text-rose-200/80">{{ errorMessage }}</p>
-        </div>
+    <main class="gal__main">
+      <div v-if="errorMessage" class="gal__error" role="alert">
+        <p class="gal__error-title">Couldn't load the gallery.</p>
+        <p class="gal__error-body">{{ errorMessage }}</p>
       </div>
 
-      <GalleryFeed
-        v-else
-        :entries="filtered"
-        :loading="loading"
-        :view="view"
-        :muted="muted"
-        :select-mode="selectMode"
-        :selection="selection"
-        @open="openItem"
-        @toggle-select="toggleSelect"
-        @drag-select="onDragSelect"
-      />
+      <template v-else>
+        <EmptyStateBlock
+          v-if="emptyKind === 'search'"
+          icon="search"
+          headline="No prints match"
+          guidance="Nothing matches your search. Clear it to browse the full library."
+        >
+          <template #action>
+            <button
+              type="button"
+              class="gal__emptybtn"
+              data-test="clear-search"
+              @click="clearSearch"
+            >
+              Clear search
+            </button>
+          </template>
+        </EmptyStateBlock>
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'video'"
+          icon="video"
+          headline="No video clips yet"
+          guidance="Generate with an LTX Video model to see clips here."
+        />
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'images'"
+          icon="image"
+          headline="No images yet"
+          guidance="Generate an image and it will appear in your library."
+        />
+
+        <EmptyStateBlock
+          v-else-if="emptyKind === 'none'"
+          icon="image"
+          headline="No prints yet"
+          guidance="Head to Create — every image and clip you make lands here."
+        />
+
+        <GalleryGrid
+          v-else-if="view === 'grid'"
+          :entries="filtered"
+          :loading="loading"
+          :select-mode="selectMode"
+          :selection="selection"
+          :fresh="fresh"
+          @open="openItem"
+          @toggle-select="toggleSelect"
+          @drag-select="onDragSelect"
+        />
+
+        <GalleryFeed
+          v-else
+          :entries="filtered"
+          :loading="loading"
+          :view="'feed'"
+          :muted="muted"
+          :select-mode="selectMode"
+          :selection="selection"
+          @open="openItem"
+          @toggle-select="toggleSelect"
+          @drag-select="onDragSelect"
+        />
+      </template>
     </main>
 
-    <!--
-      Floating selection action bar.
-      Appears when the user enters select mode. Surfaces counts and the
-      four bulk actions: select-all-in-filter, clear, delete selected,
-      delete all (the "nuke this filter" escape hatch). Positioned above
-      the back-to-top FAB so both can coexist. We intentionally use
-      window.confirm() inside the delete handlers — consistent with the
-      detail drawer's single-item delete, and avoids shipping a modal.
-    -->
+    <!-- Selection action bar (bulk delete). -->
     <Transition name="fade">
       <div
         v-if="selectMode"
-        class="pointer-events-none fixed inset-x-0 z-40 flex justify-center px-4"
+        class="gal__bar-wrap"
         :style="{
           bottom:
             'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
         }"
       >
-        <div
-          class="glass pointer-events-auto flex max-w-full flex-wrap items-center gap-2 rounded-full border border-white/10 bg-ink-900/80 px-3 py-2 text-[13px] text-ink-100 shadow-xl backdrop-blur"
-          role="toolbar"
-          aria-label="Selection actions"
-        >
-          <span class="px-2 font-medium tabular-nums">
+        <div class="gal__bar" role="toolbar" aria-label="Selection actions">
+          <span class="gal__bar-count">
             {{ selection.size }}
-            <span class="text-ink-400">/ {{ filtered.length }} selected</span>
+            <span class="gal__bar-of">/ {{ filtered.length }} selected</span>
           </span>
           <button
-            class="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium transition hover:bg-white/10 disabled:opacity-60"
+            type="button"
+            class="gal__bar-btn"
             :disabled="filtered.length === 0"
             @click="selectAllVisible"
           >
             Select all
           </button>
           <button
-            class="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium transition hover:bg-white/10 disabled:opacity-60"
+            type="button"
+            class="gal__bar-btn"
             :disabled="selection.size === 0"
             @click="clearSelection"
           >
             Clear
           </button>
           <button
-            class="rounded-full bg-rose-500/90 px-3 py-1 font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+            type="button"
+            class="gal__bar-danger"
             :disabled="selection.size === 0"
             @click="deleteSelected"
           >
             Delete selected
           </button>
           <button
-            class="rounded-full border border-rose-400/40 bg-rose-500/20 px-3 py-1 font-semibold text-rose-100 transition hover:bg-rose-500/30 disabled:opacity-50"
+            type="button"
+            class="gal__bar-danger gal__bar-danger--soft"
             :disabled="filtered.length === 0"
-            :title="
-              filtered.length === counts.total
-                ? 'Delete every item in the gallery'
-                : 'Delete every item that matches the current filter'
-            "
             @click="deleteAllFiltered"
           >
             Delete all
           </button>
           <button
-            class="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-full text-ink-300 transition hover:bg-white/10 hover:text-white"
+            type="button"
+            class="gal__bar-x"
             aria-label="Exit select mode"
             @click="setSelectMode(false)"
           >
-            <svg
-              class="h-3.5 w-3.5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M6 6l12 12" />
-              <path d="M18 6 6 18" />
-            </svg>
+            <Icon name="close" :size="15" />
           </button>
         </div>
       </div>
     </Transition>
 
-    <!-- Back-to-top FAB. Appears once the user has scrolled more than one
-         viewport down, replacing the on-desktop convenience of the sticky
-         header on mobile. Sits above the tray so an expanded CPU/GPU tray
-         doesn't swallow it. Fade/translate transition keeps it unobtrusive. -->
     <Transition name="fade">
       <button
         v-if="showBackToTop"
         type="button"
         aria-label="Scroll to top"
-        class="fixed right-4 z-20 inline-flex h-12 w-12 items-center justify-center rounded-full bg-brand-500 text-white shadow-[0_12px_30px_-10px_rgba(99,102,241,0.7)] backdrop-blur transition hover:bg-brand-400 active:scale-95 sm:right-6"
+        class="gal__fab"
         :style="{
           bottom:
             'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
         }"
         @click="scrollToTop"
       >
-        <svg
-          class="h-5 w-5"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M12 19V5" />
-          <path d="m5 12 7-7 7 7" />
-        </svg>
+        <Icon name="chevron-up" :size="20" :stroke-width="2.2" />
       </button>
     </Transition>
 
-    <DetailDrawer
+    <Lightbox
       :item="selected"
-      :has-prev="selectedIndex > 0"
-      :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :index="selectedIndex"
       :total="filtered.length"
+      :has-prev="selectedIndex > 0"
+      :has-next="selectedIndex >= 0 && selectedIndex < filtered.length - 1"
       :muted="muted"
-      @close="closeDrawer"
-      @prev="stepDrawer(-1)"
-      @next="stepDrawer(1)"
-      @delete="handleDelete"
+      @close="closeLightbox"
+      @prev="stepLightbox(-1)"
+      @next="stepLightbox(1)"
+      @reuse="onReuse"
+      @use-source="onUseAsSource"
+      @upscale="onUpscale"
+      @delete="onLightboxDelete"
     />
   </div>
 </template>
+
+<style scoped>
+.gal {
+  position: relative;
+  max-width: 1800px;
+  margin: 0 auto;
+  padding: 22px 20px 160px;
+}
+
+.gal__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 14px;
+  margin-bottom: 18px;
+}
+.gal__title {
+  margin: 0;
+  font-family: var(--f-display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--rebate);
+}
+.gal__count {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.gal__flex {
+  flex: 1;
+  min-width: 0;
+}
+
+.gal__filter {
+  flex: 0 0 auto;
+}
+
+.gal__search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--ink-3);
+}
+.gal__search input {
+  width: 180px;
+  max-width: 42vw;
+  border: 0;
+  background: transparent;
+  color: var(--rebate);
+  font-family: var(--f-body);
+  font-size: 13px;
+  outline: none;
+}
+.gal__search input::placeholder {
+  color: var(--ink-3);
+}
+.gal__search:focus-within {
+  outline: 2px solid var(--safelight);
+  outline-offset: 1px;
+}
+
+.gal__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gal__viewtoggle {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bath);
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+}
+.gal__vbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  border-radius: var(--radius-control-sm);
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.gal__vbtn[data-on="true"] {
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+}
+.gal__vbtn:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+.gal__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color var(--dur-quick) var(--ease);
+}
+.gal__icon svg {
+  width: 16px;
+  height: 16px;
+}
+.gal__icon:hover:not(:disabled) {
+  color: var(--rebate);
+}
+.gal__icon:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.gal__icon:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+.gal__spin {
+  animation: gal-spin 0.9s linear infinite;
+}
+@keyframes gal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.gal__select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 13px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: var(--bath);
+  color: var(--ink-2);
+  font-family: var(--f-body);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--dur-quick) var(--ease);
+}
+.gal__select svg {
+  width: 16px;
+  height: 16px;
+}
+.gal__select:hover {
+  color: var(--rebate);
+}
+.gal__select--on {
+  background: var(--sel-bg);
+  color: var(--sel-ink);
+  border-color: var(--sel-border);
+}
+.gal__select:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+.gal__main {
+  margin-top: 4px;
+}
+
+.gal__error {
+  background: color-mix(in srgb, var(--stop) 12%, var(--bench));
+  border: 1px solid color-mix(in srgb, var(--stop) 40%, transparent);
+  border-radius: var(--radius-card);
+  padding: 14px 16px;
+}
+.gal__error-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--rebate);
+}
+.gal__error-body {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.gal__emptybtn {
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--rebate);
+  padding: 9px 16px;
+  border-radius: var(--radius-control);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease);
+}
+.gal__emptybtn:hover {
+  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+}
+.gal__emptybtn:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+/* Selection action bar. */
+.gal__bar-wrap {
+  position: fixed;
+  inset-inline: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  padding: 0 16px;
+  pointer-events: none;
+}
+.gal__bar {
+  pointer-events: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  background: var(--bench);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-raised);
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--rebate);
+}
+.gal__bar-count {
+  padding: 0 6px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.gal__bar-of {
+  color: var(--ink-3);
+}
+.gal__bar-btn {
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--rebate);
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  cursor: pointer;
+}
+.gal__bar-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.gal__bar-danger {
+  border: 0;
+  background: var(--stop);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+  cursor: pointer;
+}
+.gal__bar-danger--soft {
+  background: color-mix(in srgb, var(--stop) 22%, transparent);
+  color: var(--stop);
+}
+.gal__bar-danger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.gal__bar-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.gal__bar-x:hover {
+  background: color-mix(in srgb, var(--rebate) 8%, transparent);
+  color: var(--rebate);
+}
+
+.gal__fab {
+  position: fixed;
+  right: 20px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--safelight);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-raised);
+  cursor: pointer;
+}
+.gal__fab:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+</style>
