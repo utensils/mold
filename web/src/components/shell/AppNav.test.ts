@@ -152,3 +152,18 @@ describe("AppNav", () => {
     expect(markGalleryVisitedMock).toHaveBeenCalled();
   });
 });
+
+describe("mobile nav sheet anchoring", () => {
+  it("mounts the sheet in a viewport-fixed host, not inside the 52px bar", async () => {
+    // SheetPanel is `position: absolute; inset: 0`; inside the relative header
+    // it resolved against the compact bar and rendered as a 52px sliver, which
+    // made the whole phone navigation unusable.
+    const w = mountNav();
+    const host = w.get("[data-test='mobile-nav-host']");
+    // Closed: no fixed overlay, so it can't swallow clicks on the page.
+    expect(host.classes()).not.toContain("fixed");
+    await w.get('[data-test="nav-hamburger"]').trigger("click");
+    expect(host.classes()).toContain("fixed");
+    expect(host.classes()).toContain("inset-0");
+  });
+});

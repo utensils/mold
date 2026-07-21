@@ -11,6 +11,7 @@ import {
   unloadModel,
 } from "../api";
 import { useDownloads } from "./useDownloads";
+import { isStandaloneGenerationModel } from "../lib/modelFilters";
 import type {
   CatalogEntryWire,
   CatalogFamilyCount,
@@ -302,7 +303,14 @@ function build() {
     installedLoading.value = true;
     installedError.value = null;
     try {
-      installed.value = await fetchModels();
+      // Only models actually on disk are "installed". /api/models returns
+      // the whole manifest (97 rows here, 2 downloaded), so an unfiltered
+      // assignment renders the entire catalog as if it were installed — and
+      // the tab heuristic below then always lands on a shelf of models the
+      // user does not have. Host detail already filters this way.
+      installed.value = (await fetchModels()).filter(
+        (m) => m.downloaded && isStandaloneGenerationModel(m),
+      );
       // First load with no explicit user choice: land on Installed when the
       // user has models, otherwise open straight into Discover.
       if (!tabTouched) {
