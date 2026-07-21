@@ -627,6 +627,27 @@ textarea.control {
   margin-top: 13px;
 }
 
+/*
+ * Mobile-scoped overrides of the shared @ui SegmentedControl (kit defaults
+ * stay untouched for web/desktop): iPhone segments need the 44pt touch floor
+ * and a 10px minimum sub-line. Three-class selectors outrank the kit's scoped
+ * rules regardless of stylesheet order.
+ */
+.mobile-resolution-tier .ms-seg .ms-seg__btn {
+  min-height: 44px;
+}
+
+.mobile-resolution-tier .ms-seg .ms-seg__sub {
+  font-size: 10px;
+}
+
+.mobile-resolution-tier-dims {
+  margin: 0;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+}
+
 .mobile-resolution-custom-toggle {
   width: 100%;
   margin-top: 2px;

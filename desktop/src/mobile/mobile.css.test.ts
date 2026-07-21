@@ -149,6 +149,7 @@ describe("mobile safe areas", () => {
   it("keeps frequent resolution and catalog controls at least 44px tall", () => {
     for (const selector of [
       ".mobile-resolution-segment",
+      ".mobile-resolution-tier .ms-seg .ms-seg__btn",
       ".mobile-resolution-aspect",
       ".mobile-catalog-segment button",
       ".mobile-catalog-media button",
@@ -210,6 +211,21 @@ describe("mobile safe areas", () => {
     expect(aspects?.[1]).toMatch(/minmax\(64px,\s*84px\)/);
     expect(choice?.[1]).toMatch(/min-height:\s*72px\s*;/);
     expect(shape?.[1]).toMatch(/border:\s*1px solid currentColor\s*;/);
+  });
+
+  it("keeps the kit tier segments at touch size with legible sublabels", () => {
+    // Mobile-scoped overrides of the shared @ui SegmentedControl: the kit's
+    // default 7px-padded segments and 9px sub-line are below the iPhone 44pt /
+    // 10px floors. Three-class selectors outrank the kit's scoped two-part
+    // rules regardless of stylesheet order.
+    const button = css.match(/\.mobile-resolution-tier \.ms-seg \.ms-seg__btn\s*\{([^}]*)\}/s);
+    const sub = css.match(/\.mobile-resolution-tier \.ms-seg \.ms-seg__sub\s*\{([^}]*)\}/s);
+    const dims = css.match(/\.mobile-resolution-tier-dims\s*\{([^}]*)\}/s);
+
+    expect(button?.[1]).toMatch(/min-height:\s*44px\s*;/);
+    expect(sub?.[1]).toMatch(/font-size:\s*10px\s*;/);
+    expect(dims?.[1]).toMatch(/font-family:\s*var\(--font-utility\)/);
+    expect(dims?.[1]).toMatch(/color:\s*var\(--ink-3\)/);
   });
 
   it("does not keep the redundant resolution summary card", () => {

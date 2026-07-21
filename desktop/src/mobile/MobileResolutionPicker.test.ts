@@ -31,6 +31,10 @@ function buttonWithText(wrapper: VueWrapper, text: string) {
   return button;
 }
 
+function tierSegments(wrapper: VueWrapper) {
+  return wrapper.get("[data-test='mobile-resolution-tier']").findAll("button");
+}
+
 describe("MobileResolutionPicker", () => {
   it("reuses family presets and applies an orientation-aware resolution", async () => {
     const { wrapper, state } = mountPicker(1024, 1024, "flux");
@@ -41,9 +45,9 @@ describe("MobileResolutionPicker", () => {
     );
     expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("1:1 · 1024×1024");
+    const active = wrapper.get("[data-test='mobile-resolution-tier'] [aria-checked='true']");
+    expect(active.get(".ms-seg__label").text()).toBe("1 MP");
+    expect(active.get(".ms-seg__sub").text()).toBe("Recommended");
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
     expect(state).toMatchObject({ width: 896, height: 1152 });
@@ -58,18 +62,24 @@ describe("MobileResolutionPicker", () => {
 
   it("offers named resolution tiers for repeated Qwen aspect buckets", async () => {
     const { wrapper, state } = mountPicker(1024, 1024, "qwen-image");
-    const tier = wrapper.get("[data-test='mobile-resolution-tier']");
-    const options = tier.findAll("option");
+    const segments = tierSegments(wrapper);
 
-    expect(options).toHaveLength(4);
-    expect(options.map((option) => option.text())).toEqual([
-      "Compact · 512 × 512 · 0.3 MP",
-      "Standard · 768 × 768 · 0.6 MP",
-      "High · 1024 × 1024 · 1.0 MP",
-      "Max · 1328 × 1328 · 1.8 MP",
+    expect(segments).toHaveLength(4);
+    expect(segments.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+      "0.3 MP",
+      "0.6 MP",
+      "1 MP",
+      "1.8 MP",
     ]);
+    expect(segments.map((segment) => segment.get(".ms-seg__sub").text())).toEqual([
+      "Compact",
+      "Standard",
+      "High",
+      "Max",
+    ]);
+    expect(segments[2]?.attributes("aria-checked")).toBe("true");
 
-    await tier.setValue("1:1 · 1328×1328");
+    await segments[3]?.trigger("click");
     expect(state).toMatchObject({ width: 1328, height: 1328 });
 
     await wrapper.get("[data-orientation='portrait']").trigger("click");
@@ -80,6 +90,32 @@ describe("MobileResolutionPicker", () => {
 
     await wrapper.get("[data-aspect='4:7']").trigger("click");
     expect(state).toMatchObject({ width: 768, height: 1344 });
+  });
+
+  it("projects the selected tier's exact pixel dimensions under the control", async () => {
+    const { wrapper, state } = mountPicker(1024, 1024, "qwen-image");
+
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("1024 × 1024 px");
+
+    await tierSegments(wrapper)[0]?.trigger("click");
+    expect(state).toMatchObject({ width: 512, height: 512 });
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("512 × 512 px");
+  });
+
+  it("renders however many tiers the family's aspect bucket provides", () => {
+    const single = tierSegments(mountPicker(1024, 1024, "flux").wrapper);
+    expect(single).toHaveLength(1);
+    expect(single[0]?.get(".ms-seg__label").text()).toBe("1 MP");
+    expect(single[0]?.get(".ms-seg__sub").text()).toBe("Recommended");
+    expect(single[0]?.attributes("aria-checked")).toBe("true");
+
+    const pair = tierSegments(mountPicker(1024, 576, "ltx2").wrapper);
+    expect(pair.map((segment) => segment.get(".ms-seg__label").text())).toEqual([
+      "0.6 MP",
+      "0.9 MP",
+    ]);
+    expect(pair.map((segment) => segment.get(".ms-seg__sub").text())).toEqual(["Standard", "High"]);
+    expect(pair[0]?.attributes("aria-checked")).toBe("true");
   });
 
   it("shows each aspect choice as a proportionally accurate frame", async () => {
@@ -110,6 +146,7 @@ describe("MobileResolutionPicker", () => {
     const { wrapper, state } = mountPicker(1000, 777);
 
     expect(wrapper.find("[data-test='mobile-resolution-tier']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='mobile-resolution-tier-dims']").exists()).toBe(false);
     expect(wrapper.find("[data-test='mobile-resolution-custom']").exists()).toBe(true);
     expect(wrapper.get("[data-test='mobile-resolution-announcement']").text()).toBe(
       "Selected resolution: 1000 by 777 pixels, 1000:777, Landscape.",

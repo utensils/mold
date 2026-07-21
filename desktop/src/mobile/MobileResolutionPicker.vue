@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import { resolutionValidationError } from "../lib/generateValidation";
 import {
   aspectRatioLabel,
@@ -111,16 +112,23 @@ function setAspect(aspect: string): void {
   );
 }
 
-function setTier(event: Event): void {
-  const label = (event.target as HTMLSelectElement).value;
+function setTier(label: string): void {
   applyResolution(tierOptions.value.find((preset) => preset.label === label) ?? null);
 }
 
-function tierOptionLabel(preset: ResolutionPreset, index: number): string {
-  const tier = resolutionTierLabel(index, tierOptions.value.length);
-  const megapixels = ((preset.width * preset.height) / 1_000_000).toFixed(1);
-  return `${tier} · ${preset.width} × ${preset.height} · ${megapixels} MP`;
+/** "0.6 MP" with the web treatment's trailing-.0 strip ("1.0" → "1 MP"). */
+function tierMegapixels(preset: ResolutionPreset): string {
+  const megapixels = ((preset.width * preset.height) / 1_000_000).toFixed(1).replace(/\.0$/, "");
+  return `${megapixels} MP`;
 }
+
+const tierSegments = computed(() =>
+  tierOptions.value.map((preset, index) => ({
+    value: preset.label,
+    label: tierMegapixels(preset),
+    sub: resolutionTierLabel(index, tierOptions.value.length),
+  })),
+);
 
 function changedDimension(event: Event): number {
   return snapMobileDimension(Number((event.target as HTMLInputElement).value));
@@ -199,19 +207,19 @@ function swapDimensions(): void {
       </div>
     </div>
 
-    <label v-if="currentPreset" class="field mobile-resolution-tier">
-      <span>Resolution tier</span>
-      <select
-        class="control"
+    <div v-if="currentPreset" class="mobile-resolution-group mobile-resolution-tier">
+      <span class="mobile-resolution-label">Resolution tier</span>
+      <SegmentedControl
         data-test="mobile-resolution-tier"
-        :value="currentPreset.label"
-        @change="setTier"
-      >
-        <option v-for="(preset, index) in tierOptions" :key="preset.label" :value="preset.label">
-          {{ tierOptionLabel(preset, index) }}
-        </option>
-      </select>
-    </label>
+        :model-value="currentPreset.label"
+        :options="tierSegments"
+        label="Resolution tier"
+        @update:model-value="setTier"
+      />
+      <p class="mobile-resolution-tier-dims" data-test="mobile-resolution-tier-dims">
+        {{ currentPreset.width }} × {{ currentPreset.height }} px
+      </p>
+    </div>
 
     <button
       v-if="currentPreset"

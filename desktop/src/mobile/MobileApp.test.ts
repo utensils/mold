@@ -292,17 +292,13 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
     expect(wrapper.get("[data-orientation='square']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='1:1']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("1:1 · 1024×1024");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("1024 × 1024 px");
 
     await fieldControl("Model").setValue(model.name);
     await flushPromises();
     expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("3:2 · 768×512");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
 
     await submitPrompt("use the video defaults");
     expect(openStreams).toHaveLength(1);
@@ -2695,9 +2691,7 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("Negative prompt").element).toHaveProperty("value", "calm water");
     expect(wrapper.get("[data-orientation='landscape']").attributes("aria-pressed")).toBe("true");
     expect(wrapper.get("[data-aspect='3:2']").attributes("aria-pressed")).toBe("true");
-    expect(
-      (wrapper.get("[data-test='mobile-resolution-tier']").element as HTMLSelectElement).value,
-    ).toBe("3:2 · 768×512");
+    expect(wrapper.get("[data-test='mobile-resolution-tier-dims']").text()).toBe("768 × 512 px");
     expect(fieldControl("Format").element).toHaveProperty("value", "mp4");
     expect(fieldControl("Frames").element).toHaveProperty("value", "121");
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
