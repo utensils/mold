@@ -10,7 +10,10 @@ import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
       guidance="That Mold Studio destination does not exist."
     >
       <template #action>
-        <RouterLink class="rounded-control bg-safelight px-4 py-2 text-on-accent" to="/create">
+        <RouterLink
+          class="rounded-control bg-safelight px-4 py-2 text-on-accent"
+          to="/create"
+        >
           Go to Create
         </RouterLink>
       </template>

@@ -1277,6 +1277,8 @@
               enable = true;
               edition = "2021";
             };
+            # The standalone iOS crate is Rust 2024 and has its own cargo-fmt CI gate.
+            settings.formatter.rustfmt.excludes = [ "apps/mobile/src-tauri/**/*.rs" ];
           };
         };
     };

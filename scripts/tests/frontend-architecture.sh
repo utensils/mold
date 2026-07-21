@@ -19,7 +19,7 @@ for legacy_lock in web/bun.lock web/bun.nix desktop/bun.lock desktop/bun.nix; do
   test ! -e "$legacy_lock" || fail "$legacy_lock must be replaced by the root lock"
 done
 
-if rg -n '"(vue|vue-router|pinia|vite|vitest|typescript|tailwindcss|prettier|happy-dom|smol-toml|@microsoft/fetch-event-source)"[[:space:]]*:' web/package.json desktop/package.json; then
+if grep -En '"(vue|vue-router|pinia|vite|vitest|typescript|tailwindcss|prettier|happy-dom|smol-toml|@microsoft/fetch-event-source)"[[:space:]]*:' web/package.json desktop/package.json; then
   fail "shared browser dependencies must be owned and pinned at the workspace root"
 fi
 
@@ -34,11 +34,11 @@ bun -e '
   }
 '
 
-if rg -n "@tauri-apps|from [\"']\.\./(web|desktop)|from [\"'].*(web|desktop)/" studio; then
+if grep -REn --include='*.ts' --include='*.vue' "@tauri-apps|from [\"']\.\./(web|desktop)|from [\"'].*(web|desktop)/" studio; then
   fail "studio must remain browser-safe and application-shell independent"
 fi
 
-if rg -n "path: [\"']/(generate|catalog)[\"']|redirect:.*(generate|catalog)" web/src/router.ts; then
+if grep -En "path: [\"']/(generate|catalog)[\"']|redirect:.*(generate|catalog)" web/src/router.ts; then
   fail "web legacy routes must not remain registered"
 fi
 

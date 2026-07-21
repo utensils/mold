@@ -19,7 +19,8 @@ export const browserPlatform: StudioPlatform = {
     };
   },
   async notify(title, body) {
-    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (!("Notification" in window) || Notification.permission !== "granted")
+      return;
     new Notification(title, { body });
   },
   async chooseImage() {

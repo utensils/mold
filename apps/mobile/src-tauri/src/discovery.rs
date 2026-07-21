@@ -33,7 +33,8 @@ fn scan(timeout: Duration) -> Result<Vec<DiscoveredHost>, String> {
 
 #[cfg(target_vendor = "apple")]
 mod apple {
-    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::ffi::{CStr, CString};
+    use std::ffi::{c_char, c_void};
     use std::time::{Duration, Instant};
 
     use super::DiscoveredHost;
