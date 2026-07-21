@@ -118,6 +118,15 @@ describe("CatalogCardGrid client-side filtering", () => {
     expect(w.findAllComponents({ name: "CatalogCard" }).length).toBe(1);
   });
 
+  it("does not send the user to a 'Refresh catalog' control that no longer exists", () => {
+    mockState.visibleEntries = ref([]);
+    mockState.resultCount = ref(0);
+    mockState.hasMore = ref(false);
+    const w = mount(CatalogCardGrid);
+    expect(w.text()).toContain("No models found.");
+    expect(w.text()).not.toContain("Refresh catalog");
+  });
+
   it("shows the empty state when the filter hides every fetched row", () => {
     mockState.entries = ref([baseEntry]);
     mockState.visibleEntries = ref([]);

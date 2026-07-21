@@ -74,9 +74,7 @@ function pullCard(id: string) {
     >
       <p class="text-sm">No models found.</p>
       <p class="text-xs">
-        Try adjusting filters or click
-        <span class="text-ink-2">Refresh catalog</span>
-        in the top bar.
+        No catalog entry matches every filter you've set — try widening one.
       </p>
     </div>
 
