@@ -23,7 +23,6 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "downloads", label: "Downloads" },
   { value: "rating", label: "Rating" },
   { value: "recent", label: "Recent" },
-  { value: "name", label: "Name" },
 ];
 
 const searchLocal = ref(cat.filter.value.q ?? "");

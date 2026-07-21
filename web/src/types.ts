@@ -910,7 +910,9 @@ export interface CatalogListParams {
   q?: string;
   include_nsfw?: boolean;
   max_engine_phase?: number;
-  sort?: "downloads" | "rating" | "recent" | "name";
+  /** Server vocabulary (`catalog.sort` capability); "name" was retired —
+   *  no upstream supports it and the server rejects it with a 422. */
+  sort?: "downloads" | "rating" | "recent";
   page?: number;
   page_size?: number;
 }

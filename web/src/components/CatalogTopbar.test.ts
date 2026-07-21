@@ -133,3 +133,24 @@ describe("CatalogTopbar", () => {
     );
   });
 });
+
+describe("CatalogTopbar sort vocabulary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFilter.value = {};
+  });
+
+  it("offers only sorts an upstream can actually serve", () => {
+    // "name" was never implemented anywhere — the server 422s it, so it must
+    // not be offerable. downloads/recent/rating are the honest vocabulary.
+    const w = mount(CatalogTopbar);
+    const values = w
+      .findAll("option")
+      .map((o) => o.attributes("value"))
+      .filter((v): v is string => typeof v === "string");
+    expect(values).toEqual(
+      expect.arrayContaining(["downloads", "recent", "rating"]),
+    );
+    expect(values).not.toContain("name");
+  });
+});
