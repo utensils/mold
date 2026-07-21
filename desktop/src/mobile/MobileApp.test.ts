@@ -105,6 +105,7 @@ const openStreams: Array<{
     headers?: Record<string, string>;
     signal: AbortSignal;
     onOpen?: () => void;
+    onClose?: (error: Error | null) => void;
     onEvent: (event: string, data: string) => void;
     target?: { baseUrl: string; apiKey: string | null };
   };
@@ -124,6 +125,16 @@ function fieldControl(label: string): DOMWrapper<Element> {
     .find((candidate) => candidate.find("span").text() === label);
   if (!field) throw new Error(`Missing ${label} field`);
   return field.find("input, textarea, select");
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -164,6 +175,7 @@ beforeEach(() => {
         headers?: Record<string, string>;
         signal: AbortSignal;
         onOpen?: () => void;
+        onClose?: (error: Error | null) => void;
         onEvent: (event: string, data: string) => void;
       },
     ) =>
@@ -1024,6 +1036,176 @@ describe("MobileApp generation queue", () => {
     expect(
       wrapper.get("[data-test='mobile-prompt-expand']").attributes("disabled"),
     ).toBeUndefined();
+  });
+
+  it.each(["job_done", "job_failed", "job_cancelled"] as const)(
+    "retains %s recovery UI when the terminal event beats the returned pull ID",
+    async (type) => {
+      const pinia = createPinia();
+      const downloads = useMobileDownloadsStore(pinia);
+      const response = deferred<string | null>();
+      const retryResponse = deferred<string | null>();
+      startCatalogDownload
+        .mockReturnValueOnce(response.promise)
+        .mockReturnValueOnce(retryResponse.promise);
+      expandPrompt.mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      );
+      wrapper = mountMobileApp(pinia);
+      await flushPromises();
+      await fieldControl("Prompt").setValue("fast cached expansion");
+      await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+      await flushPromises();
+      downloads.registerConsumer("catalog", [
+        {
+          id: "studio-id",
+          name: "Studio",
+          baseUrl: target.baseUrl,
+          apiKey: "catalog-rotated-key",
+          hostname: "studio",
+          version: "0.18.0",
+          instanceId: "studio-id",
+          online: true,
+        },
+      ]);
+      await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+      await flushPromises();
+      const frozenStream = openStreams
+        .filter((stream) => stream.path === "/api/downloads/stream")
+        .at(-1)!;
+      frozenStream.options.onEvent(
+        "download",
+        JSON.stringify({
+          type: "snapshot",
+          listing: { active_jobs: [], queued: [], history: [] },
+        }),
+      );
+      await flushPromises();
+      frozenStream.options.onEvent(
+        "download",
+        JSON.stringify(
+          type === "job_done"
+            ? { type, id: "fast-job", model: "qwen3-expand:q8" }
+            : type === "job_failed"
+              ? { type, id: "fast-job", error: "cached failure" }
+              : { type, id: "fast-job" },
+        ),
+      );
+
+      response.resolve("fast-job");
+      await flushPromises();
+      expect(
+        openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options
+          .target?.apiKey,
+      ).toBe("catalog-rotated-key");
+      if (type === "job_done") {
+        expect(wrapper.get("[data-test='mobile-retry-expansion']").text()).toBe("Retry expansion");
+      } else {
+        expect(wrapper.get("[data-test='mobile-retry-expansion-pull']").text()).toContain(
+          "qwen3-expand:q8",
+        );
+        if (type === "job_failed") {
+          expect(wrapper.get(".mobile-expansion-pull").text()).toContain("cached failure");
+        }
+        await wrapper.get("[data-test='mobile-retry-expansion-pull']").trigger("click");
+        await flushPromises();
+        const retryStream = openStreams
+          .filter((stream) => stream.path === "/api/downloads/stream")
+          .at(-1)!;
+        expect(retryStream.options.target?.apiKey).toBe(target.apiKey);
+        retryStream.options.onEvent(
+          "download",
+          JSON.stringify({
+            type: "snapshot",
+            listing: { active_jobs: [], queued: [], history: [] },
+          }),
+        );
+        retryResponse.reject(new Error("retry stopped"));
+        await flushPromises();
+        expect(
+          openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options
+            .target?.apiKey,
+        ).toBe("catalog-rotated-key");
+      }
+    },
+  );
+
+  it("releases fatal post-open recovery before a late pull ID and reacquires on Retry", async () => {
+    const pinia = createPinia();
+    const downloads = useMobileDownloadsStore(pinia);
+    const lateResponse = deferred<string | null>();
+    const retryResponse = deferred<string | null>();
+    startCatalogDownload
+      .mockReturnValueOnce(lateResponse.promise)
+      .mockReturnValueOnce(retryResponse.promise);
+    expandPrompt.mockRejectedValueOnce(
+      new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+    );
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    await fieldControl("Prompt").setValue("closed stream expansion");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    downloads.registerConsumer("catalog", [
+      {
+        id: "studio-id",
+        name: "Studio",
+        baseUrl: target.baseUrl,
+        apiKey: "catalog-rotated-key",
+        hostname: "studio",
+        version: "0.18.0",
+        instanceId: "studio-id",
+        online: true,
+      },
+    ]);
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const frozenStream = openStreams
+      .filter((stream) => stream.path === "/api/downloads/stream")
+      .at(-1)!;
+    frozenStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    await flushPromises();
+    frozenStream.options.onClose?.(new Error("download stream died"));
+    await flushPromises();
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("download stream died");
+    expect(
+      openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options.target
+        ?.apiKey,
+    ).toBe("catalog-rotated-key");
+
+    lateResponse.resolve("late-dead-job");
+    await flushPromises();
+    expect(wrapper.get(".mobile-expansion-pull").text()).toContain("download stream died");
+    expect(
+      openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options.target
+        ?.apiKey,
+    ).toBe("catalog-rotated-key");
+
+    await wrapper.get("[data-test='mobile-retry-expansion-pull']").trigger("click");
+    await flushPromises();
+    const retryStream = openStreams
+      .filter((stream) => stream.path === "/api/downloads/stream")
+      .at(-1)!;
+    expect(retryStream.options.target?.apiKey).toBe(target.apiKey);
+    retryStream.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "snapshot",
+        listing: { active_jobs: [], queued: [], history: [] },
+      }),
+    );
+    retryResponse.reject(new Error("retry stopped"));
+    await flushPromises();
+    expect(
+      openStreams.filter((stream) => stream.path === "/api/downloads/stream").at(-1)!.options.target
+        ?.apiKey,
+    ).toBe("catalog-rotated-key");
   });
 
   it.each(["edit", "remove"] as const)(

@@ -82,6 +82,11 @@ interface FrozenPullLease {
   jobId: string | null;
 }
 
+type TerminalDownloadEvent = Extract<
+  DownloadEvent,
+  { type: "job_done" | "job_failed" | "job_cancelled" }
+>;
+
 const STREAM_OPEN_TIMEOUT_MS = 10_000;
 
 function hostIdentity(host: MobileHost): HostIdentitySnapshot {
@@ -151,6 +156,7 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
   const subscriptions = new Map<string, StreamSubscription>();
   const stateIdentityByHost = new Map<string, HostIdentitySnapshot>();
   const terminalJobsByHost = new Map<string, Set<string>>();
+  const terminalEventsByHost = new Map<string, Map<string, TerminalDownloadEvent>>();
   const consumers = new Map<string, ConsumerRegistration>();
   const frozenPullLeases = new Map<string, FrozenPullLease>();
   const pendingPullRequests = new WeakMap<MobilePendingPull, Promise<MobilePullResult>>();
@@ -243,6 +249,7 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     else downloadsByHost[hostId] = emptyDownloadsState();
     stateIdentityByHost.delete(hostId);
     terminalJobsByHost.delete(hostId);
+    terminalEventsByHost.delete(hostId);
     delete rateSamplesByHost[hostId];
     clearPendingPullsForHost(hostId);
   }
@@ -276,6 +283,10 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
       const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
       known.add(event.id);
       terminalJobsByHost.set(host.id, known);
+      const events = terminalEventsByHost.get(host.id) ?? new Map<string, TerminalDownloadEvent>();
+      events.set(event.id, event);
+      while (events.size > 64) events.delete(events.keys().next().value!);
+      terminalEventsByHost.set(host.id, events);
     } else if (event.type === "snapshot") {
       const known = terminalJobsByHost.get(host.id) ?? new Set<string>();
       const settled = event.listing.history.filter(
@@ -370,6 +381,10 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
         if (cause && !controller.signal.aborted) {
           clearPendingPullsForHost(host.id);
           notifyStreamError(host, cause, "closed");
+          const owners = [...frozenPullLeases.values()]
+            .filter((lease) => lease.host.id === host.id)
+            .map((lease) => lease.ownerId);
+          for (const ownerId of owners) releaseFrozenPull(ownerId);
         }
       },
       onEvent: (_event, data) => {
@@ -404,6 +419,32 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     return Math.round(
       Math.max(0, job.bytes_total - last.bytes) / ((transferred * 1_000) / elapsed),
     );
+  }
+
+  function terminalJobFor(
+    entry: MobileDownloadEntry,
+    hostId: string,
+    jobId: string,
+  ): DownloadJob | null {
+    const recorded = downloadsByHost[hostId]?.history.find((job) => job.id === jobId);
+    if (recorded) return { ...recorded };
+    const event = terminalEventsByHost.get(hostId)?.get(jobId);
+    if (!event) return null;
+    return {
+      id: jobId,
+      model: event.type === "job_done" ? event.model : entry.name,
+      status:
+        event.type === "job_done"
+          ? "completed"
+          : event.type === "job_failed"
+            ? "failed"
+            : "cancelled",
+      files_done: 0,
+      files_total: 0,
+      bytes_done: 0,
+      bytes_total: 0,
+      error: event.type === "job_failed" ? event.error : null,
+    };
   }
 
   function desiredHosts(): Map<string, MobileHost> {
@@ -594,6 +635,13 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
             result.kind === "started" || result.kind === "conflict"
               ? result.jobId
               : (jobsForHost(host.id).find((job) => pullJobMatches(entry, job))?.id ?? null);
+          if (
+            lease.jobId &&
+            (terminalJobsByHost.get(host.id)?.has(lease.jobId) ||
+              terminalJobFor(entry, host.id, lease.jobId))
+          ) {
+            releaseFrozenPull(ownerId);
+          }
         }
         return result;
       })
@@ -656,6 +704,7 @@ export const useMobileDownloadsStore = defineStore("mobile-downloads", () => {
     unregisterConsumer,
     ensureDownloadStream,
     etaFor,
+    terminalJobFor,
     pullStatusForHost,
     startPull,
     startPullFrozen,

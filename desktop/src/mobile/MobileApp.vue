@@ -848,6 +848,7 @@ function syncExpansionDownloadConsumer(recovery: MobileExpansionRecoveryRecord):
         recovery.route.hostId === failedHost.id
       ) {
         attempt.requestError = cause.message;
+        releaseExpansionPullLease(recovery);
       }
     },
   });
@@ -1105,6 +1106,19 @@ async function pullExpansionModel(): Promise<void> {
         : null;
     }
     expansionPullAttempt.value.phase = "starting";
+    const terminalId =
+      expansionPullAttempt.value.jobId ?? expansionPullAttempt.value.observedJobId ?? null;
+    const terminalJob = terminalId
+      ? mobileDownloads.terminalJobFor(
+          { id: recovery.model, name: recovery.model },
+          recovery.route.hostId,
+          terminalId,
+        )
+      : null;
+    if (terminalJob) {
+      expansionPullAttempt.value.terminalJob = terminalJob;
+      releaseExpansionPullLease(recovery);
+    }
   } catch (error) {
     if (
       unmounted ||
