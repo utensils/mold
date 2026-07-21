@@ -11,6 +11,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::HostInput { .. }) => render_host_input(frame, app),
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
+        Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
         Some(Popup::SettingsInput { .. }) => render_settings_input(frame, app),
         Some(Popup::Info { message }) => render_info(frame, app, message.clone()),
@@ -63,6 +64,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from(
             "  1-5 / Alt+1-5      Switch workspace (Create/Library/Models/Machines/Settings)",
         ),
+        Line::from("  Ctrl+K             Command palette"),
         Line::from("  Esc                Close popup / cancel"),
         Line::from("  q / Ctrl+C         Quit"),
         Line::from(""),
@@ -79,7 +81,6 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  Ctrl+S             Save current image"),
         Line::from("  Ctrl+R             Randomize seed"),
         Line::from("  Ctrl+M             Open model selector"),
-        Line::from("  Ctrl+K             Compare models"),
         Line::from("  j/k                Navigate parameters"),
         Line::from("  +/- or Left/Right  Adjust parameter value"),
         Line::from(""),
@@ -476,6 +477,106 @@ fn render_seed_input(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// Render the ^K command palette — top-aligned like the GUI launcher.
+fn render_command_palette(frame: &mut Frame, app: &mut App) {
+    let theme = &app.theme;
+    let screen = frame.area();
+
+    let Some(Popup::CommandPalette {
+        filter,
+        selected,
+        filtered,
+    }) = &app.popup
+    else {
+        return;
+    };
+
+    // Width ~52 cols (the mock's 520px), clamped to the terminal; height
+    // fits the input row plus up to 10 command rows.
+    let width = 52.min(screen.width.saturating_sub(4)).max(20);
+    let rows = (filtered.len() as u16).clamp(1, 10);
+    let height = (rows + 3).min(screen.height.saturating_sub(2));
+    let x = screen.x + (screen.width.saturating_sub(width)) / 2;
+    let y = screen.y + 3.min(screen.height.saturating_sub(height));
+    let area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 2 || inner.width < 8 {
+        return;
+    }
+
+    // Input row: "› {filter}" with a faint placeholder when empty.
+    let mut input_spans = vec![Span::styled("\u{203a} ", Style::default().fg(theme.accent))];
+    if filter.is_empty() {
+        input_spans.push(Span::styled("type a command\u{2026}", theme.faint()));
+    } else {
+        input_spans.push(Span::styled(
+            filter.clone(),
+            Style::default().fg(theme.text),
+        ));
+    }
+    input_spans.push(Span::styled("\u{2588}", Style::default().fg(theme.accent)));
+    frame.render_widget(
+        Paragraph::new(Line::from(input_spans)),
+        Rect { height: 1, ..inner },
+    );
+
+    // Command rows below the input, scrolled to keep the selection visible.
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+    if list_area.height == 0 {
+        return;
+    }
+    let visible = list_area.height as usize;
+    let offset = selected.saturating_sub(visible.saturating_sub(1));
+    let commands = crate::palette::all_commands();
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(i, id)| {
+            let cmd = commands
+                .iter()
+                .find(|c| c.id == *id)
+                .expect("filtered ids come from the registry");
+            let row_style = if i == *selected {
+                Style::default().bg(theme.highlight).fg(theme.accent)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            let hint_pad = (list_area.width as usize)
+                .saturating_sub(4 + cmd.label.chars().count() + cmd.hint.len());
+            let line = Line::from(vec![
+                Span::styled(format!(" {} ", cmd.glyph), Style::default().fg(theme.info)),
+                Span::styled(cmd.label.clone(), row_style),
+                Span::raw(" ".repeat(hint_pad)),
+                Span::styled(cmd.hint, theme.faint()),
+            ]);
+            ListItem::new(line).style(row_style)
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), list_area);
+}
+
 fn render_history_search(frame: &mut Frame, app: &mut App) {
     let theme = &app.theme;
     let area = centered_rect(frame.area(), 60, 55);
@@ -734,6 +835,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 negative_collapsed: false,
+                last_output_path: None,
                 advanced_open: false,
             },
             gallery: crate::app::GalleryState {

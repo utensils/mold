@@ -749,6 +749,10 @@ pub struct GenerateState {
     /// `Alt+N`; models that don't support negative prompts ignore the flag
     /// entirely and hide the row regardless.
     pub negative_collapsed: bool,
+    /// Path of the most recently saved output — drives the activity
+    /// strip's "done · saved to …" line. None when saving is disabled or
+    /// the server kept the file.
+    pub last_output_path: Option<std::path::PathBuf>,
     /// Whether the Advanced disclosure on the Create view is expanded
     /// (toggled with `A`). Rendering lands with the Create redesign; the
     /// flag ships first so the key contract is stable.
@@ -968,6 +972,12 @@ pub enum Popup {
         selected: usize,
         results: Vec<String>,
     },
+    /// The ^K command palette (see `crate::palette`).
+    CommandPalette {
+        filter: String,
+        selected: usize,
+        filtered: Vec<crate::palette::CommandId>,
+    },
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
@@ -1039,6 +1049,10 @@ pub struct App {
 #[derive(Debug, Default, Clone)]
 pub struct LayoutAreas {
     pub tab_bar: ratatui::layout::Rect,
+    /// The main content region between the tab strip and the activity strip.
+    pub content: ratatui::layout::Rect,
+    /// The one-line activity strip above the status bar.
+    pub activity: ratatui::layout::Rect,
     pub prompt: ratatui::layout::Rect,
     pub negative_prompt: ratatui::layout::Rect,
     pub parameters: ratatui::layout::Rect,
@@ -1074,36 +1088,9 @@ fn start_background_server(port: u16) -> Option<std::process::Child> {
 /// then each tab is drawn as `" N Label "` (label length + 4 columns),
 /// with a single-column divider between adjacent tabs.
 pub(crate) fn tab_at_column(col: u16, tab_bar_x: u16) -> Option<View> {
-    // Mirrors what ratatui's `Tabs` widget actually renders. Each tab is:
-    //   pad_left(" ") + title(" N Label ") + pad_right(" ")
-    // followed by a one-column divider between tabs (no divider after
-    // the last). `padding_left`/`padding_right` default to " " — that's
-    // the piece the old hit-test missed, which silently mapped clicks on
-    // "Queue" to Settings because the stride was 2 cols short per tab.
-    //
-    // The block itself has no left border but does have `horizontal(1)`
-    // padding, so the first tab starts one column in from `tab_bar_x`.
-    let content_start = tab_bar_x.saturating_add(1);
-    if col < content_start {
-        return Some(View::ALL[0]);
-    }
-    let x = (col - content_start) as usize;
-
-    let mut offset = 0usize;
-    let last = View::ALL.len() - 1;
-    for (i, view) in View::ALL.iter().enumerate() {
-        // pad_left(1) + " N Label "(label + 4) + pad_right(1) = label + 6
-        let tab_width = view.label().len() + 6;
-        // Fold the post-tab divider column into this tab's click zone so
-        // there's no dead pixel between tabs. The last tab has no
-        // trailing divider.
-        let zone_width = if i == last { tab_width } else { tab_width + 1 };
-        if x < offset + zone_width {
-            return Some(*view);
-        }
-        offset += zone_width;
-    }
-    None
+    // Geometry is single-sourced in `ui::chrome::tab_spans` so the
+    // renderer, the underline row, and this hit-test can never drift.
+    crate::ui::chrome::tab_at_column(col, tab_bar_x)
 }
 
 /// Configure the background `mold serve` command — pure helper so tests
@@ -1306,6 +1293,7 @@ impl App {
                 error_message: None,
                 model_description,
                 negative_collapsed: session.negative_collapsed.unwrap_or(false),
+                last_output_path: None,
                 advanced_open: false,
             },
             gallery: GalleryState {
@@ -1955,13 +1943,17 @@ impl App {
                 if let CrosstermEvent::Key(key) = &event {
                     // Let certain keys bypass the textarea
                     match (key.code, key.modifiers) {
-                        // TUI-global shortcuts that bypass the textarea
+                        // TUI-global shortcuts that bypass the textarea.
+                        // ^K deliberately no longer performs the emacs
+                        // kill-to-end-of-line in prompt fields — it opens
+                        // the command palette everywhere instead.
                         (KeyCode::Tab, KeyModifiers::NONE)
                         | (KeyCode::BackTab, KeyModifiers::SHIFT)
                         | (KeyCode::Char('c'), KeyModifiers::CONTROL) // quit
                         | (KeyCode::Char('g'), KeyModifiers::CONTROL) // generate
                         | (KeyCode::Char('m'), KeyModifiers::CONTROL) // model selector
                         | (KeyCode::Char('r'), KeyModifiers::CONTROL) // seed mode
+                        | (KeyCode::Char('k'), KeyModifiers::CONTROL) // command palette
                         | (KeyCode::Enter, KeyModifiers::NONE)        // generate
                         | (KeyCode::Esc, KeyModifiers::NONE) => {     // nav mode
                             // Fall through to action mapping
@@ -2329,6 +2321,49 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::CommandPalette {
+                    filter,
+                    selected,
+                    filtered,
+                }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        if let Some(id) = filtered.get(*selected).copied() {
+                            self.close_popup();
+                            self.dispatch_action(crate::palette::command_action(id));
+                        } else {
+                            self.close_popup();
+                        }
+                    }
+                    // No j/k aliases — labels contain those letters.
+                    KeyCode::Up if *selected > 0 => {
+                        *selected -= 1;
+                    }
+                    KeyCode::Down if *selected + 1 < filtered.len() => {
+                        *selected += 1;
+                    }
+                    KeyCode::Char(c) => {
+                        filter.push(c);
+                        *filtered = crate::palette::filter_commands(filter)
+                            .into_iter()
+                            .map(|cmd| cmd.id)
+                            .collect();
+                        if *selected >= filtered.len() {
+                            *selected = filtered.len().saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        *filtered = crate::palette::filter_commands(filter)
+                            .into_iter()
+                            .map(|cmd| cmd.id)
+                            .collect();
+                        if *selected >= filtered.len() {
+                            *selected = filtered.len().saturating_sub(1);
+                        }
+                    }
+                    _ => {}
+                },
                 Some(Popup::Confirm { on_confirm, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
                         let action = on_confirm.clone();
@@ -2588,6 +2623,19 @@ impl App {
             }
             Action::ToggleAdvanced => {
                 self.generate.advanced_open = !self.generate.advanced_open;
+            }
+            Action::OpenPalette => {
+                self.popup = Some(Popup::CommandPalette {
+                    filter: String::new(),
+                    selected: 0,
+                    filtered: crate::palette::all_commands()
+                        .into_iter()
+                        .map(|cmd| cmd.id)
+                        .collect(),
+                });
+            }
+            Action::SetTheme(preset) => {
+                self.apply_theme_preset(preset);
             }
             Action::FocusNext if self.active_view == View::Create => {
                 // Use `negative_visible()` instead of `supports_negative_prompt`
@@ -4605,6 +4653,13 @@ impl App {
                         .map(|f| f.to_string_lossy().to_string())
                         .unwrap_or_default();
 
+                    // Feed the activity strip's "done · saved to …" state.
+                    self.generate.last_output_path = if saved_name.is_empty() {
+                        None
+                    } else {
+                        Some(saved_path.clone())
+                    };
+
                     self.generate.progress.push_log(ProgressLogEntry {
                         message: if saved_name.is_empty() {
                             format!(
@@ -6384,6 +6439,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 negative_collapsed: false,
+                last_output_path: None,
                 advanced_open: false,
             },
             gallery: GalleryState {
@@ -6533,6 +6589,215 @@ mod tests {
         // ChainExit is the only way back to compose.
         app.dispatch_action(Action::ChainExit);
         assert_eq!(app.create_mode, CreateMode::Compose);
+    }
+
+    #[tokio::test]
+    async fn ctrl_k_opens_palette_from_every_view_and_focus() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        for view in View::ALL {
+            let mut app = make_settings_test_app();
+            app.active_view = view;
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+            )));
+            assert!(
+                matches!(app.popup, Some(Popup::CommandPalette { .. })),
+                "^K must open the palette from {view:?}"
+            );
+        }
+        // Even while the prompt textarea has focus.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(matches!(app.popup, Some(Popup::CommandPalette { .. })));
+    }
+
+    #[tokio::test]
+    async fn palette_filters_dispatches_and_closes() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.dispatch_action(Action::OpenPalette);
+
+        // Typing filters instead of triggering view actions — `q` while
+        // the palette is open must not quit.
+        for c in "quit".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert!(!app.should_quit, "typing in the palette must not quit");
+        let Some(Popup::CommandPalette { filter, .. }) = &app.popup else {
+            panic!("palette should still be open");
+        };
+        assert_eq!(filter, "quit");
+
+        // Backspace all, filter to Library, Enter navigates and closes.
+        for _ in 0..4 {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        for c in "library".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.active_view, View::Library);
+        assert!(app.popup.is_none(), "palette closes after dispatch");
+    }
+
+    #[tokio::test]
+    async fn palette_esc_closes_without_action() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        let before = app.active_view;
+        app.dispatch_action(Action::OpenPalette);
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.popup.is_none());
+        assert_eq!(app.active_view, before);
+        assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn palette_set_theme_applies_and_persists_slug() {
+        crate::test_env::with_isolated_env(|_home| {
+            use crate::ui::theme::ThemePreset;
+            let mut app = make_settings_test_app();
+            app.dispatch_action(Action::SetTheme(ThemePreset::SafelightDark));
+            assert_eq!(app.settings.theme_preset, ThemePreset::SafelightDark);
+            assert_eq!(app.theme.bg, ThemePreset::SafelightDark.build().bg);
+            let loaded = crate::session::TuiSession::load();
+            assert_eq!(loaded.theme.as_deref(), Some("safelight-dark"));
+        });
+    }
+
+    #[tokio::test]
+    async fn palette_renders_on_narrow_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.dispatch_action(Action::OpenPalette);
+        let backend = TestBackend::new(30, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn activity_line_states() {
+        use crate::ui::chrome::{activity_line, ActivityKind};
+        let mut app = make_settings_test_app();
+
+        // Idle: names the model and host; never fakes a queue depth.
+        let (kind, text) = activity_line(&app);
+        assert_eq!(kind, ActivityKind::Idle);
+        let expected = format!("idle · {}", app.generate.params.model);
+        assert!(text.starts_with(&expected), "{text}");
+        assert!(
+            !text.contains("queue"),
+            "queue must be omitted when unknown"
+        );
+
+        // Generating with denoise progress: step/total + it/s.
+        app.generate.generating = true;
+        app.generate.progress.denoise_step = 12;
+        app.generate.progress.denoise_total = 28;
+        app.generate.progress.denoise_elapsed_ms = 6000;
+        let (kind, text) = activity_line(&app);
+        assert_eq!(kind, ActivityKind::Generating);
+        assert!(text.contains("developing"), "{text}");
+        assert!(text.contains("12/28"), "{text}");
+        assert!(text.contains("2.0 it/s"), "{text}");
+
+        // it/s is omitted (not NaN/inf) when elapsed is zero.
+        app.generate.progress.denoise_elapsed_ms = 0;
+        let (_, text) = activity_line(&app);
+        assert!(!text.contains("it/s"), "{text}");
+
+        // Done: needs a duration; names the save dir only when known.
+        app.generate.generating = false;
+        app.generate.last_generation_time_ms = Some(4000);
+        app.generate.last_output_path = None;
+        let (kind, text) = activity_line(&app);
+        assert_eq!(kind, ActivityKind::Done);
+        assert!(text.contains("done · 4.0s"), "{text}");
+        assert!(!text.contains("saved to"), "{text}");
+        app.generate.last_output_path = Some(std::path::PathBuf::from("/tmp/out/print.png"));
+        let (_, text) = activity_line(&app);
+        assert!(text.contains("saved to /tmp/out"), "{text}");
+
+        // Error wins over done and shows only the first line.
+        app.generate.error_message = Some("boom\nsecond line".into());
+        let (kind, text) = activity_line(&app);
+        assert_eq!(kind, ActivityKind::Error);
+        assert!(text.contains("error · boom"), "{text}");
+        assert!(!text.contains("second"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn host_chip_states() {
+        use crate::ui::chrome::{host_chip, ChipState};
+        let mut app = make_settings_test_app();
+
+        // Local mode: ready chip naming this machine + compiled backend.
+        app.generate.params.inference_mode = InferenceMode::Local;
+        let (state, text) = host_chip(&app);
+        assert_eq!(state, ChipState::Ready);
+        assert!(text.starts_with("This "), "{text}");
+
+        // Remote with a status: hostname shown.
+        app.generate.params.inference_mode = InferenceMode::Auto;
+        app.resource_info.server_status = Some(mold_core::ServerStatus {
+            version: "0.0.0".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 0,
+            hostname: Some("studio".into()),
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(2),
+            queue_capacity: None,
+            queue_paused: None,
+            instance_id: None,
+            models_disk: None,
+        });
+        let (state, text) = host_chip(&app);
+        assert_eq!(state, ChipState::Ready);
+        assert!(text.starts_with("studio"), "{text}");
+        // A reported queue depth surfaces once a job state exists (the
+        // idle line deliberately omits it, matching the mockup).
+        app.generate.last_generation_time_ms = Some(1000);
+        let (_, line) = crate::ui::chrome::activity_line(&app);
+        assert!(line.contains("queue 2"), "{line}");
+        app.generate.last_generation_time_ms = None;
+
+        // No status + connecting flag → connecting chip.
+        app.resource_info.server_status = None;
+        app.connecting = true;
+        let (state, _) = host_chip(&app);
+        assert_eq!(state, ChipState::Connecting);
+
+        // No status, not connecting → offline chip.
+        app.connecting = false;
+        let (state, _) = host_chip(&app);
+        assert_eq!(state, ChipState::Offline);
     }
 
     #[tokio::test]
@@ -7151,7 +7416,7 @@ mod tests {
 
         let tab_bar = app.layout.tab_bar;
         assert!(tab_bar.height >= 2, "tab bar should have room to render");
-        let tab_row = tab_bar.y + 1; // row 0 = title/indicator, row 1 = tabs
+        let tab_row = tab_bar.y; // row 0 = tabs, row 1 = accent underline
 
         // Find the column of each digit "1".."5" in the rendered row.
         // The Tabs widget prefixes each label with " N " — those digits
@@ -7772,6 +8037,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            last_output_path: None,
             advanced_open: false,
         };
 
@@ -7830,6 +8096,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            last_output_path: None,
             advanced_open: false,
         };
 
@@ -7869,6 +8136,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            last_output_path: None,
             advanced_open: false,
         };
 
