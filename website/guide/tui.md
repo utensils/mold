@@ -390,22 +390,22 @@ Appearance** (Left/Right cycles with immediate apply; the choice persists in
 the metadata DB under `tui.theme`).
 
 The default is **Studio Dark** — the same Mold Studio look as the desktop,
-web, and iPhone apps — with its dual-accent role model: the warm *safelight*
-accent marks focus, selection, and primary actions, while the cool *halide*
+web, and iPhone apps — with its dual-accent role model: the warm _safelight_
+accent marks focus, selection, and primary actions, while the cool _halide_
 accent marks info and live state.
 
-| Preset | Slug | Notes |
-| --- | --- | --- |
-| Studio Dark | `studio-dark` | Default. Mold family, dual accent |
-| Studio Light | `studio-light` | Mold family, dual accent |
-| Safelight Dark | `safelight-dark` | Warm darkroom family, dual accent |
-| Safelight Light | `safelight-light` | Warm darkroom family, dual accent |
-| Mocha | `mocha` | Catppuccin Mocha — the pre-Studio default |
-| Latte | `latte` | Catppuccin Latte (light) |
-| Ristretto | `ristretto` | Monokai Ristretto |
-| Gruvbox | `gruvbox` | Gruvbox Dark (hard) |
-| Tokyo | `tokyo` | Tokyo Night (storm) |
-| Nord | `nord` | Nord |
-| Dracula | `dracula` | Dracula |
+| Preset          | Slug              | Notes                                     |
+| --------------- | ----------------- | ----------------------------------------- |
+| Studio Dark     | `studio-dark`     | Default. Mold family, dual accent         |
+| Studio Light    | `studio-light`    | Mold family, dual accent                  |
+| Safelight Dark  | `safelight-dark`  | Warm darkroom family, dual accent         |
+| Safelight Light | `safelight-light` | Warm darkroom family, dual accent         |
+| Mocha           | `mocha`           | Catppuccin Mocha — the pre-Studio default |
+| Latte           | `latte`           | Catppuccin Latte (light)                  |
+| Ristretto       | `ristretto`       | Monokai Ristretto                         |
+| Gruvbox         | `gruvbox`         | Gruvbox Dark (hard)                       |
+| Tokyo           | `tokyo`           | Tokyo Night (storm)                       |
+| Nord            | `nord`            | Nord                                      |
+| Dracula         | `dracula`         | Dracula                                   |
 
 `studio` and `safelight` are accepted as slug aliases for the dark variants.
