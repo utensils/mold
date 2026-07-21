@@ -6,7 +6,8 @@
 export const PANEL_LIMITS = {
   // 210 default per the Mold Studio prototype sidebar.
   navRail: { min: 160, def: 210, max: 320 },
-  generateParams: { min: 280, def: 320, max: 480 },
+  // 340 keeps all five 52px aspect controls on one row after 18px side padding.
+  generateParams: { min: 280, def: 340, max: 480 },
 } as const;
 
 export type PanelId = keyof typeof PANEL_LIMITS;

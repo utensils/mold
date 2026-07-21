@@ -8,6 +8,15 @@ describe("PANEL_LIMITS", () => {
       expect(limits.def).toBeLessThanOrEqual(limits.max);
     }
   });
+
+  it("fits all five Generate aspect controls on one row at the default width", () => {
+    const inspectorPadding = 18 * 2;
+    const aspectControls = 52 * 5;
+    const aspectGaps = 7 * 4;
+    expect(PANEL_LIMITS.generateParams.def - inspectorPadding).toBeGreaterThanOrEqual(
+      aspectControls + aspectGaps,
+    );
+  });
 });
 
 describe("clampPanelWidth", () => {
