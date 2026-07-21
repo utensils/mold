@@ -241,7 +241,34 @@ per-model generation defaults persist to the SQLite settings DB at
 | j/k        | Navigate settings                            |
 | +/- or L/R | Adjust numeric or cycle toggle values        |
 | Enter      | Edit text/path field (opens popup) or toggle |
+| Tab        | Switch between Appearance and Configuration  |
 | Esc        | Back to Create                               |
+
+### Appearance
+
+The Appearance panel renders the eleven theme presets as bordered cards —
+three swatch dots showing each preset's background, accent, and info hues,
+the preset name, and a short palette descriptor. The selected card carries
+the focus-colored border, and the panel header shows the active slug as
+`theme · <slug>`.
+
+Arrow keys move the selection in two dimensions: Up/Down move by grid rows
+(Down past the bottom row drops into the Configuration list), while
+Left/Right and +/- cycle linearly through every preset. Every move applies
+the theme immediately and persists it under `tui.theme`. On short terminals
+the grid scrolls by whole card rows to keep the selection visible.
+
+### Preferences
+
+The Configuration list starts with a DB-backed Preferences section. Each
+toggle persists to `mold.db` the moment it flips.
+
+| Row           | Key                       | Default | Effect                                                                                                                                    |
+| ------------- | ------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Format        | `tui.default_format`      | `png`   | Seeds a fresh session's Format parameter (a saved session or per-model preference still wins)                                             |
+| Reduce Motion | `tui.reduce_motion`       | `off`   | Disables TUI motion effects (consumed by upcoming releases)                                                                               |
+| Show Timeline | `tui.show_timeline`       | `on`    | Shows the Timeline on the Create view (consumed by upcoming releases)                                                                     |
+| Confirmations | `tui.confirm_destructive` | `on`    | When off, destructive actions — deleting a print, removing a model, deleting a chain stage — run immediately without a confirmation popup |
 
 ### Field Types
 
@@ -401,8 +428,9 @@ The Nix flake, pre-built releases, and Docker images include the TUI by default.
 ## Theme
 
 The TUI ships eleven theme presets, selectable live from **Settings →
-Appearance** (Left/Right cycles with immediate apply; the choice persists in
-the metadata DB under `tui.theme`).
+Appearance** — a grid of theme cards navigated with the arrow keys
+(Left/Right also cycle linearly), applying immediately; the choice persists
+in the metadata DB under `tui.theme`.
 
 The default is **Studio Dark** — the same Mold Studio look as the desktop,
 web, and iPhone apps — with its dual-accent role model: the warm _safelight_

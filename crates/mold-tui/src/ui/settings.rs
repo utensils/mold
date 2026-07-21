@@ -1,47 +1,59 @@
 //! Settings view — two stacked panels:
 //!
-//! 1. **Appearance** — a row of theme swatches. Focused when `SettingsFocus::Appearance`;
-//!    Left/Right cycles presets with immediate live apply.
-//! 2. **Configuration** — the flat list of editable settings fields. Focused when
-//!    `SettingsFocus::Configuration`; j/k navigates, +/- adjusts, Enter opens
-//!    text/path popups.
+//! 1. **Appearance** — the theme card grid (see [`super::theme_cards`]).
+//!    Focused when `SettingsFocus::Appearance`; Left/Right cycles presets
+//!    linearly and Up/Down moves by grid rows, all with immediate live
+//!    apply. The panel height follows the card-row count and scrolls by
+//!    whole rows when the terminal is too short.
+//! 2. **Configuration** — the flat list of editable settings fields
+//!    (Preferences first, then the config sections). Focused when
+//!    `SettingsFocus::Configuration`; j/k navigates, +/- adjusts, Enter
+//!    opens text/path popups.
 //!
-//! Up from the top field hands focus back to Appearance; Down from Appearance
-//! moves into Configuration. The config list renders with a scrollbar once it
-//! exceeds the panel height.
+//! Up from the top field hands focus back to Appearance; Down from the
+//! Appearance grid's bottom row moves into Configuration. The config list
+//! renders with a scrollbar once it exceeds the panel height.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::app::{App, SettingsFieldType, SettingsFocus, SettingsRow};
 
-use super::widgets::{panel_block, render_theme_swatches, SWATCHES_PER_ROW};
+use super::theme_cards::{appearance_panel_height, card_grid, render_theme_cards};
+use super::widgets::panel_block;
 
-/// Height of the Appearance panel (2 borders + one row per swatch chunk).
-const APPEARANCE_HEIGHT: u16 = 2 + SWATCH_ROWS as u16;
+/// Fixed label-column width for Configuration rows — wide enough for the
+/// longest Preferences label ("Reduce Motion") plus one space.
+pub(crate) const LABEL_WIDTH: usize = 14;
 
-/// Number of swatch rows the Appearance panel must fit.
-const SWATCH_ROWS: usize = crate::ui::theme::ThemePreset::ALL
-    .len()
-    .div_ceil(SWATCHES_PER_ROW);
-
-// Layout contract: the panel's inner area (height minus 2 border rows) must
-// fit every swatch row, or the last presets become unreachable-looking.
-const _: () = assert!(APPEARANCE_HEIGHT as usize - 2 >= SWATCH_ROWS);
+/// Minimum rows reserved for the Configuration panel below Appearance.
+const MIN_CONFIG_HEIGHT: u16 = 5;
 
 /// Render the Settings view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Appearance is sized to its card rows, clipped so Configuration
+    // always keeps at least MIN_CONFIG_HEIGHT rows.
+    let inner_width = area.width.saturating_sub(2);
+    let appearance_height = appearance_panel_height(
+        inner_width,
+        area.height.saturating_sub(MIN_CONFIG_HEIGHT).max(1),
+    )
+    .min(area.height);
+
     let [appearance_area, config_area] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(APPEARANCE_HEIGHT), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(appearance_height),
+            Constraint::Min(MIN_CONFIG_HEIGHT),
+        ])
         .areas(area);
 
     render_appearance(frame, app, appearance_area);
     render_configuration(frame, app, config_area);
 }
 
-/// Top panel — the theme swatch grid.
-fn render_appearance(frame: &mut Frame, app: &App, area: Rect) {
+/// Top panel — the theme card grid.
+fn render_appearance(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.settings.focus == SettingsFocus::Appearance;
     // The hint shows the canonical slug (identical to the lowercased label
     // for single-word presets) — `scripts/tui-uat.sh theme-set` parses it.
@@ -53,7 +65,11 @@ fn render_appearance(frame: &mut Frame, app: &App, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    render_theme_swatches(frame, &app.theme, inner, app.settings.theme_preset, focused);
+    // Record the rendered column count so ↑/↓ move by exactly one visual
+    // row (the same pattern gallery uses for its grid).
+    let (cols, _) = card_grid(crate::ui::theme::ThemePreset::ALL.len(), inner.width);
+    app.settings.appearance_cols = cols;
+    render_theme_cards(frame, &app.theme, inner, app.settings.theme_preset, focused);
 }
 
 /// Bottom panel — the scrollable list of editable fields.
@@ -135,7 +151,7 @@ fn build_settings_line<'a>(
             let is_read_only = matches!(field_type, SettingsFieldType::ReadOnly);
             let value = app.settings_display_value(key);
             let env_var = App::settings_env_override(key);
-            let label_text = format!("{:<12}", label);
+            let label_text = format!("{:<width$}", label, width = LABEL_WIDTH);
 
             let (label_style, value_style) = if is_selected {
                 (app.theme.param_selected(), app.theme.param_selected())

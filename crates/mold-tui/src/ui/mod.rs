@@ -11,6 +11,7 @@ pub mod recent;
 pub mod script_composer;
 pub mod settings;
 pub mod theme;
+pub mod theme_cards;
 pub mod widgets;
 
 use ratatui::prelude::*;
