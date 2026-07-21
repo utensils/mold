@@ -49,7 +49,7 @@ pub enum Action {
     SearchHistory,
     /// Gallery: re-generate with same parameters.
     Regenerate,
-    /// Gallery: load parameters into Generate view for editing.
+    /// Gallery: load parameters into Create view for editing.
     EditAndGenerate,
     /// Gallery: delete the selected image (shows confirmation).
     DeleteImage,
@@ -68,8 +68,18 @@ pub enum Action {
     /// Show the help overlay.
     ShowHelp,
     /// Toggle the collapsed state of the Negative prompt panel on the
-    /// Generate view.
+    /// Create view.
     ToggleNegativePrompt,
+    /// Toggle the Advanced disclosure on the Create view.
+    ToggleAdvanced,
+    /// Open the ^K command palette.
+    OpenPalette,
+    /// Apply a theme preset (palette theme commands).
+    SetTheme(crate::ui::theme::ThemePreset),
+    /// Enter the chain composer sub-mode of the Create view.
+    ChainEnter,
+    /// Leave the chain composer back to the Create compose mode.
+    ChainExit,
     /// Image crop/pan: move viewport.
     PanLeft,
     PanRight,
@@ -123,50 +133,68 @@ pub enum Action {
     None,
 }
 
-/// The five top-level views.
+/// The five top-level workspaces — the shared Mold Studio IA
+/// (Create · Library · Models · Machines · Settings, keys `1`–`5`).
 ///
-/// Tab indices match the design system (1-indexed in the UI, 0-indexed here).
-/// Queue sits between Models and Settings because the Models and Queue tabs
-/// are both "what's running or available" views, while Settings is config.
+/// The chain composer is not a tab: it is a sub-mode of Create
+/// (`App::create_mode`), mirroring the desktop's `/create/chain` nesting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    Generate,
-    Gallery,
+    Create,
+    Library,
     Models,
-    Queue,
+    Machines,
     Settings,
-    Script,
 }
 
 impl View {
     pub fn label(&self) -> &'static str {
         match self {
-            View::Generate => "Generate",
-            View::Gallery => "Gallery",
+            View::Create => "Create",
+            View::Library => "Library",
             View::Models => "Models",
-            View::Queue => "Queue",
+            View::Machines => "Machines",
             View::Settings => "Settings",
-            View::Script => "Script",
         }
     }
 
     pub fn index(&self) -> usize {
         match self {
-            View::Generate => 0,
-            View::Gallery => 1,
+            View::Create => 0,
+            View::Library => 1,
             View::Models => 2,
-            View::Queue => 3,
+            View::Machines => 3,
             View::Settings => 4,
-            View::Script => 5,
         }
     }
 
-    pub const ALL: [View; 6] = [
-        View::Generate,
-        View::Gallery,
+    pub const ALL: [View; 5] = [
+        View::Create,
+        View::Library,
         View::Models,
-        View::Queue,
+        View::Machines,
         View::Settings,
-        View::Script,
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_all_has_five_entries_in_ia_order() {
+        // The 1–5 keys, the tab strip, and `scripts/tui-uat.sh view` all
+        // depend on this exact order — the shared Mold Studio IA.
+        assert_eq!(
+            View::ALL.map(|v| v.label()),
+            ["Create", "Library", "Models", "Machines", "Settings"]
+        );
+    }
+
+    #[test]
+    fn view_index_matches_all_position() {
+        for (i, view) in View::ALL.iter().enumerate() {
+            assert_eq!(view.index(), i, "{view:?} index drifted from ALL order");
+        }
+    }
 }
