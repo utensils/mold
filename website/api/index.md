@@ -5,7 +5,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 ## Endpoints
 
 | Method   | Path                                      | Description                                                                                                       |
-| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------ | ------- |
 | `POST`   | `/api/generate`                           | Generate images from prompt                                                                                       |
 | `POST`   | `/api/generate/stream`                    | Generate with SSE progress streaming                                                                              |
 | `POST`   | `/api/generate/estimate`                  | Estimate request-sensitive peak memory for a generation request                                                   |
@@ -21,7 +21,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/chain-jobs/:id`                     | Delete a non-running chain job                                                                                    |
 | `POST`   | `/api/chain-jobs/gc`                      | Run chain-job artifact GC                                                                                         |
 | `GET`    | `/api/chain-jobs/:id/stages/:idx/preview` | Fetch a stage preview JPEG                                                                                        |
-| `POST`   | `/api/expand`                             | Expand a prompt using LLM                                                                                         |
+| `POST`   | `/api/expand`                             | Expand a prompt using LLM, optionally absorbing a visual `style` directive                                        |
 | `GET`    | `/api/models`                             | List available models                                                                                             |
 | `GET`    | `/api/models/:model/components`           | List required model component readiness and paths                                                                 |
 | `GET`    | `/api/loras`                              | List installed LoRAs, optionally filtered by `?model=` compatibility                                              |
@@ -40,7 +40,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/downloads/:id`                      | Cancel a queued or active download                                                                                |
 | `GET`    | `/api/downloads/stream`                   | Download queue updates as SSE                                                                                     |
 | `GET`    | `/api/catalog/families`                   | Live catalog family/kind metadata                                                                                 |
-| `GET`    | `/api/catalog/search`                     | Search the live HF/Civitai catalog                                                                                |
+| `GET`    | `/api/catalog/search`                     | Search the live HF/Civitai catalog; `sort=downloads                                                               | recent | rating` |
 | `GET`    | `/api/catalog/installed`                  | List installed catalog entries and LoRAs                                                                          |
 | `GET`    | `/api/catalog/:id`                        | Resolve one `hf:` or `cv:` catalog entry                                                                          |
 | `POST`   | `/api/catalog/:id/download`               | Queue a catalog entry plus missing companions                                                                     |
@@ -50,7 +50,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
 | `GET`    | `/api/events`                             | Server-wide lifecycle events (job + gallery) as SSE                                                               |
 | `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
-| `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane for a queued job                                                                    |
+| `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
 | `DELETE` | `/api/queue/:id`                          | Cancel a still-queued generation job                                                                              |
 | `GET`    | `/api/history`                            | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                            | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
@@ -70,6 +70,15 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/openapi.json`                       | OpenAPI spec                                                                                                      |
 | `GET`    | `/api/docs`                               | Interactive API docs (Scalar)                                                                                     |
 | `GET`    | `/metrics`                                | Prometheus metrics (feature-gated)                                                                                |
+
+### Capability discovery
+
+`GET /api/capabilities` is additive and safe to feature-detect. Current
+servers advertise the accepted catalog sort values in
+`catalog.sort` (`downloads`, `recent`, `rating`) and queue controls as
+`queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`. Older
+servers may omit those fields; clients must treat missing arrays as empty and
+missing booleans as `false`.
 
 ## Authentication
 
@@ -430,16 +439,20 @@ metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
 can render one lane per GPU plus an automatic lane.
 
-Use `PATCH /api/queue/:id` to update a queued job's preferred lane:
+Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
+0-based position among queued jobs:
 
 ```bash
 curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000 \
   -H "Content-Type: application/json" \
-  -d '{"target_gpu":0}'
+  -d '{"target_gpu":0,"position":1}'
 ```
 
 Set `target_gpu` to `null` to return the queued job to automatic placement.
-Already-running jobs reject lane changes.
+Omitting either field leaves it unchanged. `position` is clamped to the current
+queued range, so a large value sends a job to the back. Reordering changes real
+dispatch priority, not only the listing returned by `GET /api/queue`.
+Already-running jobs reject lane and position changes.
 
 Use `DELETE /api/queue/:id` to cancel a job that is still queued:
 

@@ -168,7 +168,8 @@ family-specific schedulers, uses installed upscaler dropdowns, shows
 server-derived peak-memory estimates, reports component readiness via
 `GET /api/models/:model/components`, and can save/load named web-local
 generation templates. The running strip consumes `GET /api/queue` and
-`PATCH /api/queue/:id` to render queued/running work in GPU lanes.
+`PATCH /api/queue/:id` to render queued/running work in GPU lanes and change
+the real queued-job dispatch order.
 
 **Requirements:**
 
@@ -496,9 +497,11 @@ mold rm flux-dev:q4 --force  # Remove without confirmation
 
 ## Model discovery catalog
 
-**Browse:** web UI `/catalog` route — sidebar, topbar, card grid, detail
-drawer. Every read is a live HF + Civitai proxy through `GET /api/catalog/search`
-with a 5-min in-process cache (no SQLite catalog table, no scanner, no scrape).
+**Browse:** web UI `/models` route, **Discover** segment — cards and detail
+drawer. The legacy `/catalog` route permanently redirects there. Every read is
+a live HF + Civitai proxy through `GET /api/catalog/search` with a 5-min
+in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
+table, no scanner, no scrape); unknown sort values return 422.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. Phase-1 supports HF
@@ -735,13 +738,14 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
   - `GET /api/chain-jobs/:id/events` — SSE snapshot + live job events
   - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
   - `DELETE /api/chain-jobs/:id` · `POST /api/chain-jobs/gc` · `GET /api/chain-jobs/:id/stages/:idx/preview`
-- `POST /api/expand` — LLM prompt expansion
+- `POST /api/expand` — LLM prompt expansion; optional `style` is absorbed as a natural-language directive
 - `GET /api/models` · `GET /api/loras` · `POST /api/models/load` · `POST /api/models/pull` · `DELETE /api/models/unload`
 - `DELETE /api/models/:model` — remove a downloaded model (HTTP `mold rm`): deletes only exclusively-owned files, keeps shared components, returns `{ removed, kept, freed_bytes }`; 409 while loaded
 - `GET /api/gallery` · `POST /api/gallery/media-token` · `GET /api/gallery/image/:name` · `GET /api/gallery/thumbnail/:name` · `DELETE /api/gallery/image/:name`
 - `GET/POST /api/downloads` · `DELETE /api/downloads/:id` · `GET /api/downloads/stream` — bounded-parallel model pulls (two active per host); listings expose `active_jobs` plus legacy first-job `active`; cancel works for queued and active jobs. Desktop keeps one host-keyed stream per selected download target — active pulls pin to the top of the Models view with a source glyph and target host — so progress, completion refresh, and cancellation stay routed to the correct server.
 - `POST /api/upscale` · `POST /api/upscale/stream`
 - `GET /api/queue` — authoritative server-side job listing for SPA reconciliation (queued + running jobs with UUIDv4 ids)
+- `PATCH /api/queue/:id` — re-lane and/or reorder a queued job (`target_gpu?`, queued-only 0-based `position?`); omitted fields stay unchanged
 - `DELETE /api/queue/:id` — cancel a still-queued generation job (204; 404 unknown; 409 once running)
 - `GET /api/history?query=&limit=` · `DELETE /api/history[?keep=N]` — prompt history (newest first, substring filter, limit ≤ 500; 503 when the metadata DB is disabled)
 - `GET /api/config` · `GET/PUT/DELETE /api/config/:key` — the `mold config` verbs over HTTP: rows are `{ key, value, source: db|file|env, env_var? }`; PUT routes by surface like `config set` (403 on env-overridden keys), DELETE resets DB-backed keys like `config reset`
