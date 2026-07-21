@@ -37,8 +37,24 @@ describe("normalizeHostAddress", () => {
     ).toBe("http://studio.local:7680");
   });
 
-  it("accepts a bare hostname", () => {
-    expect(normalizeHostAddress("studio.local")).toBe("http://studio.local");
+  it("defaults a bare hostname to mold's port, like desktop and iOS", () => {
+    expect(normalizeHostAddress("studio.local")).toBe(
+      "http://studio.local:7680",
+    );
+  });
+
+  it("defaults a bare IP to mold's port", () => {
+    expect(normalizeHostAddress("100.105.134.43")).toBe(
+      "http://100.105.134.43:7680",
+    );
+  });
+
+  it("respects an explicit scheme without inventing a port", () => {
+    // Typing the scheme means "I know the port" — http defaults to 80,
+    // matching desktop normalizeHostUrl.
+    expect(normalizeHostAddress("http://100.105.134.43")).toBe(
+      "http://100.105.134.43",
+    );
   });
 
   it("returns null for empty or unparseable input", () => {

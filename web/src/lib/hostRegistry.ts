@@ -39,17 +39,19 @@ export function originHost(): HostEntry {
 /**
  * Normalize a user-typed address (host, host:port, http(s)://…) to an origin
  * URL, or null when it is empty / unparseable. Schemeless input defaults to
- * http:// — the common LAN / IP / MagicDNS case.
+ * http:// — the common LAN / IP / MagicDNS case — and, with no port given,
+ * to mold's :7680 (the same rule as desktop's normalizeHostUrl and iOS).
+ * An explicit scheme is taken as typed: its standard port applies.
  */
 export function normalizeHostAddress(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
-  const candidate = /^https?:\/\//i.test(trimmed)
-    ? trimmed
-    : `http://${trimmed}`;
+  const hasScheme = /^https?:\/\//i.test(trimmed);
+  const candidate = hasScheme ? trimmed : `http://${trimmed}`;
   try {
     const url = new URL(candidate);
     if (!url.hostname) return null;
+    if (!hasScheme && !url.port) url.port = "7680";
     // `origin` drops any path/query/hash and keeps a non-default port.
     return url.origin;
   } catch {
