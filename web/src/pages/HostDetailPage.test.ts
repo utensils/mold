@@ -12,7 +12,7 @@ import type {
   ResourceSnapshot,
 } from "../types";
 import { addHost } from "../lib/hostRegistry";
-import MachineDetailPage from "./MachineDetailPage.vue";
+import HostDetailPage from "./HostDetailPage.vue";
 
 // Mutable fixtures the hostClient mock reads at call time.
 let poll: {
@@ -112,7 +112,7 @@ function queued(id: string, position: number): QueueEntry {
 
 let wrapper: ReturnType<typeof mount> | null = null;
 async function mountDetail() {
-  wrapper = mount(MachineDetailPage);
+  wrapper = mount(HostDetailPage);
   await flushPromises();
   await nextTick();
   return wrapper;
@@ -146,7 +146,7 @@ afterEach(() => {
   wrapper = null;
 });
 
-describe("MachineDetailPage — telemetry", () => {
+describe("HostDetailPage — telemetry", () => {
   it("maps the resource snapshot into the telemetry card", async () => {
     const w = await mountDetail();
     expect(w.get('[data-test="machine-detail-title"]').text()).toBe("Studio");
@@ -185,7 +185,7 @@ describe("MachineDetailPage — telemetry", () => {
   });
 });
 
-describe("MachineDetailPage — queue", () => {
+describe("HostDetailPage — queue", () => {
   it("hides reorder controls when the host lacks can_reorder", async () => {
     caps = { queue: { can_reorder: false } };
     queueEntries = [queued("a", 0), queued("b", 1)];
@@ -252,7 +252,7 @@ describe("MachineDetailPage — queue", () => {
   });
 });
 
-describe("MachineDetailPage — models", () => {
+describe("HostDetailPage — models", () => {
   it("lists installed models with a loaded badge", async () => {
     models = [
       {

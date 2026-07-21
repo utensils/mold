@@ -4,10 +4,7 @@ import { cloneTemplateForm } from "../composables/useGenerateForm";
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.generation.templates.v1";
 
 export type GenerationTemplateSort =
-  | "updated-desc"
-  | "updated-asc"
-  | "name-asc"
-  | "name-desc";
+  "updated-desc" | "updated-asc" | "name-asc" | "name-desc";
 
 export interface GenerationTemplateMediaReference {
   field:

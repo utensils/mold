@@ -40,7 +40,7 @@ export function reconcileRound(
 ): void {
   for (const j of jobs) {
     if (j.state !== "running") continue;
-    if (!j.serverId) continue; // legacy server / pre-handshake — skip
+    if (!j.serverId) continue; // Request has not received its queued frame yet.
     if (serverIds.has(j.serverId)) continue; // server confirms it's alive
     if (now - j.lastProgressAt < RECONCILE_GRACE_MS) continue;
     j.state = "error";

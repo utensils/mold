@@ -278,8 +278,9 @@ Models auto-pull if not downloaded.
 ## Browser UI
 
 `mold serve` ships with a Vue 3 SPA baked into the binary. Visit
-`http://<host>:7680/` to open the Gallery, or `http://<host>:7680/create` for
-the Create composer (the old `/generate` path still redirects there):
+`http://<host>:7680/` to open the Create composer. The canonical routes are
+`/create`, `/library`, `/models`, `/machines`, and `/settings`; retired paths
+such as `/generate` and `/catalog` render Page Not Found:
 
 - Enter submits, Shift+Enter inserts a newline, empty Enter is a no-op.
 - Per-GPU running-job cards stream SSE progress (stage, denoise step N/M, VAE

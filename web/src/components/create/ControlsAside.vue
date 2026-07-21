@@ -55,7 +55,7 @@ function reroll() {
 }
 
 // Generation target (spec §08 multi-host). The picker owns the routing choice —
-// Auto, Most capable, or a sticky host — and the submit path in GeneratePage
+// Auto, Most capable, or a sticky host — and the submit path in CreatePage
 // resolves the same persisted pick through the same singleton, so what the row
 // claims and where the job lands can't drift apart.
 const router = useRouter();

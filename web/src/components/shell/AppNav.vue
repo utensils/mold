@@ -25,19 +25,19 @@ const router = useRouter();
 const downloads = useDownloads();
 
 // Cross-workspace badge signals (spec §08 G11): a fresh-prints accent dot on
-// the Gallery pill (cleared on entering the gallery) and a stop-tinted dot on
+// the Library pill (cleared on entering the Library) and a stop-tinted dot on
 // the Machines pill while any registered host is offline.
 const { freshPrintCount, hasOfflineHost } = useNotificationSignals();
 watch(
   () => route.name,
   (name) => {
-    if (name === "gallery") markGalleryVisited();
+    if (name === "library") markGalleryVisited();
   },
   { immediate: true },
 );
 
 function pillDot(pill: Pill): "accent" | "stop" | null {
-  if (pill.name === "gallery" && freshPrintCount.value > 0) return "accent";
+  if (pill.name === "library" && freshPrintCount.value > 0) return "accent";
   if (pill.name === "machines" && hasOfflineHost.value) return "stop";
   return null;
 }
@@ -52,11 +52,11 @@ interface Pill {
 
 const pills: Pill[] = [
   {
-    name: "gallery",
-    label: "Gallery",
+    name: "library",
+    label: "Library",
     icon: "library",
-    path: "/",
-    match: ["gallery"],
+    path: "/library",
+    match: ["library"],
   },
   {
     name: "create",
@@ -77,7 +77,7 @@ const pills: Pill[] = [
     label: "Machines",
     icon: "machines",
     path: "/machines",
-    match: ["machines", "machine-detail"],
+    match: ["machines", "host-detail"],
   },
 ];
 
@@ -100,7 +100,7 @@ function openDownloads() {
   window.dispatchEvent(new CustomEvent("mold:open-downloads"));
 }
 
-// Global search — routes to the gallery with a `q` query the page seeds from.
+// Global search — routes to Library with a `q` query the page seeds from.
 const query = ref(String(route.query.q ?? ""));
 watch(
   () => route.query.q,
@@ -110,7 +110,7 @@ watch(
 );
 function submitSearch() {
   const q = query.value.trim();
-  void router.push({ name: "gallery", query: q ? { q } : {} });
+  void router.push({ name: "library", query: q ? { q } : {} });
 }
 
 const menuOpen = ref(false);
@@ -120,7 +120,7 @@ const menuOpen = ref(false);
   <header class="app-nav">
     <!-- Wide bar (≥640px) -->
     <div class="bar bar--wide">
-      <router-link to="/" class="brand" aria-label="mold home">
+      <router-link to="/create" class="brand" aria-label="mold home">
         <img
           src="/logo.png"
           alt=""
@@ -189,7 +189,7 @@ const menuOpen = ref(false);
 
     <!-- Compact bar (<640px) -->
     <div class="bar bar--compact">
-      <router-link to="/" class="brand" aria-label="mold home">
+      <router-link to="/create" class="brand" aria-label="mold home">
         <img
           src="/logo.png"
           alt=""

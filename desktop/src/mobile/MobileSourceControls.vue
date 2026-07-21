@@ -14,7 +14,7 @@ import {
   type InlineGenerationMediaField,
 } from "../lib/generateValidation";
 import { base64ToDataUrl, fileToBase64, isStillImageFile } from "../lib/image";
-import { coerceSourceFitForMaskless } from "../lib/sourceFit";
+import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 
 const props = withDefaults(
   defineProps<{
