@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The TUI ships the four Mold Studio themes.** Studio Dark, Studio Light, Safelight Dark, and Safelight Light join the seven existing presets in the Appearance picker (now two rows of swatches), each carrying the design system's dual-accent model — safelight for focus/selection/primary action, halide for info/live state — via new `frame`, `surface2`, `faint`, and `info` theme tokens. Selection tints are pre-blended solids derived from the design mockup's CSS rgba values.
+
+### Changed
+
+- **The default TUI theme is now Studio Dark** (previously Catppuccin Mocha), matching the desktop, web, and iPhone default look. A persisted `tui.theme` choice is honored unchanged; unknown or missing slugs now resolve to Studio Dark. Mocha and the other six legacy presets remain selectable, and `studio` / `safelight` are accepted as slug aliases for the dark variants.
+- **Dracula's focused-panel border is now purple** (its accent hue) instead of cyan; the cyan moved to Dracula's new info role. Every preset now uses one hue for focus, selection, and primary action.
+
 ### Fixed
 
 - **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.

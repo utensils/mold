@@ -956,12 +956,12 @@ cmd_theme_set() {
     require_session
     local slug="${1:-}"
     if [ -z "$slug" ]; then
-        echo "ERROR: $0 theme-set <mocha|latte|ristretto|gruvbox|tokyo|nord|dracula>" >&2
+        echo "ERROR: $0 theme-set <studio-dark|studio-light|safelight-dark|safelight-light|mocha|latte|ristretto|gruvbox|tokyo|nord|dracula>" >&2
         exit 1
     fi
     # Presets in display order — must match `ThemePreset::ALL` in
     # crates/mold-tui/src/ui/theme.rs.
-    local -a presets=(mocha latte ristretto gruvbox tokyo nord dracula)
+    local -a presets=(studio-dark studio-light safelight-dark safelight-light mocha latte ristretto gruvbox tokyo nord dracula)
     local want_idx=-1 i
     for i in "${!presets[@]}"; do
         if [ "${presets[$i]}" = "$slug" ]; then
@@ -981,7 +981,7 @@ cmd_theme_set() {
     # Find the currently-active theme from the header (`theme · <slug>`)
     # and cycle forward to the target.
     local cur_slug cur_idx
-    cur_slug=$(capture | grep -o 'theme · [a-z]*' | head -1 | awk '{print $3}')
+    cur_slug=$(capture | grep -o 'theme · [a-z-]*' | head -1 | awk '{print $3}')
     if [ -z "$cur_slug" ]; then
         echo "ERROR: couldn't read current theme from Appearance header." >&2
         return 1
@@ -1186,6 +1186,8 @@ Settings helpers:
   settings-focus <pane>           Move Settings-view focus to
                                   'appearance' or 'configuration'
   theme-set <slug>                Cycle to a named theme — one of
+                                  studio-dark, studio-light,
+                                  safelight-dark, safelight-light,
                                   mocha, latte, ristretto, gruvbox,
                                   tokyo, nord, dracula
 
