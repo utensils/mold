@@ -76,6 +76,8 @@ export interface ExpandCapabilities {
 export interface ServerCapabilities {
   gallery: { can_delete: boolean };
   catalog?: { available: boolean; families: string[] } | null;
+  /** Server-assisted DNS-SD browse support; absent on older servers. */
+  discovery?: { can_browse: boolean } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
   /** Absent on older servers means unknown, not unavailable. */

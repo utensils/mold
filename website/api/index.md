@@ -54,7 +54,8 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/queue/:id`                          | Cancel a still-queued generation job                                                                              |
 | `GET`    | `/api/history`                            | Prompt history, newest first (`?query=` substring filter, `?limit=` up to 500)                                    |
 | `DELETE` | `/api/history`                            | Clear prompt history (`?keep=N` trims to the most recent N)                                                       |
-| `GET`    | `/api/capabilities`                       | Feature capabilities, including optional per-host expansion configuration/model state                             |
+| `GET`    | `/api/capabilities`                       | Feature capabilities, including optional per-host expansion and LAN-discovery state                               |
+| `GET`    | `/api/discovery/peers`                    | DNS-SD peers visible on the serving host's LAN (when `discovery.can_browse`)                                      |
 | `GET`    | `/api/capabilities/chain-limits`          | Chain-generation request limits                                                                                   |
 | `GET`    | `/api/config`                             | List every effective config row with its source (`db`/`file`/`env`)                                               |
 | `GET`    | `/api/config/:key`                        | Read one config key (value + owning source)                                                                       |
@@ -75,10 +76,12 @@ When running `mold serve`, you get a REST API for remote image generation.
 
 `GET /api/capabilities` is additive and safe to feature-detect. Current
 servers advertise the accepted catalog sort values in
-`catalog.sort` (`downloads`, `recent`, `rating`) and queue controls as
-`queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`. Older
-servers may omit those fields; clients must treat missing arrays as empty and
-missing booleans as `false`.
+`catalog.sort` (`downloads`, `recent`, `rating`), queue controls as
+`queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`, and
+server-assisted DNS-SD as `discovery.can_browse`. Clients must only request
+`GET /api/discovery/peers` when that discovery flag is true. Older servers may
+omit these fields; clients must treat missing arrays as empty and missing
+booleans as `false`.
 
 ## Authentication
 

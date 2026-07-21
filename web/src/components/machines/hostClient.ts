@@ -44,6 +44,20 @@ export interface HostQueueCapabilities {
 export interface HostCapabilities {
   gallery?: { can_delete?: boolean };
   queue?: HostQueueCapabilities;
+  discovery?: { can_browse?: boolean };
+}
+
+/** Server-assisted DNS-SD result. Addresses are returned for direct browser
+ * connections; the primary server does not proxy peer traffic. */
+export interface DiscoveryPeer {
+  name: string;
+  url: string;
+  host: string;
+  port: number;
+  version: string | null;
+  auth_required: boolean;
+  instance_id: string | null;
+  is_this_machine: boolean;
 }
 
 function authHeaders(key?: string): Record<string, string> {
@@ -86,6 +100,10 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
   const value = await getJson<unknown>(host, "/api/status", signal);
   parseCurrentServerStatus(value);
   return value as HostStatus;
+}
+
+export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
+  return getJson<DiscoveryPeer[]>(host, "/api/discovery/peers", signal);
 }
 
 /** One host's gallery (`GET /api/gallery`), with its `x-api-key`. Used by the

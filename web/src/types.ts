@@ -108,6 +108,7 @@ export interface GalleryCapabilities {
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
   gallery: GalleryCapabilities;
+  discovery?: { can_browse: boolean };
 }
 
 export function inferFormatFromName(filename: string): OutputFormat | null {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelQueueJob,
   hostCapabilities,
+  hostDiscoveryPeers,
   hostDownloads,
   hostStatus,
   moveQueueJob,
@@ -63,6 +64,16 @@ describe("hostClient auth + requests", () => {
     expect(
       (init.headers as Record<string, string>)["x-api-key"],
     ).toBeUndefined();
+  });
+
+  it("fetches discovery peers from the primary with its API-key header", async () => {
+    fetchMock.mockResolvedValueOnce(ok([]));
+    await hostDiscoveryPeers(remote);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://192.168.1.20:7680/api/discovery/peers");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "sekret",
+    });
   });
 
   it("PATCHes a lane change with target_gpu", async () => {

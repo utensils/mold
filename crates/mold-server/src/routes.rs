@@ -199,6 +199,7 @@ use crate::queue::clean_error_message;
         crate::routes_config::list_config_profiles,
         crate::routes_config::put_config_profile,
         health,
+        discovery_peers,
         capabilities_chain_limits,
         stream_events,
         crate::routes_chain::generate_chain,
@@ -227,6 +228,7 @@ use crate::queue::clean_error_message;
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
         mold_core::DiskUsage,
+        mold_core::DiscoveryPeer,
         mold_core::SseProgressEvent,
         mold_core::SseCompleteEvent,
         mold_core::SseErrorEvent,
@@ -388,6 +390,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/history", get(list_history).delete(delete_history))
         .route("/api/capabilities", get(server_capabilities))
+        .route("/api/discovery/peers", get(discovery_peers))
         .route(
             "/api/capabilities/chain-limits",
             get(capabilities_chain_limits),
@@ -2649,11 +2652,47 @@ async fn delete_history(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── /api/capabilities ────────────────────────────────────────────────────────
+// ── /api/discovery/peers + /api/capabilities ─────────────────────────────────
+
+/// Return the current DNS-SD cache. The serving instance is omitted by stable
+/// UUID so the browser is only offered other machines it can connect to.
+#[utoipa::path(
+    get,
+    path = "/api/discovery/peers",
+    tag = "server",
+    responses(
+        (status = 200, description = "Mold servers visible on the serving host's LAN", body = Vec<mold_core::DiscoveryPeer>),
+        (status = 503, description = "DNS-SD browsing is unavailable or disabled"),
+    )
+)]
+async fn discovery_peers(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<mold_core::DiscoveryPeer>>, ApiError> {
+    if !state.discovery.can_browse() {
+        return Err(ApiError::with_code(
+            "LAN discovery is unavailable on this server",
+            "DISCOVERY_UNAVAILABLE",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ));
+    }
+    let own_instance_id = state.instance_id.as_str();
+    let peers = state
+        .discovery
+        .peers
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|peer| {
+            !peer.is_this_machine && peer.instance_id.as_deref() != Some(own_instance_id)
+        })
+        .cloned()
+        .collect();
+    Ok(Json(peers))
+}
 
 /// Report the feature toggles a client needs to render correctly (hide the
-/// delete button when delete isn't allowed, etc.). No auth required — this
-/// is a read-only introspection endpoint.
+/// delete button when delete isn't allowed, etc.). Authentication follows the
+/// rest of `/api/*` when an API key is configured.
 async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::ServerCapabilities> {
     let catalog_available = std::env::var("MOLD_CATALOG_DISABLE")
         .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
@@ -2676,6 +2715,9 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>(),
+        },
+        discovery: mold_core::DiscoveryCapabilities {
+            can_browse: state.discovery.can_browse(),
         },
         events: mold_core::EventsCapabilities { available: true },
         queue: mold_core::QueueCapabilities {
