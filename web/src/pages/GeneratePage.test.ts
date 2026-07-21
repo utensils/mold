@@ -311,6 +311,6 @@ function pageStubs() {
     MaskEditorModal: { name: "MaskEditorModal", template: "<div />" },
     GenerationTemplatesPanel: { template: "<div />" },
     GalleryFeed: GalleryFeedStub,
-    DetailDrawer: { template: "<div />" },
+    Lightbox: { template: "<div />" },
   };
 }
