@@ -499,7 +499,6 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
         tx.execute_batch(&format!("PRAGMA user_version = {};", m.version))?;
         tx.commit()?;
         tracing::info!(version = m.version, "applied metadata DB migration");
-        current = m.version;
     }
     Ok(current)
 }
@@ -547,7 +546,6 @@ mod tests {
         crate::MetadataDb::open(&path).expect("post-race open must succeed");
         let _ = std::fs::remove_dir_all(&tmp);
     }
-    use super::*;
 
     #[test]
     fn migration_list_invariants_hold() {
