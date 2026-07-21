@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
-  estimatedPodCost,
   isNetworkVolumeDatacenter,
   podGpuName,
   podHardwareSummary,
@@ -16,6 +15,8 @@ import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostsStore } from "../stores/hosts";
 import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
+import PodCostMeter from "../components/machines/PodCostMeter.vue";
 
 const runpod = useRunPodStore();
 const prefs = useAppPrefsStore();
@@ -24,6 +25,10 @@ const toasts = useToastStore();
 const apiKey = ref("");
 const savingKey = ref(false);
 const confirmingDelete = ref<string | null>(null);
+// Confirm-before-spend (§08 G9): nothing provisions or resumes billing without
+// an explicit acknowledgement.
+const confirmProvision = ref(false);
+const confirmStartPod = ref<RunPodPod | null>(null);
 const showVolumeCreate = ref(false);
 const editingVolumeId = ref<string | null>(null);
 const confirmingVolumeDelete = ref<string | null>(null);
@@ -162,13 +167,32 @@ async function connectKey() {
   }
 }
 
-async function launch() {
+// Provisioning always begins billing, so the button opens a blocking confirm;
+// only the confirm actually creates the instance.
+function launch() {
+  confirmProvision.value = true;
+}
+
+async function confirmLaunch() {
+  confirmProvision.value = false;
   try {
     await runpod.create({ ...form });
     toasts.push("GPU instance requested");
   } catch (error) {
     toasts.push(errorMessage(error), "error");
   }
+}
+
+// Resuming a stopped pod resumes billing — confirm it too, showing the pod's
+// known hourly rate.
+function requestStart(pod: RunPodPod) {
+  confirmStartPod.value = pod;
+}
+
+async function confirmStart() {
+  const pod = confirmStartPod.value;
+  confirmStartPod.value = null;
+  if (pod) await act("start", pod);
 }
 
 async function createNetworkVolume() {
@@ -748,10 +772,7 @@ onBeforeUnmount(() => {
                 <p class="data-mono truncate text-caption text-ink-3">
                   {{ podGpuName(pod) }} · {{ pod.machine?.location ?? "Placement pending" }} ·
                   {{ money(pod.costPerHr) }}/hr<span v-if="pod.uptimeSeconds">
-                    · {{ uptime(pod.uptimeSeconds) }} · ≈{{
-                      money(estimatedPodCost(pod.costPerHr, pod.uptimeSeconds))
-                    }}
-                    this session</span
+                    · {{ uptime(pod.uptimeSeconds) }}</span
                   >
                 </p>
                 <p
@@ -767,6 +788,11 @@ onBeforeUnmount(() => {
                   Delete the instance to stop compute; /workspace remains on the volume.
                 </p>
               </div>
+              <PodCostMeter
+                v-if="pod.desiredStatus === 'RUNNING'"
+                :cost-per-hr="pod.costPerHr"
+                :uptime-seconds="pod.uptimeSeconds"
+              />
               <button
                 v-if="pod.desiredStatus === 'RUNNING'"
                 type="button"
@@ -789,7 +815,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink disabled:opacity-50"
                 :disabled="runpod.mutating === `start:${pod.id}`"
-                @click="act('start', pod)"
+                @click="requestStart(pod)"
               >
                 Start
               </button>
@@ -818,5 +844,44 @@ onBeforeUnmount(() => {
         </div>
       </main>
     </div>
+
+    <ConfirmDialog
+      :open="confirmProvision"
+      title="Launch GPU instance?"
+      confirm-label="Launch — billing begins immediately"
+      danger
+      :busy="runpod.mutating === 'create'"
+      @confirm="confirmLaunch"
+      @cancel="confirmProvision = false"
+    >
+      <div class="data-mono space-y-1 text-caption text-ink-2">
+        <div>
+          {{ form.gpuDisplayName || "GPU" }} ·
+          {{ form.cloudType === "SECURE" ? "Secure" : "Community" }} cloud
+        </div>
+        <div>
+          Container disk {{ form.containerDiskGb }} GB<span v-if="selectedNetworkVolume">
+            · network volume {{ selectedNetworkVolume.name }} ({{
+              selectedNetworkVolume.size
+            }}
+            GB)</span
+          ><span v-else-if="form.volumeGb"> · workspace {{ form.volumeGb }} GB</span>
+        </div>
+        <div class="text-ink-3">RunPod bills this GPU by the minute while it runs.</div>
+      </div>
+    </ConfirmDialog>
+
+    <ConfirmDialog
+      :open="!!confirmStartPod"
+      title="Resume pod?"
+      :confirm-label="
+        confirmStartPod ? `Resume · ${money(confirmStartPod.costPerHr)}/hr` : 'Resume'
+      "
+      message="Billing resumes immediately."
+      danger
+      :busy="!!confirmStartPod && runpod.mutating === `start:${confirmStartPod.id}`"
+      @confirm="confirmStart"
+      @cancel="confirmStartPod = null"
+    />
   </div>
 </template>

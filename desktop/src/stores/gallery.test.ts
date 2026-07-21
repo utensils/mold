@@ -774,3 +774,69 @@ describe("bucket sync", () => {
     expect(gallery.filter).toBe("all");
   });
 });
+
+describe("new-since-last-visit count (G11 nav badge)", () => {
+  it("is zero until the Library has been visited once", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 2), img("b.png", 1)]);
+    // Never visited → the first visit only establishes the baseline.
+    expect(gallery.newCount).toBe(0);
+  });
+
+  it("counts prints developed since the last visit and resets on the next", () => {
+    connectLocal();
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 1)]);
+    gallery.markLibrarySeen();
+    expect(gallery.newCount).toBe(0);
+
+    gallery.buckets.local.items = [img("b.png", 3), img("c.png", 2), img("a.png", 1)];
+    expect(gallery.newCount).toBe(2);
+
+    gallery.markLibrarySeen();
+    expect(gallery.newCount).toBe(0);
+  });
+});
+
+describe("undoable single-print delete (G12)", () => {
+  it("hides a print optimistically, restores on undo, and only DELETEs on commit", async () => {
+    // No connected host → the "local" source falls back to native IPC delete.
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 2), img("b.png", 1)]);
+
+    gallery.beginDelete("local", "a.png");
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["b.png"]);
+    expect(vi.mocked(ipc.localGalleryDelete)).not.toHaveBeenCalled();
+
+    // Undo: no server call, the print returns to the grid.
+    gallery.cancelDelete("local", "a.png");
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["a.png", "b.png"]);
+
+    // Commit: the real DELETE fires and the row leaves the bucket.
+    gallery.beginDelete("local", "a.png");
+    await gallery.commitDelete("local", "a.png");
+    expect(vi.mocked(ipc.localGalleryDelete)).toHaveBeenCalledWith("a.png");
+    expect(gallery.buckets.local!.items.map((i) => i.filename)).toEqual(["b.png"]);
+    expect(gallery.pendingDeletions.size).toBe(0);
+  });
+
+  it("restores the print when a committed delete fails", async () => {
+    vi.mocked(ipc.localGalleryDelete).mockRejectedValueOnce(new Error("nope"));
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 1)]);
+
+    gallery.beginDelete("local", "a.png");
+    await expect(gallery.commitDelete("local", "a.png")).rejects.toThrow("nope");
+    // The pending mark cleared, so the surviving bucket row is visible again.
+    expect(gallery.pendingDeletions.size).toBe(0);
+    expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["a.png"]);
+  });
+
+  it("ignores a commit for a print that was already undone", async () => {
+    const gallery = useGalleryStore();
+    gallery.buckets.local = loadedBucket([img("a.png", 1)]);
+    await gallery.commitDelete("local", "a.png"); // never began
+    expect(vi.mocked(ipc.localGalleryDelete)).not.toHaveBeenCalled();
+  });
+});

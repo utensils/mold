@@ -14,25 +14,41 @@ import ProgressBar from "@ui/components/ProgressBar.vue";
 import Icon from "@ui/components/Icon.vue";
 import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue";
 import QueueColumn from "../components/machines/QueueColumn.vue";
+import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
 import { formatGB } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
+import { podGpuName, type RunPodPod } from "../lib/runpod";
 import { useHostsStore, type HostView } from "../stores/hosts";
 import { useJobsStore } from "../stores/jobs";
+import { useRunPodStore } from "../stores/runpod";
 import { useToastStore } from "../stores/toasts";
 
 const router = useRouter();
 const hosts = useHostsStore();
 const jobs = useJobsStore();
+const runpod = useRunPodStore();
 const toasts = useToastStore();
 
 onMounted(() => {
   jobs.startPolling();
   void refreshSaved();
   void scan();
+  // Surface any billing pods on the overview so a paid host's running cost is
+  // visible without opening the RunPod view (§08 G9). No-ops when unconfigured.
+  void runpod.load();
 });
 onUnmounted(() => jobs.stopPolling());
+
+async function stopPod(pod: RunPodPod) {
+  try {
+    await runpod.act("stop", pod.id);
+    toasts.push(`Stopped ${pod.name ?? pod.id}`);
+  } catch (err) {
+    toasts.push(String(err), "error");
+  }
+}
 
 const connectOpen = ref(false);
 
@@ -246,6 +262,29 @@ async function onConnected() {
               </button>
             </div>
           </CardSurface>
+
+          <!-- Billing pods: live running-cost meter + Stop (§08 G9) -->
+          <div
+            v-for="pod in runpod.runningPods"
+            :key="pod.id"
+            data-test="runpod-running"
+            class="border-edge flex items-center gap-3 rounded-chrome border bg-bench px-4 py-3"
+          >
+            <span class="h-2 w-2 shrink-0 rounded-full bg-halide" />
+            <div class="min-w-0 flex-1">
+              <div class="truncate text-body font-semibold text-ink">{{ pod.name ?? pod.id }}</div>
+              <div class="data-mono truncate text-caption text-ink-3">
+                {{ podGpuName(pod) }} · RunPod
+              </div>
+            </div>
+            <PodCostMeter
+              :cost-per-hr="pod.costPerHr"
+              :uptime-seconds="pod.uptimeSeconds"
+              :stoppable="!pod.networkVolume"
+              :busy="runpod.mutating === `stop:${pod.id}`"
+              @stop="stopPod(pod)"
+            />
+          </div>
 
           <!-- Remembered (offline) -->
           <template v-if="rememberedHosts.length">

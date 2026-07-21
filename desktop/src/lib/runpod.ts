@@ -187,6 +187,27 @@ export function estimatedPodCost(costPerHr: number, uptimeSeconds: number): numb
   return (uptimeSeconds / 3600) * costPerHr;
 }
 
+/**
+ * Live session cost for the running-cost meter (§08 G9): the server reports
+ * `uptimeSeconds` only when the overview is polled, so the meter ticks by
+ * adding the wall-clock time elapsed since that snapshot was read. Pure so the
+ * meter math is unit-testable without timers.
+ */
+export function liveAccruedCost(
+  costPerHr: number,
+  snapshotUptimeSeconds: number,
+  snapshotAtMs: number,
+  nowMs: number,
+): number {
+  const elapsedSeconds = Math.max(0, (nowMs - snapshotAtMs) / 1000);
+  return estimatedPodCost(costPerHr, snapshotUptimeSeconds + elapsedSeconds);
+}
+
+/** USD formatter shared by every cost surface so the meter reads identically. */
+export function formatUsd(value: number): string {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+}
+
 /** One-line hardware summary ("2× GPU · 16 vCPU · 62 GB RAM · 40 GB disk"). */
 export function podHardwareSummary(pod: RunPodPod): string {
   const parts: string[] = [];

@@ -9,6 +9,13 @@ import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import { dockBadgeValue } from "./lib/dockBadge";
 import { ipc } from "./lib/ipc";
+import { appIsBackground } from "./lib/notify";
+import {
+  detectOfflineTransitions,
+  newlyCompletedJobs,
+  shouldToastGenerationComplete,
+  snapshotHostStatuses,
+} from "./lib/notifications";
 import {
   allowsNativeContextMenu,
   allowsNativeSelectAll,
@@ -51,6 +58,44 @@ const updater = useUpdaterStore();
 watch(
   () => [generation.pending.length, appPrefs.dockBadge] as const,
   ([pending, enabled]) => void ipc.setDockBadge(dockBadgeValue(pending, enabled)),
+);
+
+// Cross-surface notifications (§08 G11). A generation finishing while the user
+// is somewhere other than Create raises a toast that jumps to Library; the
+// native notification (dispatched by the generation store) covers the
+// backgrounded case, so the foreground toast bows out then.
+const notifiedComplete = new Set<number>();
+watch(
+  () => generation.jobs.map((j) => `${j.clientId}:${j.status}`).join("|"),
+  () => {
+    const done = newlyCompletedJobs(generation.jobs, notifiedComplete);
+    for (const job of done) notifiedComplete.add(job.clientId);
+    // Bound the seen-set to live jobs so it can't grow across a long session.
+    for (const id of [...notifiedComplete]) {
+      if (!generation.jobs.some((j) => j.clientId === id)) notifiedComplete.delete(id);
+    }
+    if (done.length === 0) return;
+    if (!shouldToastGenerationComplete(router.currentRoute.value.path)) return;
+    if (appIsBackground()) return;
+    toasts.push("Generated — saved to Library", "info", {
+      onClick: () => void router.push("/library"),
+    });
+  },
+);
+
+// A connected host dropping offline (ready → error) raises a sticky error toast
+// once per transition, regardless of the active workspace.
+let hostStatusSnapshot: Record<string, string> = {};
+watch(
+  () => hostsStore.all.map((h) => `${h.id}:${h.status}`).join("|"),
+  () => {
+    const current = hostsStore.all.map((h) => ({ id: h.id, label: h.label, status: h.status }));
+    for (const host of detectOfflineTransitions(hostStatusSnapshot, current)) {
+      toasts.push(`Can't reach ${host.label} — check Machines.`, "error", { sticky: true });
+    }
+    hostStatusSnapshot = snapshotHostStatuses(current);
+  },
+  { immediate: true },
 );
 
 function onKeydown(e: KeyboardEvent) {

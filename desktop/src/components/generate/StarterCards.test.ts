@@ -1,0 +1,71 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mount } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
+import StarterCards from "./StarterCards.vue";
+import { useDownloadsStore } from "../../stores/downloads";
+import type { DownloadJob } from "../../lib/api/types";
+
+function job(overrides: Partial<DownloadJob> = {}): DownloadJob {
+  return {
+    id: "j1",
+    model: "flux2-klein:q4",
+    status: "active",
+    files_done: 1,
+    files_total: 4,
+    bytes_done: 25,
+    bytes_total: 100,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  setActivePinia(createPinia());
+});
+
+describe("StarterCards (cold start G10)", () => {
+  it("renders the first-run guide with three starters, one recommended", () => {
+    const wrapper = mount(StarterCards);
+    expect(wrapper.text()).toContain("Develop your first print.");
+    expect(wrapper.text()).toContain("mold runs models locally on your machine's GPU.");
+    const cards = wrapper.findAll("[data-test='starter-card']");
+    expect(cards).toHaveLength(3);
+    expect(wrapper.text()).toContain("flux2-klein:q4");
+    const recommended = wrapper.findAll("[data-test='starter-recommended']");
+    expect(recommended).toHaveLength(1);
+    // The recommended starter is first.
+    expect(cards[0]!.text()).toContain("Recommended");
+    expect(wrapper.text()).toContain("Browse all models");
+  });
+
+  it("pulls a model through the downloads store on click", async () => {
+    const store = useDownloadsStore();
+    const createDownload = vi.spyOn(store, "createDownload").mockResolvedValue(undefined);
+    const subscribe = vi.spyOn(store, "subscribe").mockResolvedValue(undefined);
+    const wrapper = mount(StarterCards);
+
+    await wrapper.findAll("[data-test='starter-pull']")[0]!.trigger("click");
+    await Promise.resolve();
+
+    expect(createDownload).toHaveBeenCalledWith("flux2-klein:q4");
+    expect(subscribe).toHaveBeenCalled();
+  });
+
+  it("shows inline progress on the pulling card instead of a Pull button", () => {
+    const store = useDownloadsStore();
+    store.activeJobs = [job({ model: "flux2-klein:q4", bytes_done: 40, bytes_total: 100 })];
+    const wrapper = mount(StarterCards);
+
+    const cards = wrapper.findAll("[data-test='starter-card']");
+    // The first (matching) card is pulling; the others still offer Pull.
+    expect(cards[0]!.find("[data-test='starter-pulling']").exists()).toBe(true);
+    expect(cards[0]!.find("[data-test='starter-pull']").exists()).toBe(false);
+    expect(cards[0]!.text()).toContain("40%");
+    expect(cards[1]!.find("[data-test='starter-pull']").exists()).toBe(true);
+  });
+
+  it("emits browse for the escape hatch", async () => {
+    const wrapper = mount(StarterCards);
+    await wrapper.get("button.text-halide").trigger("click");
+    expect(wrapper.emitted("browse")).toHaveLength(1);
+  });
+});

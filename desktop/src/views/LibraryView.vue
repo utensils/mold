@@ -240,7 +240,7 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
     {
       label: "Delete",
       danger: true,
-      action: () => void requestSingleDelete(entry),
+      action: () => deletePrint(entry),
     },
   ];
 }
@@ -248,9 +248,19 @@ function tileMenu(entry: MergedPrint): MenuEntry[] {
 const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
 const selected = ref<{ sourceKey: string; filename: string } | null>(null);
-const confirmingSingleDelete = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
 const rowHeight = ref(180);
+
+// ── Single-print delete: optimistic + undoable (§08 G12) ─────────────────────
+// The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
+// (no server call). Undo restores it; letting the toast expire commits the real
+// DELETE. Several deletes can be pending at once, so timers are keyed per print.
+const UNDO_WINDOW_MS = 6000;
+const pendingDeletes = new Map<
+  string,
+  { sourceKey: string; filename: string; timer: ReturnType<typeof setTimeout> }
+>();
+const deleteKey = (sourceKey: string, filename: string) => `${sourceKey}::${filename}`;
 
 // ── History drawer ──────────────────────────────────────────────────────────
 // Open state lives in the URL (?panel=history) so the retired /history route
@@ -299,7 +309,6 @@ const bulkDeleting = ref(false);
 
 function setSelectMode(next: boolean) {
   selectMode.value = next;
-  confirmingSingleDelete.value = null;
   if (!next) {
     bulkSelection.value = new Set();
     bulkAnchor.value = null;
@@ -410,15 +419,7 @@ const isSelected = (entry: MergedPrint) =>
   selected.value.filename === entry.item.filename;
 
 function select(entry: MergedPrint) {
-  const next = { sourceKey: entry.sourceKey, filename: entry.item.filename };
-  if (
-    confirmingSingleDelete.value &&
-    (confirmingSingleDelete.value.sourceKey !== next.sourceKey ||
-      confirmingSingleDelete.value.filename !== next.filename)
-  ) {
-    confirmingSingleDelete.value = null;
-  }
-  selected.value = next;
+  selected.value = { sourceKey: entry.sourceKey, filename: entry.item.filename };
 }
 
 const selectedIndex = computed(() => gallery.filtered.findIndex((e) => isSelected(e)));
@@ -478,7 +479,7 @@ function onKeydown(e: KeyboardEvent) {
     if (selectMode.value && bulkSelection.value.size > 0) {
       void deleteSelectedPrints();
     } else if (selectedEntry.value) {
-      void requestSingleDelete(selectedEntry.value);
+      deletePrint(selectedEntry.value);
     }
   } else if (e.key === "ArrowRight") {
     e.preventDefault();
@@ -490,48 +491,71 @@ function onKeydown(e: KeyboardEvent) {
     e.preventDefault();
     if (selected.value) lightboxOpen.value = !lightboxOpen.value;
   } else if (e.key === "Escape") {
-    if (confirmingSingleDelete.value) confirmingSingleDelete.value = null;
-    else if (lightboxOpen.value) lightboxOpen.value = false;
+    if (lightboxOpen.value) lightboxOpen.value = false;
     else if (selectMode.value) setSelectMode(false);
   }
 }
 
-async function removeEntry(entry: MergedPrint) {
-  const index = gallery.filtered.findIndex(
-    (candidate) =>
-      candidate.sourceKey === entry.sourceKey && candidate.item.filename === entry.item.filename,
-  );
-  await gallery.remove(entry.sourceKey, entry.item.filename);
-  if (!isSelected(entry)) return;
-  const remaining = gallery.filtered;
-  if (remaining.length === 0) {
-    lightboxOpen.value = false;
-    selected.value = null;
-  } else {
-    select(remaining[Math.min(Math.max(index, 0), remaining.length - 1)]!);
-  }
-}
-
-async function requestSingleDelete(entry: MergedPrint) {
-  select(entry);
-  const target = { sourceKey: entry.sourceKey, filename: entry.item.filename };
-  const pending = confirmingSingleDelete.value;
-  if (!pending || pending.sourceKey !== target.sourceKey || pending.filename !== target.filename) {
-    confirmingSingleDelete.value = target;
-    return;
-  }
-  confirmingSingleDelete.value = null;
+/** Fire the real DELETE for a pending print, surfacing any failure (which
+ *  restores the print via the store's finally). */
+async function commitDelete(sourceKey: string, filename: string) {
+  const key = deleteKey(sourceKey, filename);
+  const pending = pendingDeletes.get(key);
+  if (pending) clearTimeout(pending.timer);
+  pendingDeletes.delete(key);
   try {
-    await removeEntry(entry);
-    toasts.push("Deleted print");
+    await gallery.commitDelete(sourceKey, filename);
   } catch (error) {
     toasts.push(error instanceof Error ? error.message : String(error), "error");
   }
 }
 
-async function removeSelected() {
+/** Undo a still-pending delete — the print returns to the grid, no server call. */
+function undoDelete(sourceKey: string, filename: string) {
+  const key = deleteKey(sourceKey, filename);
+  const pending = pendingDeletes.get(key);
+  if (pending) clearTimeout(pending.timer);
+  pendingDeletes.delete(key);
+  gallery.cancelDelete(sourceKey, filename);
+}
+
+/**
+ * Delete a single print the reversible way: hide it from the grid immediately,
+ * advance selection off the vanishing tile, and open a 6 s undo toast. The real
+ * DELETE fires only when that window lapses.
+ */
+function deletePrint(entry: MergedPrint) {
+  const { sourceKey } = entry;
+  const filename = entry.item.filename;
+  const key = deleteKey(sourceKey, filename);
+  if (pendingDeletes.has(key)) return;
+
+  const index = gallery.filtered.findIndex(
+    (candidate) => candidate.sourceKey === sourceKey && candidate.item.filename === filename,
+  );
+  const wasSelected = isSelected(entry);
+  gallery.beginDelete(sourceKey, filename);
+  if (wasSelected) {
+    const remaining = gallery.filtered;
+    if (remaining.length === 0) {
+      lightboxOpen.value = false;
+      selected.value = null;
+    } else {
+      select(remaining[Math.min(Math.max(index, 0), remaining.length - 1)]!);
+    }
+  }
+
+  const timer = setTimeout(() => void commitDelete(sourceKey, filename), UNDO_WINDOW_MS);
+  pendingDeletes.set(key, { sourceKey, filename, timer });
+  toasts.push(`Deleted ${filename}`, "info", {
+    durationMs: UNDO_WINDOW_MS,
+    action: { label: "Undo", run: () => undoDelete(sourceKey, filename) },
+  });
+}
+
+function removeSelected() {
   const entry = selectedEntry.value;
-  if (entry) await removeEntry(entry);
+  if (entry) deletePrint(entry);
 }
 
 /**
@@ -614,6 +638,11 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   resizeObserver?.disconnect();
+  // Finalize any deletes still inside their undo window — leaving Library
+  // commits them rather than stranding a hidden-but-not-deleted print.
+  for (const { sourceKey, filename } of [...pendingDeletes.values()]) {
+    void commitDelete(sourceKey, filename);
+  }
   // Flush a pending debounced search so the store matches the input.
   if (searchTimer) {
     clearTimeout(searchTimer);
@@ -804,31 +833,6 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
-    </div>
-
-    <div
-      v-if="confirmingSingleDelete && !selectMode"
-      data-test="single-delete-confirm"
-      class="border-edge absolute bottom-4 left-1/2 z-50 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-2 rounded-chrome border bg-bench px-3 py-2 shadow-lg"
-      role="alert"
-    >
-      <span class="text-caption text-ink">
-        Delete {{ confirmingSingleDelete.filename }}? This can't be undone.
-      </span>
-      <button
-        type="button"
-        class="h-7 rounded-control bg-stop px-2.5 text-caption font-semibold text-on-accent"
-        @click="selectedEntry && requestSingleDelete(selectedEntry)"
-      >
-        Delete
-      </button>
-      <button
-        type="button"
-        class="h-7 rounded-control px-2.5 text-caption text-ink-2 hover:text-ink"
-        @click="confirmingSingleDelete = null"
-      >
-        Cancel
-      </button>
     </div>
 
     <!-- Floating bulk-action bar while select mode is active. -->

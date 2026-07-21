@@ -9,6 +9,7 @@ import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
 import ModelTableRow from "../components/models/ModelTableRow.vue";
 import RenameDialog from "../components/shell/RenameDialog.vue";
+import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
@@ -139,6 +140,8 @@ const drawerRepairing = ref(false);
 // Loaded-model chip unload state — declared here (not with its handlers)
 // because the identity watch's immediate run resets it.
 const unloading = ref<Set<string>>(new Set());
+/** Name awaiting the confirming second click before it unloads (§08 G12). */
+const unloadPending = ref<string | null>(null);
 /** Optimistically hidden until the telemetry poll confirms the unload. */
 const recentlyUnloaded = ref<Set<string>>(new Set());
 
@@ -246,6 +249,12 @@ watch(modelsLoaded, (models) => {
 async function unloadChip(name: string) {
   const h = host.value;
   if (!h || unloading.value.has(name)) return;
+  // Inline confirm: the first click arms, the second unloads.
+  if (unloadPending.value !== name) {
+    unloadPending.value = name;
+    return;
+  }
+  unloadPending.value = null;
   unloading.value.add(name);
   try {
     await unloadModel(name, hostTarget() ?? undefined);
@@ -356,17 +365,13 @@ async function disconnect() {
   void router.push("/machines");
 }
 
-// Forget drops the saved entry AND the stored API key — two-step confirm.
-const forgetPending = ref(false);
+// Forget drops the saved entry AND the stored API key — confirmed first (§08 G12).
+const forgetOpen = ref(false);
 
 async function forget() {
   const h = host.value;
+  forgetOpen.value = false;
   if (!h) return;
-  if (!forgetPending.value) {
-    forgetPending.value = true;
-    return;
-  }
-  forgetPending.value = false;
   await hosts.disconnect(h.id);
   await ipc.forgetRemoteHost(h.id);
   toasts.push(`Forgot ${h.label}`);
@@ -654,13 +659,15 @@ async function forget() {
                   <button
                     type="button"
                     data-test="unload-chip"
-                    class="shrink-0 text-caption text-ink-3 transition-colors hover:text-stop disabled:opacity-40"
+                    class="shrink-0 text-caption transition-colors hover:text-stop disabled:opacity-40"
+                    :class="unloadPending === m ? 'font-semibold text-stop' : 'text-ink-3'"
                     :aria-label="`Unload ${m}`"
                     :title="`Unload ${m} from this host's GPU`"
                     :disabled="unloading.has(m)"
                     @click="unloadChip(m)"
+                    @blur="unloadPending = null"
                   >
-                    {{ unloading.has(m) ? "…" : "Unload" }}
+                    {{ unloading.has(m) ? "…" : unloadPending === m ? "Unload?" : "Unload" }}
                   </button>
                 </div>
               </div>
@@ -718,12 +725,10 @@ async function forget() {
               <button
                 type="button"
                 data-test="forget-host"
-                class="h-9 flex-1 rounded-control border border-[color-mix(in_srgb,var(--stop)_50%,transparent)] text-body font-semibold transition-colors active:translate-y-px"
-                :class="forgetPending ? 'bg-stop text-on-accent' : 'text-stop hover:bg-stop/10'"
-                @click="forget"
-                @blur="forgetPending = false"
+                class="h-9 flex-1 rounded-control border border-[color-mix(in_srgb,var(--stop)_50%,transparent)] text-body font-semibold text-stop transition-colors hover:bg-stop/10 active:translate-y-px"
+                @click="forgetOpen = true"
               >
-                {{ forgetPending ? "Forget?" : "Forget" }}
+                Forget
               </button>
             </div>
           </div>
@@ -746,6 +751,16 @@ async function forget() {
           :initial="host.label"
           @save="onRenameSave"
           @cancel="renameOpen = false"
+        />
+
+        <ConfirmDialog
+          :open="forgetOpen"
+          title="Forget studio?"
+          message="Its API key is discarded."
+          confirm-label="Forget"
+          danger
+          @confirm="forget"
+          @cancel="forgetOpen = false"
         />
       </template>
 

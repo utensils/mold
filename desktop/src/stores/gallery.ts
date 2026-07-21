@@ -139,6 +139,11 @@ export const useGalleryStore = defineStore("gallery", {
     /** Whether the Library has been opened this session — nothing is NEW on the
      *  very first visit (that visit only establishes the baseline). */
     libraryVisited: false,
+    /** Prints optimistically removed from the grid, pending commit or undo
+     *  (§08 G12). Keyed `${sourceKey}::${filename}`; excluded from every view
+     *  the moment delete is pressed, restored by undo, and only DELETEd on
+     *  commit. */
+    pendingDeletions: new Set<string>(),
   }),
   getters: {
     /**
@@ -186,6 +191,7 @@ export const useGalleryStore = defineStore("gallery", {
         const bucket = this.buckets[source.key];
         if (!bucket) continue;
         for (const item of bucket.items) {
+          if (this.pendingDeletions.has(`${source.key}::${item.filename}`)) continue;
           const identity = printIdentity(item);
           let existing = byFilename.get(item.filename);
           if (!existing && identity) {
@@ -232,6 +238,7 @@ export const useGalleryStore = defineStore("gallery", {
       const source = this.sources.find((s) => s.key === this.filter);
       if (!source) return this.merged;
       return (this.buckets[source.key]?.items ?? [])
+        .filter((item) => !this.pendingDeletions.has(`${source.key}::${item.filename}`))
         .map((item) => ({
           item,
           sourceKey: source.key,
@@ -320,6 +327,20 @@ export const useGalleryStore = defineStore("gallery", {
     /** Flat compatibility view for consumers that predate buckets. */
     items(): GalleryImage[] {
       return this.merged.map((e) => e.item);
+    },
+    /**
+     * Prints developed since the last Library visit — drives the Library nav
+     * badge (§08 G11). Zero until the Library has been opened once (that visit
+     * only establishes the baseline), then counts every merged print not yet
+     * marked seen. Re-opening Library calls `markLibrarySeen`, resetting it.
+     */
+    newCount(): number {
+      if (!this.libraryVisited) return 0;
+      let n = 0;
+      for (const entry of this.merged) {
+        if (!this.seenFilenames.has(entry.item.filename)) n++;
+      }
+      return n;
     },
   },
   actions: {
@@ -422,6 +443,28 @@ export const useGalleryStore = defineStore("gallery", {
       const bucket = this.buckets[hostId];
       if (!bucket?.loaded || bucket.loading) return;
       await this.fetchBucket(hostId);
+    },
+    /** Optimistically hide a print from every view, pending commit or undo. */
+    beginDelete(sourceKey: string, filename: string) {
+      this.pendingDeletions.add(`${sourceKey}::${filename}`);
+    },
+    /** Undo an optimistic delete — no server call; the print returns to the grid. */
+    cancelDelete(sourceKey: string, filename: string) {
+      this.pendingDeletions.delete(`${sourceKey}::${filename}`);
+    },
+    /**
+     * Commit an optimistic delete: run the real DELETE, then drop the pending
+     * mark. A failed DELETE restores the print (the bucket row survived and the
+     * mark clears) and rethrows so the caller can surface the error.
+     */
+    async commitDelete(sourceKey: string, filename: string) {
+      const key = `${sourceKey}::${filename}`;
+      if (!this.pendingDeletions.has(key)) return; // already undone/committed
+      try {
+        await this.remove(sourceKey, filename);
+      } finally {
+        this.pendingDeletions.delete(key);
+      }
     },
     /** Delete a print where it lives, evicting only that origin's media. */
     async remove(sourceKey: string, filename: string) {

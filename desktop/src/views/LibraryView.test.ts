@@ -155,33 +155,62 @@ beforeEach(() => {
 
 describe("LibraryView delete keyboard handling", () => {
   it.each(["Delete", "Backspace"])(
-    "prevents %s navigation and requires a second press before deleting",
+    "prevents %s navigation and only DELETEs after the undo window",
     async (key) => {
       const { wrapper, gallery, router } = await mountView();
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true }));
+      vi.useFakeTimers();
+      try {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true }));
 
-      const first = new KeyboardEvent("keydown", { key, cancelable: true });
-      expect(window.dispatchEvent(first)).toBe(false);
-      await flushPromises();
+        const press = new KeyboardEvent("keydown", { key, cancelable: true });
+        expect(window.dispatchEvent(press)).toBe(false);
+        await flushPromises();
 
-      expect(localGalleryDelete).not.toHaveBeenCalled();
-      expect(wrapper.get('[data-test="single-delete-confirm"]').text()).toContain(
-        "Delete first.png?",
-      );
-      expect(router.currentRoute.value.path).toBe("/library");
+        // Optimistically hidden, undo toast up, no server call and no navigation.
+        expect(localGalleryDelete).not.toHaveBeenCalled();
+        expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual(["second.png"]);
+        expect(useToastStore().items.at(-1)?.message).toContain("Deleted first.png");
+        expect(router.currentRoute.value.path).toBe("/library");
 
-      const second = new KeyboardEvent("keydown", { key, cancelable: true });
-      expect(window.dispatchEvent(second)).toBe(false);
-      await flushPromises();
-
-      expect(localGalleryDelete).toHaveBeenCalledWith("first.png");
-      expect(gallery.filtered.map((entry) => entry.item.filename)).toEqual(["second.png"]);
-      expect(router.currentRoute.value.path).toBe("/library");
-      wrapper.unmount();
+        // The DELETE fires only when the 6 s window lapses.
+        vi.advanceTimersByTime(6000);
+        await flushPromises();
+        expect(localGalleryDelete).toHaveBeenCalledWith("first.png");
+        expect(router.currentRoute.value.path).toBe("/library");
+      } finally {
+        vi.useRealTimers();
+        wrapper.unmount();
+      }
     },
   );
 
-  it("routes context-menu confirmation to the selected remote host", async () => {
+  it("undo restores the print without a server call", async () => {
+    const { wrapper, gallery } = await mountView();
+    vi.useFakeTimers();
+    try {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", cancelable: true }));
+      const press = new KeyboardEvent("keydown", { key: "Delete", cancelable: true });
+      window.dispatchEvent(press);
+      await flushPromises();
+      expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["second.png"]);
+
+      const undo = useToastStore().items.at(-1)!;
+      expect(undo.action?.label).toBe("Undo");
+      useToastStore().runAction(undo.id);
+      await flushPromises();
+
+      // The print is back and no DELETE ran, even after the window would lapse.
+      expect(gallery.filtered.map((e) => e.item.filename)).toEqual(["first.png", "second.png"]);
+      vi.advanceTimersByTime(6000);
+      await flushPromises();
+      expect(localGalleryDelete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      wrapper.unmount();
+    }
+  });
+
+  it("routes the committed delete to the selected remote host", async () => {
     const remotePrint: GalleryImage = {
       ...prints[0]!,
       filename: "remote.png",
@@ -189,33 +218,39 @@ describe("LibraryView delete keyboard handling", () => {
       metadata: { ...prints[0]!.metadata, seed: 9 },
     };
     const { wrapper, gallery } = await mountView(remotePrint);
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
-    expect(tile).toBeDefined();
-    await tile!.trigger("contextmenu");
+    vi.useFakeTimers();
+    try {
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      expect(tile).toBeDefined();
+      await tile!.trigger("contextmenu");
 
-    const menu = useContextMenuStore();
-    const deleteEntry = menu.entries.find(
-      (entry): entry is Exclude<MenuEntry, { separator: true }> =>
-        !("separator" in entry) && entry.label === "Delete",
-    );
-    expect(deleteEntry).toBeDefined();
-    menu.activate(deleteEntry!);
-    await flushPromises();
+      const menu = useContextMenuStore();
+      const deleteEntry = menu.entries.find(
+        (entry): entry is Exclude<MenuEntry, { separator: true }> =>
+          !("separator" in entry) && entry.label === "Delete",
+      );
+      expect(deleteEntry).toBeDefined();
+      menu.activate(deleteEntry!);
+      await flushPromises();
 
-    expect(apiFetchTo).not.toHaveBeenCalled();
-    await wrapper.get('[data-test="single-delete-confirm"] button').trigger("click");
-    await flushPromises();
+      // Hidden immediately, but nothing hits the host until the window lapses.
+      expect(apiFetchTo).not.toHaveBeenCalled();
+      expect(gallery.filtered.some((entry) => entry.item.filename === "remote.png")).toBe(false);
 
-    expect(apiFetchTo).toHaveBeenCalledWith(
-      { baseUrl: "http://plato:7680", apiKey: "secret" },
-      "/api/gallery/image/remote.png",
-      { method: "DELETE" },
-    );
-    expect(gallery.filtered.some((entry) => entry.item.filename === "remote.png")).toBe(false);
-    wrapper.unmount();
+      vi.advanceTimersByTime(6000);
+      await flushPromises();
+      expect(apiFetchTo).toHaveBeenCalledWith(
+        { baseUrl: "http://plato:7680", apiKey: "secret" },
+        "/api/gallery/image/remote.png",
+        { method: "DELETE" },
+      );
+    } finally {
+      vi.useRealTimers();
+      wrapper.unmount();
+    }
   });
 
-  it("surfaces a remote context-menu delete failure and keeps the print", async () => {
+  it("restores the print and surfaces the error when the committed delete fails", async () => {
     const remotePrint: GalleryImage = {
       ...prints[0]!,
       filename: "remote.png",
@@ -224,20 +259,28 @@ describe("LibraryView delete keyboard handling", () => {
     };
     apiFetchTo.mockRejectedValueOnce(new Error("Forbidden"));
     const { wrapper, gallery } = await mountView(remotePrint);
-    const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
-    await tile!.trigger("contextmenu");
-    const menu = useContextMenuStore();
-    const deleteEntry = menu.entries.find(
-      (entry) => !("separator" in entry) && entry.label === "Delete",
-    )!;
-    menu.activate(deleteEntry);
-    await flushPromises();
-    await wrapper.get('[data-test="single-delete-confirm"] button').trigger("click");
-    await flushPromises();
+    vi.useFakeTimers();
+    try {
+      const tile = wrapper.findAll("button").find((button) => button.text().includes("S 9"));
+      await tile!.trigger("contextmenu");
+      const menu = useContextMenuStore();
+      const deleteEntry = menu.entries.find(
+        (entry) => !("separator" in entry) && entry.label === "Delete",
+      )!;
+      menu.activate(deleteEntry);
+      await flushPromises();
 
-    expect(useToastStore().items.at(-1)).toMatchObject({ message: "Forbidden", kind: "error" });
-    expect(gallery.filtered.some((entry) => entry.item.filename === "remote.png")).toBe(true);
-    wrapper.unmount();
+      vi.advanceTimersByTime(6000);
+      await flushPromises();
+
+      expect(
+        useToastStore().items.some((t) => t.message === "Forbidden" && t.kind === "error"),
+      ).toBe(true);
+      expect(gallery.filtered.some((entry) => entry.item.filename === "remote.png")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      wrapper.unmount();
+    }
   });
 
   it("leaves Backspace native while the library search field is being edited", async () => {
@@ -249,7 +292,6 @@ describe("LibraryView delete keyboard handling", () => {
     const event = new KeyboardEvent("keydown", { key: "Backspace", cancelable: true });
     expect(search.dispatchEvent(event)).toBe(true);
     expect(localGalleryDelete).not.toHaveBeenCalled();
-    expect(wrapper.find('[data-test="single-delete-confirm"]').exists()).toBe(false);
     wrapper.unmount();
   });
 });

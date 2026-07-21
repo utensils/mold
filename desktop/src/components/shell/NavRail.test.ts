@@ -8,6 +8,7 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useContextMenuStore, type MenuItem } from "../../stores/contextMenu";
 import { useHostsStore, type HostView } from "../../stores/hosts";
+import { useGalleryStore } from "../../stores/gallery";
 
 const stub = { template: "<div />" };
 
@@ -374,5 +375,102 @@ describe("NavRail collapse", () => {
     // Destinations are still present as accessible icon buttons.
     const buttons = wrapper.findAll("button");
     expect(buttons.some((b) => b.attributes("aria-label") === "Create")).toBe(true);
+  });
+});
+
+describe("NavRail workspace badges (G11)", () => {
+  it("shows a stop dot on Machines when a connected host is offline", async () => {
+    const wrapper = await mountAt("/create");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "error",
+      error: "down",
+      instanceId: null,
+    });
+    await flushPromises();
+    expect(wrapper.find("[data-test='machines-error-dot']").exists()).toBe(true);
+  });
+
+  it("hides the Machines stop dot while every host is reachable", async () => {
+    const wrapper = await mountAt("/create");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    await flushPromises();
+    expect(wrapper.find("[data-test='machines-error-dot']").exists()).toBe(false);
+  });
+
+  it("badges Library with the count of prints developed since the last visit", async () => {
+    const wrapper = await mountAt("/create");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const gallery = useGalleryStore();
+    const image = (filename: string, timestamp: number) =>
+      ({ filename, timestamp, metadata: { prompt: "p" } }) as never;
+    gallery.buckets.local = {
+      items: [image("a.png", 1)],
+      loading: false,
+      error: null,
+      loaded: true,
+    };
+    gallery.markLibrarySeen();
+    gallery.buckets.local.items = [image("b.png", 3), image("a.png", 1)];
+    await flushPromises();
+    const badge = wrapper.find(".ms-nav__badge");
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toBe("1");
+  });
+});
+
+describe("NavRail forget confirm (G12)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  it("Forget opens a confirm dialog with §11 copy before dropping the host", async () => {
+    const wrapper = await mountAt("/create");
+    const conn = useConnectionStore();
+    conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+    conn.status = "ready";
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    await flushPromises();
+    const forgetSpy = vi.spyOn(ipc, "forgetRemoteHost").mockResolvedValue([]);
+
+    const rows = wrapper.findAll("[data-test='host-row']");
+    await rows[1]!.trigger("contextmenu");
+    const entry = useContextMenuStore()
+      .entries.filter((e): e is MenuItem => !("separator" in e))
+      .find((e) => e.label === "Forget");
+    entry?.action?.();
+    await flushPromises();
+
+    // Not forgotten yet — the confirm dialog is up with blunt copy.
+    expect(forgetSpy).not.toHaveBeenCalled();
+    const dialog = document.querySelector("[data-test='confirm-dialog']");
+    expect(dialog?.textContent).toContain("Forget studio?");
+    expect(dialog?.textContent).toContain("Its API key is discarded.");
+
+    (document.querySelector("[data-test='confirm-accept']") as HTMLButtonElement).click();
+    await flushPromises();
+    expect(forgetSpy).toHaveBeenCalledWith("hal9000-7680");
+    wrapper.unmount();
   });
 });

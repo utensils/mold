@@ -7,6 +7,7 @@ import type { IconName } from "@ui/icons";
 import logoUrl from "../../assets/logo.png";
 import StatusPopover from "./StatusPopover.vue";
 import RenameDialog from "./RenameDialog.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
 import { useGenerationStore, jobStatusCode, railOrder, type Job } from "../../stores/generation";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
@@ -15,6 +16,7 @@ import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { hostIdFromUrl } from "../../lib/hosts";
+import { badgeCount } from "../../lib/notifications";
 import { detectedHosts as computeDetectedHosts } from "../../lib/discovery";
 import { ipc, type DiscoveredHost, type SavedHost } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
@@ -26,7 +28,13 @@ const generation = useGenerationStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
+const gallery = useGalleryStore();
 const toasts = useToastStore();
+
+// Workspace badges (§08 G11): Library counts prints developed since the last
+// visit; Machines shows a stop dot when any connected host is offline.
+const libraryBadge = computed(() => badgeCount(gallery.newCount));
+const machinesErrored = computed(() => hosts.all.some((h) => h.status === "error"));
 
 // Fixed widths per the prototype (210 ↔ 62). The old drag-resize handle is
 // gone; the persisted navRailWidth pref is left untouched but no longer read.
@@ -121,12 +129,21 @@ async function openHostUrl(url: string) {
   }
 }
 
+/** Host awaiting the forget confirm (§08 G12). */
+const forgetTarget = ref<HostView | null>(null);
+
 /** Drop the host AND its saved entry + stored API key (recoverable only by
  *  re-adding it). Disconnect alone keeps both for later reconnect. */
 async function forgetHost(host: HostView) {
   await hosts.disconnect(host.id);
   await ipc.forgetRemoteHost(host.id);
   toasts.push(`Forgot ${host.label}`);
+}
+
+async function confirmForget() {
+  const host = forgetTarget.value;
+  forgetTarget.value = null;
+  if (host) await forgetHost(host);
 }
 
 function onRenameSave(name: string) {
@@ -232,7 +249,9 @@ function hostMenu(host: HostView): MenuEntry[] {
   entries.push({
     label: "Forget",
     danger: true,
-    action: () => void forgetHost(host),
+    action: () => {
+      forgetTarget.value = host;
+    },
   });
   return entries;
 }
@@ -337,15 +356,21 @@ function jobMenu(job: Job): MenuEntry[] {
 
     <!-- nav destinations -->
     <div class="flex flex-col gap-[3px]">
-      <NavItem
-        v-for="d in destinations"
-        :key="d.route"
-        :icon="d.icon"
-        :label="d.label"
-        :collapsed="collapsed"
-        :active="isActive(d.route)"
-        @select="router.push(d.route)"
-      />
+      <div v-for="d in destinations" :key="d.route" class="relative">
+        <NavItem
+          :icon="d.icon"
+          :label="d.label"
+          :collapsed="collapsed"
+          :active="isActive(d.route)"
+          :badge="d.route === '/library' ? (libraryBadge ?? '') : ''"
+          @select="router.push(d.route)"
+        />
+        <span
+          v-if="d.route === '/machines' && machinesErrored"
+          data-test="machines-error-dot"
+          class="pointer-events-none absolute top-2 right-2 h-2 w-2 rounded-full bg-stop"
+        />
+      </div>
     </div>
 
     <!-- now developing -->
@@ -486,6 +511,16 @@ function jobMenu(job: Job): MenuEntry[] {
       :initial="renameTarget?.label ?? ''"
       @save="onRenameSave"
       @cancel="renameTarget = null"
+    />
+
+    <ConfirmDialog
+      :open="!!forgetTarget"
+      title="Forget studio?"
+      message="Its API key is discarded."
+      confirm-label="Forget"
+      danger
+      @confirm="confirmForget"
+      @cancel="forgetTarget = null"
     />
   </nav>
 </template>

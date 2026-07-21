@@ -56,6 +56,9 @@ export function notifyChainFinished(frames: number): void {
 export function notifyPulled(model: string): void {
   dispatchNotification(`Pulled ${model}`);
 }
+export function notifyPullFailed(model: string, message?: string): void {
+  dispatchNotification(`Couldn't pull ${model}`, message?.slice(0, 80));
+}
 export function notifyUpdateAvailable(version: string): void {
   dispatchNotification(`Mold ${version} is available`, "Open Mold to update and restart.");
 }
