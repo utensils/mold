@@ -225,7 +225,16 @@ const menuOpen = ref(false);
       </button>
     </div>
 
-    <MobileNavSheet :open="menuOpen" @close="menuOpen = false" />
+    <!-- Viewport-fixed host: SheetPanel is `position: absolute; inset: 0`, so
+         mounted inside this `position: relative` header it resolved against the
+         52px compact bar and the whole mobile navigation rendered as a sliver.
+         Same fix the Create Advanced sheet and the model drawer needed. -->
+    <div
+      :class="menuOpen ? 'fixed inset-0 z-50' : ''"
+      data-test="mobile-nav-host"
+    >
+      <MobileNavSheet :open="menuOpen" @close="menuOpen = false" />
+    </div>
   </header>
 </template>
 
