@@ -142,13 +142,14 @@ The underlying script also exposes setup and a deterministic simulator build:
 ./scripts/ios.sh simulator
 ```
 
-Frontend commands run from `desktop/`:
+Install the shared workspace at the repository root, then run the mobile
+commands from there:
 
 ```bash
 bun install --frozen-lockfile
-bun run dev:mobile
+bun --cwd desktop run dev:mobile
 bun run build:mobile
-bun run test -- src/mobile
+bun --cwd desktop run test -- src/mobile
 ```
 
 Tauri always boots a root `index.html`. The mobile Vite build starts from

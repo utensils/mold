@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick } from "vue";
-import GeneratePage from "./GeneratePage.vue";
+import CreatePage from "./CreatePage.vue";
 import {
   useGenerateForm,
   __testing__ as generateFormTesting,
@@ -89,15 +89,13 @@ vi.mock("../composables/useStatusPoll", () => ({
 // Create now reads its model list (and routing inputs) from the per-host poll.
 // Canned responses keep the page deterministic and off the network.
 const hostStatusMock = vi.hoisted(() =>
-  vi.fn(
-    async (_host: { id: string }): Promise<Record<string, unknown>> => ({
-      version: "test",
-      models_loaded: [],
-      busy: false,
-      uptime_secs: 1,
-      queue_depth: 0,
-    }),
-  ),
+  vi.fn(async (_host: { id: string }): Promise<Record<string, unknown>> => ({
+    version: "test",
+    models_loaded: [],
+    busy: false,
+    uptime_secs: 1,
+    queue_depth: 0,
+  })),
 );
 const hostModelsMock = vi.hoisted(() =>
   vi.fn(async (_host: { id: string }): Promise<unknown[]> => []),
@@ -117,7 +115,7 @@ const RecentGridStub = defineComponent({
   template: '<div data-test="recent-grid">{{ entries.length }}</div>',
 });
 
-describe("GeneratePage layout and behavior", () => {
+describe("CreatePage layout and behavior", () => {
   beforeEach(async () => {
     // The routing singleton outlives a test's component; let any poll still in
     // flight from the previous test land, then discard what it wrote.
@@ -140,7 +138,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("uses the Mold Studio composer + controls-region workspace", () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     expect(wrapper.get("[data-test='generate-shell']").classes()).toContain(
       "max-w-[1600px]",
     );
@@ -150,20 +148,20 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("keeps the recent gallery visible after refreshes", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const feed = wrapper.findComponent(RecentGridStub);
     expect(feed.props("entries")).toEqual([entry]);
   });
 
   it("guides a first pull when no models are installed (cold start)", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -182,7 +180,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("submits Qwen edit images without sending stale mask state", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "qwen-image-edit:q4";
     form.state.value.modelFamily = "qwen-image-edit";
@@ -210,7 +208,7 @@ describe("GeneratePage layout and behavior", () => {
     upscaleStreamMock.mockImplementation(async (_request, handlers) => {
       handlers.onComplete({ image: "UPSCALED" });
     });
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "ltx-2-19b-distilled:fp8";
     form.state.value.modelFamily = "ltx2";
@@ -241,7 +239,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("asks before replacing a source image while a mask exists", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -270,12 +268,12 @@ describe("GeneratePage layout and behavior", () => {
     expect(form.state.value.maskImage).toBeNull();
   });
 
-  it("submits Sequence mode through createChainJob instead of the legacy stream", async () => {
+  it("submits Sequence mode through the durable chain endpoint", async () => {
     // Sequence only offers the ScriptComposer for a chain-capable (video)
     // model; a non-chain model gets the "sequences need a video model" panel.
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     // Switch to Sequence so the ScriptComposer renders.
     const seqButton = wrapper
@@ -314,7 +312,7 @@ describe("GeneratePage layout and behavior", () => {
   it("explains Sequence for a non-chain model instead of a dead composer", async () => {
     useGenerateForm().state.value.modelFamily = "flux2";
     useGenerateForm().state.value.model = "flux2-klein:q4";
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     const seqButton = wrapper
       .findAll("[data-test='composer-mode'] button")
@@ -332,7 +330,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("fans a batch out into variations and queues one print per edited prompt", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
     form.state.value.modelFamily = "flux";
@@ -359,7 +357,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("sends the active style as a directive on the main-prompt expand", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -378,7 +376,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("never steers a chain-stage expand with the composer's style chip", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
     form.state.value.modelFamily = "ltx2";
@@ -399,7 +397,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("bakes and clears the chip when a quick expansion is applied", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -435,7 +433,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("keeps a stage expansion out of the composer's prompt and style", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
     form.state.value.modelFamily = "ltx2";
@@ -458,7 +456,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("carries the preset negative when a variation is adopted into the composer", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "sdxl-base:fp16";
     form.state.value.modelFamily = "sdxl";
@@ -485,7 +483,7 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises(); // onMounted registers the mold:new-print listener
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
@@ -528,7 +526,7 @@ describe("GeneratePage layout and behavior", () => {
       retakes: [],
       script: { schema: "mold.chain.v1", chain: {}, stage: [] },
     };
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     expect(
       wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
@@ -537,7 +535,7 @@ describe("GeneratePage layout and behavior", () => {
 });
 
 // ── Multi-host generation routing (spec §08) ────────────────────────────────
-describe("GeneratePage host routing", () => {
+describe("CreatePage host routing", () => {
   const flux = {
     name: "flux2-klein:q4",
     family: "flux2",
@@ -578,7 +576,7 @@ describe("GeneratePage host routing", () => {
 
   it("submits unrouted when this server is the only machine", async () => {
     hostModelsMock.mockResolvedValue([flux]);
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -598,7 +596,7 @@ describe("GeneratePage host routing", () => {
     localStorage.setItem("mold.web.generateTarget.v1", studio.id);
     hostModelsMock.mockResolvedValue([flux]);
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -626,7 +624,7 @@ describe("GeneratePage host routing", () => {
       };
     });
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -659,7 +657,7 @@ describe("GeneratePage host routing", () => {
       return [flux];
     });
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");
@@ -684,7 +682,7 @@ describe("GeneratePage host routing", () => {
       host.id === ORIGIN_HOST_ID ? [] : [zimage],
     );
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     await nextTick();
 
@@ -701,7 +699,7 @@ describe("GeneratePage host routing", () => {
       host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
     );
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     const picker = wrapper.getComponent({ name: "CreateModelPicker" });
@@ -718,7 +716,7 @@ describe("GeneratePage host routing", () => {
       host.id === ORIGIN_HOST_ID ? [flux] : [zimage],
     );
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     const picker = wrapper.getComponent({ name: "CreateModelPicker" });
@@ -736,7 +734,7 @@ describe("GeneratePage host routing", () => {
     form.state.value.modelFamily = "flux";
     hostModelsMock.mockResolvedValue([flux]);
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     await nextTick();
 
@@ -752,7 +750,7 @@ describe("GeneratePage host routing", () => {
     form.state.value.modelFamily = "flux2";
     hostModelsMock.mockResolvedValue([flux, zimage]);
 
-    mount(GeneratePage, { global: { stubs: pageStubs() } });
+    mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     await nextTick();
 
@@ -771,7 +769,7 @@ describe("GeneratePage host routing", () => {
       host.id === ORIGIN_HOST_ID ? Promise.resolve([]) : pendingRemote,
     );
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(false);
 
@@ -789,7 +787,7 @@ describe("GeneratePage host routing", () => {
       { ...flux, name: "ltx-2:fp8", family: "ltx2" },
     ]);
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     await nextTick();
 
@@ -819,7 +817,7 @@ describe("GeneratePage host routing", () => {
             },
     }));
 
-    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
     await wrapper.get("[data-test='composer-submit']").trigger("click");

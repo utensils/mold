@@ -20,10 +20,9 @@ export const CAPABLE_TARGET_ID = "capable";
 
 export type HostRoutingStatus = "connecting" | "ready" | "error";
 
-/** GPU summary as `/api/status` reports it. `backend` is an additive field —
- *  servers that predate it fall back to name inference. */
+/** GPU summary as the current `/api/status` contract reports it. */
 export interface RoutableGpu {
-  backend?: string | null;
+  backend: string | null;
   name?: string | null;
   vramTotalMb?: number | null;
 }
@@ -78,28 +77,10 @@ export function pickAutoHost<T extends RoutableHost>(
   });
 }
 
-/**
- * Guess the compute backend from a GPU's marketing name. Only used when a host
- * doesn't report `gpu_info.backend` (servers ≤ 0.16); the explicit field wins.
- */
-export function inferBackendFromGpuName(
-  name: string,
-): "cuda" | "metal" | "cpu" {
-  const n = name.toLowerCase();
-  if (/nvidia|rtx|geforce|gtx|quadro|tesla|a100|h100|l40/.test(n))
-    return "cuda";
-  if (/apple|\bm[1-4]\b/.test(n)) return "metal";
-  return "cpu";
-}
-
 /** Capability ladder: CUDA (2) > Metal (1) > CPU/unknown (0). */
-export function backendRank(
-  backend: string | null | undefined,
-  gpuName?: string | null,
-): number {
-  const b = backend ?? (gpuName ? inferBackendFromGpuName(gpuName) : null);
-  if (b === "cuda") return 2;
-  if (b === "metal") return 1;
+export function backendRank(backend: string | null): number {
+  if (backend === "cuda") return 2;
+  if (backend === "metal") return 1;
   return 0;
 }
 
@@ -119,7 +100,7 @@ export function pickMostCapableHost<T extends RoutableHost>(
     if (withModel.length > 0) ready = withModel;
   }
   if (ready.length === 0) return null;
-  const rank = (x: RoutableHost) => backendRank(x.gpu?.backend, x.gpu?.name);
+  const rank = (x: RoutableHost) => backendRank(x.gpu?.backend ?? null);
   const vram = (x: RoutableHost) => x.gpu?.vramTotalMb ?? 0;
   return ready.reduce((best, h) => {
     if (rank(h) !== rank(best)) return rank(h) > rank(best) ? h : best;

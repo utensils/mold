@@ -168,10 +168,7 @@ function resolveSources() {
     .catch(() => {
       /* the fallback chain lands on the "can't render" tile */
     });
-  void resolveStreamableSrc(host, name, {
-    // Never buffer a whole video to satisfy a ticket-less legacy host.
-    allowLegacyBlob: mediaKind(props.item.format, name) !== "video",
-  })
+  void resolveStreamableSrc(host, name)
     .then((url) => {
       if (generation === resolveGeneration) fullSrc.value = url;
     })

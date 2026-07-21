@@ -61,6 +61,7 @@ jobs:
           workspaces: desktop/src-tauri
           key: desktop-distribution-${{ inputs.channel }}
       - run: bun install --frozen-lockfile
+        working-directory: .
       - name: Install updater verification tooling
         run: HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign
 

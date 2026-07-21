@@ -11,7 +11,11 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
+      - "studio/**"
       - "ui/**"
+      - "package.json"
+      - "bun.lock"
+      - "bun.nix"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
@@ -43,7 +47,11 @@ on:
   pull_request:
     paths:
       - "desktop/**"
+      - "studio/**"
       - "ui/**"
+      - "package.json"
+      - "bun.lock"
+      - "bun.nix"
       - "crates/mold-core/**"
       - "crates/mold-catalog/**"
       - "crates/mold-db/**"
@@ -109,6 +117,7 @@ jobs:
           bash ../scripts/tests/prune-desktop-nightly-assets.sh
           bash ../scripts/tests/select-desktop-stable-latest.sh
       - run: bun install --frozen-lockfile
+        working-directory: .
       - run: bun run fmt:check
       - run: bunx vue-tsc -b
       - run: bun run test
@@ -127,6 +136,7 @@ jobs:
         with:
           workspaces: desktop/src-tauri
       - run: bun install --frozen-lockfile
+        working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       # CPU-only: the metal feature is deliberately off in CI.
@@ -184,6 +194,7 @@ jobs:
           key: desktop-linux-sm89
           cache-on-failure: true
       - run: bun install --frozen-lockfile
+        working-directory: .
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml

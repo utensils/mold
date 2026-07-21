@@ -4,7 +4,7 @@
  * logic in `sourceFitPreprocess.ts` so tests can inject a fake and stay off
  * happy-dom's stub canvas.
  */
-import type { Rect, Size, SourceFitTransform } from "./sourceFit";
+import type { Rect, Size, SourceFitTransform } from "@studio/lib/sourceFit";
 import type { SourceFitCanvasOps } from "./sourceFitPreprocess";
 import { base64ToDataUrl } from "./image";
 

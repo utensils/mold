@@ -90,10 +90,10 @@ describe("useHostRouting", () => {
       status({
         queue_depth: 5,
         gpu_info: {
+          backend: "cuda",
           name: "NVIDIA RTX 4090",
           vram_total_mb: 24576,
           vram_used_mb: 0,
-          backend: "cuda",
         },
       }),
     );
@@ -230,6 +230,7 @@ describe("useHostRouting", () => {
       ORIGIN_HOST_ID,
       status({
         gpu_info: {
+          backend: "metal",
           name: "Apple M3 Max",
           vram_total_mb: 65536,
           vram_used_mb: 0,
@@ -241,6 +242,7 @@ describe("useHostRouting", () => {
       studio.id,
       status({
         gpu_info: {
+          backend: "cuda",
           name: "NVIDIA RTX 4090",
           vram_total_mb: 24576,
           vram_used_mb: 0,
@@ -253,7 +255,6 @@ describe("useHostRouting", () => {
     const routing = useHostRouting();
     await routing.refresh();
 
-    // Backend is inferred from the GPU name on servers that omit the field.
     expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
   });
 

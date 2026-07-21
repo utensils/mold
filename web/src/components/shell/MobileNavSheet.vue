@@ -28,11 +28,11 @@ interface Destination {
 
 const destinations: Destination[] = [
   {
-    name: "gallery",
-    label: "Gallery",
+    name: "library",
+    label: "Library",
     icon: "library",
-    path: "/",
-    match: ["gallery"],
+    path: "/library",
+    match: ["library"],
   },
   {
     name: "create",
@@ -53,7 +53,7 @@ const destinations: Destination[] = [
     label: "Machines",
     icon: "machines",
     path: "/machines",
-    match: ["machines", "machine-detail"],
+    match: ["machines", "host-detail"],
   },
   {
     name: "settings",

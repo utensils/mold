@@ -81,7 +81,7 @@ describe("chainToml", () => {
 
   it("round-trips per-stage source images", () => {
     // Regression: Script mode submits dropped `source_image_b64` in
-    // GeneratePage.onSubmitScript, which broke per-stage starting images
+    // CreatePage.onSubmitScript, which broke per-stage starting images
     // added in the composer. The TOML projection must carry both the
     // inline bytes and the display filename through a round trip so
     // drafts and exports survive reload.

@@ -28,7 +28,7 @@ export interface MergedGallery {
   entries: HostGalleryImage[];
   /** Hosts whose /api/gallery succeeded. */
   reachableHostIds: string[];
-  /** Hosts that failed (network / auth / older server) — surfaced as an
+  /** Hosts that failed (network, authentication, or incompatible API) — surfaced as an
    * "unreachable" chip rather than a silent gap. */
   unreachableHostIds: string[];
   /** Non-origin hosts that were attempted — drives the honest count line

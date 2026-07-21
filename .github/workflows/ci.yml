@@ -52,9 +52,20 @@ jobs:
               - '.github/workflows/ci.yml'
             web:
               - 'web/**'
+              - 'studio/**'
+              - 'ui/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'bun.nix'
               - '.github/workflows/ci.yml'
             nix:
               - 'web/**'
+              - 'desktop/**'
+              - 'studio/**'
+              - 'ui/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'bun.nix'
               - 'flake.nix'
               - 'flake.lock'
               - 'nix/**'
@@ -114,8 +125,11 @@ jobs:
         with:
           bun-version: latest
       - name: Install web dependencies
-        working-directory: web
         run: bun install --frozen-lockfile
+      - name: Check frontend architecture and dead code
+        run: bun run check:architecture && bun run check:dead-code
+      - name: Run shared Studio tests
+        run: bun run test:studio
       - name: Check web formatting
         working-directory: web
         run: bun run fmt:check
