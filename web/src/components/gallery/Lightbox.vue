@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * Lightbox — the print viewer that replaces the legacy DetailDrawer (spec §03
+ * Lightbox — the canonical print viewer (spec §03
  * Tile/lightbox rules, prototype desktop LIGHTBOX + mobile-web GALLERY VIEWER).
  *
  *   ≥640px  contained two-pane lightbox: media on the --print bed with
@@ -108,9 +108,7 @@ function resolveMedia() {
     .catch(() => {
       /* no poster is fine — the media itself still loads */
     });
-  void resolveStreamableSrc(host, item.filename, {
-    allowLegacyBlob: !isVideoFile.value,
-  })
+  void resolveStreamableSrc(host, item.filename)
     .then((url) => {
       if (generation === resolveGeneration) mediaSrc.value = url;
     })

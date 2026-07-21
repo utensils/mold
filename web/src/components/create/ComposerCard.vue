@@ -16,7 +16,7 @@ import {
   PromptCycler,
   caretOnFirstLine,
   caretOnLastLine,
-} from "../../lib/promptCycler";
+} from "@studio/lib/promptCycler";
 
 const props = withDefaults(
   defineProps<{

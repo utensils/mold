@@ -28,7 +28,7 @@ export interface CommandContext {
 }
 
 const GO: Array<{ id: string; label: string; path: string }> = [
-  { id: "go-gallery", label: "Gallery", path: "/" },
+  { id: "go-library", label: "Library", path: "/library" },
   { id: "go-create", label: "Create", path: "/create" },
   { id: "go-models", label: "Models", path: "/models" },
   { id: "go-machines", label: "Machines", path: "/machines" },

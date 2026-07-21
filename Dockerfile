@@ -18,17 +18,21 @@
 # in a dedicated stage keeps the Rust builder free of Node/bun tooling
 # and avoids re-running `bun install` on every cargo cache invalidation.
 #
-# Pinned to bun 1.3 — `web/bun.lock` is a v1 text lockfile written by
+# Pinned to bun 1.3 — the root `bun.lock` is written by
 # bun 1.2+; older bun versions (e.g. 1.1.x) reject it with
 # "Unknown lockfile version".
 FROM oven/bun:1.3-alpine AS web-builder
-WORKDIR /web
-COPY web/package.json web/bun.lock web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts web/index.html ./
+WORKDIR /frontend
+COPY package.json bun.lock ./
+COPY studio/package.json studio/package.json
+COPY ui/package.json ui/package.json
+COPY web/package.json web/package.json
+COPY desktop/package.json desktop/package.json
 RUN bun install --frozen-lockfile
-COPY ui /ui
-COPY web/src ./src
-COPY web/public ./public
-RUN bun run build
+COPY studio studio
+COPY ui ui
+COPY web web
+RUN bun run build:web
 
 # ── Stage 1b: Build mold binary ─────────────────────────────────────
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder

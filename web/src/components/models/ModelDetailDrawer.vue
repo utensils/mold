@@ -25,12 +25,7 @@ const cat = useCatalog();
  * completely empty panel — the bug users photographed twice.
  */
 type DrawerState =
-  | "closed"
-  | "loading"
-  | "error"
-  | "catalog"
-  | "installed"
-  | "unrenderable";
+  "closed" | "loading" | "error" | "catalog" | "installed" | "unrenderable";
 
 const state = computed<DrawerState>(() => {
   if (cat.detailLoadingId.value != null) return "loading";

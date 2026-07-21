@@ -25,7 +25,7 @@ export interface JobProgress {
 export interface Job {
   id: string;
   /** Either a single-clip `GenerateRequestWire` or a canonical
-   * `ChainRequestWire` (Script mode on GeneratePage submits the latter
+   * `ChainRequestWire` (Script mode on CreatePage submits the latter
    * directly). Only `model` is read from this, so the union is safe. */
   request: GenerateRequestWire | ChainRequestWire;
   startedAt: number;
@@ -56,11 +56,8 @@ export interface Job {
   hostId: string | null;
   hostLabel: string | null;
   /** Server-assigned UUID, captured from the first `queued` SSE event.
-   * `null` until that event arrives (e.g. between submit and HTTP
-   * handshake), and stays `null` against legacy servers that predate
-   * L3. The reconciliation poller only sweeps cards whose `serverId`
-   * is non-null — without an id we can't tell server-side reality from
-   * legacy-server-pretending-it-knows-nothing. */
+   * `null` until the required queued event arrives. The reconciliation poller
+   * only sweeps cards whose `serverId` is known. */
   serverId: string | null;
 }
 
@@ -118,10 +115,7 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
     case "queued":
       p.stage = `Queued (position ${evt.position})`;
       p.queuePosition = evt.position;
-      // Capture the server-assigned id the first time it lands.
-      // Legacy servers (pre-L3) omit `id`; we leave `serverId` null
-      // and the reconciliation poller skips this card.
-      if (evt.id && !job.serverId) {
+      if (!job.serverId) {
         job.serverId = evt.id;
       }
       break;
@@ -194,7 +188,7 @@ function chainStageLabel(
 
 /** Chain complete events carry a `video` payload instead of `image`, no
  * single seed, and separate thumbnail/gif_preview fields. Shape-shift into
- * `SseCompleteEvent` so `GeneratePage.openJob` + `RunningJobCard` stay
+ * `SseCompleteEvent` so `CreatePage.openJob` + `RunningJobCard` stay
  * unchanged. `seed_used` falls back to the request seed (or 0) — the
  * gallery match will miss but the refresh-on-complete still surfaces the
  * new item. */
@@ -330,16 +324,18 @@ interface PersistedJob {
   error: string | null;
   state: Job["state"];
   chain: ChainJobMeta | null;
-  /** May be missing on payloads persisted before lastProgressAt existed —
-   * load path falls back to `startedAt`. */
-  lastProgressAt?: number;
-  /** Optional — pre-queue-stale-fix payloads don't carry workStarted. */
-  workStarted?: boolean;
-  /** Optional — pre-routing payloads don't carry a host. */
-  hostId?: string | null;
-  hostLabel?: string | null;
-  /** Optional — pre-L3 payloads don't carry a serverId. */
-  serverId?: string | null;
+  lastProgressAt: number;
+  workStarted: boolean;
+  hostId: string | null;
+  hostLabel: string | null;
+  serverId: string | null;
+}
+
+const JOB_STORAGE_VERSION = 1;
+
+interface PersistedJobs {
+  version: typeof JOB_STORAGE_VERSION;
+  jobs: PersistedJob[];
 }
 
 function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
@@ -374,9 +370,11 @@ function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
 function loadPersistedJobs(raw: string | null): Job[] {
   try {
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as PersistedJob[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((p) => {
+    const parsed = JSON.parse(raw) as PersistedJobs;
+    if (parsed.version !== JOB_STORAGE_VERSION || !Array.isArray(parsed.jobs)) {
+      return [];
+    }
+    return parsed.jobs.map((p) => {
       const wasZombie = p.state === "running";
       const state: Job["state"] = wasZombie ? "error" : p.state;
       const error = wasZombie
@@ -394,16 +392,16 @@ function loadPersistedJobs(raw: string | null): Job[] {
         // Dangling controllers from prior sessions aren't used — cancel()
         // bails early for non-running jobs anyway.
         controller: new AbortController(),
-        progress: p.progress ?? emptyProgress(),
+        progress: p.progress,
         result: p.result as SseCompleteEvent | null,
         error,
         state,
         chain: p.chain,
-        lastProgressAt: p.lastProgressAt ?? p.startedAt,
-        workStarted: p.workStarted ?? state !== "running",
-        hostId: p.hostId ?? null,
-        hostLabel: p.hostLabel ?? null,
-        serverId: p.serverId ?? null,
+        lastProgressAt: p.lastProgressAt,
+        workStarted: p.workStarted,
+        hostId: p.hostId,
+        hostLabel: p.hostLabel,
+        serverId: p.serverId,
       };
     });
   } catch {
@@ -438,7 +436,11 @@ function persistJobs(jobs: Job[]) {
       hostLabel: j.hostLabel,
       serverId: j.serverId,
     }));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+    const payload: PersistedJobs = {
+      version: JOB_STORAGE_VERSION,
+      jobs: serializable,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   } catch {
     /* quota / privacy mode — silently drop */
   }
@@ -446,7 +448,7 @@ function persistJobs(jobs: Job[]) {
 
 // ── Module-level singleton state ─────────────────────────────────────────────
 //
-// Pre-singleton: `useGenerateStream()` was invoked inside `GeneratePage.vue`'s
+// Pre-singleton: `useGenerateStream()` was invoked inside `CreatePage.vue`'s
 // `setup()`, so each mount got its own `jobs` ref and watcher. Navigating
 // away → back created a fresh instance whose `jobs` was loaded from
 // localStorage; the SSE callbacks from the previous instance kept mutating
@@ -660,7 +662,7 @@ export function useGenerateStream(
 ): UseGenerateStream {
   // Per-call: register the optional `onComplete` listener and tear it
   // down when the calling component unmounts so navigating away from
-  // GeneratePage doesn't leak callbacks into module-level state.
+  // CreatePage doesn't leak callbacks into module-level state.
   // `onUnmounted` is a no-op outside a component instance, which keeps
   // direct test invocations harmless.
   if (onComplete) {

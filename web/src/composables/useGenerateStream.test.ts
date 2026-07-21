@@ -18,6 +18,10 @@ import type {
 } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
+function persistedPayload(jobs: unknown[]): string {
+  return JSON.stringify({ version: 1, jobs });
+}
+
 // Capture the most recent handlers passed into `generateStream` /
 // `generateChainStream` so each test can drive the SSE lifecycle (complete /
 // error) deterministically without spinning up a real EventSource. The mocks
@@ -152,12 +156,16 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
       state: "running",
       chain: null,
       lastProgressAt: 1_010_000,
+      workStarted: true,
+      hostId: null,
+      hostLabel: null,
+      serverId: null,
       ...overrides,
     };
   }
 
   it("flips a persisted running job to error with a server-progress-lost message", () => {
-    const raw = JSON.stringify([persisted({ id: "zombie-1" })]);
+    const raw = persistedPayload([persisted({ id: "zombie-1" })]);
     const jobs = __testing__.loadPersistedJobs(raw);
     expect(jobs).toHaveLength(1);
     expect(jobs[0].state).toBe("error");
@@ -169,7 +177,7 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
   });
 
   it("passes through done jobs unchanged", () => {
-    const raw = JSON.stringify([persisted({ id: "x", state: "done" })]);
+    const raw = persistedPayload([persisted({ id: "x", state: "done" })]);
     const jobs = __testing__.loadPersistedJobs(raw);
     expect(jobs).toHaveLength(1);
     expect(jobs[0].state).toBe("done");
@@ -177,7 +185,7 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
   });
 
   it("passes through error jobs unchanged (preserves the original error text)", () => {
-    const raw = JSON.stringify([
+    const raw = persistedPayload([
       persisted({ id: "x", state: "error", error: "OOM" }),
     ]);
     const jobs = __testing__.loadPersistedJobs(raw);
@@ -190,19 +198,14 @@ describe("loadPersistedJobs dead-letters running rows on rehydrate", () => {
     expect(__testing__.loadPersistedJobs("")).toEqual([]);
     expect(__testing__.loadPersistedJobs("not-json")).toEqual([]);
     expect(__testing__.loadPersistedJobs('{"not":"an array"}')).toEqual([]);
+    expect(
+      __testing__.loadPersistedJobs(JSON.stringify([persisted()])),
+    ).toEqual([]);
   });
 
-  it("falls back to startedAt when lastProgressAt is missing (back-compat for pre-L2 payloads)", () => {
-    const raw = JSON.stringify([
-      persisted({
-        id: "old",
-        state: "done",
-        lastProgressAt: undefined,
-        startedAt: 555,
-      }),
-    ]);
-    const jobs = __testing__.loadPersistedJobs(raw);
-    expect(jobs[0].lastProgressAt).toBe(555);
+  it("rejects a payload from a different storage version", () => {
+    const raw = JSON.stringify({ version: 0, jobs: [persisted()] });
+    expect(__testing__.loadPersistedJobs(raw)).toEqual([]);
   });
 });
 
@@ -581,7 +584,7 @@ describe("useGenerateStream host routing", () => {
 
   it("round-trips the host attribution through persistence", () => {
     const restored = __testing__.loadPersistedJobs(
-      JSON.stringify([
+      persistedPayload([
         {
           id: "j1",
           request: singleGen({ frames: 1 }),
@@ -591,8 +594,11 @@ describe("useGenerateStream host routing", () => {
           error: null,
           state: "done",
           chain: null,
+          lastProgressAt: 1,
+          workStarted: true,
           hostId: "studio",
           hostLabel: "Studio",
+          serverId: null,
         },
       ]),
     );
@@ -600,21 +606,8 @@ describe("useGenerateStream host routing", () => {
     expect(restored[0]?.hostLabel).toBe("Studio");
   });
 
-  it("reads a pre-routing persisted payload as unattributed", () => {
-    const restored = __testing__.loadPersistedJobs(
-      JSON.stringify([
-        {
-          id: "j1",
-          request: singleGen({ frames: 1 }),
-          startedAt: 1,
-          progress: null,
-          result: null,
-          error: null,
-          state: "done",
-          chain: null,
-        },
-      ]),
-    );
-    expect(restored[0]?.hostId).toBeNull();
+  it("rejects the retired pre-routing job-array schema", () => {
+    const restored = __testing__.loadPersistedJobs(JSON.stringify([]));
+    expect(restored).toEqual([]);
   });
 });
