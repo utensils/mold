@@ -26,7 +26,7 @@ const entries: GalleryImage[] = [
   },
 ];
 
-describe("GalleryFeed visibility", () => {
+describe("GalleryFeed", () => {
   beforeEach(() => {
     (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
   });
@@ -35,19 +35,16 @@ describe("GalleryFeed visibility", () => {
     delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   });
 
-  it("keeps entries visible even if legacy hide props are passed", () => {
+  it("renders current entries", () => {
     const wrapper = mount(GalleryFeed, {
       props: {
         entries,
         loading: false,
         view: "grid",
         muted: true,
-        hideMode: true,
-        revealed: new Set<string>(),
       },
     });
 
     expect(wrapper.text()).toContain("recent image");
-    expect(wrapper.text()).not.toContain("Reveal");
   });
 });

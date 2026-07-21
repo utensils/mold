@@ -3,6 +3,7 @@
 import { defineConfig } from "vitest/config";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
+import { devServerUrlPlugin } from "../studio/vite/serverUrl";
 
 // In dev we proxy /api + /health to the running mold server so we can
 // iterate on the UI against live data. Override the target with
@@ -17,19 +18,21 @@ const apiTarget = process.env.MOLD_API_ORIGIN ?? "http://localhost:7680";
 // Shared Mold Studio design system (tokens + primitives) outside this root;
 // `vue` is pinned to this app's copy so ui/ sources resolve it.
 const uiDir = new URL("../ui", import.meta.url).pathname;
+const studioDir = new URL("../studio", import.meta.url).pathname;
 
 export default defineConfig({
-  plugins: [vue(), tailwindcss()],
+  plugins: [vue(), tailwindcss(), devServerUrlPlugin("Mold web")],
   resolve: {
     alias: {
       "@ui": uiDir,
-      vue: new URL("./node_modules/vue", import.meta.url).pathname,
+      "@studio": studioDir,
+      vue: new URL("../node_modules/vue", import.meta.url).pathname,
     },
   },
   server: {
     host: "0.0.0.0",
     port: 5174,
-    fs: { allow: [".", uiDir] },
+    fs: { allow: [".", uiDir, studioDir] },
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
       "/health": { target: apiTarget, changeOrigin: true },

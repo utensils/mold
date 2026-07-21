@@ -45,14 +45,8 @@ export function outputFormatsForFamily(family: string): OutputFormat[] {
     : ["png", "jpeg", "webp"];
 }
 
-export function defaultOutputFormat(family: string): OutputFormat {
-  return outputFormatsForFamily(family)[0];
-}
-
 const STORAGE_KEY = "mold.generate.form";
 const FORM_VERSION = 3 as const;
-/** Versions we can load and migrate forward without discarding the draft. */
-const MIGRATABLE_VERSIONS = new Set([1, 2, FORM_VERSION]);
 const QWEN_IMAGE_EDIT_FAMILY = "qwen-image-edit";
 
 function selectedFamily(s: GenerateFormState): string {
@@ -293,34 +287,6 @@ export function applyMetadataToForm(
   };
 }
 
-/// Drops users with pre-multi-LoRA persisted forms onto the new shape
-/// without re-prompting them for everything else. The old `lora` field
-/// (singular, nullable) becomes a 1- or 0-element `loras` array.
-type LegacyFormState = Omit<Partial<GenerateFormState>, "version"> & {
-  lora?: LoraSelection | null;
-  version?: number;
-  sourceImage?: GenerateFormState["imageAttachments"][number] | null;
-};
-
-function migrateLegacy(parsed: LegacyFormState): Partial<GenerateFormState> {
-  const {
-    lora,
-    sourceImage: _sourceImage,
-    imageAttachments,
-    version: _version,
-    ...rest
-  } = parsed;
-  const next: Partial<GenerateFormState> = {
-    ...rest,
-    version: FORM_VERSION,
-    imageAttachments: parsed.version === 1 ? [] : (imageAttachments ?? []),
-  };
-  if (!Array.isArray(rest.loras)) {
-    next.loras = lora ? [lora] : [];
-  }
-  return next;
-}
-
 function stripMediaBytes<T extends { base64: string }>(media: T): T {
   const { base64: _base64, ...rest } = cloneFormState(media) as T & {
     base64?: string;
@@ -429,15 +395,15 @@ function load(): GenerateFormState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultForm();
-    const parsed = JSON.parse(raw) as LegacyFormState;
-    if (!MIGRATABLE_VERSIONS.has(parsed.version ?? -1)) {
+    const parsed = JSON.parse(raw) as Partial<GenerateFormState>;
+    if (parsed.version !== FORM_VERSION) {
       return defaultForm();
     }
     return {
       ...defaultForm(),
       ...sanitizePersistedForm({
         ...defaultForm(),
-        ...migrateLegacy(parsed),
+        ...parsed,
       }),
     };
   } catch {

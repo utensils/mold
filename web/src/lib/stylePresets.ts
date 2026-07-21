@@ -1,8 +1,8 @@
 /*
  * Web view of the shared Mold Studio style-preset kit (repo-root
  * `ui/lib/stylePresets.ts`). The kit owns the canonical eight presets, their
- * A1111-style positive templates, the curated negatives, the legacy-id
- * aliases, submit-time composition, and the natural-language `styleHint` the
+ * A1111-style positive templates, curated negatives, submit-time composition,
+ * and the natural-language `styleHint` the
  * server expansion directive uses — so one preset produces the same request on
  * web, desktop, and iOS.
  *
@@ -13,17 +13,14 @@
  */
 import {
   STYLE_PRESETS as KIT_STYLE_PRESETS,
-  resolveStyleId,
   type StylePreset as KitStylePreset,
 } from "@ui/lib/stylePresets";
 
 export {
-  LEGACY_STYLE_IDS,
   STYLE_ANGLES,
   angleForIndex,
   composeStyle,
   mergeStyleNegative,
-  resolveStyleId,
   styleHint,
 } from "@ui/lib/stylePresets";
 export type { ComposeStyleOptions, ComposedStyle } from "@ui/lib/stylePresets";
@@ -40,12 +37,10 @@ export const STYLE_PRESETS: readonly StylePreset[] = KIT_STYLE_PRESETS.map(
 
 const BY_ID = new Map(STYLE_PRESETS.map((preset) => [preset.id, preset]));
 
-/** Resolve a preset by id, following legacy aliases. Returns `null` for
- * `null` or an unknown id so a stale persisted preset never crashes the
- * request path. */
+/** Resolve a current preset id. Unknown persisted values are ignored. */
 export function stylePresetById(id: string | null): StylePreset | null {
   if (!id) return null;
-  return BY_ID.get(resolveStyleId(id)) ?? null;
+  return BY_ID.get(id) ?? null;
 }
 
 /** Chip label for a stored id — "None" when nothing (known) is picked. */

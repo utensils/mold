@@ -26,7 +26,7 @@ import {
   type Size,
   type SourceFitPolicy,
   type SourceFitTransform,
-} from "./sourceFit";
+} from "@studio/lib/sourceFit";
 
 /** Canvas operations the preprocess needs — injectable for tests. */
 export interface SourceFitCanvasOps {

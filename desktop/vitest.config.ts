@@ -9,7 +9,7 @@ export default mergeConfig(
       alias: {
         // ../ui test files resolve test-only deps from this app's copies.
         "@vue/test-utils": fileURLToPath(
-          new URL("./node_modules/@vue/test-utils", import.meta.url),
+          new URL("../node_modules/@vue/test-utils", import.meta.url),
         ),
       },
     },
@@ -18,7 +18,7 @@ export default mergeConfig(
       globals: false,
       // The shared design-system primitives (../ui) are tested here so the
       // desktop CI gate covers them; they have no test runner of their own.
-      include: ["src/**/*.test.ts", "../ui/**/*.test.ts"],
+      include: ["src/**/*.test.ts", "../ui/**/*.test.ts", "../studio/**/*.test.ts"],
       // The ../ui include widens the glob base to the repo root, which holds
       // .direnv flake-input symlinks to stale full-source snapshots — never
       // collect tests through them.

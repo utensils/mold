@@ -92,10 +92,6 @@ export function supportsLora(family: string): boolean {
   return generationCapabilitiesForFamily(family).supportsLora;
 }
 
-export function familySupportsAudio(family: string): boolean {
-  return generationCapabilitiesForFamily(family).supportsAudio;
-}
-
 export function isQwenImageEditFamily(family: string): boolean {
   return family === "qwen-image-edit";
 }

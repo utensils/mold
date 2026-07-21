@@ -33,7 +33,7 @@ fn scan(timeout: Duration) -> Result<Vec<DiscoveredHost>, String> {
 
 #[cfg(target_vendor = "apple")]
 mod apple {
-    use std::ffi::{CStr, CString, c_char, c_void};
+    use std::ffi::{c_char, c_void, CStr, CString};
     use std::time::{Duration, Instant};
 
     use super::DiscoveredHost;
@@ -240,12 +240,13 @@ mod apple {
         let mut found = Vec::new();
         for state in resolves {
             unsafe { DNSServiceRefDeallocate(state.service) };
-            if let Some(host) = state.host
-                && !found
+            if let Some(host) = state.host {
+                if !found
                     .iter()
                     .any(|item: &DiscoveredHost| item.host == host.host && item.port == host.port)
-            {
-                found.push(host);
+                {
+                    found.push(host);
+                }
             }
         }
         found.sort_by(|left, right| left.name.cmp(&right.name));

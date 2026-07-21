@@ -357,7 +357,7 @@ desktop-release    # signed + notarized + stapled app and DMG, then verify
 desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test (CPU) + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
-desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+frontend-bun-lock  # regenerate the repo-root bun.lock and bun.nix
 ios-dev            # iPhone app with Tauri hot reload (Vite on :1431)
 ios-run            # production-mode run on an iPhone or simulator
 ios-check          # Rust check for the Apple Silicon simulator target

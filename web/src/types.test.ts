@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inferFormatFromName, mediaKind } from "./types";
-import type {
-  ChainJobDetail,
-  ChainJobEvent,
-  ChainProgressEvent,
-} from "./types";
+import type { ChainJobDetail, ChainJobEvent } from "./types";
 
 describe("inferFormatFromName", () => {
   it.each([
@@ -111,35 +107,5 @@ describe("ChainJobEvent serde-tag fixtures", () => {
       frames_emitted: 97,
       has_preview: true,
     });
-  });
-});
-
-describe("legacy ChainProgressEvent job_id", () => {
-  it("accepts optional job_id on every progress variant", () => {
-    const events: ChainProgressEvent[] = [
-      {
-        type: "chain_start",
-        stage_count: 2,
-        estimated_total_frames: 194,
-        job_id: "job-1",
-      },
-      { type: "stage_start", stage_idx: 0, job_id: "job-1" },
-      {
-        type: "denoise_step",
-        stage_idx: 0,
-        step: 1,
-        total: 4,
-        job_id: "job-1",
-      },
-      {
-        type: "stage_done",
-        stage_idx: 0,
-        frames_emitted: 97,
-        job_id: "job-1",
-      },
-      { type: "stitching", total_frames: 194, job_id: "job-1" },
-    ];
-
-    expect(events.every((event) => event.job_id === "job-1")).toBe(true);
   });
 });

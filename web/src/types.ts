@@ -1,3 +1,7 @@
+import type { SourceFitPolicy } from "@studio/lib/sourceFit";
+
+export type { SourceFitPolicy } from "@studio/lib/sourceFit";
+
 // Matches `mold_core::OutputFormat` on the wire (lowercase strings).
 export type OutputFormat = "png" | "jpeg" | "gif" | "apng" | "webp" | "mp4";
 
@@ -130,9 +134,7 @@ export interface LoraWeight {
 
 // ── Device placement (Agent C: model-ui-overhaul §3) ──────────────────────
 export type DeviceRef =
-  | { kind: "auto" }
-  | { kind: "cpu" }
-  | { kind: "gpu"; ordinal: number };
+  { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
 
 export interface AdvancedPlacement {
   transformer: DeviceRef;
@@ -269,8 +271,6 @@ export interface QueueEntry {
   gpu?: number;
   /** Preferred lane for queued jobs. Omitted/null means Auto. */
   target_gpu?: number | null;
-  /** Back-compat alias if a server chooses preferred_gpu wording. */
-  preferred_gpu?: number | null;
 }
 
 export interface QueueListing {
@@ -283,7 +283,7 @@ export type SseProgressEvent =
   | { type: "info"; message: string }
   | { type: "cache_hit"; resource: string }
   | { type: "denoise_step"; step: number; total: number; elapsed_ms: number }
-  | { type: "queued"; position: number; id?: string }
+  | { type: "queued"; position: number; id: string }
   | {
       type: "weight_load";
       bytes_loaded: number;
@@ -378,23 +378,20 @@ export type ChainProgressEvent =
       type: "chain_start";
       stage_count: number;
       estimated_total_frames: number;
-      job_id?: string;
     }
-  | { type: "stage_start"; stage_idx: number; job_id?: string }
+  | { type: "stage_start"; stage_idx: number }
   | {
       type: "denoise_step";
       stage_idx: number;
       step: number;
       total: number;
-      job_id?: string;
     }
   | {
       type: "stage_done";
       stage_idx: number;
       frames_emitted: number;
-      job_id?: string;
     }
-  | { type: "stitching"; total_frames: number; job_id?: string };
+  | { type: "stitching"; total_frames: number };
 
 export interface SseChainCompleteEvent {
   video: string; // base64
@@ -427,12 +424,7 @@ export interface ChainJobSummary {
 }
 
 export type ChainJobState =
-  | "queued"
-  | "running"
-  | "interrupted"
-  | "failed"
-  | "completed"
-  | "cancelled";
+  "queued" | "running" | "interrupted" | "failed" | "completed" | "cancelled";
 
 export type StageState = "pending" | "running" | "completed" | "failed";
 
@@ -560,21 +552,6 @@ export interface ExpandFormState {
   familyOverride: string | null;
 }
 
-export type SourceFitPolicy =
-  | { mode: "pad-repaint" }
-  | { mode: "pad-fit" }
-  | {
-      mode: "crop-fill";
-      alignX?: "left" | "center" | "right";
-      alignY?: "top" | "center" | "bottom";
-    }
-  | { mode: "lanczos-resize" }
-  | {
-      mode: "upscale-then-fit";
-      upscalerModel: string;
-      fit: Exclude<SourceFitPolicy, { mode: "upscale-then-fit" }>;
-    };
-
 export interface LoraSelection {
   path: string;
   scale: number;
@@ -606,10 +583,6 @@ export const LORA_CAPABLE_FAMILIES = [
   "qwen-image-edit",
   "z-image",
 ] as const;
-
-export function supportsLora(family: string): boolean {
-  return (LORA_CAPABLE_FAMILIES as readonly string[]).includes(family);
-}
 
 export interface GenerateFormState {
   version: 3;
@@ -667,52 +640,13 @@ export interface GenerateFormState {
   enableAudio: boolean | null;
 }
 
-// ── Video-family detection helper used by multiple components ──────────────
-export const VIDEO_FAMILIES: ReadonlyArray<string> = [
-  "ltx-video",
-  "ltx2",
-  "ltx-2",
-];
-
-// Families with an audio decode path. Mirrors the server-side
-// `chain_limits::family_supports_audio` — the SPA gates the audio
-// toggle on this so users can't enable an audio mux for a family
-// that has no audio output. Today only LTX-2 / LTX-2.3 (`"ltx2"`).
-export const AUDIO_FAMILIES: ReadonlyArray<string> = ["ltx2", "ltx-2"];
-
-export function familySupportsAudio(family: string): boolean {
-  return AUDIO_FAMILIES.includes(family);
-}
-
-// Families whose image pipeline ignores the negative prompt.
-export const NO_CFG_FAMILIES: ReadonlyArray<string> = [
-  "flux",
-  "flux2",
-  "flux.2",
-  "z-image",
-  "qwen-image",
-  "qwen_image",
-];
-
-// Families whose UNet responds to scheduler overrides.
-export const UNET_SCHEDULER_FAMILIES: ReadonlyArray<string> = [
-  "sd15",
-  "sd1.5",
-  "stable-diffusion-1.5",
-  "sdxl",
-];
-
 // ─── Downloads UI (Agent A) ───────────────────────────────────────────────────
 // Mirror of `mold_core::types::{DownloadJob, JobStatus, DownloadEvent,
 // DownloadsListing}`. Keep field names / string literals in sync with the
 // server's serde output.
 
 export type JobStatusWire =
-  | "queued"
-  | "active"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "queued" | "active" | "completed" | "failed" | "cancelled";
 
 export interface DownloadJobWire {
   id: string;
@@ -892,13 +826,8 @@ export interface CatalogListResponse {
   entries: CatalogEntryWire[];
   page: number;
   page_size: number;
-  /**
-   * Total rows matching the request's WHERE clauses, ignoring pagination.
-   * Optional so older servers that don't yet emit it still parse — the
-   * SPA falls back to a "last page came back full → keep loading" heuristic
-   * when this is undefined.
-   */
-  total?: number;
+  /** Total rows matching the request's filters, ignoring pagination. */
+  total: number;
 }
 
 export interface CatalogFamilyCount {
