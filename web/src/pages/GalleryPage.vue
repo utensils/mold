@@ -652,8 +652,7 @@ onMounted(async () => {
         v-if="selectMode"
         class="gal__bar-wrap"
         :style="{
-          bottom:
-            'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
+          bottom: 'max(0.75rem, env(safe-area-inset-bottom))',
         }"
       >
         <div class="gal__bar" role="toolbar" aria-label="Selection actions">
@@ -712,8 +711,7 @@ onMounted(async () => {
         aria-label="Scroll to top"
         class="gal__fab"
         :style="{
-          bottom:
-            'calc(var(--mold-tray-height, 0px) + max(0.75rem, env(safe-area-inset-bottom)))',
+          bottom: 'max(0.75rem, env(safe-area-inset-bottom))',
         }"
         @click="scrollToTop"
       >

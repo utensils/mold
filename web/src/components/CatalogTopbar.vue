@@ -71,18 +71,18 @@ function clearSearch() {
 
 <template>
   <div
-    class="glass flex flex-wrap items-center gap-2 rounded-3xl px-4 py-3 sm:gap-3 sm:px-5 sm:py-3.5"
+    class="bg-bench border border-edge flex flex-wrap items-center gap-2 rounded-3xl px-4 py-3 sm:gap-3 sm:px-5 sm:py-3.5"
   >
     <!-- Modality chips — match TopBar's filter-pill pattern -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
+      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
       aria-label="Modality filter"
     >
       <button
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.modality
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setModality(undefined)"
@@ -93,7 +93,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.modality === 'image'
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setModality('image')"
@@ -104,7 +104,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.modality === 'video'
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setModality('video')"
@@ -115,14 +115,14 @@ function clearSearch() {
 
     <!-- Kind chips -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
+      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
       aria-label="Kind filter"
     >
       <button
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.kind
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setKind(undefined)"
@@ -135,7 +135,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.kind === opt.value
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setKind(opt.value)"
@@ -146,14 +146,14 @@ function clearSearch() {
 
     <!-- Source chips -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
+      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
       aria-label="Source filter"
     >
       <button
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.source
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setSource(undefined)"
@@ -164,7 +164,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.source === 'hf'
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setSource('hf')"
@@ -175,7 +175,7 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.source === 'civitai'
-            ? 'bg-brand-500 text-white shadow-sm'
+            ? 'bg-safelight text-white shadow-sm'
             : 'hover:text-white'
         "
         @click="setSource('civitai')"
@@ -187,7 +187,7 @@ function clearSearch() {
     <!-- Search -->
     <label class="relative min-w-[180px] flex-1">
       <svg
-        class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400"
+        class="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
@@ -205,12 +205,12 @@ function clearSearch() {
         placeholder="Search catalog…"
         autocomplete="off"
         spellcheck="false"
-        class="h-10 w-full rounded-full border border-white/5 bg-white/5 pl-10 pr-10 text-[13px] text-ink-100 placeholder:text-ink-400 focus:border-brand-400/40 focus:outline-none focus:ring-2 focus:ring-brand-400/25"
+        class="h-10 w-full rounded-full border border-white/5 bg-white/5 pl-10 pr-10 text-[13px] text-rebate placeholder:text-ink-3 focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
       />
       <button
         v-if="searchLocal"
         type="button"
-        class="absolute right-2.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-ink-300 transition hover:bg-white/10 hover:text-white"
+        class="absolute right-2.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-ink-3 transition hover:bg-white/10 hover:text-white"
         aria-label="Clear search"
         @click="clearSearch"
       >
@@ -233,7 +233,7 @@ function clearSearch() {
     <!-- Sort -->
     <select
       :value="cat.filter.value.sort ?? 'downloads'"
-      class="h-10 rounded-full border border-white/5 bg-white/5 px-4 text-[13px] font-medium text-ink-100 focus:border-brand-400/40 focus:outline-none focus:ring-2 focus:ring-brand-400/25"
+      class="h-10 rounded-full border border-white/5 bg-white/5 px-4 text-[13px] font-medium text-rebate focus:border-safelight/40 focus:outline-none focus:ring-2 focus:ring-safelight/25"
       aria-label="Sort by"
       @change="
         setSort(($event.target as HTMLSelectElement).value as SortOption)
@@ -246,11 +246,11 @@ function clearSearch() {
 
     <!-- Include NSFW -->
     <label
-      class="flex items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3.5 py-1.5 text-[13px] font-medium text-ink-200"
+      class="flex items-center gap-2 rounded-full border border-white/5 bg-white/5 px-3.5 py-1.5 text-[13px] font-medium text-ink-2"
     >
       <input
         type="checkbox"
-        class="h-3.5 w-3.5 accent-brand-500"
+        class="h-3.5 w-3.5 accent-safelight"
         aria-label="Include NSFW"
         :checked="cat.filter.value.include_nsfw ?? false"
         @change="setNsfw(($event.target as HTMLInputElement).checked)"

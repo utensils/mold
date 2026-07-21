@@ -1,20 +1,28 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, provide, ref } from "vue";
+import { useRoute } from "vue-router";
 import ToastShelf from "@ui/components/ToastShelf.vue";
-import DownloadsDrawer from "./components/DownloadsDrawer.vue";
+import DownloadsPopover from "./components/shell/DownloadsPopover.vue";
 import AppNav from "./components/shell/AppNav.vue";
 import CommandK from "./components/shell/CommandK.vue";
 import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
-import ResourceTray from "./components/ResourceTray.vue";
 import { dismissToast, runToastAction, useNotifications } from "./lib/toasts";
 import {
   computeEtaSeconds,
+  computeRateBytesPerSec,
   onDownloadComplete,
   useDownloads,
 } from "./composables/useDownloads";
 import { fetchModels } from "./api";
 import { useGenerateStream } from "./composables/useGenerateStream";
 import { startQueueReconciler } from "./composables/useQueueReconciler";
+import { installNotifications } from "./lib/notifications";
+import {
+  useResources,
+  RESOURCES_INJECTION_KEY,
+} from "./composables/useResources";
+
+const route = useRoute();
 
 // Singleton — mounted once, survives navigation.
 const downloads = useDownloads();
@@ -27,20 +35,12 @@ const downloads = useDownloads();
 // user is on.
 const stream = useGenerateStream();
 const reconciler = startQueueReconciler(stream.jobs);
-const drawerOpen = ref(false);
 
-function openDownloads() {
-  drawerOpen.value = true;
-}
-function closeDownloads() {
-  drawerOpen.value = false;
-}
-
-// Exposed to child components via provide/inject-free singleton from useDownloads.
-// We additionally listen for the page-level event "mold:open-downloads" so the
-// nav chrome and ⌘K palette can open the drawer without a prop drill.
+// Downloads popover (spec §06). Opened by the AppNav button and ⌘K palette,
+// both of which dispatch the shared `mold:open-downloads` window event.
+const downloadsOpen = ref(false);
 function onOpenEvent() {
-  openDownloads();
+  downloadsOpen.value = true;
 }
 window.addEventListener("mold:open-downloads", onOpenEvent);
 
@@ -59,9 +59,16 @@ function onKeydown(event: KeyboardEvent) {
 window.addEventListener("keydown", onKeydown);
 
 const off = onDownloadComplete(() => {
-  // Best-effort: if the Generate page listens, it can refresh its own models
-  // list too. We refresh anyway for the picker.
+  // Refresh the model picker once a pull lands so the new model appears.
   void fetchModels().catch(() => undefined);
+});
+
+// Cross-workspace notifications (spec §08 G11): generation-done / pull /
+// host-offline toasts plus the nav badge signals.
+const teardownNotifications = installNotifications({
+  jobs: stream.jobs,
+  downloads,
+  currentRouteName: () => String(route.name ?? ""),
 });
 
 onBeforeUnmount(() => {
@@ -69,6 +76,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   off();
   reconciler.stop();
+  teardownNotifications();
 });
 
 const etaByJob = computed(() =>
@@ -83,22 +91,25 @@ const etaByJob = computed(() =>
   ),
 );
 
+const rateByJob = computed(() =>
+  Object.fromEntries(
+    downloads.activeJobs.value.map((job) => [
+      job.id,
+      computeRateBytesPerSec(downloads.ratesByJob.value[job.id] ?? []),
+    ]),
+  ),
+);
+
 async function handleCancel(id: string) {
   await downloads.cancel(id);
 }
 async function handleRetry(model: string) {
   await downloads.enqueue(model);
 }
-// ── Agent B (resource telemetry) ────────────────────────────────────────────
-// `useResources` is mounted once at the App root and injected into pages
-// that need it (/generate, and Agent C's PlacementPanel). This ensures a
-// single shared EventSource instead of one per page navigation.
-import { provide } from "vue";
-import {
-  useResources,
-  RESOURCES_INJECTION_KEY,
-} from "./composables/useResources";
 
+// `useResources` is mounted once at the App root and provided so pages that
+// need GPU telemetry (Advanced → PlacementPanel) share a single EventSource
+// instead of opening one per navigation.
 const resources = useResources();
 provide(RESOURCES_INJECTION_KEY, resources);
 
@@ -111,6 +122,17 @@ const notifications = useNotifications();
   <div class="app-frame">
     <AppNav />
     <router-view />
+    <DownloadsPopover
+      :open="downloadsOpen"
+      :active="downloads.activeJobs.value"
+      :queued="downloads.queued.value"
+      :history="downloads.history.value"
+      :eta-by-job="etaByJob"
+      :rate-by-job="rateByJob"
+      @close="downloadsOpen = false"
+      @cancel="handleCancel"
+      @retry="handleRetry"
+    />
     <ToastShelf
       :toasts="notifications.toasts"
       @dismiss="dismissToast"
@@ -119,17 +141,6 @@ const notifications = useNotifications();
     <ConfirmDialog />
     <CommandK :open="paletteOpen" @close="paletteOpen = false" />
   </div>
-  <ResourceTray />
-  <DownloadsDrawer
-    :open="drawerOpen"
-    :active="downloads.activeJobs.value"
-    :queued="downloads.queued.value"
-    :history="downloads.history.value"
-    :eta-by-job="etaByJob"
-    @close="closeDownloads"
-    @cancel="handleCancel"
-    @retry="handleRetry"
-  />
 </template>
 
 <style scoped>

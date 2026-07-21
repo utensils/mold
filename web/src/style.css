@@ -42,33 +42,6 @@
 
   --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
   --shadow-float: 0 40px 90px -20px rgba(0, 0, 0, 0.6);
-
-  /* ── TEMPORARY migration aliases ─────────────────────────────────────
-   * Legacy utility names from the pre-Mold-Studio SPA, remapped onto the
-   * token palette so unmigrated views stay legible. Every mapping below is
-   * deleted once the last view moves to the semantic names above. */
-  --color-ink-50: var(--rebate);
-  --color-ink-100: color-mix(in srgb, var(--rebate) 90%, transparent);
-  --color-ink-200: var(--ink-2);
-  --color-ink-300: var(--ink-3);
-  --color-ink-400: color-mix(in srgb, var(--rebate) 42%, transparent);
-  --color-ink-500: color-mix(in srgb, var(--rebate) 34%, transparent);
-  --color-ink-900: var(--bench);
-  --color-ink-950: var(--bath);
-  --color-brand-300: color-mix(in srgb, var(--safelight) 70%, var(--rebate));
-  --color-brand-400: var(--safelight);
-  --color-brand-500: var(--safelight);
-  --color-brand-600: color-mix(in srgb, var(--safelight) 82%, var(--on-accent));
-  --color-accent-300: color-mix(in srgb, var(--warning) 70%, var(--rebate));
-  --color-accent-400: var(--warning);
-  --shadow-card: inset 0 1px 0 var(--card-hi);
-}
-
-/* TEMPORARY migration alias — legacy glass panels become flat bench cards
- * (spec: no backdrop blur in content). Deleted with the last legacy view. */
-.glass {
-  background: var(--bench);
-  border: 1px solid var(--edge);
 }
 
 /* Wordmark gradient (spec §02, prototype [data-brand]): the "mold" wordmark is

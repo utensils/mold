@@ -243,10 +243,10 @@ onBeforeUnmount(() => {
     <!-- Empty state -->
     <div
       v-else-if="entries.length === 0"
-      class="glass flex flex-col items-center gap-3 rounded-[var(--radius-card)] px-6 py-20 text-center"
+      class="bg-bench border border-edge flex flex-col items-center gap-3 rounded-[var(--radius-card)] px-6 py-20 text-center"
     >
       <svg
-        class="h-14 w-14 text-ink-400"
+        class="h-14 w-14 text-ink-3"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
@@ -260,11 +260,11 @@ onBeforeUnmount(() => {
         <path d="m4 19 6-6 4 4 3-3 3 3" />
       </svg>
       <div>
-        <p class="text-lg font-medium text-ink-100">Nothing to show.</p>
-        <p class="mt-1 text-sm text-ink-400">
+        <p class="text-lg font-medium text-rebate">Nothing to show.</p>
+        <p class="mt-1 text-sm text-ink-3">
           Try clearing the search or filter, or generate something with
           <code
-            class="rounded bg-white/10 px-1.5 py-0.5 text-[12px] text-ink-100"
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[12px] text-rebate"
             >mold run</code
           >.
         </p>
@@ -321,7 +321,7 @@ onBeforeUnmount(() => {
     <div
       v-if="entries.length > 0"
       ref="sentinel"
-      class="mt-8 flex h-10 items-center justify-center text-[12px] font-medium text-ink-400"
+      class="mt-8 flex h-10 items-center justify-center text-[12px] font-medium text-ink-3"
       aria-hidden="true"
     >
       <span v-if="hasMore">
@@ -336,7 +336,7 @@ onBeforeUnmount(() => {
          fixed viewport because drag coords come from pointer events. -->
     <div
       v-if="dragBox"
-      class="pointer-events-none fixed z-40 rounded-sm border border-brand-400/70 bg-brand-400/10"
+      class="pointer-events-none fixed z-40 rounded-sm border border-safelight/70 bg-safelight/10"
       :style="{
         left: `${dragBox.x}px`,
         top: `${dragBox.y}px`,

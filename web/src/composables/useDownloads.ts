@@ -199,6 +199,23 @@ export function computeEtaSeconds(
   return Number.isFinite(eta) ? Math.round(eta) : null;
 }
 
+/**
+ * Instantaneous transfer rate (bytes/sec) over the same sliding window
+ * `computeEtaSeconds` reads. Null until there are two samples with forward
+ * progress — the downloads popover pairs this with the ETA on the sub-line.
+ */
+export function computeRateBytesPerSec(
+  history: Array<{ ts: number; bytes: number }>,
+): number | null {
+  if (history.length < 2) return null;
+  const first = history[0];
+  const last = history[history.length - 1];
+  const deltaBytes = last.bytes - first.bytes;
+  const deltaMs = last.ts - first.ts;
+  if (deltaMs <= 0 || deltaBytes <= 0) return null;
+  return (deltaBytes * 1000) / deltaMs;
+}
+
 // ── Vue runtime singleton ────────────────────────────────────────────────────
 
 export interface UseDownloads {

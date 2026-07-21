@@ -8,6 +8,7 @@
  * surfaces the "N on" badge and opens the drawer.
  */
 import { computed } from "vue";
+import { useRouter } from "vue-router";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
@@ -18,6 +19,12 @@ import Icon from "@ui/components/Icon.vue";
 import { ASPECTS, dimsForMp } from "@ui/lib/resolution";
 import type { GenerateFormState } from "../../types";
 import { projectResolution } from "./resolutionProjection";
+import {
+  ORIGIN_HOST_ID,
+  getGenerateTargetId,
+  getHost,
+  originHost,
+} from "../../lib/hostRegistry";
 
 const props = withDefaults(
   defineProps<{
@@ -25,16 +32,29 @@ const props = withDefaults(
     family: string;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
-    /** Host label for the run-on row. */
-    hostLabel?: string;
   }>(),
-  { advCount: 0, hostLabel: "This Mac" },
+  { advCount: 0 },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
   "open-advanced": [];
 }>();
+
+// Generation target row (spec §08 multi-host, light). The row reflects the
+// chosen target from the host registry (origin by default) and opens Machines
+// on click. Cross-host dispatch from the browser is a follow-up — a non-origin
+// target here is honest that generation still runs on this server for now.
+const router = useRouter();
+// Read once at setup — ControlsAside remounts on returning to Create, so a
+// target changed on the Machines page is picked up on the next visit.
+const targetHost = computed(
+  () => getHost(getGenerateTargetId()) ?? originHost(),
+);
+const targetIsOrigin = computed(() => targetHost.value.id === ORIGIN_HOST_ID);
+function openMachines() {
+  void router?.push("/machines");
+}
 
 const projection = computed(() =>
   projectResolution(props.modelValue.width, props.modelValue.height),
@@ -177,11 +197,29 @@ function setSeed(value: number) {
       >
     </button>
 
-    <div class="controls__host">
-      <span class="controls__dot" />
-      <span class="controls__host-label">Run on {{ hostLabel }}</span>
-      <Icon name="chevron-down" :size="14" />
-    </div>
+    <button
+      type="button"
+      class="controls__host"
+      data-test="controls-host"
+      @click="openMachines"
+    >
+      <span
+        class="controls__dot"
+        :class="{ 'controls__dot--remote': !targetIsOrigin }"
+      />
+      <span class="controls__host-label">Run on {{ targetHost.name }}</span>
+      <span v-if="!targetIsOrigin" class="controls__host-hint">
+        opens machines
+      </span>
+      <Icon name="chevron-right" :size="14" />
+    </button>
+    <p
+      v-if="!targetIsOrigin"
+      class="controls__host-note"
+      data-test="controls-host-note"
+    >
+      generation runs on this server for now
+    </p>
   </aside>
 </template>
 
@@ -256,11 +294,27 @@ function setSeed(value: number) {
 }
 
 .controls__host {
+  width: 100%;
+  border: 0;
   border-top: 1px solid var(--edge);
-  padding-top: 14px;
+  background: transparent;
+  padding: 14px 0 0;
+  margin-top: 2px;
   display: flex;
   align-items: center;
   gap: 9px;
+  cursor: pointer;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.controls__host:hover .controls__host-label {
+  color: var(--rebate);
+}
+
+.controls__host:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
 }
 
 .controls__dot {
@@ -271,9 +325,27 @@ function setSeed(value: number) {
   flex: 0 0 7px;
 }
 
+.controls__dot--remote {
+  background: var(--halide);
+}
+
 .controls__host-label {
   font-size: 12px;
   color: var(--ink-2);
   flex: 1;
+}
+
+.controls__host-hint {
+  font-family: var(--f-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.controls__host-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--ink-3);
 }
 </style>

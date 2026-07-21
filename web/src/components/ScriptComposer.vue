@@ -277,10 +277,10 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 <template>
   <div class="flex flex-col gap-3">
     <div class="flex items-center gap-2 text-sm">
-      <span class="font-semibold text-slate-100">Script mode</span>
+      <span class="font-semibold text-rebate">Script mode</span>
       <div class="ml-auto flex gap-2">
         <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
+          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
           @click="importFileInput?.click()"
         >
           Import
@@ -293,13 +293,13 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
           @change="handleImportChange"
         />
         <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
+          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
           @click="downloadToml()"
         >
           Export
         </button>
         <button
-          class="rounded-lg bg-slate-900/60 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800/80"
+          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
           @click="copyToml()"
         >
           Copy TOML
@@ -329,7 +329,7 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 
     <div
       class="flex items-center justify-between text-xs"
-      :class="overCap ? 'text-red-400' : 'text-slate-400'"
+      :class="overCap ? 'text-red-400' : 'text-ink-3'"
       :title="
         overCap
           ? 'Reduce frames or stages — server will reject this script'
@@ -343,23 +343,23 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       </span>
       <button
         v-if="canAddStage"
-        class="rounded-lg bg-slate-900/60 px-3 py-1 text-slate-200 hover:bg-slate-800/80"
+        class="rounded-lg bg-bench/60 px-3 py-1 text-ink-2 hover:bg-surface/80"
         @click="addStage"
       >
         + Add stage
       </button>
-      <span v-else class="text-slate-500">Max stages reached</span>
+      <span v-else class="text-ink-3">Max stages reached</span>
     </div>
 
     <label
       v-if="limits?.supports_audio"
-      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-slate-300"
+      class="flex cursor-pointer items-center gap-2 px-1 text-xs text-ink-2"
       title="Generate per-stage audio and mux it into the stitched MP4 (LTX-2 / LTX-2.3 only). Smooth/Cut/Fade transitions stitch audio to match the visual transition."
     >
       <input
         type="checkbox"
         data-test="script-composer-enable-audio"
-        class="h-4 w-4 rounded border-slate-600 bg-slate-900 text-brand-500 focus:ring-brand-500"
+        class="h-4 w-4 rounded border-ce bg-bench text-safelight focus:ring-safelight"
         :checked="script.chain.enable_audio === true"
         @change="
           script.chain.enable_audio = ($event.target as HTMLInputElement)
@@ -375,7 +375,7 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       This model doesn't support chain generation.
     </p>
     <button
-      class="w-full rounded-xl bg-brand-500 py-2 text-sm font-semibold text-white hover:bg-brand-600 disabled:opacity-50"
+      class="w-full rounded-xl bg-safelight py-2 text-sm font-semibold text-white hover:bg-safelight disabled:opacity-50"
       :disabled="
         limits === null ||
         overCap ||

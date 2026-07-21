@@ -14,11 +14,33 @@ import Icon from "@ui/components/Icon.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
 import { useDownloads } from "../../composables/useDownloads";
+import {
+  markGalleryVisited,
+  useNotificationSignals,
+} from "../../lib/notifications";
 import type { IconName } from "@ui/icons";
 
 const route = useRoute();
 const router = useRouter();
 const downloads = useDownloads();
+
+// Cross-workspace badge signals (spec §08 G11): a fresh-prints accent dot on
+// the Gallery pill (cleared on entering the gallery) and a stop-tinted dot on
+// the Machines pill while any registered host is offline.
+const { freshPrintCount, hasOfflineHost } = useNotificationSignals();
+watch(
+  () => route.name,
+  (name) => {
+    if (name === "gallery") markGalleryVisited();
+  },
+  { immediate: true },
+);
+
+function pillDot(pill: Pill): "accent" | "stop" | null {
+  if (pill.name === "gallery" && freshPrintCount.value > 0) return "accent";
+  if (pill.name === "machines" && hasOfflineHost.value) return "stop";
+  return null;
+}
 
 interface Pill {
   name: string;
@@ -122,6 +144,13 @@ const menuOpen = ref(false);
           @click="go(pill)"
         >
           {{ pill.label }}
+          <span
+            v-if="pillDot(pill)"
+            class="seg-dot"
+            :class="`seg-dot--${pillDot(pill)}`"
+            :data-test="`nav-dot-${pill.name}`"
+            aria-hidden="true"
+          />
         </button>
       </nav>
 
@@ -276,6 +305,7 @@ const menuOpen = ref(false);
 }
 
 .seg-pill {
+  position: relative;
   border: 0;
   background: transparent;
   color: var(--ink-2);
@@ -288,6 +318,23 @@ const menuOpen = ref(false);
   transition:
     background var(--dur-quick) var(--ease),
     color var(--dur-quick) var(--ease);
+}
+
+.seg-dot {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.seg-dot--accent {
+  background: var(--safelight);
+}
+
+.seg-dot--stop {
+  background: var(--stop);
 }
 
 .seg-pill:hover {

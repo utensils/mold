@@ -47,17 +47,17 @@ const sourceImageLabel = computed(() => {
 </script>
 
 <template>
-  <div class="glass rounded-2xl p-3 space-y-2">
-    <div class="flex items-center gap-2 text-xs text-slate-400">
+  <div class="bg-bench border border-edge rounded-2xl p-3 space-y-2">
+    <div class="flex items-center gap-2 text-xs text-ink-3">
       <span class="drag-handle cursor-grab select-none">⋮⋮</span>
       <span>{{ index + 1 }}</span>
       <template v-if="!isFirst">
-        <div class="inline-flex rounded-full bg-slate-900/60 p-0.5">
+        <div class="inline-flex rounded-full bg-bench/60 p-0.5">
           <button
             type="button"
             :class="
               (stage.transition ?? 'smooth') === 'smooth'
-                ? 'bg-brand-500/60'
+                ? 'bg-safelight/60'
                 : ''
             "
             class="rounded-full px-2 py-0.5"
@@ -67,7 +67,7 @@ const sourceImageLabel = computed(() => {
           </button>
           <button
             type="button"
-            :class="stage.transition === 'cut' ? 'bg-brand-500/60' : ''"
+            :class="stage.transition === 'cut' ? 'bg-safelight/60' : ''"
             class="rounded-full px-2 py-0.5"
             @click="updateTransition('cut')"
           >
@@ -75,7 +75,7 @@ const sourceImageLabel = computed(() => {
           </button>
           <button
             type="button"
-            :class="stage.transition === 'fade' ? 'bg-brand-500/60' : ''"
+            :class="stage.transition === 'fade' ? 'bg-safelight/60' : ''"
             class="rounded-full px-2 py-0.5"
             @click="updateTransition('fade')"
           >
@@ -86,7 +86,7 @@ const sourceImageLabel = computed(() => {
       <span v-else class="italic opacity-60">Opening frame</span>
       <div class="ml-auto flex items-center gap-2">
         <select
-          class="rounded-full bg-slate-900/60 px-2 py-0.5 text-xs"
+          class="rounded-full bg-bench/60 px-2 py-0.5 text-xs"
           :value="stage.frames"
           @change="
             updateFrames(Number(($event.target as HTMLSelectElement).value))
@@ -128,7 +128,7 @@ const sourceImageLabel = computed(() => {
         />
         <button
           type="button"
-          class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-slate-900/90 text-xs text-slate-100 hover:bg-slate-800"
+          class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-bench/90 text-xs text-rebate hover:bg-surface"
           aria-label="Remove source image"
           title="Remove source image"
           @click="emit('clear-image')"
@@ -139,7 +139,7 @@ const sourceImageLabel = computed(() => {
       <button
         v-else
         type="button"
-        class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/40 text-lg text-slate-400 hover:border-slate-500 hover:text-slate-200"
+        class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl border border-dashed border-edge bg-bench/40 text-lg text-ink-3 hover:border-ce hover:text-ink-2"
         aria-label="Attach source image"
         title="Attach source image"
         @click="emit('pick-image')"
@@ -148,25 +148,25 @@ const sourceImageLabel = computed(() => {
       </button>
 
       <textarea
-        class="min-h-[2.5rem] flex-1 resize-none bg-transparent text-base text-slate-100 placeholder:text-slate-500 focus:outline-none"
+        class="min-h-[2.5rem] flex-1 resize-none bg-transparent text-base text-rebate placeholder:text-ink-3 focus:outline-none"
         :value="stage.prompt"
         placeholder="Describe this stage…"
         @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
       />
     </div>
 
-    <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-      <button class="hover:text-slate-200" @click="emit('expand')">
+    <div class="flex flex-wrap items-center gap-2 text-xs text-ink-3">
+      <button class="hover:text-ink-2" @click="emit('expand')">
         ✨ Expand
       </button>
       <button
         v-if="hasSourceImage"
-        class="hover:text-slate-200"
+        class="hover:text-ink-2"
         @click="emit('pick-image')"
       >
         🖼️ Replace image
       </button>
-      <button v-else class="hover:text-slate-200" @click="emit('pick-image')">
+      <button v-else class="hover:text-ink-2" @click="emit('pick-image')">
         🖼️ Attach image
       </button>
       <span>{{ durationSec }}s</span>

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ControlsAside from "./ControlsAside.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
@@ -9,7 +9,13 @@ import {
   useGenerateForm,
   __testing__,
 } from "../../composables/useGenerateForm";
+import { addHost, setGenerateTargetId } from "../../lib/hostRegistry";
 import type { GenerateFormState } from "../../types";
+
+const pushMock = vi.hoisted(() => vi.fn());
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: pushMock }),
+}));
 
 function baseForm(
   overrides: Partial<GenerateFormState> = {},
@@ -28,6 +34,7 @@ function factory(overrides: Partial<GenerateFormState> = {}, family = "flux") {
 describe("ControlsAside", () => {
   beforeEach(() => {
     localStorage.clear();
+    pushMock.mockClear();
   });
   afterEach(() => __testing__.resetForTest());
 
@@ -107,5 +114,33 @@ describe("ControlsAside", () => {
     expect(wrapper.get("[data-test='adv-badge']").text()).toContain("3");
     await wrapper.get("[data-test='open-advanced']").trigger("click");
     expect(wrapper.emitted("open-advanced")).toHaveLength(1);
+  });
+
+  it("defaults the run-on row to this server with no caption", () => {
+    const wrapper = factory();
+    expect(wrapper.get("[data-test='controls-host']").text()).toContain(
+      "this server",
+    );
+    expect(wrapper.find("[data-test='controls-host-note']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("reflects a non-origin generate target with an honest caption", () => {
+    const host = addHost({ url: "http://studio:7680", name: "Studio" });
+    setGenerateTargetId(host.id);
+    const wrapper = factory();
+    expect(wrapper.get("[data-test='controls-host']").text()).toContain(
+      "Studio",
+    );
+    expect(wrapper.get("[data-test='controls-host-note']").text()).toContain(
+      "generation runs on this server for now",
+    );
+  });
+
+  it("opens the machines workspace when the host row is clicked", async () => {
+    const wrapper = factory();
+    await wrapper.get("[data-test='controls-host']").trigger("click");
+    expect(pushMock).toHaveBeenCalledWith("/machines");
   });
 });

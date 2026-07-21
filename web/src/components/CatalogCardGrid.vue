@@ -50,7 +50,7 @@ function pullCard(id: string) {
     <!-- Loading state -->
     <div
       v-if="cat.loading.value"
-      class="flex items-center justify-center py-12 text-sm text-ink-400"
+      class="flex items-center justify-center py-12 text-sm text-ink-3"
     >
       Loading…
     </div>
@@ -58,7 +58,7 @@ function pullCard(id: string) {
     <!-- Error state -->
     <div
       v-else-if="cat.errorMsg.value"
-      class="glass flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
+      class="bg-bench border border-edge flex items-start gap-3 rounded-2xl px-4 py-3 text-sm text-rose-200"
     >
       <span class="mt-0.5">⚠</span>
       <div>
@@ -70,12 +70,12 @@ function pullCard(id: string) {
     <!-- Empty state -->
     <div
       v-else-if="cat.entries.value.length === 0"
-      class="flex flex-col items-center justify-center gap-2 py-16 text-ink-400"
+      class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
       <p class="text-sm">No models found.</p>
       <p class="text-xs">
         Try adjusting filters or click
-        <span class="text-ink-200">Refresh catalog</span>
+        <span class="text-ink-2">Refresh catalog</span>
         in the top bar.
       </p>
     </div>
@@ -94,7 +94,7 @@ function pullCard(id: string) {
 
       <div
         v-if="cat.loadingMore.value"
-        class="py-6 text-center text-sm text-ink-400"
+        class="py-6 text-center text-sm text-ink-3"
       >
         Loading more…
       </div>

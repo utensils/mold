@@ -37,18 +37,18 @@ function onCopy(text: string, kind: CopyTarget) {
   <header class="flex items-start gap-3">
     <div class="min-w-0 flex-1">
       <p
-        class="truncate font-mono text-[12px] text-ink-400"
+        class="truncate font-mono text-[12px] text-ink-3"
         :title="item.filename"
       >
         {{ item.filename }}
       </p>
       <h2
-        class="mt-1 flex items-center gap-2 text-base font-semibold text-ink-50"
+        class="mt-1 flex items-center gap-2 text-base font-semibold text-rebate"
       >
-        <span class="h-1.5 w-1.5 rounded-full bg-brand-400"></span>
+        <span class="h-1.5 w-1.5 rounded-full bg-safelight"></span>
         {{ shortModel(item.metadata.model) }}
       </h2>
-      <p class="mt-0.5 text-[12px] text-ink-400">
+      <p class="mt-0.5 text-[12px] text-ink-3">
         {{ formatAbsoluteTime(item.timestamp) }}
       </p>
     </div>
@@ -81,13 +81,13 @@ function onCopy(text: string, kind: CopyTarget) {
   <section class="mt-5">
     <div class="mb-2 flex items-center justify-between">
       <span
-        class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-400"
+        class="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-3"
       >
         Prompt
       </span>
       <button
         v-if="item.metadata.prompt"
-        class="text-[11px] font-medium text-brand-300 transition hover:text-brand-400"
+        class="text-[11px] font-medium text-safelight transition hover:text-safelight"
         @click="onCopy(item.metadata.prompt, 'prompt')"
       >
         {{ copied === "prompt" ? "copied ✓" : "copy" }}
@@ -95,13 +95,13 @@ function onCopy(text: string, kind: CopyTarget) {
     </div>
     <p
       v-if="item.metadata.prompt"
-      class="whitespace-pre-wrap rounded-xl bg-white/[0.04] p-3 text-[13.5px] leading-relaxed text-ink-100"
+      class="whitespace-pre-wrap rounded-xl bg-white/[0.04] p-3 text-[13.5px] leading-relaxed text-rebate"
     >
       {{ item.metadata.prompt }}
     </p>
     <p
       v-else
-      class="rounded-xl bg-white/[0.04] p-3 text-[13px] italic text-ink-400"
+      class="rounded-xl bg-white/[0.04] p-3 text-[13px] italic text-ink-3"
     >
       {{
         item.metadata_synthetic
@@ -114,12 +114,12 @@ function onCopy(text: string, kind: CopyTarget) {
   <!-- Original prompt (shows only when expansion was used) -->
   <section v-if="item.metadata.original_prompt" class="mt-4">
     <div
-      class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-400"
+      class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-3"
     >
       Original prompt
     </div>
     <p
-      class="whitespace-pre-wrap rounded-xl bg-white/[0.03] p-3 text-[13px] leading-relaxed text-ink-200"
+      class="whitespace-pre-wrap rounded-xl bg-white/[0.03] p-3 text-[13px] leading-relaxed text-ink-2"
     >
       {{ item.metadata.original_prompt }}
     </p>
@@ -128,7 +128,7 @@ function onCopy(text: string, kind: CopyTarget) {
   <!-- Negative -->
   <section v-if="item.metadata.negative_prompt" class="mt-4">
     <div
-      class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-400"
+      class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-3"
     >
       Negative
     </div>
@@ -142,19 +142,17 @@ function onCopy(text: string, kind: CopyTarget) {
   <!-- Specs grid -->
   <section class="mt-5 grid grid-cols-2 gap-2 text-[12.5px]">
     <div class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         Resolution
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         {{ formatResolution(item.metadata) || "—" }}
       </div>
     </div>
     <div class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
-        Seed
-      </div>
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">Seed</div>
       <button
-        class="mt-0.5 block w-full text-left font-mono text-[12px] font-medium text-ink-50 transition hover:text-brand-300"
+        class="mt-0.5 block w-full text-left font-mono text-[12px] font-medium text-rebate transition hover:text-safelight"
         :title="copied === 'seed' ? 'copied!' : 'click to copy'"
         @click="onCopy(String(item.metadata.seed), 'seed')"
       >
@@ -162,18 +160,16 @@ function onCopy(text: string, kind: CopyTarget) {
       </button>
     </div>
     <div class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
-        Steps
-      </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">Steps</div>
+      <div class="mt-0.5 font-medium text-rebate">
         {{ item.metadata.steps || "—" }}
       </div>
     </div>
     <div class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         Guidance
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         {{ item.metadata.guidance ? item.metadata.guidance.toFixed(1) : "—" }}
       </div>
     </div>
@@ -184,10 +180,10 @@ function onCopy(text: string, kind: CopyTarget) {
       "
       class="rounded-xl bg-white/[0.04] px-3 py-2.5"
     >
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         img2img
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         strength {{ item.metadata.strength.toFixed(2) }}
       </div>
     </div>
@@ -196,10 +192,10 @@ function onCopy(text: string, kind: CopyTarget) {
       v-if="item.metadata.scheduler"
       class="rounded-xl bg-white/[0.04] px-3 py-2.5"
     >
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         Scheduler
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         {{ formatScheduler(item.metadata.scheduler) }}
       </div>
     </div>
@@ -208,10 +204,10 @@ function onCopy(text: string, kind: CopyTarget) {
       v-if="item.metadata.frames"
       class="rounded-xl bg-white/[0.04] px-3 py-2.5"
     >
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         Frames
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         {{ item.metadata.frames }}
       </div>
     </div>
@@ -219,25 +215,25 @@ function onCopy(text: string, kind: CopyTarget) {
       v-if="item.metadata.fps"
       class="rounded-xl bg-white/[0.04] px-3 py-2.5"
     >
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">FPS</div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">FPS</div>
+      <div class="mt-0.5 font-medium text-rebate">
         {{ item.metadata.fps }}
       </div>
     </div>
 
     <div v-if="item.size_bytes" class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         File size
       </div>
-      <div class="mt-0.5 font-medium text-ink-50">
+      <div class="mt-0.5 font-medium text-rebate">
         {{ formatFileSize(item.size_bytes) }}
       </div>
     </div>
     <div v-if="item.format" class="rounded-xl bg-white/[0.04] px-3 py-2.5">
-      <div class="text-[10.5px] uppercase tracking-wider text-ink-400">
+      <div class="text-[10.5px] uppercase tracking-wider text-ink-3">
         Format
       </div>
-      <div class="mt-0.5 font-medium uppercase text-ink-50">
+      <div class="mt-0.5 font-medium uppercase text-rebate">
         {{ item.format }}
       </div>
     </div>
@@ -246,14 +242,14 @@ function onCopy(text: string, kind: CopyTarget) {
   <!-- LoRA -->
   <section
     v-if="item.metadata.lora"
-    class="mt-4 rounded-xl bg-brand-500/10 px-3 py-3"
+    class="mt-4 rounded-xl bg-safelight/10 px-3 py-3"
   >
-    <div class="text-[10.5px] uppercase tracking-wider text-brand-300">
+    <div class="text-[10.5px] uppercase tracking-wider text-safelight">
       LoRA
     </div>
-    <div class="mt-0.5 break-all font-mono text-[12px] text-brand-100">
+    <div class="mt-0.5 break-all font-mono text-[12px] text-safelight">
       {{ item.metadata.lora }}
-      <span v-if="item.metadata.lora_scale" class="text-brand-300">
+      <span v-if="item.metadata.lora_scale" class="text-safelight">
         × {{ item.metadata.lora_scale }}
       </span>
     </div>
@@ -283,5 +279,5 @@ function onCopy(text: string, kind: CopyTarget) {
     </button>
   </section>
 
-  <p class="mt-6 text-[11px] text-ink-500">mold {{ item.metadata.version }}</p>
+  <p class="mt-6 text-[11px] text-ink-3">mold {{ item.metadata.version }}</p>
 </template>

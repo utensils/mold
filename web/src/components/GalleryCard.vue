@@ -180,14 +180,14 @@ function onRecreate(evt: Event) {
     ref="root"
     :data-filename="item.filename"
     :data-selected="selected ? 'true' : 'false'"
-    class="group relative block w-full overflow-hidden bg-ink-900/80 shadow-[var(--shadow-card)] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+    class="group relative block w-full overflow-hidden bg-bench/80 shadow-[inset_0_1px_0_var(--card-hi)] transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-safelight"
     :class="[
       variant === 'feed'
         ? 'ring-0 sm:rounded-3xl sm:ring-1 sm:ring-white/5'
         : 'rounded-2xl ring-1 ring-white/5',
-      selectMode ? 'cursor-pointer' : 'cursor-zoom-in hover:ring-brand-400/50',
+      selectMode ? 'cursor-pointer' : 'cursor-zoom-in hover:ring-safelight/50',
       selected
-        ? 'ring-2 ring-brand-400 sm:ring-2'
+        ? 'ring-2 ring-safelight sm:ring-2'
         : selectMode
           ? 'ring-1 ring-white/10'
           : '',
@@ -312,7 +312,7 @@ function onRecreate(evt: Event) {
       <button
         v-if="showRecreate && !selectMode"
         type="button"
-        class="absolute left-3 top-3 z-[6] rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-semibold text-white/90 opacity-0 backdrop-blur transition hover:bg-brand-500/80 group-hover:opacity-100 focus:opacity-100"
+        class="absolute left-3 top-3 z-[6] rounded-full bg-black/65 px-2.5 py-1 text-[11px] font-semibold text-white/90 opacity-0 backdrop-blur transition hover:bg-safelight/80 group-hover:opacity-100 focus:opacity-100"
         title="Recreate with these settings"
         aria-label="Recreate with these settings"
         @click="onRecreate"
@@ -328,7 +328,7 @@ function onRecreate(evt: Event) {
         class="pointer-events-none absolute left-3 top-3 z-10 inline-flex h-7 w-7 items-center justify-center rounded-full border-2 transition"
         :class="
           selected
-            ? 'border-brand-400 bg-brand-500 text-white shadow'
+            ? 'border-safelight bg-safelight text-white shadow'
             : 'border-white/60 bg-black/40 text-transparent backdrop-blur'
         "
         aria-hidden="true"
@@ -356,7 +356,7 @@ function onRecreate(evt: Event) {
             <div
               class="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider"
             >
-              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-brand-400" />
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-safelight" />
               <span class="truncate">{{ modelLabel }}</span>
             </div>
             <p
@@ -382,12 +382,12 @@ function onRecreate(evt: Event) {
       class="flex flex-col gap-2.5 border-t border-white/5 px-5 py-4 sm:px-6 sm:py-5"
     >
       <div
-        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-300"
+        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-3"
       >
         <span
-          class="inline-flex items-center gap-1.5 font-semibold text-ink-50"
+          class="inline-flex items-center gap-1.5 font-semibold text-rebate"
         >
-          <span class="h-1.5 w-1.5 rounded-full bg-brand-400" />
+          <span class="h-1.5 w-1.5 rounded-full bg-safelight" />
           {{ modelLabel }}
         </span>
         <span v-if="resolution" class="tabular-nums">{{ resolution }}</span>
@@ -402,13 +402,13 @@ function onRecreate(evt: Event) {
         </span>
         <span
           v-if="item.metadata_synthetic"
-          class="italic text-ink-500"
+          class="italic text-ink-3"
           title="No mold:parameters chunk was embedded in this file."
         >
           no metadata
         </span>
         <time
-          class="ml-auto shrink-0 text-[12px] tabular-nums text-ink-400"
+          class="ml-auto shrink-0 text-[12px] tabular-nums text-ink-3"
           :title="new Date(item.timestamp * 1000).toLocaleString()"
         >
           {{ relative }}
@@ -416,11 +416,11 @@ function onRecreate(evt: Event) {
       </div>
       <p
         v-if="item.metadata.prompt"
-        class="line-clamp-3 text-[15px] leading-relaxed text-ink-100"
+        class="line-clamp-3 text-[15px] leading-relaxed text-rebate"
       >
         {{ item.metadata.prompt }}
       </p>
-      <p v-else class="text-[13px] italic text-ink-400">
+      <p v-else class="text-[13px] italic text-ink-3">
         No prompt recorded for this file.
       </p>
     </div>

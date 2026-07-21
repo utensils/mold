@@ -26,6 +26,16 @@ vi.mock("../../composables/useDownloads", () => ({
   }),
 }));
 
+const notifState = vi.hoisted(() => ({ fresh: 0, offline: false }));
+const markGalleryVisitedMock = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/notifications", () => ({
+  useNotificationSignals: () => ({
+    freshPrintCount: { value: notifState.fresh },
+    hasOfflineHost: { value: notifState.offline },
+  }),
+  markGalleryVisited: markGalleryVisitedMock,
+}));
+
 function mountNav() {
   return mount(AppNav, {
     global: {
@@ -42,6 +52,9 @@ describe("AppNav", () => {
     routeState.query = {};
     dlState.activeJobs = [];
     dlState.queued = [];
+    notifState.fresh = 0;
+    notifState.offline = false;
+    markGalleryVisitedMock.mockClear();
     pushMock.mockClear();
   });
 
@@ -115,5 +128,27 @@ describe("AppNav", () => {
 
     await wrapper.get('[data-test="nav-hamburger"]').trigger("click");
     expect(wrapper.findComponent(MobileNavSheet).props("open")).toBe(true);
+  });
+
+  it("shows an accent dot on the Gallery pill for fresh prints", () => {
+    notifState.fresh = 2;
+    routeState.name = "create";
+    const wrapper = mountNav();
+    expect(wrapper.find('[data-test="nav-dot-gallery"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="nav-dot-machines"]').exists()).toBe(false);
+  });
+
+  it("shows a stop dot on the Machines pill while a host is offline", () => {
+    notifState.offline = true;
+    const wrapper = mountNav();
+    const dot = wrapper.find('[data-test="nav-dot-machines"]');
+    expect(dot.exists()).toBe(true);
+    expect(dot.classes()).toContain("seg-dot--stop");
+  });
+
+  it("clears fresh prints when the gallery route is entered", () => {
+    routeState.name = "gallery";
+    mountNav();
+    expect(markGalleryVisitedMock).toHaveBeenCalled();
   });
 });

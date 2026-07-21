@@ -84,12 +84,12 @@ function deleteTemplate(template: GenerationTemplate) {
 
 <template>
   <section
-    class="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-2"
+    class="mt-4 rounded-lg border border-edge bg-bath/30 p-2"
     data-test="generation-templates"
   >
     <div class="flex items-center justify-between gap-2">
-      <label class="text-xs uppercase text-slate-400">Templates</label>
-      <span class="text-[11px] text-slate-500">
+      <label class="text-xs uppercase text-ink-3">Templates</label>
+      <span class="text-[11px] text-ink-3">
         {{ templates.length }}
       </span>
     </div>
@@ -98,13 +98,13 @@ function deleteTemplate(template: GenerationTemplate) {
       <input
         v-model="nameDraft"
         type="text"
-        class="min-w-0 rounded-lg bg-slate-900/60 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+        class="min-w-0 rounded-lg bg-bench/60 px-2 py-1 text-xs text-rebate placeholder:text-ink-3"
         placeholder="Template name"
         data-test="template-name"
       />
       <button
         type="button"
-        class="rounded-md bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
+        class="rounded-md bg-surface px-2 py-1 text-xs text-ink-2 hover:bg-surface"
         data-test="template-save"
         @click="saveCurrent"
       >
@@ -116,13 +116,13 @@ function deleteTemplate(template: GenerationTemplate) {
       <input
         v-model="search"
         type="search"
-        class="min-w-0 rounded-lg bg-slate-900/60 px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500"
+        class="min-w-0 rounded-lg bg-bench/60 px-2 py-1 text-xs text-rebate placeholder:text-ink-3"
         placeholder="Search templates"
         data-test="template-search"
       />
       <select
         v-model="sort"
-        class="rounded-lg bg-slate-900/60 px-2 py-1 text-xs text-slate-100"
+        class="rounded-lg bg-bench/60 px-2 py-1 text-xs text-rebate"
         data-test="template-sort"
         @change="refreshTemplates"
       >
@@ -137,22 +137,22 @@ function deleteTemplate(template: GenerationTemplate) {
       <div
         v-for="template in visibleTemplates"
         :key="template.id"
-        class="grid grid-cols-[1fr_auto_auto_auto] items-center gap-1 border-t border-slate-800/70 py-1 first:border-t-0"
+        class="grid grid-cols-[1fr_auto_auto_auto] items-center gap-1 border-t border-edge/70 py-1 first:border-t-0"
       >
         <button
           type="button"
-          class="min-w-0 truncate text-left text-xs text-slate-200 hover:text-white"
+          class="min-w-0 truncate text-left text-xs text-ink-2 hover:text-white"
           data-test="template-load"
           @click="loadTemplate(template)"
         >
           <span data-test="template-row-name">{{ template.name }}</span>
-          <span class="ml-1 text-slate-500">
+          <span class="ml-1 text-ink-3">
             {{ template.form.model || "no model" }}
           </span>
         </button>
         <button
           type="button"
-          class="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+          class="rounded px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-surface hover:text-rebate"
           data-test="template-rename"
           @click="renameTemplate(template)"
         >
@@ -160,17 +160,14 @@ function deleteTemplate(template: GenerationTemplate) {
         </button>
         <button
           type="button"
-          class="rounded px-1.5 py-0.5 text-[11px] text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+          class="rounded px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-surface hover:text-rebate"
           data-test="template-delete"
           @click="deleteTemplate(template)"
         >
           Delete
         </button>
       </div>
-      <p
-        v-if="visibleTemplates.length === 0"
-        class="py-2 text-xs text-slate-500"
-      >
+      <p v-if="visibleTemplates.length === 0" class="py-2 text-xs text-ink-3">
         No templates
       </p>
     </div>

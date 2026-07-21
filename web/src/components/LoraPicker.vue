@@ -151,13 +151,13 @@ function addAnother() {
     class="mt-4 space-y-3"
   >
     <div class="flex items-center justify-between">
-      <label class="text-xs uppercase text-slate-400">
+      <label class="text-xs uppercase text-ink-3">
         LoRA{{ modelValue.length > 1 ? ` stack (${modelValue.length})` : "" }}
       </label>
       <button
         v-if="canAddMore"
         type="button"
-        class="rounded-md bg-slate-800 px-2 py-0.5 text-xs text-slate-200 hover:bg-slate-700"
+        class="rounded-md bg-surface px-2 py-0.5 text-xs text-ink-2 hover:bg-surface"
         @click="addAnother"
       >
         + Add LoRA
@@ -168,7 +168,7 @@ function addAnother() {
       v-if="loras.length > 6"
       v-model="search"
       type="search"
-      class="w-full rounded-lg bg-slate-900/60 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-500"
+      class="w-full rounded-lg bg-bench/60 px-2 py-1 text-sm text-rebate placeholder:text-ink-3"
       placeholder="Search LoRAs"
       aria-label="Search LoRAs"
     />
@@ -176,13 +176,13 @@ function addAnother() {
     <div
       v-for="(row, index) in modelValue"
       :key="`${row.path}-${index}`"
-      class="rounded-lg border border-slate-800 bg-slate-900/40 p-2"
+      class="rounded-lg border border-edge bg-bench/40 p-2"
       data-test="lora-row"
     >
       <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
         <select
           :value="row.path"
-          class="min-w-0 rounded-lg bg-slate-900/60 px-2 py-1 text-slate-100"
+          class="min-w-0 rounded-lg bg-bench/60 px-2 py-1 text-rebate"
           @change="selectAt(index, $event)"
         >
           <option value="">— remove —</option>
@@ -197,7 +197,7 @@ function addAnother() {
         <div class="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            class="h-8 w-8 rounded-md bg-surface text-xs text-ink-2 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
             aria-label="Move LoRA up"
             :disabled="index === 0"
             @click="moveAt(index, index - 1)"
@@ -206,7 +206,7 @@ function addAnother() {
           </button>
           <button
             type="button"
-            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            class="h-8 w-8 rounded-md bg-surface text-xs text-ink-2 hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40"
             aria-label="Move LoRA down"
             :disabled="index === modelValue.length - 1"
             @click="moveAt(index, index + 1)"
@@ -215,7 +215,7 @@ function addAnother() {
           </button>
           <button
             type="button"
-            class="h-8 w-8 rounded-md bg-slate-800 text-xs text-slate-300 hover:bg-rose-700/50"
+            class="h-8 w-8 rounded-md bg-surface text-xs text-ink-2 hover:bg-rose-700/50"
             aria-label="Remove this LoRA"
             @click="removeAt(index)"
           >
@@ -225,7 +225,7 @@ function addAnother() {
       </div>
 
       <div class="mt-2">
-        <label class="text-xs text-slate-400">
+        <label class="text-xs text-ink-3">
           Scale — {{ row.scale.toFixed(2) }}
         </label>
         <input
@@ -248,7 +248,7 @@ function addAnother() {
           v-for="phrase in trainedWordsForRow(row)"
           :key="phrase"
           type="button"
-          class="rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-200 hover:bg-emerald-700/40"
+          class="rounded-full bg-surface px-2 py-0.5 text-xs text-ink-2 hover:bg-emerald-700/40"
           :title="`Append “${phrase}” to the prompt`"
           @click="emit('append-prompt', phrase)"
         >
@@ -259,9 +259,9 @@ function addAnother() {
 
     <p
       v-if="modelValue.length === 0 && loras.length > 0"
-      class="text-xs text-slate-500"
+      class="text-xs text-ink-3"
     >
-      No LoRA selected — click <span class="text-slate-400">+ Add LoRA</span> to
+      No LoRA selected — click <span class="text-ink-3">+ Add LoRA</span> to
       stack one.
     </p>
   </section>

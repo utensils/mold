@@ -14,7 +14,7 @@ import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
-import ResourceStrip from "../components/ResourceStrip.vue";
+import ColdStartGuide from "../components/create/ColdStartGuide.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { blobToBase64 } from "../lib/base64";
@@ -72,6 +72,9 @@ const form = useGenerateForm();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const models = ref<ModelInfoExtended[]>([]);
+// Gates the cold-start guide (spec §08 G10): only after the first models load
+// resolves so we never flash the guide while the list is still in flight.
+const modelsLoaded = ref(false);
 const galleryEntries = ref<GalleryImage[]>([]);
 const muted = ref(loadMuted());
 
@@ -176,6 +179,8 @@ async function refreshModels() {
     models.value = await fetchModels();
   } catch (e) {
     console.error(e);
+  } finally {
+    modelsLoaded.value = true;
   }
 }
 
@@ -268,6 +273,13 @@ const chainDecision = computed(() =>
 // ── Installed generation models for the left rail ─────────────────────
 const installedModels = computed(() =>
   models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
+);
+
+// Cold start (spec §08 G10): nothing installed to generate with. Only after the
+// first load resolves, so the guide replaces the empty canvas rather than
+// flashing during boot.
+const showColdStart = computed(
+  () => modelsLoaded.value && installedModels.value.length === 0,
 );
 
 function selectModel(model: ModelInfoExtended) {
@@ -801,10 +813,6 @@ onBeforeUnmount(() => {
     data-test="generate-shell"
     class="mx-auto max-w-[1600px] px-4 pb-24 pt-5"
   >
-    <div class="mb-4 lg:hidden">
-      <ResourceStrip variant="chip" />
-    </div>
-
     <div
       data-test="generate-workspace"
       class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_296px] xl:grid-cols-[238px_minmax(0,1fr)_296px]"
@@ -947,7 +955,14 @@ onBeforeUnmount(() => {
             to take substantially longer than a single clip.
           </div>
 
+          <div
+            v-if="canvasMode === 'empty' && showColdStart"
+            class="flex min-h-[300px] items-center justify-center rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
+          >
+            <ColdStartGuide />
+          </div>
           <ResultCanvas
+            v-else
             :mode="canvasMode"
             :progress="genProgress"
             :stage="genStage"

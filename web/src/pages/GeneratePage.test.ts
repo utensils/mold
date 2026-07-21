@@ -112,6 +112,12 @@ describe("GeneratePage layout and behavior", () => {
     expect(feed.props("entries")).toEqual([entry]);
   });
 
+  it("guides a first pull when no models are installed (cold start)", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
+  });
+
   it("blocks non-Qwen mask submissions until a source image is selected", async () => {
     const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
@@ -276,7 +282,10 @@ describe("GeneratePage layout and behavior", () => {
 
 function pageStubs() {
   return {
-    ResourceStrip: { template: "<div />" },
+    ColdStartGuide: {
+      name: "ColdStartGuide",
+      template: "<div data-test='cold-start-stub' />",
+    },
     ComposerCard: {
       name: "ComposerCard",
       template:
