@@ -56,13 +56,18 @@ const loading = ref(false);
 
 /** Summary fields render immediately; the detail overlays as it arrives.
  *  `installed` never downgrades: the opener knows the model is on its host
- *  even when the detail endpoint (possibly another host) says otherwise. */
+ *  even when the detail endpoint (possibly another host) says otherwise.
+ *  `thumbnail_url` never swaps: Civitai publishes several previews per model
+ *  version and the detail endpoint need not pick the one the search listing
+ *  picked, so letting it overlay would show a different image than the card
+ *  the user just clicked. The detail's preview only fills a listing gap. */
 const merged = computed<CatalogEntry>(() =>
   detail.value
     ? {
         ...props.entry,
         ...detail.value,
         installed: props.entry.installed || detail.value.installed,
+        thumbnail_url: props.entry.thumbnail_url || detail.value.thumbnail_url || null,
       }
     : props.entry,
 );
@@ -164,6 +169,7 @@ const thumbnailUrl = computed(() =>
   merged.value.thumbnail_url ? catalogThumbnailUrl(merged.value.thumbnail_url) : null,
 );
 const thumbFailed = ref(false);
+const showHero = computed(() => thumbnailUrl.value !== null && !thumbFailed.value);
 
 const downloadItems = computed(() => buildDownloadContents(merged.value));
 const downloadTotal = computed(() => downloadContentsTotalBytes(downloadItems.value));
@@ -274,14 +280,20 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 
     <div class="min-h-0 flex-1 overflow-y-auto">
       <!-- Preview -->
-      <div class="border-edge relative aspect-video w-full overflow-hidden border-b">
+      <!-- A 4:3 hero keeps more of a portrait preview than 16:9 did; the
+           placeholder branch stays 16:9 because its mark is a fixed height. -->
+      <div
+        class="border-edge relative w-full overflow-hidden border-b"
+        :class="showHero ? 'aspect-[4/3]' : 'aspect-video'"
+      >
         <img
-          v-if="thumbnailUrl && !thumbFailed"
-          :src="thumbnailUrl"
+          v-if="showHero"
+          :src="thumbnailUrl!"
           alt=""
           loading="lazy"
           decoding="async"
-          class="h-full w-full object-cover"
+          data-test="drawer-hero"
+          class="catalog-hero h-full w-full object-cover"
           @error="thumbFailed = true"
         />
         <ModelFamilyPlaceholder v-else :family="merged.family" layout="grid" />
@@ -519,3 +531,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* Same upward crop bias as the grid card: portrait previews otherwise lose
+   the subject's head to a centred cover crop. */
+.catalog-hero {
+  object-position: 50% 25%;
+}
+</style>

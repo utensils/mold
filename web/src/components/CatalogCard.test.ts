@@ -85,4 +85,58 @@ describe("CatalogCard (discover)", () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
     expect(w.text()).not.toMatch(/installed/i);
   });
+
+  it("renders a lazy preview image when the entry has a thumbnail", () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    const img = w.get("[data-test=card-thumb]");
+    expect(img.attributes("src")).toBe("https://example.test/preview.jpeg");
+    expect(img.attributes("loading")).toBe("lazy");
+    expect(img.attributes("decoding")).toBe("async");
+    expect(w.find("[data-test=card-thumb-placeholder]").exists()).toBe(false);
+  });
+
+  it("normalizes a Civitai CDN thumbnail to one shared width derivative", () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url:
+        "https://image.civitai.com/token/id/original=true/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.get("[data-test=card-thumb]").attributes("src")).toBe(
+      "https://image.civitai.com/token/id/width=512/preview.jpeg",
+    );
+  });
+
+  it("renders the family placeholder and no image without a thumbnail", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    const placeholder = w.get("[data-test=card-thumb-placeholder]");
+    expect(placeholder.text()).toContain("FLUX");
+    expect(w.find("[data-test=card-thumb]").exists()).toBe(false);
+  });
+
+  it("falls back to the placeholder when the thumbnail fails to load", async () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/gone.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    await w.get("[data-test=card-thumb]").trigger("error");
+    expect(w.find("[data-test=card-thumb]").exists()).toBe(false);
+    expect(w.find("[data-test=card-thumb-placeholder]").exists()).toBe(true);
+  });
+
+  it("hides the loading shimmer once the thumbnail loads", async () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      thumbnail_url: "https://example.test/preview.jpeg",
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+    expect(w.find("[data-test=card-thumb-shimmer]").exists()).toBe(true);
+    await w.get("[data-test=card-thumb]").trigger("load");
+    expect(w.find("[data-test=card-thumb-shimmer]").exists()).toBe(false);
+  });
 });

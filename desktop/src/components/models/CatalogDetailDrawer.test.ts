@@ -81,6 +81,50 @@ beforeEach(() => {
 });
 
 describe("CatalogDetailDrawer", () => {
+  // Civitai publishes several previews per model version, and the detail
+  // endpoint does not have to pick the one the search listing picked. The
+  // card the user clicked has to stay the hero, or the drawer looks like a
+  // different model.
+  it("keeps the clicked listing's preview as the hero when the detail names another", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg" }),
+    );
+    const wrapper = await mountDrawer(
+      summary({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/listing.jpeg" }),
+    );
+    expect(wrapper.get("[data-test='drawer-hero']").attributes("src")).toBe(
+      "https://image.civitai.com/tok/id/width=512/listing.jpeg",
+    );
+  });
+
+  it("falls back to the detail's preview when the listing carries none", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({ thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg" }),
+    );
+    const wrapper = await mountDrawer(summary({ thumbnail_url: null }));
+    expect(wrapper.get("[data-test='drawer-hero']").attributes("src")).toBe(
+      "https://image.civitai.com/tok/id/width=512/detail.jpeg",
+    );
+  });
+
+  it("still lets unrelated detail fields override the listing", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({
+        thumbnail_url: "https://image.civitai.com/tok/id/width=512/detail.jpeg",
+        description: "Detail-only copy.",
+        size_bytes: 12_000_000_000,
+      }),
+    );
+    const wrapper = await mountDrawer(
+      summary({
+        thumbnail_url: "https://image.civitai.com/tok/id/width=512/listing.jpeg",
+        size_bytes: 8_000_000_000,
+      }),
+    );
+    expect(wrapper.text()).toContain("Detail-only copy.");
+    expect(wrapper.get("[data-test='stat-checkpoint']").text()).toContain("12.0");
+  });
+
   it("lists on-disk component state with a presence summary for installed entries", async () => {
     fetchModelComponents.mockResolvedValue({
       model: "cv:8001",

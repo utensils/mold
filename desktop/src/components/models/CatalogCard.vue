@@ -115,7 +115,7 @@ function onCardKeydown(event: KeyboardEvent): void {
         loading="lazy"
         decoding="async"
         fetchpriority="low"
-        class="h-full w-full object-cover"
+        class="catalog-thumb h-full w-full object-cover"
         @load="thumbLoaded = true"
         @error="thumbFailed = true"
       />
@@ -228,5 +228,12 @@ function onCardKeydown(event: KeyboardEvent): void {
 <style scoped>
 .catalog-card-contained {
   contain: layout paint style;
+}
+
+/* Model previews are overwhelmingly portrait subjects, and a centred cover
+   crop of a portrait in this short landscape box slices heads off at the
+   chin. Bias the frame upward so the subject survives the crop. */
+.catalog-thumb {
+  object-position: 50% 28%;
 }
 </style>
