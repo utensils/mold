@@ -118,6 +118,19 @@ describe("CatalogTopbar", () => {
     );
   });
 
+  it("unchecking Include NSFW sends include_nsfw=false rather than omitting it", async () => {
+    // The server's `include_nsfw` defaults to *true* when the parameter is
+    // absent, so dropping it on uncheck left NSFW rows in the grid while the
+    // box read as off. The off state has to be stated explicitly.
+    mockFilter.value = { include_nsfw: true };
+    const w = mount(CatalogTopbar);
+    const box = w.find("input[type=checkbox]");
+    await box.setValue(false);
+    expect(mockSetFilter).toHaveBeenCalledWith(
+      expect.objectContaining({ include_nsfw: false }),
+    );
+  });
+
   it("clicking the kind 'All' chip clears the kind filter", async () => {
     mockFilter.value = { kind: "lora" };
     const w = mount(CatalogTopbar);

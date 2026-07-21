@@ -58,8 +58,11 @@ function setKind(k: KindFilter | undefined) {
   cat.setFilter({ kind: k });
 }
 
+// `include_nsfw` must be stated in both directions: the server treats an
+// absent parameter as `true`, so omitting it on uncheck left NSFW rows in
+// the grid under an unchecked box.
 function setNsfw(on: boolean) {
-  cat.setFilter({ include_nsfw: on || undefined });
+  cat.setFilter({ include_nsfw: on });
 }
 
 function clearSearch() {

@@ -69,7 +69,7 @@ function pullCard(id: string) {
 
     <!-- Empty state -->
     <div
-      v-else-if="cat.entries.value.length === 0"
+      v-else-if="cat.visibleEntries.value.length === 0"
       class="flex flex-col items-center justify-center gap-2 py-16 text-ink-3"
     >
       <p class="text-sm">No models found.</p>
@@ -82,9 +82,18 @@ function pullCard(id: string) {
 
     <!-- Grid -->
     <template v-else>
+      <p
+        data-testid="catalog-result-count"
+        class="mb-3 text-[12px] text-ink-3"
+        aria-live="polite"
+      >
+        {{ cat.resultCount.value.toLocaleString() }}
+        {{ cat.resultCount.value === 1 ? "result" : "results" }}
+      </p>
+
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <CatalogCard
-          v-for="entry in cat.entries.value"
+          v-for="entry in cat.visibleEntries.value"
           :key="entry.id"
           :entry="entry"
           @open="openCard(entry.id)"
