@@ -1,42 +1,74 @@
 @import "tailwindcss";
+@import "../../ui/tokens.css";
+@import "../../ui/fonts/fonts.css";
+@import "../../ui/kit.css";
 
 /*
- * Tailwind v4 theme tokens. Anything declared here is surfaced as CSS
- * custom properties (e.g. `--color-brand-500`) and as utility classes
- * (e.g. `bg-brand-500`). Keep this palette small and deliberate — the
- * gallery leans on tone and depth, not a rainbow of accents.
+ * Mold Studio web surface. All color flows from ui/tokens.css (two theme
+ * families × dark/light selected via data-theme / data-theme-family on the
+ * root element). The @theme block only maps token custom properties onto
+ * Tailwind utility names — never introduce raw values here.
  */
 @theme {
-  --font-sans:
-    "InterVariable", "Inter", ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas,
-    "Liberation Mono", monospace;
+  --font-display: var(--f-display);
+  --font-sans: var(--f-body);
+  --font-mono: var(--f-mono);
 
-  --color-ink-50: #f8fafc;
-  --color-ink-100: #e2e8f0;
-  --color-ink-200: #cbd5e1;
-  --color-ink-300: #94a3b8;
-  --color-ink-400: #64748b;
-  --color-ink-500: #475569;
-  --color-ink-900: #0f172a;
-  --color-ink-950: #020617;
+  --color-desk: var(--desk);
+  --color-bath: var(--bath);
+  --color-bench: var(--bench);
+  --color-surface: var(--surface);
+  --color-rebate: var(--rebate);
+  --color-ink: var(--rebate);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-edge: var(--edge);
+  --color-ce: var(--ce);
+  --color-safelight: var(--safelight);
+  --color-halide: var(--halide);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-stop: var(--stop);
+  --color-on-accent: var(--on-accent);
+  --color-on-media: var(--on-media);
+  --color-print: var(--print);
 
-  --color-brand-300: #a5b4fc;
-  --color-brand-400: #818cf8;
-  --color-brand-500: #6366f1;
-  --color-brand-600: #4f46e5;
+  --radius-control-sm: 6px;
+  --radius-control: 9px;
+  --radius-control-lg: 10px;
+  --radius-card: 12px;
+  --radius-card-lg: 16px;
+  --radius-pill: 20px;
 
-  --color-accent-300: #fde68a;
-  --color-accent-400: #fbbf24;
+  --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-float: 0 40px 90px -20px rgba(0, 0, 0, 0.6);
 
-  --radius-card: 1.25rem;
+  /* ── TEMPORARY migration aliases ─────────────────────────────────────
+   * Legacy utility names from the pre-Mold-Studio SPA, remapped onto the
+   * token palette so unmigrated views stay legible. Every mapping below is
+   * deleted once the last view moves to the semantic names above. */
+  --color-ink-50: var(--rebate);
+  --color-ink-100: color-mix(in srgb, var(--rebate) 90%, transparent);
+  --color-ink-200: var(--ink-2);
+  --color-ink-300: var(--ink-3);
+  --color-ink-400: color-mix(in srgb, var(--rebate) 42%, transparent);
+  --color-ink-500: color-mix(in srgb, var(--rebate) 34%, transparent);
+  --color-ink-900: var(--bench);
+  --color-ink-950: var(--bath);
+  --color-brand-300: color-mix(in srgb, var(--safelight) 70%, var(--rebate));
+  --color-brand-400: var(--safelight);
+  --color-brand-500: var(--safelight);
+  --color-brand-600: color-mix(in srgb, var(--safelight) 82%, var(--on-accent));
+  --color-accent-300: color-mix(in srgb, var(--warning) 70%, var(--rebate));
+  --color-accent-400: var(--warning);
+  --shadow-card: inset 0 1px 0 var(--card-hi);
+}
 
-  --shadow-card:
-    0 18px 42px -18px rgba(2, 6, 23, 0.9),
-    0 0 0 1px rgba(148, 163, 184, 0.08) inset;
-  --shadow-float: 0 30px 70px -28px rgba(15, 23, 42, 0.85);
+/* TEMPORARY migration alias — legacy glass panels become flat bench cards
+ * (spec: no backdrop blur in content). Deleted with the last legacy view. */
+.glass {
+  background: var(--bench);
+  border: 1px solid var(--edge);
 }
 
 html,
@@ -46,30 +78,17 @@ body,
 }
 
 body {
-  background:
-    radial-gradient(
-      80% 60% at 12% -6%,
-      rgba(99, 102, 241, 0.16),
-      transparent 55%
-    ),
-    radial-gradient(
-      60% 60% at 94% 10%,
-      rgba(244, 114, 182, 0.12),
-      transparent 60%
-    ),
-    radial-gradient(
-      50% 60% at 50% 110%,
-      rgba(56, 189, 248, 0.1),
-      transparent 60%
-    ),
-    #020617;
-  background-attachment: fixed;
+  background: var(--desk);
+  color: var(--rebate);
+  font-family: var(--f-body);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Custom scrollbar that blends with the glass panels instead of shouting. */
+/* Quiet token-tinted scrollbars. */
 @supports (scrollbar-color: auto) {
   * {
-    scrollbar-color: color-mix(in oklab, var(--color-ink-400) 50%, transparent)
+    scrollbar-color: color-mix(in srgb, var(--rebate) 16%, transparent)
       transparent;
     scrollbar-width: thin;
   }
@@ -90,8 +109,8 @@ body {
 .fade-enter-active,
 .fade-leave-active {
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
+    opacity var(--dur-base) var(--ease),
+    transform var(--dur-base) var(--ease);
 }
 .fade-enter-from,
 .fade-leave-to {
@@ -103,8 +122,8 @@ body {
 .drawer-enter-active,
 .drawer-leave-active {
   transition:
-    opacity 0.22s ease,
-    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    opacity var(--dur-base) var(--ease),
+    transform var(--dur-slow) var(--ease);
 }
 .drawer-enter-from {
   opacity: 0;
@@ -113,12 +132,4 @@ body {
 .drawer-leave-to {
   opacity: 0;
   transform: translateY(1vh) scale(0.99);
-}
-
-/* Utility: thin glass panel base used in multiple places. */
-.glass {
-  background: color-mix(in oklab, var(--color-ink-900) 72%, transparent);
-  border: 1px solid color-mix(in oklab, var(--color-ink-300) 14%, transparent);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
 }

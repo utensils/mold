@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { imageUrl, thumbnailUrl } from "../api";
+import { requestConfirm } from "../lib/toasts";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import Metadata from "./Metadata.vue";
@@ -173,10 +174,15 @@ async function copy(text: string, kind: "prompt" | "seed") {
   }
 }
 
-function confirmDelete() {
+async function confirmDelete() {
   if (!props.item) return;
-  if (!window.confirm(`Delete ${props.item.filename}? This can't be undone.`))
-    return;
+  const accepted = await requestConfirm({
+    title: "Delete print?",
+    body: `${props.item.filename} — this can't be undone.`,
+    confirmLabel: "Delete",
+    danger: true,
+  });
+  if (!accepted || !props.item) return;
   emit("delete", props.item);
 }
 </script>

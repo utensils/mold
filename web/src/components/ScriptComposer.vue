@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import StageCard from "./StageCard.vue";
+import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
 import {
   readChainScript,
@@ -222,7 +223,7 @@ async function importToml(file: File) {
   try {
     script.value = readChainScript(text);
   } catch (err) {
-    alert(String(err));
+    toast("error", String(err));
   }
 }
 

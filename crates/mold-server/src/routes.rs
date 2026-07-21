@@ -2623,6 +2623,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         queue: mold_core::QueueCapabilities {
             can_pause: true,
             can_cancel_all: true,
+            can_reorder: true,
         },
         expand: Some(expand),
     })

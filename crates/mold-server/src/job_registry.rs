@@ -105,6 +105,14 @@ pub enum QueuedJobCancelError {
     AlreadyRunning,
 }
 
+/// Why a `PATCH /api/queue/:id` `position` reorder was rejected. Same shape as
+/// the target-gpu/cancel errors — only queued jobs are movable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueReorderError {
+    NotFound,
+    AlreadyRunning,
+}
+
 /// The registry itself. Construct via `JobRegistry::new` and share through
 /// `AppState`. All mutation is fire-and-forget — if the inner lock is
 /// poisoned (extremely unlikely in practice) we recover from the inner
@@ -293,6 +301,57 @@ impl JobRegistry {
         Ok(())
     }
 
+    /// Move a still-queued job to be the `position`-th queued entry (0-based)
+    /// among the queued jobs — the ordering the dispatcher consumes FIFO.
+    ///
+    /// `position` is clamped into the queued range, so a caller can pass a
+    /// large number to mean "send to the back". Running jobs are ignored for
+    /// indexing (they've left the reorderable set) and keep their absolute
+    /// slot, so a queued job can never jump ahead of one already executing.
+    /// The relative order of the other queued jobs is preserved. Moving a job
+    /// that is already at `position` is a successful no-op.
+    pub fn reorder_queued(&self, id: &str, position: usize) -> Result<(), QueueReorderError> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(from) = entries.iter().position(|e| e.id == id) else {
+            return Err(QueueReorderError::NotFound);
+        };
+        if entries[from].state == JobLifecycle::Running {
+            return Err(QueueReorderError::AlreadyRunning);
+        }
+        // Vec indices occupied by queued entries, in order — running entries
+        // are skipped so `position` indexes purely among movable jobs.
+        let queued_slots: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.state == JobLifecycle::Queued)
+            .map(|(i, _)| i)
+            .collect();
+        // `from` is queued (checked above), so it is present here.
+        let cur = queued_slots
+            .iter()
+            .position(|&i| i == from)
+            .expect("queued job must appear in its own queued-slot list");
+        let target = position.min(queued_slots.len() - 1);
+        if cur == target {
+            return Ok(());
+        }
+        // Pull the job out, then reinsert at the Vec index that makes it the
+        // `target`-th queued entry among the survivors.
+        let entry = entries.remove(from);
+        let remaining_slots: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.state == JobLifecycle::Queued)
+            .map(|(i, _)| i)
+            .collect();
+        let dest = remaining_slots
+            .get(target)
+            .copied()
+            .unwrap_or(entries.len());
+        entries.insert(dest, entry);
+        Ok(())
+    }
+
     pub fn target_gpu(&self, id: &str) -> Option<Option<usize>> {
         let entries = self.inner.read().unwrap_or_else(|e| e.into_inner());
         entries.iter().find(|e| e.id == id).map(|e| e.target_gpu)
@@ -419,6 +478,101 @@ mod tests {
         let err = reg.set_target_gpu("a", None).unwrap_err();
         assert_eq!(err, TargetGpuUpdateError::AlreadyRunning);
         assert_eq!(reg.target_gpu("a"), Some(None));
+    }
+
+    fn queued_order(reg: &JobRegistry) -> Vec<String> {
+        reg.snapshot().entries.into_iter().map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn reorder_moves_queued_job_to_the_front() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        reg.reorder_queued("c", 0).unwrap();
+        assert_eq!(queued_order(&reg), ["c", "a", "b"]);
+        // Positions recompute from the new order.
+        let snap = reg.snapshot();
+        assert_eq!(snap.entries[0].position, 0);
+        assert_eq!(snap.entries[2].position, 2);
+    }
+
+    #[test]
+    fn reorder_moves_queued_job_to_the_back() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        reg.reorder_queued("a", 2).unwrap();
+        assert_eq!(queued_order(&reg), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn reorder_moves_a_middle_job_up_and_preserves_the_others_order() {
+        let reg = JobRegistry::new();
+        for id in ["a", "b", "c", "d", "e"] {
+            reg.register(id, "flux-dev:fp16");
+        }
+        // Move the last job to slot 1 — everything else keeps relative order.
+        reg.reorder_queued("e", 1).unwrap();
+        assert_eq!(queued_order(&reg), ["a", "e", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn reorder_clamps_an_out_of_range_position_to_the_back() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        reg.reorder_queued("a", 999).unwrap();
+        assert_eq!(queued_order(&reg), ["b", "c", "a"]);
+    }
+
+    #[test]
+    fn reorder_to_the_current_position_is_a_noop() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        reg.reorder_queued("b", 1).unwrap();
+        assert_eq!(queued_order(&reg), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn reorder_indexes_among_queued_only_and_keeps_running_jobs_in_place() {
+        // `a` is running: it must stay at the head and be skipped when
+        // `position` indexes the queued jobs, so a reorder can never promote a
+        // queued job ahead of the job already executing.
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        reg.register("c", "ltx-video:q8");
+        reg.mark_running("a", Some(0));
+        // Among the queued jobs [b, c], send c to slot 0.
+        reg.reorder_queued("c", 0).unwrap();
+        assert_eq!(queued_order(&reg), ["a", "c", "b"]);
+        let snap = reg.snapshot();
+        assert_eq!(snap.entries[0].state, JobLifecycle::Running);
+        assert_eq!(snap.entries[1].id, "c");
+        assert_eq!(snap.entries[1].state, JobLifecycle::Queued);
+    }
+
+    #[test]
+    fn reorder_rejects_a_running_job() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        reg.mark_running("a", Some(0));
+        let err = reg.reorder_queued("a", 0).unwrap_err();
+        assert_eq!(err, QueueReorderError::AlreadyRunning);
+    }
+
+    #[test]
+    fn reorder_unknown_id_is_not_found() {
+        let reg = JobRegistry::new();
+        reg.register("a", "flux-dev:fp16");
+        let err = reg.reorder_queued("ghost", 0).unwrap_err();
+        assert_eq!(err, QueueReorderError::NotFound);
     }
 
     #[test]

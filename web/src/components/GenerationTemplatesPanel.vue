@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { GenerateFormState } from "../types";
+import { requestText } from "../lib/toasts";
 import {
   deleteGenerationTemplate,
   loadGenerationTemplates,
@@ -64,11 +65,12 @@ function loadTemplate(template: GenerationTemplate) {
   emit("update:modelValue", template.form);
 }
 
-function renameTemplate(template: GenerationTemplate) {
-  const next =
-    typeof window.prompt === "function"
-      ? window.prompt("Template name", template.name)
-      : template.name;
+async function renameTemplate(template: GenerationTemplate) {
+  const next = await requestText({
+    title: "Rename template",
+    label: "Template name",
+    initial: template.name,
+  });
   if (next === null) return;
   renameGenerationTemplate(template.id, next);
   refreshTemplates();

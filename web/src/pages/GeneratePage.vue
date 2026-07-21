@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { requestChoice, toast } from "../lib/toasts";
 import Composer from "../components/Composer.vue";
 import ChainJobCard from "../components/ChainJobCard.vue";
 import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
@@ -462,10 +463,8 @@ async function onSubmit() {
   const decision = chainDecision.value;
   if (decision.kind === "reject") {
     // Block submit on a well-defined routing rejection (non-chainable
-    // family over its per-clip budget). Keeping this as alert() matches
-    // the existing terse validation UX — a toast system would be a
-    // separate piece of work.
-    alert(decision.reason);
+    // family over its per-clip budget).
+    toast("error", decision.reason);
     return;
   }
   if (!(await preprocessSourceIfNeeded())) return;
@@ -520,12 +519,13 @@ function onExpandStage(stageIndex: number, prompt: string) {
   showExpand.value = true;
 }
 
-function onClearSource() {
-  if (form.state.value.maskImage && !resolveMaskSourceConflict()) return;
+async function onClearSource() {
+  if (form.state.value.maskImage && !(await resolveMaskSourceConflict()))
+    return;
   form.state.value.imageAttachments = [];
 }
 
-function onPickSource(v: SourceImageState[]) {
+async function onPickSource(v: SourceImageState[]) {
   const qwenEdit =
     isQwenImageEditFamily(
       currentModel.value?.family ?? form.state.value.modelFamily,
@@ -535,7 +535,7 @@ function onPickSource(v: SourceImageState[]) {
     form.state.value.maskImage &&
     form.state.value.imageAttachments.length > 0 &&
     v.length > 0 &&
-    !resolveMaskSourceConflict()
+    !(await resolveMaskSourceConflict())
   ) {
     return;
   }
@@ -545,20 +545,17 @@ function onPickSource(v: SourceImageState[]) {
   composerError.value = null;
 }
 
-function resolveMaskSourceConflict(): boolean {
-  const choice = window.prompt(
-    "This source image has a mask. Type reset to clear the mask, keep to keep/scale it, or cancel.",
-    "reset",
-  );
-  const normalized = choice?.trim().toLowerCase();
-  if (
-    normalized === "cancel" ||
-    normalized === null ||
-    normalized === undefined
-  ) {
-    return false;
-  }
-  if (normalized === "keep") return true;
+async function resolveMaskSourceConflict(): Promise<boolean> {
+  const choice = await requestChoice({
+    title: "Source image has a mask",
+    body: "Changing the source affects the inpaint mask.",
+    choices: [
+      { id: "reset", label: "Clear the mask" },
+      { id: "keep", label: "Keep and scale the mask" },
+    ],
+  });
+  if (choice === null) return false;
+  if (choice === "keep") return true;
   form.state.value.maskImage = null;
   return true;
 }

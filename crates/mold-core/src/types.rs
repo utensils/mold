@@ -3204,12 +3204,15 @@ pub struct EventsCapabilities {
 
 /// Whether the server exposes queue-wide controls. `can_pause` covers
 /// `POST /api/queue/pause` and `POST /api/queue/resume`; `can_cancel_all`
-/// covers `DELETE /api/queue`. Both default to `false` so older servers that
-/// omit the field are treated as lacking the controls.
+/// covers `DELETE /api/queue`; `can_reorder` covers moving a queued job with
+/// the `PATCH /api/queue/:id` `position` field. All default to `false` so
+/// older servers that omit the fields are treated as lacking the controls.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueCapabilities {
     pub can_pause: bool,
     pub can_cancel_all: bool,
+    #[serde(default)]
+    pub can_reorder: bool,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
@@ -3676,6 +3679,21 @@ mod server_event_tests {
         .unwrap();
         assert!(!caps.queue.can_pause);
         assert!(!caps.queue.can_cancel_all);
+        assert!(!caps.queue.can_reorder);
+    }
+
+    #[test]
+    fn capabilities_queue_without_reorder_field_defaults_to_false() {
+        // A server that predates reorder support reports `queue` with the two
+        // older flags only — `can_reorder` must default false, not fail to
+        // deserialize.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]},"queue":{"can_pause":true,"can_cancel_all":true}}"#,
+        )
+        .unwrap();
+        assert!(caps.queue.can_pause);
+        assert!(caps.queue.can_cancel_all);
+        assert!(!caps.queue.can_reorder);
     }
 
     #[test]

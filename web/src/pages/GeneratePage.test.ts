@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick } from "vue";
 import GeneratePage from "./GeneratePage.vue";
 import { __testing__ as generateFormTesting } from "../composables/useGenerateForm";
+import {
+  resetNotifications,
+  settleConfirm,
+  useNotifications,
+} from "../lib/toasts";
 import type {
   ChainJobDetail,
   GalleryImage,
@@ -111,6 +116,7 @@ describe("GeneratePage layout and visibility", () => {
   beforeEach(() => {
     localStorage.clear();
     generateFormTesting.resetForTest();
+    resetNotifications();
     submitMock.mockClear();
     createChainJobMock.mockClear();
     createChainJobMock.mockResolvedValue({ job_id: "job-1" });
@@ -194,9 +200,8 @@ describe("GeneratePage layout and visibility", () => {
     expect(req.source_image).toBeUndefined();
   });
 
-  it("prompts before replacing a source image while a mask exists", async () => {
+  it("asks before replacing a source image while a mask exists", async () => {
     fetchModelsMock.mockResolvedValue([fluxModel]);
-    const promptSpy = vi.mocked(window.prompt).mockReturnValue("reset");
     const wrapper = mount(GeneratePage, {
       global: { stubs: pageStubs() },
     });
@@ -222,10 +227,14 @@ describe("GeneratePage layout and visibility", () => {
       ]);
     await nextTick();
 
+    // The mask conflict now flows through the app dialog store.
+    expect(useNotifications().confirm?.kind).toBe("choice");
+    settleConfirm("reset");
+    await flushPromises();
+
     const updated = wrapper
       .getComponent({ name: "GenerateParamsPanel" })
       .props("modelValue") as GenerateFormState;
-    expect(promptSpy).toHaveBeenCalled();
     expect(updated.imageAttachments[0]?.filename).toBe("new.png");
     expect(updated.maskImage).toBeNull();
   });

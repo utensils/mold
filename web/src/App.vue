@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue";
+import ToastShelf from "@ui/components/ToastShelf.vue";
 import DownloadsDrawer from "./components/DownloadsDrawer.vue";
+import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
 import ResourceTray from "./components/ResourceTray.vue";
+import { dismissToast, runToastAction, useNotifications } from "./lib/toasts";
 import {
   computeEtaSeconds,
   onDownloadComplete,
@@ -81,10 +84,22 @@ import {
 
 const resources = useResources();
 provide(RESOURCES_INJECTION_KEY, resources);
+
+// App-frame notifications (spec §08 G11/G12): the shelf and confirm modal
+// render inside this frame — never a page-level fixed layer.
+const notifications = useNotifications();
 </script>
 
 <template>
-  <router-view />
+  <div class="app-frame">
+    <router-view />
+    <ToastShelf
+      :toasts="notifications.toasts"
+      @dismiss="dismissToast"
+      @action="runToastAction"
+    />
+    <ConfirmDialog />
+  </div>
   <ResourceTray />
   <DownloadsDrawer
     :open="drawerOpen"
@@ -97,3 +112,14 @@ provide(RESOURCES_INJECTION_KEY, resources);
     @retry="handleRetry"
   />
 </template>
+
+<style scoped>
+/* The app frame is the positioning context every overlay renders inside
+ * (spec §05 — contained, not global). */
+.app-frame {
+  position: relative;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+</style>

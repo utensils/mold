@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { listGallery, deleteGalleryImage } from "../api";
+import { requestConfirm } from "../lib/toasts";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
@@ -173,22 +174,31 @@ async function handleDeleteMany(names: string[]): Promise<number> {
 async function deleteSelected() {
   const names = Array.from(selection.value);
   if (names.length === 0) return;
-  const msg =
-    names.length === 1
-      ? `Delete ${names[0]}? This can't be undone.`
-      : `Delete ${names.length} items? This can't be undone.`;
-  if (!window.confirm(msg)) return;
+  const accepted = await requestConfirm({
+    title:
+      names.length === 1 ? "Delete print?" : `Delete ${names.length} prints?`,
+    body: "This can't be undone.",
+    confirmLabel: "Delete",
+    danger: true,
+  });
+  if (!accepted) return;
   await handleDeleteMany(names);
 }
 
 async function deleteAllFiltered() {
   const list = filtered.value;
   if (list.length === 0) return;
-  const msg =
-    list.length === entries.value.length
-      ? `Delete ALL ${list.length} gallery items? This can't be undone.`
-      : `Delete all ${list.length} items in the current filter? This can't be undone.`;
-  if (!window.confirm(msg)) return;
+  const everything = list.length === entries.value.length;
+  const accepted = await requestConfirm({
+    title: everything
+      ? `Delete all ${list.length} prints?`
+      : `Delete ${list.length} filtered prints?`,
+    body: "This can't be undone.",
+    confirmLabel: "Delete",
+    danger: true,
+    typedPhrase: "delete",
+  });
+  if (!accepted) return;
   const names = list.map((e) => e.filename);
   await handleDeleteMany(names);
 }
