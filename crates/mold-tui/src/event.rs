@@ -150,10 +150,15 @@ fn map_gallery_key(key: &KeyEvent, app: &App) -> Action {
             KeyCode::Left | KeyCode::Char('h') => Action::GridLeft,
             KeyCode::Right | KeyCode::Char('l') => Action::GridRight,
             KeyCode::Enter => Action::Confirm,
-            KeyCode::Char('e') => Action::EditAndGenerate,
+            // `r` mirrors the details panel's "[r] Recall prompt" hint;
+            // `e` stays for muscle memory.
+            KeyCode::Char('e') | KeyCode::Char('r') => Action::EditAndGenerate,
             KeyCode::Char('d') => Action::DeleteImage,
             KeyCode::Char('o') => Action::OpenFile,
             KeyCode::Char('u') => Action::UpscaleImage,
+            KeyCode::Char('/') => Action::FilterLibrary,
+            // Esc first clears an applied filter, then leaves the view.
+            KeyCode::Esc if !app.gallery.filter.is_empty() => Action::FilterLibraryClear,
             KeyCode::Esc => Action::SwitchView(View::Create),
             KeyCode::Char('q') => Action::Quit,
             KeyCode::Char('1') => Action::SwitchView(View::Create),
@@ -309,8 +314,13 @@ mod tests {
     }
 
     // Helper to test gallery key mapping with a specific view mode.
-    // We can't construct a full App in tests, so we test the match logic directly.
-    fn gallery_key(code: KeyCode, mode: GalleryViewMode) -> Action {
+    // We can't construct a full App in tests, so we test the match logic
+    // directly (`filter_active` mirrors `!app.gallery.filter.is_empty()`).
+    fn gallery_key_with_filter(
+        code: KeyCode,
+        mode: GalleryViewMode,
+        filter_active: bool,
+    ) -> Action {
         match mode {
             GalleryViewMode::Grid => match code {
                 KeyCode::Up | KeyCode::Char('k') => Action::Up,
@@ -318,10 +328,12 @@ mod tests {
                 KeyCode::Left | KeyCode::Char('h') => Action::GridLeft,
                 KeyCode::Right | KeyCode::Char('l') => Action::GridRight,
                 KeyCode::Enter => Action::Confirm,
-                KeyCode::Char('e') => Action::EditAndGenerate,
+                KeyCode::Char('e') | KeyCode::Char('r') => Action::EditAndGenerate,
                 KeyCode::Char('d') => Action::DeleteImage,
                 KeyCode::Char('o') => Action::OpenFile,
                 KeyCode::Char('u') => Action::UpscaleImage,
+                KeyCode::Char('/') => Action::FilterLibrary,
+                KeyCode::Esc if filter_active => Action::FilterLibraryClear,
                 KeyCode::Esc => Action::SwitchView(View::Create),
                 KeyCode::Char('q') => Action::Quit,
                 _ => Action::None,
@@ -339,6 +351,40 @@ mod tests {
                 _ => Action::None,
             },
         }
+    }
+
+    fn gallery_key(code: KeyCode, mode: GalleryViewMode) -> Action {
+        gallery_key_with_filter(code, mode, false)
+    }
+
+    #[test]
+    fn gallery_grid_slash_starts_library_filter() {
+        assert_eq!(
+            gallery_key(KeyCode::Char('/'), GalleryViewMode::Grid),
+            Action::FilterLibrary
+        );
+    }
+
+    #[test]
+    fn gallery_grid_r_recalls_prompt() {
+        // The details panel advertises "[r] Recall prompt" — `r` in the
+        // grid must trigger the same EditAndGenerate as `e`.
+        assert_eq!(
+            gallery_key(KeyCode::Char('r'), GalleryViewMode::Grid),
+            Action::EditAndGenerate
+        );
+    }
+
+    #[test]
+    fn gallery_grid_esc_clears_applied_filter_first() {
+        assert_eq!(
+            gallery_key_with_filter(KeyCode::Esc, GalleryViewMode::Grid, true),
+            Action::FilterLibraryClear
+        );
+        assert_eq!(
+            gallery_key_with_filter(KeyCode::Esc, GalleryViewMode::Grid, false),
+            Action::SwitchView(View::Create)
+        );
     }
 
     #[test]
