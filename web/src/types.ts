@@ -606,8 +606,12 @@ export function supportsLora(family: string): boolean {
 }
 
 export interface GenerateFormState {
-  version: 2;
+  version: 3;
   prompt: string;
+  /** Active style preset id (see `lib/stylePresets`). `null` = no style. The
+   * preset's extras are appended to the outgoing prompt at request time; the
+   * textarea content (`prompt`) is never rewritten by the style row. */
+  stylePreset: string | null;
   negativePrompt: string;
   model: string;
   /** Family for the selected model. Stored so request serialization can

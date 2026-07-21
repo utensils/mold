@@ -3,6 +3,7 @@ import { nextTick } from "vue";
 import {
   applyMetadataToForm,
   cloneTemplateForm,
+  promptWithStyle,
   sanitizePersistedForm,
   useGenerateForm,
   __testing__,
@@ -120,6 +121,81 @@ describe("useGenerateForm", () => {
     expect(form.state.value.imageAttachments).toEqual([]);
     // Untouched fields fall back to defaults.
     expect(form.state.value.steps).toBe(20);
+  });
+
+  it("migrates a version 2 snapshot to v3, defaulting stylePreset to null and preserving everything else", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        prompt: "a fox in snow",
+        negativePrompt: "blurry",
+        model: "sdxl:base",
+        modelFamily: "sdxl",
+        width: 768,
+        height: 1024,
+        steps: 32,
+        guidance: 6,
+        seedMode: "static",
+        seed: 4242,
+        batchSize: 3,
+        scheduler: "ddim",
+        loras: [{ path: "lora-a", scale: 0.8 }],
+      }),
+    );
+    const form = useGenerateForm();
+    expect(form.state.value.version).toBe(3);
+    expect(form.state.value.stylePreset).toBeNull();
+    // Every v2 field survives the migration untouched.
+    expect(form.state.value.prompt).toBe("a fox in snow");
+    expect(form.state.value.negativePrompt).toBe("blurry");
+    expect(form.state.value.model).toBe("sdxl:base");
+    expect(form.state.value.width).toBe(768);
+    expect(form.state.value.height).toBe(1024);
+    expect(form.state.value.steps).toBe(32);
+    expect(form.state.value.guidance).toBe(6);
+    expect(form.state.value.seed).toBe(4242);
+    expect(form.state.value.batchSize).toBe(3);
+    expect(form.state.value.scheduler).toBe("ddim");
+    expect(form.state.value.loras).toEqual([{ path: "lora-a", scale: 0.8 }]);
+  });
+
+  it("loads a version 3 snapshot preserving a saved stylePreset", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ version: 3, prompt: "a cat", stylePreset: "cinematic" }),
+    );
+    const form = useGenerateForm();
+    expect(form.state.value.stylePreset).toBe("cinematic");
+  });
+
+  it("toRequest appends the active style preset's extras without mutating the prompt", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.stylePreset = "cinematic";
+    expect(form.toRequest().prompt).toBe(
+      "a lighthouse in a storm, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
+    );
+    // The textarea content itself is never rewritten by the style row.
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+  });
+
+  it("toRequest sends the bare prompt when no style preset is active", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.stylePreset = null;
+    expect(form.toRequest().prompt).toBe("a lighthouse in a storm");
+  });
+
+  it("promptWithStyle uses the extras alone when the prompt is empty (no stray comma)", () => {
+    const form = useGenerateForm();
+    form.state.value.prompt = "";
+    form.state.value.stylePreset = "anime";
+    expect(promptWithStyle(form.state.value)).toBe(
+      "anime key art, cel shading, vibrant palette",
+    );
   });
 
   it("discards a snapshot with a mismatched version to avoid stale schemas", () => {
@@ -657,7 +733,8 @@ describe("generate form serialization helpers", () => {
     overrides: Partial<GenerateFormState> = {},
   ): GenerateFormState {
     return {
-      version: 2,
+      version: 3,
+      stylePreset: null,
       prompt: "a cat",
       negativePrompt: "",
       model: "flux-dev:q4",

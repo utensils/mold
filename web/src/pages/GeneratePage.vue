@@ -1,31 +1,41 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { requestChoice, toast } from "../lib/toasts";
-import Composer from "../components/Composer.vue";
+import ComposerCard from "../components/create/ComposerCard.vue";
+import ResultCanvas from "../components/create/ResultCanvas.vue";
+import ControlsAside from "../components/create/ControlsAside.vue";
+import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
+import ActivityStrip from "../components/create/ActivityStrip.vue";
+import { advancedActiveCount } from "../components/create/advancedCount";
+import { projectResolution } from "../components/create/resolutionProjection";
+import ScriptComposer from "../components/ScriptComposer.vue";
 import ChainJobCard from "../components/ChainJobCard.vue";
-import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
-type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
-import LoraPicker from "../components/LoraPicker.vue";
-import ModelPicker from "../components/ModelPicker.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
-import RunningStrip from "../components/RunningStrip.vue";
+import MaskEditorModal from "../components/MaskEditorModal.vue";
+import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
 import ResourceStrip from "../components/ResourceStrip.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
-import DetailDrawer from "../components/DetailDrawer.vue";
+import Lightbox from "../components/gallery/Lightbox.vue";
+import { blobToBase64 } from "../lib/base64";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import Icon from "@ui/components/Icon.vue";
+import { ASPECTS } from "@ui/lib/resolution";
 import {
   createChainJob,
   deleteGalleryImage,
   fetchModels,
+  imageUrl,
   listGallery,
   upscaleStream,
-  updateQueueJobTargetGpu,
 } from "../api";
 import {
   applyMetadataToForm,
+  isQwenImageEditFamily,
+  promptWithStyle,
   useGenerateForm,
 } from "../composables/useGenerateForm";
-import { isQwenImageEditFamily } from "../composables/useGenerateForm";
+import { angleForIndex } from "../lib/stylePresets";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
@@ -36,19 +46,19 @@ import {
   resolveSourceFitTransform,
 } from "../lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
+import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import type {
   ChainRequestWire,
   ChainStageWire,
   ExpandFormState,
   GalleryImage,
-  LoraSelection,
   ModelInfoExtended,
   SourceFitPolicy,
   SourceImageState,
 } from "../types";
-import { supportsLora } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
-import type { ComposerMode } from "../components/Composer.vue";
+
+type ComposerMode = "single" | "script";
 
 function loadMuted(): boolean {
   try {
@@ -63,17 +73,32 @@ const { status } = useStatusPoll();
 const queue = useQueue();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
-// The Recent shelf renders a fixed grid; mute is inherited from the gallery
-// preference and consumed read-only (no toggle on Create).
 const muted = ref(loadMuted());
 
 const showExpand = ref(false);
 const showPicker = ref(false);
+const showMask = ref(false);
+const showAdvanced = ref(false);
+const showTemplates = ref(false);
 const composerError = ref<string | null>(null);
 const preprocessingStatus = ref<string | null>(null);
 const submitStatus = computed(
   () => composerError.value ?? preprocessingStatus.value,
 );
+
+// ── Expand / variations state (spec §03/§06) ──────────────────────────
+// batch = 1 rewrites the prompt in place (undoable); batch > 1 fans out into
+// editable variations reviewed in the canvas before queueing.
+const prevPrompt = ref<string | null>(null);
+const expanded = computed(() => prevPrompt.value !== null);
+const variations = ref<string[]>([]);
+
+// Phone surface → the Advanced sheet instead of the side drawer.
+const isPhone = ref(false);
+let phoneQuery: MediaQueryList | null = null;
+function syncPhone() {
+  isPhone.value = phoneQuery?.matches ?? false;
+}
 
 function mediaUrl(image: SourceImageState): string {
   return `data:${image.mime || "image/png"};base64,${image.base64}`;
@@ -116,8 +141,9 @@ function drawableFitPolicy(
 
 function loadComposerMode(): ComposerMode {
   try {
-    const v = localStorage.getItem("mold.composer.mode");
-    return v === "script" ? "script" : "single";
+    return localStorage.getItem("mold.composer.mode") === "script"
+      ? "script"
+      : "single";
   } catch {
     return "single";
   }
@@ -133,24 +159,13 @@ function setComposerMode(v: ComposerMode) {
 }
 
 const expandStageIndex = ref<number | null>(null);
-const composerRef = ref<InstanceType<typeof Composer> | null>(null);
-const paramsPanelRef = ref<GenerateParamsPanelInstance | null>(null);
+const expandStagePrompt = ref("");
+const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
 // Drawer state (mirrors GalleryPage).
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-// The running-strip card auto-dismisses inside the SSE singleton (see
-// `scheduleAutoRemoveOnDone` in useGenerateStream); here we only need to
-// pull in the freshly-saved gallery row when a job transitions to "done".
-//
-// We deliberately *don't* use the singleton's `onComplete` listener for
-// this — that listener is only registered while GeneratePage is mounted,
-// so a job that completes while the user is sitting on /catalog or
-// /gallery would never trigger a refresh. A watcher on `stream.jobs`
-// keyed on the set of done ids reconciles immediately on mount and
-// fires for any subsequent transitions, regardless of which route was
-// active when the SSE complete event arrived.
 const stream = useGenerateStream();
 const submittedChainJobId = ref<string | null>(null);
 const submittedChainJob = useChainJobStream(submittedChainJobId);
@@ -172,9 +187,6 @@ async function refreshGallery() {
   }
 }
 
-// Computed of done ids joined into a stable string: changes only when
-// the *set* of done ids changes, not on every progress event. Avoids
-// `{ deep: true }` which would refire on every denoise tick.
 const doneJobIds = computed(() =>
   stream.jobs.value
     .filter((j) => j.state === "done")
@@ -182,9 +194,6 @@ const doneJobIds = computed(() =>
     .join(","),
 );
 
-// Track ids we've already triggered a refresh for so the same completion
-// can't fire `refreshGallery()` twice (e.g. on remount when the job is
-// still in the "done" pre-auto-remove window).
 const seenDoneIds = new Set<string>();
 watch(
   doneJobIds,
@@ -201,12 +210,6 @@ watch(
   { immediate: true },
 );
 
-// ── Auto-refresh ──────────────────────────────────────────────────────────
-// Gallery gets new entries whenever a job completes (via stream onComplete)
-// or whenever someone drops a file into MOLD_OUTPUT_DIR out-of-band (e.g.
-// `mold run --local` on the same host). Polling every 10 s catches the
-// second case without hammering the server. Models poll less often; new
-// entries show up when `mold pull` finishes or a new weight is dropped in.
 let galleryTimer: ReturnType<typeof setInterval> | null = null;
 let modelsTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -235,10 +238,12 @@ const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
 );
 
-const gpus = computed(
-  () =>
-    status.value?.gpus?.map((g) => ({ ordinal: g.ordinal, state: g.state })) ??
-    [],
+const currentFamily = computed(
+  () => currentModel.value?.family ?? form.state.value.modelFamily,
+);
+
+const capabilities = computed(() =>
+  generationCapabilitiesForFamily(currentFamily.value),
 );
 
 const gpuListForPlacement = computed(
@@ -260,24 +265,111 @@ const chainDecision = computed(() =>
   ),
 );
 
-const currentFamily = computed(
-  () => currentModel.value?.family ?? form.state.value.modelFamily,
+// ── Installed generation models for the left rail ─────────────────────
+const installedModels = computed(() =>
+  models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
 );
-
-const familySupportsLora = computed(() => supportsLora(currentFamily.value));
 
 function selectModel(model: ModelInfoExtended) {
   form.applyModelDefaults(model);
 }
 
-function onLorasChange(loras: LoraSelection[]) {
-  form.state.value.loras = loras;
+// ── Shape / summary projections ───────────────────────────────────────
+const projection = computed(() =>
+  projectResolution(form.state.value.width, form.state.value.height),
+);
+const aspectLabel = computed(
+  () =>
+    ASPECTS.find((a) => a.id === projection.value.aspectId)?.label ?? "Custom",
+);
+
+const advCount = computed(() =>
+  advancedActiveCount({
+    negativePrompt: capabilities.value.supportsNegativePrompt
+      ? form.state.value.negativePrompt
+      : "",
+    hasSource: form.state.value.imageAttachments.length > 0,
+    loraCount: form.state.value.loras.length,
+    upscaleOn: form.state.value.upscaleModel.trim() !== "",
+    scheduler: capabilities.value.supportsScheduler
+      ? form.state.value.scheduler
+      : null,
+    customSize: projection.value.isCustom,
+    videoNonDefault:
+      capabilities.value.supportsVideo &&
+      form.state.value.frames != null &&
+      form.state.value.frames !== 25,
+  }),
+);
+
+// ── Canvas state ──────────────────────────────────────────────────────
+function percentFor(job: Job): number | null {
+  const p = job.progress;
+  if (p.step !== null && p.totalSteps) {
+    return Math.round((p.step / p.totalSteps) * 100);
+  }
+  if (p.weightBytesLoaded !== null && p.weightBytesTotal) {
+    return Math.round((p.weightBytesLoaded / p.weightBytesTotal) * 100);
+  }
+  return null;
 }
 
-function onAppendPromptPhrase(phrase: string) {
-  form.appendPromptPhrase(phrase);
+const runningJob = computed(() =>
+  stream.jobs.value.find((j) => j.state === "running"),
+);
+const latestDone = computed(() => {
+  let best: Job | null = null;
+  for (const j of stream.jobs.value) {
+    if (
+      j.state === "done" &&
+      j.result &&
+      (!best || j.startedAt > best.startedAt)
+    ) {
+      best = j;
+    }
+  }
+  return best;
+});
+
+const canvasMode = computed<"empty" | "generating" | "result" | "variations">(
+  () => {
+    if (variations.value.length) return "variations";
+    if (runningJob.value) return "generating";
+    if (latestDone.value) return "result";
+    return "empty";
+  },
+);
+
+const genProgress = computed(() =>
+  runningJob.value ? (percentFor(runningJob.value) ?? 0) : 0,
+);
+const genStage = computed(() => {
+  const j = runningJob.value;
+  if (!j) return "";
+  const p = j.progress;
+  if (p.step !== null && p.totalSteps)
+    return `Developing ${p.step} / ${p.totalSteps}`;
+  return p.stage || "Loading model";
+});
+
+const resultSrc = computed(() => {
+  const r = latestDone.value?.result;
+  if (!r) return "";
+  if (r.video_thumbnail) return `data:image/png;base64,${r.video_thumbnail}`;
+  return `data:image/${r.format};base64,${r.image}`;
+});
+const resultCaption = computed(() => {
+  const r = latestDone.value?.result;
+  if (!r) return "";
+  const secs = Math.round(r.generation_time_ms / 1000);
+  return `${r.model} · seed ${r.seed_used} · ${secs}s · this server`;
+});
+
+function openLatestResult() {
+  if (latestDone.value) openJob(latestDone.value);
 }
 
+// ── Source preprocessing / fitting (preserved) ────────────────────────
 async function preprocessSourceIfNeeded(): Promise<boolean> {
   const policy = form.state.value.sourceFitPolicy;
   const source = form.state.value.imageAttachments[0];
@@ -287,11 +379,7 @@ async function preprocessSourceIfNeeded(): Promise<boolean> {
   preprocessingStatus.value = `Preprocessing source with ${model}`;
   let completed = false;
   await upscaleStream(
-    {
-      model,
-      image: source.base64,
-      output_format: "png",
-    },
+    { model, image: source.base64, output_format: "png" },
     {
       onProgress: (evt) => {
         if (evt.type === "stage_start") preprocessingStatus.value = evt.name;
@@ -399,15 +487,14 @@ async function fitStillSourceToRequest(): Promise<void> {
   );
 }
 
-async function onSubmit() {
+// ── Submit (preserved logic) ──────────────────────────────────────────
+function validateSubmit(): boolean {
   composerError.value = null;
   preprocessingStatus.value = null;
   if (!form.state.value.model) {
-    // First-run / nothing-downloaded case. The user has to pick a model
-    // before submit can do anything; force-expand the params panel so
-    // the ModelPicker is reachable without hunting for the toggle.
-    paramsPanelRef.value?.setExpanded(true);
-    return;
+    showAdvanced.value = false;
+    composerError.value = "Pick a model to start.";
+    return false;
   }
   const qwenImageEdit =
     isQwenImageEditFamily(
@@ -415,7 +502,7 @@ async function onSubmit() {
     ) || form.state.value.model.startsWith("qwen-image-edit:");
   if (qwenImageEdit && form.state.value.imageAttachments.length === 0) {
     composerError.value = "Qwen image edit needs a target image.";
-    return;
+    return false;
   }
   if (
     !qwenImageEdit &&
@@ -423,12 +510,15 @@ async function onSubmit() {
     form.state.value.imageAttachments.length === 0
   ) {
     composerError.value = "Mask image needs a source image.";
-    return;
+    return false;
   }
+  return true;
+}
+
+async function onSubmit() {
+  if (!validateSubmit()) return;
   const decision = chainDecision.value;
   if (decision.kind === "reject") {
-    // Block submit on a well-defined routing rejection (non-chainable
-    // family over its per-clip budget).
     toast("error", decision.reason);
     return;
   }
@@ -476,7 +566,21 @@ async function onSubmitScript(script: ChainScriptToml) {
   }
 }
 
-const expandStagePrompt = ref("");
+// ── Expand (spec §03/§06) ─────────────────────────────────────────────
+function onExpand() {
+  if (form.state.value.batchSize > 1) {
+    // Fan out into editable variations, reviewed in the canvas before queue.
+    const baseExpanded =
+      promptWithStyle(form.state.value).trim() || "a quiet landscape";
+    variations.value = Array.from(
+      { length: form.state.value.batchSize },
+      (_, i) => `${baseExpanded}, ${angleForIndex(i)}`,
+    );
+    return;
+  }
+  // batch = 1: server enrichment via the Expand modal, applied in place.
+  showExpand.value = true;
+}
 
 function onExpandStage(stageIndex: number, prompt: string) {
   expandStageIndex.value = stageIndex;
@@ -484,6 +588,54 @@ function onExpandStage(stageIndex: number, prompt: string) {
   showExpand.value = true;
 }
 
+function applyExpandedPrompt(v: string) {
+  if (expandStageIndex.value !== null) {
+    scriptComposerRef.value?.setStagePrompt(expandStageIndex.value, v);
+    return;
+  }
+  prevPrompt.value = form.state.value.prompt;
+  form.state.value.prompt = v;
+}
+
+function undoExpand() {
+  if (prevPrompt.value === null) return;
+  form.state.value.prompt = prevPrompt.value;
+  prevPrompt.value = null;
+}
+
+// ── Variations review (batch > 1) ─────────────────────────────────────
+function useVariation(index: number) {
+  const v = variations.value[index];
+  if (v == null) return;
+  form.state.value.prompt = v;
+  form.state.value.stylePreset = null; // extras are already baked into `v`
+  variations.value = [];
+}
+
+function discardVariations() {
+  variations.value = [];
+}
+
+async function queueVariations() {
+  if (!validateSubmit()) return;
+  const decision = chainDecision.value;
+  if (decision.kind === "reject") {
+    toast("error", decision.reason);
+    return;
+  }
+  const list = variations.value.slice();
+  variations.value = [];
+  const base = form.toRequest();
+  for (const prompt of list) {
+    // Each variation already carries the style extras, so it is the final
+    // prompt — override the base request's prompt rather than re-appending.
+    // Each is one print; the batch size drove the variation count, not the
+    // per-job image count.
+    stream.submit({ ...base, prompt, batch_size: 1 }, decision);
+  }
+}
+
+// ── Source image handling (preserved) ─────────────────────────────────
 async function onClearSource() {
   if (form.state.value.maskImage && !(await resolveMaskSourceConflict()))
     return;
@@ -525,11 +677,16 @@ async function resolveMaskSourceConflict(): Promise<boolean> {
   return true;
 }
 
+function onApplyMask(mask: SourceImageState) {
+  form.state.value.maskImage = mask;
+  showMask.value = false;
+}
+
+// ── Gallery drawer (preserved) ────────────────────────────────────────
 function openItem(item: GalleryImage) {
-  const idx = galleryEntries.value.findIndex(
+  selectedIndex.value = galleryEntries.value.findIndex(
     (e) => e.filename === item.filename,
   );
-  selectedIndex.value = idx;
   selected.value = item;
 }
 
@@ -540,10 +697,6 @@ function recreateFromGallery(item: GalleryImage) {
   });
 }
 
-// Map a finished Job back to its saved GalleryImage. The SSE complete
-// event doesn't echo the on-disk filename, so we match on seed + model
-// against the freshly-refreshed gallery (sorted newest-first, so the
-// first match is the right one if a seed happens to repeat).
 function openJob(job: Job) {
   const r = job.result;
   if (!r) return;
@@ -552,17 +705,36 @@ function openJob(job: Job) {
   );
   if (match) openItem(match);
 }
+
 function closeDrawer() {
   selected.value = null;
   selectedIndex.value = -1;
 }
+
+function onLightboxReuse(item: GalleryImage) {
+  recreateFromGallery(item);
+  closeDrawer();
+}
+
+async function onLightboxUseSource(item: GalleryImage) {
+  try {
+    const res = await fetch(imageUrl(item.filename));
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+    const base64 = await blobToBase64(await res.blob());
+    form.state.value.imageAttachments = [
+      { kind: "gallery", filename: item.filename, base64 },
+    ];
+    closeDrawer();
+  } catch (err) {
+    toast("error", err instanceof Error ? err.message : String(err));
+  }
+}
 function stepDrawer(delta: number) {
   if (selectedIndex.value < 0) return;
-  const list = galleryEntries.value;
   const next = selectedIndex.value + delta;
-  if (next < 0 || next >= list.length) return;
+  if (next < 0 || next >= galleryEntries.value.length) return;
   selectedIndex.value = next;
-  selected.value = list[next] ?? null;
+  selected.value = galleryEntries.value[next] ?? null;
 }
 async function handleDelete(item: GalleryImage) {
   try {
@@ -578,20 +750,16 @@ async function handleDelete(item: GalleryImage) {
   }
 }
 
-async function onQueueLaneChange(id: string, targetGpu: number | null) {
-  try {
-    await updateQueueJobTargetGpu(id, targetGpu);
-    await queue.refresh();
-  } catch (e) {
-    console.error(e);
-  }
+function openAdvancedLora() {
+  showAdvanced.value = true;
 }
 
-const queueBusy = computed(() =>
-  stream.jobs.value.some((j) => j.state === "running"),
-);
-
 onMounted(async () => {
+  if (typeof window.matchMedia === "function") {
+    phoneQuery = window.matchMedia("(max-width: 639px)");
+    syncPhone();
+    phoneQuery.addEventListener?.("change", syncPhone);
+  }
   await refreshModels();
   try {
     galleryEntries.value = await listGallery();
@@ -599,9 +767,7 @@ onMounted(async () => {
     console.error(e);
   }
   if (!form.state.value.model) {
-    const first = models.value.find(
-      (m) => m.downloaded && isStandaloneGenerationModel(m),
-    );
+    const first = installedModels.value[0];
     if (first) form.applyModelDefaults(first);
   }
   startAutoRefresh();
@@ -609,6 +775,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAutoRefresh();
+  phoneQuery?.removeEventListener?.("change", syncPhone);
   queue.stop();
 });
 </script>
@@ -616,87 +783,182 @@ onBeforeUnmount(() => {
 <template>
   <div
     data-test="generate-shell"
-    class="mx-auto max-w-[2400px] px-3 pb-40 pt-4 sm:px-5 sm:pt-6 lg:px-6 2xl:px-8"
+    class="mx-auto max-w-[1600px] px-4 pb-24 pt-5"
   >
-    <!-- Narrow-viewport resource chip. Desktop reads GPU telemetry from the
-         app-level ResourceTray; the wide-screen page has room for its own
-         panels. Kept from the former TopBar so mobile keeps a live readout. -->
     <div class="mb-4 lg:hidden">
       <ResourceStrip variant="chip" />
     </div>
 
     <div
       data-test="generate-workspace"
-      class="mt-4 grid gap-4 sm:mt-6 xl:grid-cols-[24rem_minmax(0,1fr)_34rem] 2xl:grid-cols-[26rem_minmax(0,1fr)_38rem]"
+      class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_296px] xl:grid-cols-[238px_minmax(0,1fr)_296px]"
     >
-      <aside class="space-y-4 xl:sticky xl:top-4 xl:self-start">
-        <section class="glass rounded-2xl p-4">
-          <h2 class="text-sm font-semibold text-slate-100">Models</h2>
-          <div class="mt-3">
-            <ModelPicker
-              :models="models"
-              :model-value="form.state.value.model"
-              @update:model-value="() => {}"
-              @select="selectModel"
-            />
+      <!-- Left rail: model list + LoRA card -->
+      <aside class="hidden flex-col gap-3.5 xl:flex">
+        <div class="rounded-card border border-edge bg-bench p-4">
+          <div
+            class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-3"
+          >
+            Model
           </div>
-        </section>
+          <div class="mt-3 flex flex-col gap-1">
+            <button
+              v-for="m in installedModels"
+              :key="m.name"
+              type="button"
+              class="flex items-center gap-2 rounded-control px-2.5 py-2 text-left font-mono text-xs text-ink-2 transition hover:bg-white/5"
+              :class="{ 'text-rebate': m.name === form.state.value.model }"
+              :data-test="`model-row-${m.name}`"
+              @click="selectModel(m)"
+            >
+              <span class="min-w-0 flex-1 truncate">{{ m.name }}</span>
+              <span
+                v-if="m.name === form.state.value.model"
+                class="font-extrabold text-safelight"
+                >✓</span
+              >
+            </button>
+            <router-link
+              to="/models"
+              class="mt-1 px-2.5 py-1 text-left font-mono text-[11px] text-ink-3 hover:text-safelight"
+              >All models →</router-link
+            >
+          </div>
+        </div>
 
-        <section v-if="familySupportsLora" class="glass rounded-2xl p-4">
-          <h2 class="text-sm font-semibold text-slate-100">LoRA Stack</h2>
-          <LoraPicker
-            :family="currentFamily"
-            :model-value="form.state.value.loras"
-            @update:model-value="onLorasChange"
-            @append-prompt="onAppendPromptPhrase"
-          />
-        </section>
+        <div class="rounded-card border border-edge bg-bench p-4">
+          <div class="flex items-center justify-between">
+            <span
+              class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-3"
+              >LoRA stack</span
+            >
+            <span class="font-mono text-[11px] text-ink-3">{{
+              form.state.value.loras.length
+            }}</span>
+          </div>
+          <button
+            type="button"
+            class="mt-3 w-full rounded-control border border-dashed border-ce p-2.5 text-xs text-ink-2 hover:bg-white/5"
+            data-test="add-lora"
+            @click="openAdvancedLora"
+          >
+            + Add LoRA
+          </button>
+        </div>
       </aside>
 
-      <main class="min-w-0">
-        <Composer
-          ref="composerRef"
-          v-model="form.state.value"
-          :mode="composerMode"
-          :queue-depth="status?.queue_depth ?? null"
-          :queue-capacity="status?.queue_capacity ?? null"
-          :gpus="gpus"
-          :expand-active="form.state.value.expand.enabled"
-          :family="currentFamily"
-          :chain-decision="chainDecision"
-          :submit-error="submitStatus"
-          @submit="onSubmit"
-          @submit-script="onSubmitScript"
-          @update:mode="setComposerMode"
-          @open-expand="showExpand = true"
-          @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
-          @open-image-picker="showPicker = true"
-          @clear-source="onClearSource"
-        />
-
-        <RunningStrip
+      <!-- Center: activity + composer + canvas + recent -->
+      <main class="flex min-w-0 flex-col gap-4">
+        <ActivityStrip
           :jobs="stream.jobs.value"
-          :queue-entries="queue.entries.value"
-          :gpus="gpus"
           @cancel="stream.cancel"
           @open="openJob"
-          @dismiss="stream.remove"
-          @clear-finished="stream.clearDone"
-          @lane-change="onQueueLaneChange"
         />
+
+        <div class="flex items-center gap-2">
+          <SegmentedControl
+            :model-value="composerMode"
+            :options="[
+              { value: 'single', label: 'Single' },
+              { value: 'script', label: 'Sequence' },
+            ]"
+            label="Composer mode"
+            data-test="composer-mode"
+            @update:model-value="setComposerMode"
+          />
+          <div class="flex-1" />
+          <div class="relative">
+            <button
+              type="button"
+              class="flex items-center gap-1.5 rounded-control border border-ce px-3 py-1.5 text-xs text-ink-2 hover:bg-white/5"
+              data-test="templates-toggle"
+              @click="showTemplates = !showTemplates"
+            >
+              <Icon name="star" :size="14" />
+              Templates
+            </button>
+            <div
+              v-if="showTemplates"
+              class="absolute right-0 z-30 mt-2 w-80 rounded-card border border-edge bg-bench p-3 shadow-[var(--shadow-raised)]"
+              data-test="templates-popover"
+            >
+              <GenerationTemplatesPanel v-model="form.state.value" />
+            </div>
+          </div>
+        </div>
+
+        <ScriptComposer
+          v-if="composerMode === 'script'"
+          ref="scriptComposerRef"
+          :model="form.state.value.model"
+          :width="form.state.value.width"
+          :height="form.state.value.height"
+          :fps="form.state.value.fps ?? 24"
+          @submit="onSubmitScript"
+          @expand="(idx: number, p: string) => onExpandStage(idx, p)"
+        />
+
+        <template v-else>
+          <ComposerCard
+            v-model:prompt="form.state.value.prompt"
+            v-model:style-preset="form.state.value.stylePreset"
+            :aspect-label="aspectLabel"
+            :width="form.state.value.width"
+            :height="form.state.value.height"
+            :steps="form.state.value.steps"
+            :batch-size="form.state.value.batchSize"
+            :expanded="expanded"
+            @submit="onSubmit"
+            @expand="onExpand"
+            @undo-expand="undoExpand"
+          />
+
+          <div
+            v-if="submitStatus"
+            class="rounded-control bg-stop/10 px-3 py-1.5 text-xs text-stop"
+            data-test="composer-submit-error"
+          >
+            {{ submitStatus }}
+          </div>
+
+          <div
+            v-if="chainDecision.kind === 'chain'"
+            class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
+          >
+            Will render as
+            <span class="font-semibold">{{ chainDecision.stageCount }}</span>
+            chained clips of {{ chainDecision.clipFrames }} frames — expect this
+            to take substantially longer than a single clip.
+          </div>
+
+          <ResultCanvas
+            :mode="canvasMode"
+            :progress="genProgress"
+            :stage="genStage"
+            :result-src="resultSrc"
+            :result-caption="resultCaption"
+            :variations="variations"
+            @update:variations="variations = $event"
+            @use-variation="useVariation"
+            @discard="discardVariations"
+            @queue="queueVariations"
+            @click="canvasMode === 'result' ? openLatestResult() : undefined"
+          />
+        </template>
 
         <ChainJobCard
           v-if="submittedChainJobDetail"
-          class="mt-4"
           :job="submittedChainJobDetail"
           @updated="submittedChainJobId = submittedChainJobDetail?.id ?? null"
         />
 
-        <section class="mt-4">
+        <section>
           <div class="mb-2 flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-slate-100">Recent</h2>
-            <span class="text-xs text-slate-500"
-              >{{ galleryEntries.length }} items</span
+            <span class="font-display text-[15px] font-semibold text-rebate"
+              >Recent</span
+            >
+            <span class="font-mono text-[11px] text-ink-3"
+              >{{ galleryEntries.length }} prints</span
             >
           </div>
           <div class="max-h-[52rem] overflow-y-auto pr-1">
@@ -713,19 +975,28 @@ onBeforeUnmount(() => {
         </section>
       </main>
 
-      <aside class="xl:sticky xl:top-4 xl:self-start">
-        <GenerateParamsPanel
-          ref="paramsPanelRef"
-          v-model="form.state.value"
-          :models="models"
-          :placement-gpus="gpuListForPlacement"
-          :force-expanded="true"
-          :show-model-picker="false"
-          :show-loras="false"
-          title="Controls"
-        />
-      </aside>
+      <!-- Right: controls -->
+      <ControlsAside
+        v-model="form.state.value"
+        :family="currentFamily"
+        :adv-count="advCount"
+        @open-advanced="showAdvanced = true"
+      />
     </div>
+
+    <AdvancedDrawer
+      :open="showAdvanced"
+      v-model="form.state.value"
+      :family="currentFamily"
+      :adv-count="advCount"
+      :mobile="isPhone"
+      :placement-gpus="gpuListForPlacement"
+      @close="showAdvanced = false"
+      @open-picker="showPicker = true"
+      @clear-source="onClearSource"
+      @open-mask="showMask = true"
+      @append-prompt="form.appendPromptPhrase"
+    />
 
     <ExpandModal
       :open="showExpand"
@@ -734,17 +1005,9 @@ onBeforeUnmount(() => {
       "
       :expand="form.state.value.expand"
       :current-model="currentModel"
-      :queue-busy="queueBusy"
+      :queue-busy="!!runningJob"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
-      @apply-prompt="
-        (v: string) => {
-          if (expandStageIndex !== null) {
-            composerRef?.scriptComposerRef?.setStagePrompt(expandStageIndex, v);
-          } else {
-            form.state.value.prompt = v;
-          }
-        }
-      "
+      @apply-prompt="applyExpandedPrompt"
       @close="
         showExpand = false;
         expandStageIndex = null;
@@ -755,8 +1018,15 @@ onBeforeUnmount(() => {
       @pick="onPickSource"
       @close="showPicker = false"
     />
+    <MaskEditorModal
+      :open="showMask"
+      :source-image="form.state.value.imageAttachments[0] ?? null"
+      :initial-mask="form.state.value.maskImage"
+      @apply="onApplyMask"
+      @close="showMask = false"
+    />
 
-    <DetailDrawer
+    <Lightbox
       :item="selected"
       :has-prev="selectedIndex > 0"
       :has-next="
@@ -768,6 +1038,9 @@ onBeforeUnmount(() => {
       @close="closeDrawer"
       @prev="stepDrawer(-1)"
       @next="stepDrawer(1)"
+      @reuse="onLightboxReuse"
+      @use-source="onLightboxUseSource"
+      @upscale="onLightboxUseSource"
       @delete="handleDelete"
     />
   </div>

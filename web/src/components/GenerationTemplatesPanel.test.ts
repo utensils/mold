@@ -13,7 +13,8 @@ function makeForm(
   overrides: Partial<GenerateFormState> = {},
 ): GenerateFormState {
   return {
-    version: 2,
+    version: 3,
+    stylePreset: null,
     prompt: "template prompt",
     negativePrompt: "",
     model: "flux-dev:q4",
