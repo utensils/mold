@@ -117,6 +117,10 @@ function hostOf(entry: GalleryImage) {
   return id ? getHost(id) : null;
 }
 
+function hostLabel(entry: GalleryImage): string {
+  return (entry as { hostLabel?: string }).hostLabel ?? "";
+}
+
 /** Composite identity for a tile: two hosts can hold the same filename. */
 function keyOf(entry: GalleryImage): string {
   return printKey(entry as { hostId?: string; filename: string });
@@ -302,6 +306,22 @@ onBeforeUnmount(() => {
             </template>
           </MediaTile>
 
+          <span
+            v-if="hostLabel(entry)"
+            class="gg__host"
+            data-test="host-badge"
+            :title="`Generated on ${hostLabel(entry)}`"
+          >
+            {{ hostLabel(entry) }}
+          </span>
+          <span
+            class="gg__metadata"
+            data-test="print-metadata"
+            :title="`${entry.metadata.model} · Seed ${entry.metadata.seed}`"
+          >
+            {{ entry.metadata.model }} · S {{ entry.metadata.seed }}
+          </span>
+
           <!-- Selection hit layer (select mode only). Sits above the tile so a
                click toggles instead of opening; keeps shift/meta range logic. -->
           <button
@@ -369,27 +389,33 @@ onBeforeUnmount(() => {
 
 .gg__grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 @media (min-width: 640px) {
   .gg__grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 @media (min-width: 900px) {
   .gg__grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 @media (min-width: 1200px) {
   .gg__grid {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
 .gg__cell {
   position: relative;
+  min-width: 0;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  contain: inline-size layout paint;
 }
 
 .gg__skel {
@@ -398,7 +424,13 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--rebate) 5%, transparent);
 }
 
-/* Video/animated badge pinned bottom-right via MediaTile's overlay slot. */
+/* Video/animated badge stays top-right so gallery metadata owns the bottom edge. */
+:deep(.ms-tile__overlay) {
+  top: 8px;
+  right: 8px;
+  bottom: auto;
+}
+
 .gg__vbadge {
   display: inline-flex;
   align-items: center;
@@ -415,6 +447,54 @@ onBeforeUnmount(() => {
 .gg__vplay {
   width: 10px;
   height: 10px;
+}
+
+.gg__host,
+.gg__metadata {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  color: var(--on-media);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.gg__host {
+  bottom: 8px;
+  left: 8px;
+  max-width: 70%;
+  overflow: hidden;
+  padding: 2px 6px;
+  border-radius: var(--radius-control-sm);
+  background: rgba(0, 0, 0, 0.62);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--dur-quick) var(--ease);
+}
+
+.gg__metadata {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, 0.62);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateY(100%);
+  transition: transform var(--dur-quick) var(--ease);
+}
+
+.gg__cell:hover .gg__host,
+.gg__cell:focus-within .gg__host {
+  opacity: 0;
+}
+
+.gg__cell:hover .gg__metadata,
+.gg__cell:focus-within .gg__metadata {
+  transform: translateY(0);
 }
 
 .gg__hit {
