@@ -1,24 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import NavItem from "@ui/components/NavItem.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import type { IconName } from "@ui/icons";
 import logoUrl from "../../assets/logo.png";
 import StatusPopover from "./StatusPopover.vue";
-import RenameDialog from "./RenameDialog.vue";
-import ConfirmDialog from "./ConfirmDialog.vue";
+import PanelResizeHandle from "./PanelResizeHandle.vue";
+import { dragWidth } from "../../lib/panelResize";
 import { useGenerationStore, jobStatusCode, railOrder, type Job } from "../../stores/generation";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useGalleryStore } from "../../stores/gallery";
-import { useHostsStore, type HostView } from "../../stores/hosts";
+import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
-import { hostIdFromUrl } from "../../lib/hosts";
 import { badgeCount } from "../../lib/notifications";
-import { detectedHosts as computeDetectedHosts } from "../../lib/discovery";
-import { ipc, type DiscoveredHost, type SavedHost } from "../../lib/ipc";
 import { shortcutLabel } from "../../lib/platform";
 
 const route = useRoute();
@@ -36,225 +33,37 @@ const toasts = useToastStore();
 const libraryBadge = computed(() => badgeCount(gallery.newCount));
 const machinesErrored = computed(() => hosts.all.some((h) => h.status === "error"));
 
-// Fixed widths per the prototype (210 ↔ 62). The old drag-resize handle is
-// gone; the persisted navRailWidth pref is left untouched but no longer read.
+// Collapse snaps to the 62px icon rail; expanded width is drag-resizable at
+// the right edge and persists via appPrefs.navRailWidth (double-click resets
+// to the 210px default).
 const collapsed = computed(() => appPrefs.sidebarCollapsed);
 
-// Quiet background mDNS scan so nearby `mold serve` instances surface in the
-// rail without a trip to Settings.
-const discovered = ref<DiscoveredHost[]>([]);
-// Remembered hosts snapshot so the detected-row menu can offer Forget for a
-// box that's saved (under any slug) but not currently connected.
-const remembered = ref<SavedHost[]>([]);
-let scanTimer: ReturnType<typeof setInterval> | null = null;
-
-async function scanNetwork() {
-  try {
-    discovered.value = await ipc.discoverServers();
-    remembered.value = (await ipc.appSettingsGet()).savedHosts;
-  } catch {
-    // Discovery is best-effort; the section simply stays as-is.
-  }
-}
-
-onMounted(() => {
-  void scanNetwork();
-  scanTimer = setInterval(() => void scanNetwork(), 60_000);
-});
-onUnmounted(() => {
-  if (scanTimer) clearInterval(scanTimer);
-});
-
-/** Detected on the network but not connected (and not this machine). Deduped
- *  by slug AND instance id, so a box already connected by hostname isn't
- *  re-offered when mDNS advertises it by IP. */
-const detectedHosts = computed(() =>
-  computeDetectedHosts(
-    discovered.value,
-    new Set(hosts.all.map((h) => h.id)),
-    new Set(hosts.all.map((h) => h.instanceId).filter((id): id is string => !!id)),
-  ),
+// Live width while dragging; null follows the persisted preference.
+// Persistence happens only on commit, never per pointermove.
+const draftRailWidth = ref<number | null>(null);
+const railWidth = computed(() =>
+  collapsed.value ? 62 : (draftRailWidth.value ?? appPrefs.navRailWidth),
 );
 
-function hostDot(host: HostView): string {
-  switch (host.status) {
-    case "ready":
-      return "bg-safelight";
-    case "connecting":
-      return "bg-halide animate-pulse";
-    default:
-      return "bg-stop";
-  }
+function onRailResize(dx: number) {
+  draftRailWidth.value = dragWidth("navRail", appPrefs.navRailWidth, dx, "right");
 }
 
-/** Connect a detected host in place when its key is already stored — under
- *  its advertised URL slug, or under the slug of a remembered host with the
- *  same instance id (a box remembered by hostname is often advertised by IP
- *  under a different slug). */
-async function connectDetected(host: DiscoveredHost) {
-  const id = hostIdFromUrl(host.url);
-  let key = await ipc.secretGet(`remote-api-key.${id}`);
-  if (!key && host.instanceId) {
-    try {
-      const saved = (await ipc.appSettingsGet()).savedHosts.find(
-        (s) => s.instanceId === host.instanceId,
-      );
-      if (saved && saved.id !== id) key = await ipc.secretGet(`remote-api-key.${saved.id}`);
-    } catch {
-      // Settings unreadable — fall through to the key prompt.
-    }
-  }
-  if (host.authRequired && !key) {
-    toasts.push(`${host.name} needs an API key — add it in Settings → Hosts.`);
-    void router.push("/settings");
-    return;
-  }
-  try {
-    await hosts.connect(host.url, key, host.name);
-    toasts.push(`Connected to ${host.name}`);
-  } catch (err) {
-    toasts.push(String(err), "error");
-  }
+async function onRailCommit() {
+  const width = draftRailWidth.value;
+  if (width === null) return;
+  if (width !== appPrefs.navRailWidth) await appPrefs.update({ navRailWidth: width });
+  draftRailWidth.value = null;
 }
 
-const renameTarget = ref<HostView | null>(null);
-
-/** Open the host's web UI in the default browser. */
-async function openHostUrl(url: string) {
-  try {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
-    await openUrl(url);
-  } catch {
-    window.open(url, "_blank", "noopener");
-  }
+function onRailReset() {
+  draftRailWidth.value = null;
+  void appPrefs.update({ navRailWidth: null });
 }
 
-/** Host awaiting the forget confirm (§08 G12). */
-const forgetTarget = ref<HostView | null>(null);
-
-/** Drop the host AND its saved entry + stored API key (recoverable only by
- *  re-adding it). Disconnect alone keeps both for later reconnect. */
-async function forgetHost(host: HostView) {
-  await hosts.disconnect(host.id);
-  await ipc.forgetRemoteHost(host.id);
-  toasts.push(`Forgot ${host.label}`);
-}
-
-async function confirmForget() {
-  const host = forgetTarget.value;
-  forgetTarget.value = null;
-  if (host) await forgetHost(host);
-}
-
-function onRenameSave(name: string) {
-  const host = renameTarget.value;
-  renameTarget.value = null;
-  if (host) void hosts.rename(host.id, name);
-}
-
-/** The remembered entry for a detected box — matched by advertised slug or,
- *  when the advertisement carries an instance id, by a saved twin under any
- *  slug (remembered by hostname, advertised by IP). */
-function rememberedTwinOf(d: DiscoveredHost): SavedHost | null {
-  const id = hostIdFromUrl(d.url);
-  return (
-    remembered.value.find((s) => s.id === id) ??
-    (d.instanceId ? (remembered.value.find((s) => s.instanceId === d.instanceId) ?? null) : null)
-  );
-}
-
-function detectedMenu(d: DiscoveredHost): MenuEntry[] {
-  const entries: MenuEntry[] = [
-    { label: "Connect", action: () => void connectDetected(d) },
-    { separator: true },
-    { label: "Open web UI", action: () => void openHostUrl(d.url) },
-    {
-      label: "Copy URL",
-      action: () => void navigator.clipboard.writeText(d.url).then(() => toasts.push("Copied")),
-    },
-  ];
-  const saved = rememberedTwinOf(d);
-  if (saved) {
-    entries.push({ separator: true });
-    entries.push({
-      label: "Forget",
-      danger: true,
-      action: () =>
-        void ipc.forgetRemoteHost(saved.id).then(() => {
-          remembered.value = remembered.value.filter((s) => s.id !== saved.id);
-          toasts.push(`Forgot ${saved.name ?? d.name}`);
-        }),
-    });
-  }
-  return entries;
-}
-
-function hostMenu(host: HostView): MenuEntry[] {
-  const entries: MenuEntry[] = [];
-  const isTarget = (appPrefs.settings?.generateTargetHost ?? null) === host.id;
-  if (isTarget) {
-    entries.push({
-      label: "Route automatically",
-      action: () => void appPrefs.update({ generateTargetHost: null }),
-    });
-  } else {
-    entries.push({
-      label: "Set as generation target",
-      disabled: host.status !== "ready",
-      action: () => void appPrefs.update({ generateTargetHost: host.id }),
-    });
-  }
-  entries.push({
-    label: "View in library",
-    action: () => {
-      // Direct set: pushing an unchanged ?host= query is a no-op navigation,
-      // so the view's watcher alone can't re-apply the filter.
-      useGalleryStore().filter = host.id;
-      void router.push({ path: "/library", query: { host: host.id } });
-    },
-  });
-  entries.push({ separator: true });
-  entries.push({
-    label: "Open web UI",
-    disabled: !host.baseUrl,
-    action: () => void openHostUrl(host.baseUrl ?? ""),
-  });
-  entries.push({
-    label: "Copy URL",
-    disabled: !host.baseUrl,
-    action: () =>
-      void navigator.clipboard.writeText(host.baseUrl ?? "").then(() => toasts.push("Copied")),
-  });
-  if (host.kind === "remote") {
-    entries.push({
-      label: "Rename…",
-      action: () => {
-        renameTarget.value = host;
-      },
-    });
-  }
-  entries.push({ separator: true });
-  if (host.primary) {
-    entries.push({ label: "Manage in Settings", action: () => void router.push("/settings") });
-    return entries;
-  }
-  if (host.status === "error") {
-    entries.push({ label: "Reconnect", action: () => void hosts.reconnect(host.id) });
-  }
-  entries.push({
-    label: "Disconnect",
-    danger: true,
-    action: () => void hosts.disconnect(host.id),
-  });
-  entries.push({
-    label: "Forget",
-    danger: true,
-    action: () => {
-      forgetTarget.value = host;
-    },
-  });
-  return entries;
-}
+// Host management, discovery, and per-host actions live entirely in the
+// Machines workspace — the rail keeps only the Machines destination (with
+// its offline stop-dot badge) and the status popover.
 
 interface Destination {
   route: string;
@@ -344,9 +153,17 @@ function jobMenu(job: Job): MenuEntry[] {
   <nav
     class="nav-rail relative flex shrink-0 flex-col border-r border-edge bg-bench pt-3.5 pb-3"
     :class="collapsed ? 'px-1.5' : 'px-2.5'"
-    :style="{ width: collapsed ? '62px' : '210px' }"
+    :style="{ width: `${railWidth}px` }"
     aria-label="Primary"
   >
+    <PanelResizeHandle
+      v-if="!collapsed"
+      class="absolute inset-y-0 -right-0.5 z-10"
+      label="Resize sidebar"
+      @resize="onRailResize"
+      @commit="onRailCommit"
+      @reset="onRailReset"
+    />
     <!-- header: logo + gradient wordmark + STUDIO kicker -->
     <div class="mb-4 flex items-center gap-2.5 px-2" :class="collapsed ? 'justify-center' : ''">
       <img :src="logoUrl" alt="mold" class="h-6 w-6 shrink-0 object-contain" />
@@ -428,63 +245,6 @@ function jobMenu(job: Job): MenuEntry[] {
       <p v-else class="px-3 text-caption text-ink-3">nothing developing</p>
     </template>
 
-    <!-- machines: ambient host status + quick nav to /machines/:id -->
-    <div v-if="!collapsed" class="mt-5 mb-1.5 flex items-center gap-2 px-3">
-      <span class="rail-kicker">Machines</span>
-      <div class="h-px flex-1 border-t border-edge" />
-    </div>
-    <div v-else class="mt-4 mb-1 h-px border-t border-edge" />
-    <div data-test="hosts-section" class="flex flex-col gap-[2px]">
-      <button
-        v-for="host in hosts.all"
-        :key="host.id"
-        type="button"
-        data-test="host-row"
-        class="flex h-8 cursor-pointer items-center gap-2.5 rounded-[9px] hover:bg-[color-mix(in_srgb,var(--rebate)_6%,transparent)]"
-        :class="collapsed ? 'justify-center px-0' : 'px-2.5'"
-        :title="collapsed ? host.label : (host.baseUrl ?? undefined)"
-        @click="router.push(`/machines/${host.id}`)"
-        @contextmenu.prevent="contextMenu.open($event, hostMenu(host))"
-      >
-        <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="hostDot(host)" />
-        <template v-if="!collapsed">
-          <span class="min-w-0 flex-1 truncate text-caption text-ink-2">{{ host.label }}</span>
-          <span v-if="host.queueDepth !== null" class="font-utility text-[9.5px] text-ink-3">
-            {{ host.queueDepth }}
-          </span>
-        </template>
-      </button>
-      <div
-        v-for="d in detectedHosts"
-        :key="d.url"
-        data-test="detected-host-row"
-        class="flex h-8 items-center gap-2.5 rounded-[9px]"
-        :class="collapsed ? 'justify-center px-0' : 'px-2.5'"
-        :title="d.url"
-        @contextmenu.prevent="contextMenu.open($event, detectedMenu(d))"
-      >
-        <span class="h-[7px] w-[7px] shrink-0 rounded-full border border-control-edge" />
-        <template v-if="!collapsed">
-          <span class="min-w-0 flex-1 truncate text-caption text-ink-3">{{ d.name }}</span>
-          <button
-            type="button"
-            data-test="detected-host-connect"
-            class="shrink-0 rounded-[6px] px-1 text-caption text-ink-3 hover:text-ink"
-            :aria-label="`Connect to ${d.name}`"
-            @click="connectDetected(d)"
-          >
-            +
-          </button>
-        </template>
-      </div>
-      <p
-        v-if="!collapsed && hosts.all.length === 0 && detectedHosts.length === 0"
-        class="px-3 text-caption text-ink-3"
-      >
-        No hosts
-      </p>
-    </div>
-
     <div class="flex-1" />
 
     <!-- status + settings -->
@@ -504,24 +264,6 @@ function jobMenu(job: Job): MenuEntry[] {
         {{ shortcutLabel(",") }}
       </Keycap>
     </div>
-
-    <RenameDialog
-      :open="!!renameTarget"
-      title="Rename host"
-      :initial="renameTarget?.label ?? ''"
-      @save="onRenameSave"
-      @cancel="renameTarget = null"
-    />
-
-    <ConfirmDialog
-      :open="!!forgetTarget"
-      title="Forget studio?"
-      message="Its API key is discarded."
-      confirm-label="Forget"
-      danger
-      @confirm="confirmForget"
-      @cancel="forgetTarget = null"
-    />
   </nav>
 </template>
 

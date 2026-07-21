@@ -166,4 +166,42 @@ describe("MachinesView overview", () => {
     await flushPromises();
     expect(wrapper.find("[data-test='connect-type-remote']").exists()).toBe(true);
   });
+
+  it("connecting a discovered box finds a stored key under its instance-id twin's slug", async () => {
+    // Remembered by hostname (studio-7680) but advertised by IP: the key is
+    // stored under the remembered slug, not the advertised one.
+    appSettingsGet.mockResolvedValue({
+      savedHosts: [
+        {
+          id: "studio-7680",
+          name: "studio",
+          url: "http://studio:7680",
+          lastUsedMs: 1,
+          instanceId: "uuid-studio",
+        },
+      ],
+      connectedHostIds: [],
+      generateTargetHost: null,
+    });
+    discoverServers.mockResolvedValue([
+      {
+        name: "studio-7680",
+        url: "http://192.168.1.20:7680",
+        host: "192.168.1.20",
+        port: 7680,
+        version: "1",
+        authRequired: true,
+        isThisMachine: false,
+        instanceId: "uuid-studio",
+      },
+    ]);
+    secretGet.mockImplementation((name: unknown) =>
+      Promise.resolve(name === "remote-api-key.studio-7680" ? "twin-key" : null),
+    );
+    const wrapper = await mountView();
+    await wrapper.get("[data-test='discovered-add']").trigger("click");
+    await flushPromises();
+    expect(secretGet).toHaveBeenCalledWith("remote-api-key.192-168-1-20-7680");
+    expect(secretGet).toHaveBeenCalledWith("remote-api-key.studio-7680");
+  });
 });

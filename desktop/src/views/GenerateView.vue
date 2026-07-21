@@ -1279,14 +1279,24 @@ watch(
 
 onMounted(() => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
-  if (previewRegion.value && typeof ResizeObserver !== "undefined") {
+  resizePreview();
+  void listenForNativeImageDrops();
+});
+
+// The preview region only exists while a job renders (v-else-if="job"), so a
+// mount-time observer would never attach — the frame would measure 0×0 and
+// the developing canvas render as a black void. Attach/detach as the element
+// comes and goes, measuring immediately on attach.
+watch(previewRegion, (el) => {
+  previewResizeObserver?.disconnect();
+  previewResizeObserver = null;
+  if (el && typeof ResizeObserver !== "undefined") {
     previewResizeObserver = new ResizeObserver(([entry]) => {
       if (entry) resizePreview(entry.contentRect.width, entry.contentRect.height);
     });
-    previewResizeObserver.observe(previewRegion.value);
+    previewResizeObserver.observe(el);
   }
-  resizePreview();
-  void listenForNativeImageDrops();
+  if (el) resizePreview();
 });
 
 onBeforeUnmount(() => {

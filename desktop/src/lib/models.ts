@@ -43,7 +43,7 @@ export function modelSizeLabels(m: ModelEntry): ModelSizeLabels {
   const differs = runtimeBytes > 0 && Math.abs(runtimeBytes - weightsBytes) >= 50_000_000;
   return {
     weights,
-    runtime: differs ? `${formatGB(runtimeBytes)} with shared runtime` : null,
+    runtime: differs ? `${formatGB(runtimeBytes)} on disk` : null,
   };
 }
 

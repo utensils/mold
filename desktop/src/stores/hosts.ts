@@ -344,7 +344,7 @@ export const useHostsStore = defineStore("hosts", {
         });
       });
       if (clearedTarget) {
-        // Keep the in-memory prefs snapshot coherent (HostSelector reads it).
+        // Keep the in-memory prefs snapshot coherent (the Create header host menu reads it).
         const prefs = useAppPrefsStore();
         if (prefs.settings) prefs.settings = { ...prefs.settings, generateTargetHost: null };
       }

@@ -4,7 +4,8 @@
  * these helpers own the clamping so every surface agrees on the limits.
  */
 export const PANEL_LIMITS = {
-  navRail: { min: 160, def: 208, max: 320 },
+  // 210 default per the Mold Studio prototype sidebar.
+  navRail: { min: 160, def: 210, max: 320 },
   generateParams: { min: 280, def: 320, max: 480 },
 } as const;
 

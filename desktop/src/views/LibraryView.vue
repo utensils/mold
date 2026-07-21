@@ -409,6 +409,15 @@ const virtualizer = useVirtualizer(
   })),
 );
 
+// TanStack Virtual caches per-index measurements; a new estimateSize closure
+// alone does NOT invalidate that cache. When the justified layout re-flows
+// (container resize, entries arriving, row-height change) the cached offsets
+// go stale and rows render overlapping — re-measure on any height change.
+watch(
+  () => rows.value.map((r) => r.height).join(","),
+  () => virtualizer.value?.measure?.(),
+);
+
 const showBadges = computed(() => gallery.filter === "all" && gallery.chipCounts.length > 1);
 const availabilityLabel = (entry: MergedPrint) =>
   entry.availableOn.map((source) => source.label).join(" · ");

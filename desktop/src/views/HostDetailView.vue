@@ -381,7 +381,7 @@ async function forget() {
 
 <template>
   <div class="h-full overflow-y-auto p-6">
-    <div class="mx-auto max-w-5xl">
+    <div class="mx-auto max-w-7xl">
       <template v-if="host">
         <!-- Header: back to Machines · status · name · address · target chip -->
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -639,8 +639,10 @@ async function forget() {
             </CardSurface>
           </div>
 
-          <!-- Right: loaded models, installed models, connection actions -->
-          <div class="flex shrink-0 flex-col gap-4 lg:w-80">
+          <!-- Right: loaded models, installed models, connection actions.
+               Fluid on wide windows so long model names and size labels
+               un-truncate instead of pinning to a fixed 320px column. -->
+          <div class="flex min-w-0 flex-col gap-4 lg:min-w-80 lg:max-w-xl lg:flex-1">
             <CardSurface large>
               <h2 class="edge-code" data-test="loaded-label">LOADED</h2>
               <div v-if="loadedChips.length" class="mt-3 flex flex-col gap-2">

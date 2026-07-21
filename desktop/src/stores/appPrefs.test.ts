@@ -221,7 +221,7 @@ describe("appPrefs panel widths", () => {
 
   it("defaults to the PANEL_LIMITS defaults before settings load", () => {
     const prefs = useAppPrefsStore();
-    expect(prefs.navRailWidth).toBe(208);
+    expect(prefs.navRailWidth).toBe(210);
     expect(prefs.generateParamsWidth).toBe(320);
   });
 
@@ -229,7 +229,7 @@ describe("appPrefs panel widths", () => {
     vi.mocked(ipc.appSettingsGet).mockResolvedValue(panelSettings() as never);
     const prefs = useAppPrefsStore();
     await prefs.init();
-    expect(prefs.navRailWidth).toBe(208);
+    expect(prefs.navRailWidth).toBe(210);
     expect(prefs.generateParamsWidth).toBe(320);
   });
 

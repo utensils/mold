@@ -10,6 +10,13 @@ body,
   overscroll-behavior: none;
 }
 
+/* Native-app feel: no WebKit elastic rubber-banding anywhere. The shell rule
+ * above only covers the root; every inner scroll region (library grid, host
+ * detail, drawers, settings) must also stop dead at its limits. */
+* {
+  overscroll-behavior: none;
+}
+
 body {
   background: var(--bath);
   color: var(--rebate);

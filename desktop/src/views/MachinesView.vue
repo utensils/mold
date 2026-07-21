@@ -167,7 +167,22 @@ async function addDiscovered(host: DiscoveredHost) {
   adding.value = true;
   actionError.value = null;
   try {
-    const key = await ipc.secretGet(`remote-api-key.${hostIdFromUrl(host.url)}`);
+    // Key lookup: the advertised URL slug first, then a remembered twin with
+    // the same instance id — a box remembered by hostname is often advertised
+    // by IP under a different slug, and its stored key must still apply.
+    let key = await ipc.secretGet(`remote-api-key.${hostIdFromUrl(host.url)}`);
+    if (!key && host.instanceId) {
+      try {
+        const saved = (await ipc.appSettingsGet()).savedHosts.find(
+          (s) => s.instanceId === host.instanceId,
+        );
+        if (saved && saved.id !== hostIdFromUrl(host.url)) {
+          key = await ipc.secretGet(`remote-api-key.${saved.id}`);
+        }
+      } catch {
+        // Settings unreadable — connect proceeds without a key.
+      }
+    }
     const view = await hosts.connect(host.url, key, host.name);
     toasts.push(`Connected to ${view.label}`);
     await refreshSaved();

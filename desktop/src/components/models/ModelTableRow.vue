@@ -140,20 +140,33 @@ function onRowKeydown(event: KeyboardEvent): void {
 
     <!-- Primary weights and full runtime footprint are deliberately separate
          lines: the latter includes shared encoders/VAEs (SIZE vs FETCH on
-         catalog rows). The fixed-width block keeps columns aligned. -->
-    <div class="ml-auto flex shrink-0 items-center gap-2" :class="barPercent != null ? 'w-64' : ''">
+         catalog rows). The block targets a fixed basis so table columns
+         align, but may shrink in narrow containers — lines truncate with
+         tooltips instead of escaping the card. -->
+    <div
+      class="ml-auto flex min-w-0 shrink items-center justify-end gap-2"
+      :class="barPercent != null ? 'basis-64' : ''"
+    >
       <div
         v-if="barPercent != null"
-        class="h-1.5 flex-1 overflow-hidden rounded-full bg-bath"
+        class="hidden h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-bath @[24rem]:block sm:block"
         aria-hidden="true"
       >
         <div class="h-full bg-halide" :style="{ width: `${barPercent}%` }" />
       </div>
-      <span class="w-40 shrink-0 text-right" data-test="row-sizes">
-        <span v-if="sizePrimary" class="data-mono block text-caption text-ink-2">
+      <span class="min-w-0 max-w-40 shrink text-right" data-test="row-sizes">
+        <span
+          v-if="sizePrimary"
+          class="data-mono block truncate text-caption text-ink-2"
+          :title="sizePrimary"
+        >
           {{ sizePrimary }}
         </span>
-        <span v-if="sizeSecondary" class="data-mono block text-[10px] text-ink-3">
+        <span
+          v-if="sizeSecondary"
+          class="data-mono block truncate text-[10px] text-ink-3"
+          :title="sizeSecondary"
+        >
           {{ sizeSecondary }}
         </span>
       </span>

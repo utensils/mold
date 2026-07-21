@@ -292,17 +292,17 @@ Views: Generate, Gallery, Models, Queue, Settings, Script (composer). Actions in
 
 ## 14. iPhone scope and invariants
 
-| Area        | Current iPhone contract                                                                                                                                                         |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Processing  | Remote hosts only; no local fallback or embedded engine                                                                                                                         |
-| Navigation  | Create, Library, Models, Machines; header-pushed Settings                                                                                                                      |
-| Machines    | Bonjour `_mold._tcp`, IP/DNS/HTTPS, Tailscale MagicDNS, Keychain API keys, detailed telemetry/models/downloads/queue                                                            |
+| Area        | Current iPhone contract                                                                                                                                                                                                    |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Processing  | Remote hosts only; no local fallback or embedded engine                                                                                                                                                                    |
+| Navigation  | Create, Library, Models, Machines; header-pushed Settings                                                                                                                                                                  |
+| Machines    | Bonjour `_mold._tcp`, IP/DNS/HTTPS, Tailscale MagicDNS, Keychain API keys, detailed telemetry/models/downloads/queue                                                                                                       |
 | Create      | Shared capability/request logic, frozen-host prepared expansion, full-screen Advanced sheet, style presets, proportional resolution controls, Random/Fixed seed, independent sibling queue, current image/video parameters |
-| Library     | All saved hosts merged newest-first, full-size image/video, Range seeking, horizontal navigation, explicit prompt/source reuse, optional batch/source provenance                |
-| Models      | Installed/live union, browse-host/target-host separation, model detail/actions, immediate Connecting/Starting/Queued/Pulling status                                             |
-| Settings    | Mold Studio families (Mold/Safelight) × System/Dark/Light, host shortcut, version, remote-only policy, and TestFlight update channel                                            |
-| Interaction | Safe areas, 44pt controls, 16px editable text, no WebView document zoom, no shell rubber band, scoped Library swipe                                                            |
-| Release     | Eligible successful `main` iOS CI → internal TestFlight → App Store Connect `VALID` → tester membership verification                                                            |
+| Library     | All saved hosts merged newest-first, full-size image/video, Range seeking, horizontal navigation, explicit prompt/source reuse, optional batch/source provenance                                                           |
+| Models      | Installed/live union, browse-host/target-host separation, model detail/actions, immediate Connecting/Starting/Queued/Pulling status                                                                                        |
+| Settings    | Mold Studio families (Mold/Safelight) × System/Dark/Light, host shortcut, version, remote-only policy, and TestFlight update channel                                                                                       |
+| Interaction | Safe areas, 44pt controls, 16px editable text, no WebView document zoom, no shell rubber band, scoped Library swipe                                                                                                        |
+| Release     | Eligible successful `main` iOS CI → internal TestFlight → App Store Connect `VALID` → tester membership verification                                                                                                       |
 
 Deliberate initial exclusions are the desktop Chains editor/durable-jobs
 workspace, RunPod provisioning, engine configuration, desktop file/clipboard
