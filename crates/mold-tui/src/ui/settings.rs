@@ -15,10 +15,19 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 
 use crate::app::{App, SettingsFieldType, SettingsFocus, SettingsRow};
 
-use super::widgets::{panel_block, render_theme_swatches};
+use super::widgets::{panel_block, render_theme_swatches, SWATCHES_PER_ROW};
 
-/// Height of the Appearance panel (title + 1 content row + 2 borders).
-const APPEARANCE_HEIGHT: u16 = 4;
+/// Height of the Appearance panel (2 borders + one row per swatch chunk).
+const APPEARANCE_HEIGHT: u16 = 2 + SWATCH_ROWS as u16;
+
+/// Number of swatch rows the Appearance panel must fit.
+const SWATCH_ROWS: usize = crate::ui::theme::ThemePreset::ALL
+    .len()
+    .div_ceil(SWATCHES_PER_ROW);
+
+// Layout contract: the panel's inner area (height minus 2 border rows) must
+// fit every swatch row, or the last presets become unreachable-looking.
+const _: () = assert!(APPEARANCE_HEIGHT as usize - 2 >= SWATCH_ROWS);
 
 /// Render the Settings view.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -34,10 +43,9 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Top panel — the theme swatch grid.
 fn render_appearance(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.settings.focus == SettingsFocus::Appearance;
-    let hint = format!(
-        "theme · {}",
-        app.settings.theme_preset.label().to_lowercase()
-    );
+    // The hint shows the canonical slug (identical to the lowercased label
+    // for single-word presets) — `scripts/tui-uat.sh theme-set` parses it.
+    let hint = format!("theme · {}", app.settings.theme_preset.slug());
     let block = panel_block(&app.theme, "Appearance", focused, Some(&hint));
     let inner = block.inner(area);
     frame.render_widget(block, area);

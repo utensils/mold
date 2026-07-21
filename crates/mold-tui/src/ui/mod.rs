@@ -116,7 +116,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )
                 .title_top(Line::from(right_spans).right_aligned())
-                .style(Style::default().bg(theme.tab_bg))
+                .style(Style::default().bg(theme.frame))
                 .padding(Padding::horizontal(1)),
         )
         .select(app.active_view.index())
