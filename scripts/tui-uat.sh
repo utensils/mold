@@ -859,14 +859,23 @@ cmd_settings_focus() {
         appearance|Appearance)
             # Walk off the top of the Configuration list → focus flips
             # to Appearance. 50 presses is safely more than the longest
-            # row list we ship.
+            # row list we ship. Note: once focus reaches the theme card
+            # grid, remaining presses walk the selection up to the top
+            # card row (live-applying en route) — `theme-set` re-reads
+            # the header afterwards, so its cycle stays correct.
             for _ in $(seq 1 50); do
                 send_one_key "$term_id" k
             done
             ;;
         configuration|Configuration)
-            # One Down from Appearance flips focus back.
-            send_one_key "$term_id" j
+            # Normalize to Appearance first (see above), then Tab flips
+            # deterministically to Configuration without walking the
+            # card grid. (A bare Down would move the theme selection a
+            # row and live-apply it.)
+            for _ in $(seq 1 50); do
+                send_one_key "$term_id" k
+            done
+            send_one_key "$term_id" tab
             ;;
         *)
             echo "ERROR: unknown focus '$target'. Use 'appearance' or 'configuration'." >&2

@@ -6,9 +6,9 @@
 //! `frame.render_widget(…, area)`. They have no state of their own.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders};
 
-use super::theme::{Theme, ThemePreset};
+use super::theme::Theme;
 
 /// A standard framed panel with a `  Title  ` inset in the top-left.
 ///
@@ -84,62 +84,6 @@ pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-/// Number of theme swatches per Appearance-panel row.
-///
-/// Exposed `pub(crate)` so `ui::settings` can assert its panel height fits
-/// the resulting row count (layout constants keep contract tests).
-pub(crate) const SWATCHES_PER_ROW: usize = 4;
-
-/// Draw the theme swatch grid used by the Appearance panel.
-///
-/// Each swatch is rendered as `●<space>Label` plus a trailing `✓` on the
-/// current selection. With eleven presets a single line would clip on
-/// normal terminal widths, so swatches wrap into rows of
-/// [`SWATCHES_PER_ROW`]. Interim UI — the Settings redesign replaces this
-/// with theme cards.
-pub fn render_theme_swatches(
-    frame: &mut Frame,
-    theme: &Theme,
-    area: Rect,
-    current: ThemePreset,
-    focused: bool,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    for chunk in ThemePreset::ALL.chunks(SWATCHES_PER_ROW) {
-        let mut spans: Vec<Span> = Vec::new();
-        for (i, preset) in chunk.iter().enumerate() {
-            let is_active = *preset == current;
-            let dot_style = Style::default().fg(preset.swatch());
-            let label_style = if is_active {
-                if focused {
-                    theme.param_selected().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
-                }
-            } else {
-                theme.dim()
-            };
-
-            if i > 0 {
-                spans.push(Span::raw("   "));
-            }
-            spans.push(Span::styled("● ", dot_style));
-            spans.push(Span::styled(preset.label(), label_style));
-            if is_active {
-                spans.push(Span::styled(" ✓", theme.success()));
-            }
-        }
-        lines.push(Line::from(spans));
-    }
-
-    let para = Paragraph::new(lines);
-    frame.render_widget(para, area);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,19 +155,5 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("abc", 1).chars().count(), 1);
         // Strings shorter than `max` are still passed through unchanged.
         assert_eq!(truncate_with_ellipsis("a", 1), "a");
-    }
-
-    #[test]
-    fn render_theme_swatches_is_safe_with_zero_area() {
-        // Sanity check for the early-return guard on width==0 / height==0.
-        let theme = Theme::mocha();
-        let backend = TestBackend::new(40, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let empty = Rect::new(0, 0, 0, 0);
-                render_theme_swatches(frame, &theme, empty, ThemePreset::Latte, true);
-            })
-            .unwrap();
     }
 }

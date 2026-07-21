@@ -102,6 +102,23 @@ impl ThemePreset {
         self.build().accent
     }
 
+    /// Short palette descriptor for the theme card (dim text beside the
+    /// swatch dots) — the design mockup's card copy for the Studio /
+    /// Safelight / Mocha presets, terse palette words for the rest.
+    pub fn description(self) -> &'static str {
+        match self {
+            ThemePreset::StudioDark | ThemePreset::StudioLight => "dual accent",
+            ThemePreset::SafelightDark | ThemePreset::SafelightLight => "warm · dual accent",
+            ThemePreset::Mocha => "single blue",
+            ThemePreset::Latte => "light · blue",
+            ThemePreset::Ristretto => "warm espresso",
+            ThemePreset::Gruvbox => "retro warm",
+            ThemePreset::Tokyo => "night blue",
+            ThemePreset::Nord => "cold muted",
+            ThemePreset::Dracula => "purple · cyan",
+        }
+    }
+
     /// Build a concrete [`Theme`] for this preset.
     pub fn build(self) -> Theme {
         match self {
@@ -764,6 +781,27 @@ mod tests {
             blend((0x9b, 0x4d, 0x00), (0xf7, 0xf1, 0xe6), 13),
             Color::Rgb(0xeb, 0xdc, 0xc8)
         );
+    }
+
+    #[test]
+    fn descriptions_match_the_mockup_card_copy() {
+        // The theme cards pin the mockup's descriptor strings for the
+        // Studio pair, the Safelight pair, and Mocha; every preset must
+        // have a non-empty descriptor so cards never render a blank row.
+        assert_eq!(ThemePreset::StudioDark.description(), "dual accent");
+        assert_eq!(ThemePreset::StudioLight.description(), "dual accent");
+        assert_eq!(
+            ThemePreset::SafelightDark.description(),
+            "warm · dual accent"
+        );
+        assert_eq!(
+            ThemePreset::SafelightLight.description(),
+            "warm · dual accent"
+        );
+        assert_eq!(ThemePreset::Mocha.description(), "single blue");
+        for preset in ThemePreset::ALL {
+            assert!(!preset.description().is_empty(), "{preset:?}");
+        }
     }
 
     #[test]

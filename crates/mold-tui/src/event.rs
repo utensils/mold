@@ -232,6 +232,11 @@ fn map_machines_key(key: &KeyEvent) -> Action {
 
 fn map_settings_key(key: &KeyEvent) -> Action {
     match key.code {
+        // Tab toggles Appearance ↔ Configuration directly — the
+        // deterministic pane switch (`scripts/tui-uat.sh settings-focus`
+        // relies on it now that ↑/↓ walk the theme card grid).
+        KeyCode::Tab => Action::FocusNext,
+        KeyCode::BackTab => Action::FocusPrev,
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => Action::Increment,
@@ -536,6 +541,15 @@ mod tests {
         assert_eq!(map_settings_key(&key(KeyCode::Down)), Action::Down);
         assert_eq!(map_settings_key(&key(KeyCode::Char('k'))), Action::Up);
         assert_eq!(map_settings_key(&key(KeyCode::Char('j'))), Action::Down);
+    }
+
+    #[test]
+    fn settings_tab_toggles_pane_focus() {
+        // Tab/BackTab are the deterministic Appearance ↔ Configuration
+        // flip — `scripts/tui-uat.sh settings-focus` depends on this
+        // mapping now that ↑/↓ walk the theme card grid.
+        assert_eq!(map_settings_key(&key(KeyCode::Tab)), Action::FocusNext);
+        assert_eq!(map_settings_key(&key(KeyCode::BackTab)), Action::FocusPrev);
     }
 
     #[test]
