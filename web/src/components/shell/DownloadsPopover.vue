@@ -6,12 +6,13 @@
  * `mold:open-downloads` window event (App owns the state); the AppNav button
  * and ⌘K palette both dispatch it.
  */
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
+import Icon from "@ui/components/Icon.vue";
 import DownloadsBody from "./DownloadsBody.vue";
 import type { DownloadJobWire } from "../../types";
 
-defineProps<{
+const props = defineProps<{
   open: boolean;
   active: DownloadJobWire[];
   queued: DownloadJobWire[];
@@ -26,6 +27,30 @@ const emit = defineEmits<{
   (e: "retry", model: string): void;
 }>();
 
+// Dismissal. The Escape handler must live on the document, not on the panel:
+// opening the popover doesn't move focus into it, so a keydown bound to the
+// element itself never fires. Outside-click uses mousedown so a drag that ends
+// outside doesn't count as "clicking away".
+const panelEl = ref<HTMLElement | null>(null);
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") emit("close");
+}
+function onPointerDownOutside(e: MouseEvent) {
+  const target = e.target as Node | null;
+  if (target && panelEl.value?.contains(target)) return;
+  emit("close");
+}
+
+function bindDismiss() {
+  document.addEventListener("keydown", onKeydown);
+  document.addEventListener("mousedown", onPointerDownOutside);
+}
+function unbindDismiss() {
+  document.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("mousedown", onPointerDownOutside);
+}
+
 // Bottom-sheet only on phones; anchored panel everywhere else. Default to the
 // anchored panel when matchMedia is unavailable (jsdom / SSR).
 const isNarrow = ref(false);
@@ -33,6 +58,12 @@ let mql: MediaQueryList | null = null;
 function sync() {
   isNarrow.value = mql?.matches ?? false;
 }
+
+watch(
+  () => props.open,
+  (open) => (open ? bindDismiss() : unbindDismiss()),
+  { immediate: true },
+);
 
 onMounted(() => {
   if (typeof window.matchMedia === "function") {
@@ -42,6 +73,7 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => {
+  unbindDismiss();
   mql?.removeEventListener?.("change", sync);
 });
 </script>
@@ -71,7 +103,7 @@ onBeforeUnmount(() => {
     role="dialog"
     aria-label="Downloads"
     data-test="downloads-popover"
-    @keydown.escape="emit('close')"
+    ref="panelEl"
   >
     <header class="dl-pop__head">
       <span class="dl-pop__title">Downloads</span>
@@ -81,7 +113,7 @@ onBeforeUnmount(() => {
         aria-label="Close downloads"
         @click="emit('close')"
       >
-        ✕
+        <Icon name="close" :size="14" />
       </button>
     </header>
     <DownloadsBody
