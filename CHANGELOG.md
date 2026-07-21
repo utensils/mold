@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-21
+
 ### Added
 
 - **Desktop Batch now prepares reviewable prompt variations before generation.** Batch 1 keeps the quick Expand and undo flow while freezing its resolved host through Generate. Batch 2 or greater resolves the selected Generate host once, prepares exactly that many non-empty prompts on it, and opens an inline workspace for editing, intentional removal, regenerate-all, discard, and explicit generation. The same frozen host receives every sibling with its expanded prompt, shared source-prompt provenance, and durable batch ID plus one-based sibling position/count visible in Gallery. Source, model, host, or count changes preserve the reviewed set but name it as out of date and block submission until refresh or discard; missing expansion models pull on the directed host without fallback, show Connecting, Starting, Queued, byte/file/ETA progress, and terminal recovery inline without hiding the prompt work, and partial sibling failures keep successful prints visible.
@@ -1030,7 +1032,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/utensils/mold/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/utensils/mold/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/utensils/mold/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/utensils/mold/compare/v0.16.0...v0.17.0
