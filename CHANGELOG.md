@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-07-21
+
 ### Fixed
 
 - **Docker release images include the shared Mold Studio UI kit.** The container web-builder now copies repo-root `ui/` beside `/web` before running the SPA build, so `@ui/*` aliases resolve in the release-only Docker context instead of failing TypeScript compilation after otherwise-green web, desktop, and Nix checks.
@@ -1065,7 +1067,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/utensils/mold/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/utensils/mold/compare/v0.17.1...v0.18.0
