@@ -1,4 +1,5 @@
 pub mod chrome;
+pub mod create_form;
 pub mod gallery;
 pub mod generate;
 pub mod info;
@@ -7,12 +8,13 @@ pub mod machines;
 pub mod models;
 pub mod param_form;
 pub mod popup;
+pub mod preview;
 pub mod progress;
-pub mod recent;
 pub mod script_composer;
 pub mod settings;
 pub mod theme;
 pub mod theme_cards;
+pub mod timeline;
 pub mod widgets;
 
 use ratatui::prelude::*;
@@ -76,6 +78,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.popup.is_some() {
         popup::render(frame, app);
     }
+
+    // ── Motion post-processing (last: effects recolor the frame) ─
+    app.motion.process(frame.buffer_mut(), area);
 }
 
 /// Render an upscale progress bar at the bottom of the gallery area.
@@ -251,24 +256,19 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                 vec![
                     ("Enter", "Edit"),
                     ("+/-", "Adjust"),
+                    ("A", "Advanced"),
                     ("^G", "Generate"),
-                    ("^M", "Model"),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                     ("?", "Help"),
                 ]
             } else {
-                let neg_label = if app.generate.negative_collapsed {
-                    "Neg+"
-                } else {
-                    "Neg-"
-                };
                 vec![
                     ("Enter", "Generate"),
                     ("^G", "Generate"),
                     ("^M", "Model"),
                     ("^R", "Seed"),
-                    ("Alt+N", neg_label),
+                    ("Alt+N", "Negative"),
                     ("Tab", "Focus"),
                     ("Esc", "Nav"),
                 ]

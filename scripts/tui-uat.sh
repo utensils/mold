@@ -910,8 +910,11 @@ cmd_model() {
     sleep 0.2
     send_one_key "$term_id" shift+tab
     sleep 0.2
+    # Model is the FIRST Create-form row. 20 up-presses covers the worst
+    # case: a persisted open Advanced accordion with a section expanded
+    # adds up to ~13 rows below the essentials.
     local _
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in $(seq 1 20); do
         send_one_key "$term_id" k
     done
     sleep 0.2

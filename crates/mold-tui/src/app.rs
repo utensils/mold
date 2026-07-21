@@ -362,113 +362,55 @@ impl GenerateFocus {
 }
 
 /// Index of parameter fields in the form.
+///
+/// The Create redesign trimmed this to the essentials + the Advanced
+/// accordion's section fields (see `ui::create_form::visible_rows`):
+/// `Width`/`Height` merged into `Size`, `SeedValue` merged into `Seed`,
+/// and `Mode`/`Host` were deleted — routing comes from the Machines
+/// generation target (`GenTarget`). `UnloadModel` moved to Models (`u`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamField {
+    // Essentials
     Model,
-    Width,
-    Height,
+    Size,
     Steps,
     Guidance,
     Seed,
-    SeedValue,
     Batch,
-    Format,
-    Mode,
-    Host,
-    // Advanced
+    // Advanced — Sampling
     Scheduler,
-    Lora,
     Expand,
     Offload,
-    // img2img
+    // Advanced — Source
     SourceImage,
     Strength,
     MaskImage,
-    // Video
-    Frames,
-    Fps,
-    // ControlNet
     ControlImage,
     ControlModel,
     ControlScale,
-    // Actions
-    ResetDefaults,
-    // Tools
-    UnloadModel,
+    // Advanced — LoRA / Upscale / Output
+    Lora,
+    Upscale,
+    Format,
+    // Advanced — Video
+    Frames,
+    Fps,
 }
 
 impl ParamField {
-    /// All fields in display order, filtering by model capabilities and mode.
-    pub fn visible_fields(caps: &ModelCapabilities, mode: InferenceMode) -> Vec<ParamField> {
-        let mut fields = vec![
-            ParamField::Model,
-            ParamField::Width,
-            ParamField::Height,
-            ParamField::Steps,
-            ParamField::Guidance,
-            ParamField::Seed,
-            ParamField::SeedValue,
-            ParamField::Batch,
-            ParamField::Format,
-            ParamField::Mode,
-        ];
-        // Show Host field when server connection is possible
-        if mode != InferenceMode::Local {
-            fields.push(ParamField::Host);
-        }
-        // Advanced
-        if caps.supports_scheduler {
-            fields.push(ParamField::Scheduler);
-        }
-        if caps.supports_lora {
-            fields.push(ParamField::Lora);
-        }
-        fields.push(ParamField::Expand);
-        fields.push(ParamField::Offload);
-        // Video
-        if caps.supports_video {
-            fields.push(ParamField::Frames);
-            fields.push(ParamField::Fps);
-        }
-        // img2img
-        if caps.supports_source_image {
-            fields.push(ParamField::SourceImage);
-        }
-        if caps.supports_strength {
-            fields.push(ParamField::Strength);
-        }
-        if caps.supports_mask {
-            fields.push(ParamField::MaskImage);
-        }
-        // ControlNet
-        if caps.supports_controlnet {
-            fields.push(ParamField::ControlImage);
-            fields.push(ParamField::ControlModel);
-            fields.push(ParamField::ControlScale);
-        }
-        // Actions
-        fields.push(ParamField::ResetDefaults);
-        // Tools
-        fields.push(ParamField::UnloadModel);
-        fields
-    }
-
     pub fn label(&self) -> &'static str {
         match self {
             Self::Model => "Model",
-            Self::Width => "Width",
-            Self::Height => "Height",
-            Self::Steps => "Steps",
-            Self::Guidance => "Guidance",
+            Self::Size => "Size",
+            Self::Steps => "Detail",
+            Self::Guidance => "Prompt strength",
             Self::Seed => "Seed",
-            Self::SeedValue => "",
             Self::Batch => "Batch",
             Self::Format => "Format",
-            Self::Mode => "Mode",
-            Self::Host => "Host",
             Self::Scheduler => "Scheduler",
             Self::Lora => "LoRA",
-            Self::Expand => "Expand",
+            Self::Upscale => "Upscale",
+            Self::Expand => "Expand prompt",
             Self::Offload => "Offload",
             Self::SourceImage => "Source",
             Self::Strength => "Strength",
@@ -478,21 +420,6 @@ impl ParamField {
             Self::Frames => "Frames",
             Self::Fps => "FPS",
             Self::ControlScale => "Scale",
-            Self::ResetDefaults => "\u{21ba} Reset",
-            Self::UnloadModel => "\u{23cf} Unload",
-        }
-    }
-
-    /// The section header this field falls under, if it starts a new section.
-    pub fn section_header(&self) -> Option<&'static str> {
-        match self {
-            Self::Scheduler => Some("Advanced"),
-            Self::Frames => Some("Video"),
-            Self::SourceImage => Some("img2img"),
-            Self::ControlImage => Some("ControlNet"),
-            Self::ResetDefaults => Some("Actions"),
-            Self::UnloadModel => None,
-            _ => None,
         }
     }
 }
@@ -511,6 +438,19 @@ fn qwen_image_edit_dimensions_for_path(path: &str) -> Option<(u32, u32)> {
         TARGET_AREA,
         ALIGN,
     ))
+}
+
+/// Parse the Size popup's free-text `WxH` entry (`1024x768`, `1024 × 768`,
+/// …). Both numbers clamp into the same 256–4096 range the old Width/Height
+/// rows enforced. Returns `None` when the text isn't two numbers.
+pub(crate) fn parse_size_input(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.split(['x', 'X', '\u{00d7}']).map(str::trim);
+    let w: u32 = parts.next()?.parse().ok()?;
+    let h: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((w.clamp(256, 4096), h.clamp(256, 4096)))
 }
 
 /// How the seed behaves across generations.
@@ -587,6 +527,9 @@ pub struct GenerateParams {
     pub lora_scale: f64,
     pub expand: bool,
     pub offload: bool,
+    /// Upscaler to run after generation (wired to the existing
+    /// `GenerateRequest.upscale_model` field). `None` = off.
+    pub upscale_model: Option<String>,
     // img2img
     pub source_image_path: Option<String>,
     pub strength: f64,
@@ -653,6 +596,7 @@ impl GenerateParams {
             lora_scale: 1.0,
             expand: false,
             offload: false,
+            upscale_model: None,
             source_image_path: None,
             strength: 0.75,
             mask_image_path: None,
@@ -668,19 +612,25 @@ impl GenerateParams {
     pub fn display_value(&self, field: &ParamField) -> String {
         match field {
             ParamField::Model => self.model.clone(),
-            ParamField::Width => self.width.to_string(),
-            ParamField::Height => self.height.to_string(),
+            ParamField::Size => format!("{} \u{00d7} {}", self.width, self.height),
             ParamField::Steps => self.steps.to_string(),
             ParamField::Guidance => format!("{:.1}", self.guidance),
-            ParamField::Seed => self.seed_mode.label().to_string(),
-            ParamField::SeedValue => self
-                .seed
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string()),
+            // The Seed essentials row absorbs the old SeedValue row: the
+            // mode alone when Random, `mode · value` when the seed is
+            // pinned (Fixed/Increment).
+            ParamField::Seed => match self.seed_mode {
+                SeedMode::Random => "random".to_string(),
+                mode => format!(
+                    "{} \u{00b7} {}",
+                    mode.label(),
+                    self.seed
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "\u{27e8}random\u{27e9}".to_string())
+                ),
+            },
             ParamField::Batch => self.batch.to_string(),
-            ParamField::Format => format!("{:?}", self.format).to_uppercase(),
-            ParamField::Mode => self.inference_mode.label().to_string(),
-            ParamField::Host => self.host.as_deref().unwrap_or("localhost:7680").to_string(),
+            ParamField::Format => format!("{:?}", self.format).to_lowercase(),
+            ParamField::Upscale => self.upscale_model.clone().unwrap_or_else(|| "off".into()),
             ParamField::Scheduler => self
                 .scheduler
                 .as_ref()
@@ -737,8 +687,6 @@ impl GenerateParams {
             ParamField::Frames => self.frames.to_string(),
             ParamField::Fps => self.fps.to_string(),
             ParamField::ControlScale => format!("{:.1}", self.control_scale),
-            ParamField::ResetDefaults => "restore model defaults".to_string(),
-            ParamField::UnloadModel => "free GPU memory".to_string(),
         }
     }
 }
@@ -750,7 +698,16 @@ pub struct GenerateState {
     pub params: GenerateParams,
     pub focus: GenerateFocus,
     pub param_index: usize,
-    pub visible_fields: Vec<ParamField>,
+    /// The flat Create-form row list (`param_index` indexes into it).
+    /// Rebuilt via [`App::refresh_create_rows`] whenever capabilities or
+    /// the accordion state change.
+    pub rows: Vec<crate::ui::create_form::CreateRow>,
+    /// Advanced accordion disclosure state (persisted at
+    /// `tui.advanced_open` / `tui.advanced_section`).
+    pub advanced: crate::ui::create_form::AdvancedState,
+    /// Scroll offset (in panel lines) of the parameters list — written by
+    /// the renderer, read by mouse hit-testing.
+    pub param_scroll: usize,
     pub capabilities: ModelCapabilities,
     pub progress: ProgressState,
     pub preview_image: Option<image::DynamicImage>,
@@ -766,28 +723,23 @@ pub struct GenerateState {
     pub last_generation_time_ms: Option<u64>,
     pub error_message: Option<String>,
     pub model_description: String,
-    /// When `true`, the Negative prompt textarea collapses to a single dim
-    /// summary row so it doesn't steal vertical space. Users toggle this with
-    /// `Alt+N`; models that don't support negative prompts ignore the flag
-    /// entirely and hide the row regardless.
-    pub negative_collapsed: bool,
     /// Path of the most recently saved output — drives the activity
     /// strip's "done · saved to …" line. None when saving is disabled or
     /// the server kept the file.
     pub last_output_path: Option<std::path::PathBuf>,
-    /// Whether the Advanced disclosure on the Create view is expanded
-    /// (toggled with `A`). Rendering lands with the Create redesign; the
-    /// flag ships first so the key contract is stable.
-    pub advanced_open: bool,
 }
 
 impl GenerateState {
-    /// Whether the Negative prompt textarea is currently rendered and
-    /// therefore focusable. This is the predicate every focus-routing or
-    /// hit-test site should consult — checking `supports_negative_prompt`
-    /// alone lets focus land on a row that isn't drawn.
+    /// Whether the inline Negative prompt editor is currently rendered and
+    /// therefore focusable: the model supports it, the Advanced accordion
+    /// is open, and the Negative section is the expanded one. This is the
+    /// predicate every focus-routing or hit-test site should consult —
+    /// checking `supports_negative_prompt` alone lets focus land on a row
+    /// that isn't drawn.
     pub fn negative_visible(&self) -> bool {
-        self.capabilities.supports_negative_prompt && !self.negative_collapsed
+        self.capabilities.supports_negative_prompt
+            && self.advanced.open
+            && self.advanced.expanded == Some(crate::ui::create_form::AdvSection::Negative)
     }
 }
 
@@ -1201,15 +1153,16 @@ pub enum Popup {
         selected: usize,
         filtered: Vec<String>,
     },
-    HostInput {
-        input: String,
-    },
     /// Stepped connect-a-machine flow (Machines workspace):
     /// Url → optional ApiKey → Testing → saved or Failed with retry.
     MachineConnect {
         form: crate::hosts::ConnectForm,
     },
     SeedInput {
+        input: String,
+    },
+    /// Free-text `WxH` entry for the Size essentials row.
+    SizeInput {
         input: String,
     },
     HistorySearch {
@@ -1241,8 +1194,22 @@ pub enum Popup {
         filter: String,
         selected: usize,
         filtered: Vec<String>,
+        purpose: UpscalePickerPurpose,
     },
 }
+
+/// What selecting an entry in [`Popup::UpscaleModelSelector`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpscalePickerPurpose {
+    /// Library flow: upscale the selected gallery image now.
+    RunNow,
+    /// Create → Advanced → Upscale: set `GenerateParams::upscale_model`
+    /// for the next generation (the `(off)` entry clears it).
+    SetGenerateParam,
+}
+
+/// Label of the synthetic "clear" entry offered by the Create-side picker.
+pub(crate) const UPSCALE_OFF_ENTRY: &str = "(off)";
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -1281,6 +1248,9 @@ pub struct App {
     pub config: Config,
     pub server_url: Option<String>,
     pub picker: Picker,
+    /// Studio motion effects (workspace fade, completion sweep) — gated
+    /// behind reduce-motion; see `crate::motion`.
+    pub motion: crate::motion::MotionState,
     pub theme: Theme,
     pub popup: Option<Popup>,
     pub should_quit: bool,
@@ -1303,6 +1273,11 @@ pub struct App {
     pub upscale_progress: ProgressState,
     /// True while a background server health check / connect is in progress.
     pub connecting: bool,
+    /// Whether the Create view renders the Timeline panel. Backed by the
+    /// `tui.show_timeline` settings key (owned by the Settings redesign —
+    /// we read the raw key with a default of `true` so the panel honors
+    /// the pref without a cross-PR dependency).
+    pub show_timeline: bool,
 }
 
 /// Stored layout rectangles for mouse click hit-testing.
@@ -1441,7 +1416,8 @@ impl App {
 
         let family = family_for_model(&params.model, &config);
         let mut capabilities = capabilities_for_family(&family);
-        let mut visible_fields = ParamField::visible_fields(&capabilities, initial_mode);
+        // Restore the Advanced accordion where the user left it.
+        let advanced = crate::ui::create_form::AdvancedState::load();
 
         // Build initial catalog — try server first if connected, fall back to local
         let catalog = if let Some(ref url) = server_url {
@@ -1494,9 +1470,7 @@ impl App {
             session.apply_to_params(&mut params);
             // Re-derive capabilities for the restored model
             let fam = family_for_model(&params.model, &config);
-            let caps = capabilities_for_family(&fam);
-            visible_fields = ParamField::visible_fields(&caps, initial_mode);
-            capabilities = caps;
+            capabilities = capabilities_for_family(&fam);
         } else {
             // Model not found — only apply non-model-specific settings.
             // Skip width/height/steps/guidance/scheduler since they belong to
@@ -1538,6 +1512,20 @@ impl App {
             .map(crate::ui::theme::ThemePreset::from_slug)
             .unwrap_or_default();
 
+        // `tui.show_timeline` is owned by the Settings redesign; read the
+        // raw key (default true) so there's no cross-PR dependency.
+        let show_timeline = mold_db::open_default()
+            .ok()
+            .flatten()
+            .and_then(|db| {
+                mold_db::Settings::new(&db)
+                    .get_bool("tui.show_timeline")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(true);
+
+        let rows = crate::ui::create_form::visible_rows(&capabilities, &advanced);
         let app = Ok(Self {
             active_view: View::Create,
             create_mode: CreateMode::default(),
@@ -1547,7 +1535,9 @@ impl App {
                 params,
                 focus: GenerateFocus::Prompt,
                 param_index: 0,
-                visible_fields,
+                rows,
+                advanced,
+                param_scroll: 0,
                 capabilities,
                 progress: ProgressState::default(),
                 preview_image: None,
@@ -1559,9 +1549,7 @@ impl App {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description,
-                negative_collapsed: session.negative_collapsed.unwrap_or(false),
                 last_output_path: None,
-                advanced_open: false,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -1591,6 +1579,7 @@ impl App {
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url,
+            motion: crate::motion::MotionState::from_env_and_prefs(),
             picker,
             theme: initial_preset.build(),
             popup: None,
@@ -1607,6 +1596,7 @@ impl App {
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
             connecting: false,
+            show_timeline,
         });
 
         // Spawn background gallery scan
@@ -2036,8 +2026,7 @@ impl App {
             .to_string();
         let session =
             crate::session::TuiSession::from_params(&prompt_text, &neg_text, &self.generate.params)
-                .with_theme(self.settings.theme_preset)
-                .with_negative_collapsed(self.generate.negative_collapsed);
+                .with_theme(self.settings.theme_preset);
         session.save();
     }
 
@@ -2114,10 +2103,7 @@ impl App {
             }
         }
         self.generate.capabilities = capabilities_for_family(&family);
-        self.generate.visible_fields = ParamField::visible_fields(
-            &self.generate.capabilities,
-            self.generate.params.inference_mode,
-        );
+        self.refresh_create_rows();
         self.generate.param_index = 0;
 
         // Apply saved per-model prefs last, so a user's explicit choices
@@ -2231,6 +2217,65 @@ impl App {
         if let Some(cs) = prefs.control_scale {
             p.control_scale = cs;
         }
+    }
+
+    /// Rebuild the Create-form row list from the current capabilities and
+    /// accordion state, clamping the selection into range.
+    pub(crate) fn refresh_create_rows(&mut self) {
+        self.generate.rows = crate::ui::create_form::visible_rows(
+            &self.generate.capabilities,
+            &self.generate.advanced,
+        );
+        if self.generate.param_index >= self.generate.rows.len() {
+            self.generate.param_index = self.generate.rows.len().saturating_sub(1);
+        }
+    }
+
+    /// Expand one accordion section (collapsing any other) or collapse all
+    /// with `None`. Persists the accordion state, rebuilds the rows, and
+    /// keeps the selection on the section's own row. Focus escapes the
+    /// inline Negative editor if the change hides it.
+    fn set_advanced_expanded(&mut self, sec: Option<crate::ui::create_form::AdvSection>) {
+        self.generate.advanced.expanded = sec;
+        self.generate.advanced.save();
+        self.refresh_create_rows();
+        if let Some(sec) = sec {
+            if let Some(idx) = self
+                .generate
+                .rows
+                .iter()
+                .position(|r| *r == crate::ui::create_form::CreateRow::Section(sec))
+            {
+                self.generate.param_index = idx;
+            }
+        }
+        if self.generate.focus == GenerateFocus::NegativePrompt && !self.generate.negative_visible()
+        {
+            self.generate.focus = GenerateFocus::Parameters;
+        }
+    }
+
+    /// The selected model's default canvas size — the anchor area for the
+    /// Size essentials row's aspect presets. Prefers the server catalog
+    /// defaults when remote-connected, mirroring `update_model`.
+    fn model_default_size(&self) -> (u32, u32) {
+        if self.should_poll_remote() {
+            if let Some(entry) = self
+                .models
+                .catalog
+                .iter()
+                .find(|m| m.name == self.generate.params.model)
+            {
+                return (entry.defaults.default_width, entry.defaults.default_height);
+            }
+        }
+        let mc = self
+            .config
+            .resolved_model_config(&self.generate.params.model);
+        (
+            mc.effective_width(&self.config),
+            mc.effective_height(&self.config),
+        )
     }
 
     /// Handle a raw crossterm event.
@@ -2487,12 +2532,20 @@ impl App {
                     filter,
                     selected,
                     filtered,
+                    purpose,
                 }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
+                        let purpose = *purpose;
                         if let Some(model) = filtered.get(*selected).cloned() {
                             self.close_popup();
-                            self.spawn_upscale(model);
+                            match purpose {
+                                UpscalePickerPurpose::RunNow => self.spawn_upscale(model),
+                                UpscalePickerPurpose::SetGenerateParam => {
+                                    self.generate.params.upscale_model =
+                                        (model != UPSCALE_OFF_ENTRY).then_some(model);
+                                }
+                            }
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') if *selected > 0 => {
@@ -2511,57 +2564,21 @@ impl App {
                     }
                     _ => {}
                 },
-                Some(Popup::HostInput { input }) => match key.code {
+                Some(Popup::SizeInput { input }) => match key.code {
                     KeyCode::Esc => self.close_popup(),
                     KeyCode::Enter => {
-                        let host = input.trim().to_string();
+                        let text = input.trim().to_string();
                         self.close_popup();
-                        if host.is_empty() {
-                            // Clear host → switch to local
-                            self.generate.params.host = None;
-                            self.generate.params.inference_mode = InferenceMode::Local;
-                            self.server_url = None;
-                            self.generate.visible_fields = ParamField::visible_fields(
-                                &self.generate.capabilities,
-                                self.generate.params.inference_mode,
-                            );
-                            // Switch to local resource info
-                            self.resource_info.clear_server_status();
-                            self.resource_info.refresh_local();
-                            // Refresh to local catalog and gallery
-                            self.models.catalog =
-                                mold_core::build_model_catalog(&self.config, None, false);
-                            self.gallery.scanning = true;
-                            self.spawn_gallery_scan();
-                        } else {
-                            // Normalize using same logic as CLI/MoldClient
-                            let url = mold_core::client::normalize_host(&host);
-                            self.generate.params.host = Some(url.clone());
-                            self.connecting = true;
-                            // Show connecting status
-                            self.generate.progress.push_log(ProgressLogEntry {
-                                message: format!("Connecting to {url}..."),
-                                style: ProgressStyle::Info,
-                            });
-                            // Spawn background health check + model list fetch
-                            let tx = self.bg_tx.clone();
-                            self.tokio_handle.spawn(async move {
-                                let client = mold_core::MoldClient::new(&url);
-                                match client.list_models_extended().await {
-                                    Ok(models) => {
-                                        let _ = tx
-                                            .send(BackgroundEvent::ServerConnected { url, models });
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(BackgroundEvent::ServerUnreachable(
-                                            format!("{url}: {e}"),
-                                        ));
-                                    }
-                                }
-                            });
+                        if let Some((w, h)) = parse_size_input(&text) {
+                            self.generate.params.width = w;
+                            self.generate.params.height = h;
                         }
                     }
-                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Char(c)
+                        if c.is_ascii_digit() || matches!(c, 'x' | 'X' | '\u{00d7}' | ' ') =>
+                    {
+                        input.push(c)
+                    }
                     KeyCode::Backspace => {
                         input.pop();
                     }
@@ -2781,11 +2798,15 @@ impl App {
                         self.generate.focus = GenerateFocus::NegativePrompt;
                     } else if self.layout.parameters.contains(pos) {
                         self.generate.focus = GenerateFocus::Parameters;
-                        // Select and activate the parameter row that was clicked
-                        let relative_row =
-                            (row - self.layout.parameters.y).saturating_sub(1) as usize;
-                        if relative_row < self.generate.visible_fields.len() {
-                            self.generate.param_index = relative_row;
+                        // Select and activate the row under the click,
+                        // accounting for multi-line rows and scroll.
+                        let line = (row - self.layout.parameters.y).saturating_sub(1) as usize
+                            + self.generate.param_scroll;
+                        let has_desc = !self.generate.model_description.is_empty();
+                        if let Some(idx) =
+                            crate::ui::param_form::row_at_line(&self.generate.rows, has_desc, line)
+                        {
+                            self.generate.param_index = idx;
                             self.activate_current_param();
                         }
                     } else {
@@ -2917,13 +2938,22 @@ impl App {
             filter,
             selected,
             filtered,
+            purpose,
         }) = &mut self.popup
         {
             let query = filter.to_lowercase();
-            *filtered = all
-                .into_iter()
-                .filter(|name| name.to_lowercase().contains(&query))
-                .collect();
+            let mut list: Vec<String> = Vec::new();
+            // The Create-side picker keeps its "(off)" clear entry on top.
+            if *purpose == UpscalePickerPurpose::SetGenerateParam
+                && UPSCALE_OFF_ENTRY.to_lowercase().contains(&query)
+            {
+                list.push(UPSCALE_OFF_ENTRY.to_string());
+            }
+            list.extend(
+                all.into_iter()
+                    .filter(|name| name.to_lowercase().contains(&query)),
+            );
+            *filtered = list;
             if *selected >= filtered.len() {
                 *selected = filtered.len().saturating_sub(1);
             }
@@ -2955,6 +2985,10 @@ impl App {
     /// Machines polls immediately; Library kicks a merged rescan when the
     /// last one is stale (>30 s), missing, or the host registry changed.
     fn set_active_view(&mut self, view: View) {
+        if self.active_view != view {
+            self.motion
+                .trigger_workspace_fade(self.layout.content, self.theme.bg);
+        }
         self.active_view = view;
         match view {
             View::Machines => {
@@ -2987,14 +3021,29 @@ impl App {
                 self.set_active_view(View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()]);
             }
             Action::ChainEnter => {
+                let switched =
+                    self.active_view != View::Create || self.create_mode != CreateMode::Chain;
                 self.active_view = View::Create;
                 self.create_mode = CreateMode::Chain;
+                if switched {
+                    self.motion
+                        .trigger_workspace_fade(self.layout.content, self.theme.bg);
+                }
             }
             Action::ChainExit => {
                 self.create_mode = CreateMode::Compose;
             }
             Action::ToggleAdvanced => {
-                self.generate.advanced_open = !self.generate.advanced_open;
+                self.generate.advanced.open = !self.generate.advanced.open;
+                self.generate.advanced.save();
+                self.refresh_create_rows();
+                // Closing the disclosure hides the inline Negative editor;
+                // don't leave focus in a textarea that isn't drawn.
+                if self.generate.focus == GenerateFocus::NegativePrompt
+                    && !self.generate.negative_visible()
+                {
+                    self.generate.focus = GenerateFocus::Parameters;
+                }
             }
             Action::OpenPalette => {
                 self.popup = Some(Popup::CommandPalette {
@@ -3081,7 +3130,7 @@ impl App {
             Action::Down => match self.active_view {
                 View::Create => {
                     if self.generate.focus == GenerateFocus::Parameters
-                        && self.generate.param_index + 1 < self.generate.visible_fields.len()
+                        && self.generate.param_index + 1 < self.generate.rows.len()
                     {
                         self.generate.param_index += 1;
                     }
@@ -3139,16 +3188,22 @@ impl App {
             Action::Generate if self.active_view == View::Create && !self.generate.generating => {
                 self.start_generation();
             }
-            Action::ToggleNegativePrompt => {
-                self.generate.negative_collapsed = !self.generate.negative_collapsed;
-                // If we're collapsing while focused on the Negative pane, slip
-                // focus back to the regular prompt so the user isn't stuck in
-                // a hidden textarea.
-                if self.generate.negative_collapsed
-                    && self.generate.focus == GenerateFocus::NegativePrompt
+            // Alt+N muscle memory: open Advanced, expand the Negative
+            // section, and focus the inline editor in one stroke. A no-op
+            // for models without negative-prompt support.
+            Action::ToggleNegativePrompt if self.generate.capabilities.supports_negative_prompt => {
+                self.active_view = View::Create;
+                self.generate.advanced.open = true;
+                self.set_advanced_expanded(Some(crate::ui::create_form::AdvSection::Negative));
+                if let Some(idx) = self
+                    .generate
+                    .rows
+                    .iter()
+                    .position(|r| *r == crate::ui::create_form::CreateRow::NegativeEditor)
                 {
-                    self.generate.focus = GenerateFocus::Prompt;
+                    self.generate.param_index = idx;
                 }
+                self.generate.focus = GenerateFocus::NegativePrompt;
             }
             Action::Confirm => match self.active_view {
                 View::Create => {
@@ -3407,6 +3462,7 @@ impl App {
                     filter: String::new(),
                     selected: 0,
                     filtered: models,
+                    purpose: UpscalePickerPurpose::RunNow,
                 });
             }
             Action::RemoveModel if self.active_view == View::Models => {
@@ -3558,26 +3614,78 @@ impl App {
     }
 
     fn increment_param(&mut self, delta: i32) {
+        use crate::ui::create_form::CreateRow;
         if self.active_view != View::Create || self.generate.focus != GenerateFocus::Parameters {
             return;
         }
-        let field = match self.generate.visible_fields.get(self.generate.param_index) {
-            Some(f) => *f,
+        let row = match self.generate.rows.get(self.generate.param_index) {
+            Some(r) => *r,
             None => return,
+        };
+        match row {
+            CreateRow::Field(field) | CreateRow::SectionField(_, field) => {
+                self.adjust_field(field, delta);
+            }
+            // ◀▶ on the disclosure/section rows mirrors Enter: → opens,
+            // ← closes.
+            CreateRow::AdvancedHeader => {
+                if (delta > 0) != self.generate.advanced.open {
+                    self.dispatch_action(Action::ToggleAdvanced);
+                }
+            }
+            CreateRow::Section(sec) => {
+                if delta > 0 {
+                    self.set_advanced_expanded(Some(sec));
+                } else if self.generate.advanced.expanded == Some(sec) {
+                    self.set_advanced_expanded(None);
+                }
+            }
+            CreateRow::NegativeEditor | CreateRow::ResetDefaults => {}
+        }
+    }
+
+    /// Apply a `+`/`-`/`◀▶` adjustment to one parameter field.
+    fn adjust_field(&mut self, field: ParamField, delta: i32) {
+        // Size presets need the model's default area before we borrow
+        // params mutably.
+        let default_size = if field == ParamField::Size {
+            Some(self.model_default_size())
+        } else {
+            None
         };
         let p = &mut self.generate.params;
         match field {
-            ParamField::Width => {
-                p.width = (p.width as i32 + delta * 64).clamp(256, 4096) as u32;
-            }
-            ParamField::Height => {
-                p.height = (p.height as i32 + delta * 64).clamp(256, 4096) as u32;
+            ParamField::Size => {
+                // Cycle the aspect presets fitted to the model's default
+                // pixel area; a custom size snaps to the first preset.
+                let (dw, dh) = default_size.unwrap_or((p.width, p.height));
+                let presets = crate::ui::create_form::size_presets(dw, dh, 64);
+                if presets.is_empty() {
+                    return;
+                }
+                let len = presets.len() as i32;
+                let next = match presets.iter().position(|&s| s == (p.width, p.height)) {
+                    Some(i) => (i as i32 + delta).rem_euclid(len) as usize,
+                    None => 0,
+                };
+                (p.width, p.height) = presets[next];
             }
             ParamField::Steps => {
                 p.steps = (p.steps as i32 + delta).clamp(1, 200) as u32;
             }
             ParamField::Guidance => {
                 p.guidance = (p.guidance + delta as f64 * 0.5).clamp(0.0, 30.0);
+            }
+            ParamField::Seed => {
+                // ◀▶ cycles the seed mode (random → fixed → increment).
+                p.seed_mode = if delta >= 0 {
+                    p.seed_mode.next()
+                } else {
+                    p.seed_mode.next().next()
+                };
+                if p.seed_mode == SeedMode::Fixed && p.seed.is_none() {
+                    p.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
+                }
             }
             ParamField::Batch => {
                 p.batch = (p.batch as i32 + delta).max(1) as u32;
@@ -3604,24 +3712,23 @@ impl App {
                     OutputFormat::Mp4 => OutputFormat::Png,
                 };
             }
-            ParamField::Mode => {
-                p.inference_mode = p.inference_mode.next();
-            }
             ParamField::Expand => {
                 p.expand = !p.expand;
             }
             ParamField::Offload => {
                 p.offload = !p.offload;
             }
-            _ => {}
-        }
-        // Refresh visible fields when mode changes (Host visibility)
-        if field == ParamField::Mode {
-            self.generate.visible_fields = ParamField::visible_fields(
-                &self.generate.capabilities,
-                self.generate.params.inference_mode,
-            );
-            self.sync_resource_info_mode();
+            ParamField::Upscale => {
+                // ◀▶ clears the post-generate upscaler; Enter picks one.
+                p.upscale_model = None;
+            }
+            ParamField::Model
+            | ParamField::Scheduler
+            | ParamField::Lora
+            | ParamField::SourceImage
+            | ParamField::MaskImage
+            | ParamField::ControlImage
+            | ParamField::ControlModel => {}
         }
     }
 
@@ -4125,37 +4232,51 @@ impl App {
         });
     }
 
-    /// Handle Enter on the currently focused parameter field.
+    /// Handle Enter on the currently selected Create-form row.
     fn activate_current_param(&mut self) {
-        let field = match self.generate.visible_fields.get(self.generate.param_index) {
-            Some(f) => *f,
+        use crate::ui::create_form::CreateRow;
+        let row = match self.generate.rows.get(self.generate.param_index) {
+            Some(r) => *r,
             None => return,
         };
+        match row {
+            CreateRow::Field(field) | CreateRow::SectionField(_, field) => {
+                self.activate_field(field)
+            }
+            CreateRow::AdvancedHeader => self.dispatch_action(Action::ToggleAdvanced),
+            CreateRow::Section(sec) => {
+                if self.generate.advanced.expanded == Some(sec) {
+                    self.set_advanced_expanded(None);
+                } else {
+                    self.set_advanced_expanded(Some(sec));
+                }
+            }
+            CreateRow::NegativeEditor => {
+                self.generate.focus = GenerateFocus::NegativePrompt;
+            }
+            // Reset all params to model defaults (keep model and prompt)
+            CreateRow::ResetDefaults => self.reset_params_to_model_defaults(),
+        }
+    }
+
+    /// Handle Enter on one parameter field.
+    fn activate_field(&mut self, field: ParamField) {
         match field {
             // Open model selector popup
             ParamField::Model => self.open_model_selector(),
+            // Free-text WxH entry
+            ParamField::Size => {
+                let input = format!(
+                    "{}x{}",
+                    self.generate.params.width, self.generate.params.height
+                );
+                self.popup = Some(Popup::SizeInput { input });
+            }
             // Toggle boolean fields
             ParamField::Expand => self.generate.params.expand = !self.generate.params.expand,
             ParamField::Offload => self.generate.params.offload = !self.generate.params.offload,
-            ParamField::Mode => {
-                self.generate.params.inference_mode = self.generate.params.inference_mode.next();
-                self.generate.visible_fields = ParamField::visible_fields(
-                    &self.generate.capabilities,
-                    self.generate.params.inference_mode,
-                );
-                self.sync_resource_info_mode();
-            }
             // Cycle format
-            ParamField::Format => {
-                self.generate.params.format = match self.generate.params.format {
-                    OutputFormat::Png => OutputFormat::Jpeg,
-                    OutputFormat::Jpeg => OutputFormat::Gif,
-                    OutputFormat::Gif => OutputFormat::Apng,
-                    OutputFormat::Apng => OutputFormat::Webp,
-                    OutputFormat::Webp => OutputFormat::Mp4,
-                    OutputFormat::Mp4 => OutputFormat::Png,
-                };
-            }
+            ParamField::Format => self.adjust_field(ParamField::Format, 1),
             // Cycle scheduler
             ParamField::Scheduler => {
                 self.generate.params.scheduler = match self.generate.params.scheduler {
@@ -4165,18 +4286,8 @@ impl App {
                     Some(Scheduler::UniPc) => None,
                 };
             }
-            // Randomize seed on Enter
+            // Enter on the merged Seed row edits the value (◀▶ cycles mode)
             ParamField::Seed => {
-                // Click/Enter on Seed mode row toggles the mode
-                self.generate.params.seed_mode = self.generate.params.seed_mode.next();
-                if self.generate.params.seed_mode == SeedMode::Fixed
-                    && self.generate.params.seed.is_none()
-                {
-                    self.generate.params.seed = Some(rand::thread_rng().gen_range(0..u64::MAX));
-                }
-            }
-            // Randomize the seed value
-            ParamField::SeedValue => {
                 let current = self
                     .generate
                     .params
@@ -4185,58 +4296,62 @@ impl App {
                     .unwrap_or_default();
                 self.popup = Some(Popup::SeedInput { input: current });
             }
-            // Open host input popup
-            ParamField::Host => {
-                let current = self.generate.params.host.clone().unwrap_or_default();
-                self.popup = Some(Popup::HostInput { input: current });
+            // Pick (or clear) the post-generate upscaler
+            ParamField::Upscale => {
+                let mut filtered = vec![UPSCALE_OFF_ENTRY.to_string()];
+                filtered.extend(self.available_upscaler_models());
+                self.popup = Some(Popup::UpscaleModelSelector {
+                    filter: String::new(),
+                    selected: 0,
+                    filtered,
+                    purpose: UpscalePickerPurpose::SetGenerateParam,
+                });
             }
-            // Unload model from GPU memory
-            ParamField::UnloadModel => {
-                self.dispatch_action(Action::UnloadModel);
-            }
-            // Reset all params to model defaults (keep model and prompt)
-            ParamField::ResetDefaults => {
-                let model = self.generate.params.model.clone();
-
-                // Use server catalog defaults when connected (and not in local mode),
-                // local config otherwise
-                if let Some(entry) = if self.should_poll_remote() {
-                    self.models.catalog.iter().find(|m| m.name == model)
-                } else {
-                    None
-                } {
-                    self.generate.params.width = entry.defaults.default_width;
-                    self.generate.params.height = entry.defaults.default_height;
-                    self.generate.params.steps = entry.defaults.default_steps;
-                    self.generate.params.guidance = entry.defaults.default_guidance;
-                } else {
-                    let mc = self.config.resolved_model_config(&model);
-                    self.generate.params.width = mc.effective_width(&self.config);
-                    self.generate.params.height = mc.effective_height(&self.config);
-                    self.generate.params.steps = mc.effective_steps(&self.config);
-                    self.generate.params.guidance = mc.effective_guidance();
-                }
-                self.generate.params.seed = None;
-                self.generate.params.seed_mode = SeedMode::Random;
-                self.generate.params.batch = 1;
-                self.generate.params.format = OutputFormat::Png;
-                self.generate.params.scheduler = None;
-                self.generate.params.lora_path = None;
-                self.generate.params.lora_scale = 1.0;
-                self.generate.params.expand = false;
-                self.generate.params.offload = false;
-                self.generate.params.frames = 25;
-                self.generate.params.fps = 24;
-                self.generate.params.strength = 0.75;
-                self.generate.params.source_image_path = None;
-                self.generate.params.mask_image_path = None;
-                self.generate.params.control_image_path = None;
-                self.generate.params.control_model = None;
-                self.generate.params.control_scale = 1.0;
-            }
-            // For numeric fields, Enter does nothing special (use +/-)
+            // For the remaining fields, Enter does nothing special (use +/-)
             _ => {}
         }
+    }
+
+    /// Restore the selected model's defaults (keeps model and prompt).
+    fn reset_params_to_model_defaults(&mut self) {
+        let model = self.generate.params.model.clone();
+
+        // Use server catalog defaults when connected (and not in local mode),
+        // local config otherwise
+        if let Some(entry) = if self.should_poll_remote() {
+            self.models.catalog.iter().find(|m| m.name == model)
+        } else {
+            None
+        } {
+            self.generate.params.width = entry.defaults.default_width;
+            self.generate.params.height = entry.defaults.default_height;
+            self.generate.params.steps = entry.defaults.default_steps;
+            self.generate.params.guidance = entry.defaults.default_guidance;
+        } else {
+            let mc = self.config.resolved_model_config(&model);
+            self.generate.params.width = mc.effective_width(&self.config);
+            self.generate.params.height = mc.effective_height(&self.config);
+            self.generate.params.steps = mc.effective_steps(&self.config);
+            self.generate.params.guidance = mc.effective_guidance();
+        }
+        self.generate.params.seed = None;
+        self.generate.params.seed_mode = SeedMode::Random;
+        self.generate.params.batch = 1;
+        self.generate.params.format = OutputFormat::Png;
+        self.generate.params.scheduler = None;
+        self.generate.params.lora_path = None;
+        self.generate.params.lora_scale = 1.0;
+        self.generate.params.expand = false;
+        self.generate.params.offload = false;
+        self.generate.params.upscale_model = None;
+        self.generate.params.frames = 25;
+        self.generate.params.fps = 24;
+        self.generate.params.strength = 0.75;
+        self.generate.params.source_image_path = None;
+        self.generate.params.mask_image_path = None;
+        self.generate.params.control_image_path = None;
+        self.generate.params.control_model = None;
+        self.generate.params.control_scale = 1.0;
     }
 
     // ── Settings view helpers ─────────────────────────────────────────
@@ -5341,6 +5456,21 @@ impl App {
                         Some(saved_path.clone())
                     };
 
+                    // Sweep the caption row in under the finished print —
+                    // caption only, never the image cells (graphics
+                    // protocols are escape-sequence passthrough).
+                    if self.generate.batch_remaining == 0 {
+                        let p = self.layout.preview;
+                        if p.height > 0 {
+                            let caption = ratatui::layout::Rect {
+                                y: p.y + p.height - 1,
+                                height: 1,
+                                ..p
+                            };
+                            self.motion.trigger_completion_sweep(caption, self.theme.bg);
+                        }
+                    }
+
                     self.generate.progress.push_log(ProgressLogEntry {
                         message: if saved_name.is_empty() {
                             format!(
@@ -5633,10 +5763,6 @@ impl App {
                     if self.generate.params.inference_mode == InferenceMode::Local {
                         self.generate.params.inference_mode = InferenceMode::Auto;
                     }
-                    self.generate.visible_fields = ParamField::visible_fields(
-                        &self.generate.capabilities,
-                        self.generate.params.inference_mode,
-                    );
                     // Apply model defaults from server catalog
                     self.apply_remote_model_defaults(&models);
                     self.generate.progress.push_log(ProgressLogEntry {
@@ -6192,83 +6318,31 @@ mod tests {
         assert_eq!(InferenceMode::Remote.label(), "remote");
     }
 
-    #[test]
-    fn visible_fields_hides_host_in_local_mode() {
-        let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Local);
-        assert!(!fields.contains(&ParamField::Host));
-    }
+    // NOTE: the old `ParamField::visible_fields` capability tests moved to
+    // `ui::create_form` (`visible_rows_*`, `scheduler_row_gated_on_capability`,
+    // `video_section_only_when_caps_support_video`, …). The Mode/Host rows —
+    // and their display tests — are gone: routing comes from the Machines
+    // generation target.
 
     #[test]
-    fn visible_fields_shows_host_in_auto_mode() {
-        let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert!(fields.contains(&ParamField::Host));
-    }
-
-    #[test]
-    fn visible_fields_shows_host_in_remote_mode() {
-        let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Remote);
-        assert!(fields.contains(&ParamField::Host));
-    }
-
-    #[test]
-    fn visible_fields_includes_scheduler_for_sd15() {
-        let caps = crate::model_info::capabilities_for_family("sd15");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert!(fields.contains(&ParamField::Scheduler));
-    }
-
-    #[test]
-    fn visible_fields_excludes_scheduler_for_flux() {
-        let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert!(!fields.contains(&ParamField::Scheduler));
-    }
-
-    #[test]
-    fn visible_fields_includes_lora_for_flux() {
-        let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert!(fields.contains(&ParamField::Lora));
-    }
-
-    #[test]
-    fn visible_fields_excludes_lora_for_unsupported_family() {
-        let caps = crate::model_info::capabilities_for_family("wuerstchen");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert!(!fields.contains(&ParamField::Lora));
-    }
-
-    #[test]
-    fn generate_params_display_host_default() {
-        let config = Config::load_or_default();
-        let params = GenerateParams::from_config(&config);
-        assert_eq!(params.display_value(&ParamField::Host), "localhost:7680");
-    }
-
-    #[test]
-    fn generate_params_display_host_custom() {
+    fn generate_params_display_size_merges_width_height() {
         let config = Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
-        params.host = Some("http://gpu-server:7680".to_string());
-        assert_eq!(
-            params.display_value(&ParamField::Host),
-            "http://gpu-server:7680"
-        );
+        params.width = 1024;
+        params.height = 768;
+        assert_eq!(params.display_value(&ParamField::Size), "1024 \u{00d7} 768");
     }
 
     #[test]
-    fn generate_params_display_mode() {
-        let config = Config::load_or_default();
-        let mut params = GenerateParams::from_config(&config);
-        params.inference_mode = InferenceMode::Auto;
-        assert_eq!(params.display_value(&ParamField::Mode), "auto");
-        params.inference_mode = InferenceMode::Local;
-        assert_eq!(params.display_value(&ParamField::Mode), "local");
-        params.inference_mode = InferenceMode::Remote;
-        assert_eq!(params.display_value(&ParamField::Mode), "remote");
+    fn parse_size_input_accepts_wxh_forms() {
+        assert_eq!(parse_size_input("1024x768"), Some((1024, 768)));
+        assert_eq!(parse_size_input("1024 X 768"), Some((1024, 768)));
+        assert_eq!(parse_size_input("1024 \u{00d7} 768"), Some((1024, 768)));
+        // Clamped into the same range the old Width/Height rows enforced.
+        assert_eq!(parse_size_input("64x9999"), Some((256, 4096)));
+        assert_eq!(parse_size_input("banana"), None);
+        assert_eq!(parse_size_input("1024"), None);
+        assert_eq!(parse_size_input("1x2x3"), None);
     }
 
     #[test]
@@ -6295,22 +6369,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn param_field_labels_not_empty() {
-        let caps = crate::model_info::capabilities_for_family("sd15");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        for field in &fields {
-            // SeedValue intentionally has no label (continuation of Seed row)
-            if *field == ParamField::SeedValue {
-                continue;
-            }
-            assert!(
-                !field.label().is_empty(),
-                "field {:?} has empty label",
-                field
-            );
-        }
-    }
+    // (`every_field_row_has_a_nonempty_label` in `ui::create_form` covers
+    // the label contract for every row the form can produce.)
 
     #[test]
     fn progress_state_clear_resets_all() {
@@ -6613,39 +6673,27 @@ mod tests {
     }
 
     #[test]
-    fn seed_display_shows_mode() {
+    fn seed_display_merges_mode_and_value() {
+        // The Seed essentials row absorbed the old SeedValue row.
         let config = Config::load_or_default();
         let mut params = GenerateParams::from_config(&config);
         assert_eq!(params.display_value(&ParamField::Seed), "random");
         params.seed_mode = SeedMode::Fixed;
-        assert_eq!(params.display_value(&ParamField::Seed), "fixed");
-        params.seed_mode = SeedMode::Increment;
-        assert_eq!(params.display_value(&ParamField::Seed), "increment");
-    }
-
-    #[test]
-    fn seed_value_display_with_number() {
-        let config = Config::load_or_default();
-        let mut params = GenerateParams::from_config(&config);
         params.seed = Some(12345);
-        assert_eq!(params.display_value(&ParamField::SeedValue), "12345");
-    }
-
-    #[test]
-    fn seed_value_display_random_when_none() {
-        let config = Config::load_or_default();
-        let params = GenerateParams::from_config(&config);
-        let display = params.display_value(&ParamField::SeedValue);
-        assert!(display.contains("random"));
-    }
-
-    #[test]
-    fn seed_value_shows_long_numbers_untruncated() {
-        let config = Config::load_or_default();
-        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(
+            params.display_value(&ParamField::Seed),
+            "fixed \u{00b7} 12345"
+        );
+        params.seed_mode = SeedMode::Increment;
         params.seed = Some(11275518943372801901);
-        let display = params.display_value(&ParamField::SeedValue);
-        assert_eq!(display, "11275518943372801901");
+        assert_eq!(
+            params.display_value(&ParamField::Seed),
+            "increment \u{00b7} 11275518943372801901"
+        );
+        // Pinned mode without a value yet still communicates "random".
+        params.seed_mode = SeedMode::Fixed;
+        params.seed = None;
+        assert!(params.display_value(&ParamField::Seed).contains("random"));
     }
 
     // ── Regression tests for Codex review findings ────────
@@ -6718,74 +6766,33 @@ mod tests {
     }
 
     #[test]
-    fn visible_fields_ends_with_tools_section() {
-        // The Tools section (ResetDefaults, UnloadModel) should always be at the end
+    fn create_rows_end_with_reset_defaults_and_never_offer_unload() {
+        // UnloadModel left Create for good — Models owns `u`. The reset
+        // action row closes the form in every accordion state.
+        use crate::ui::create_form::{visible_rows, AdvancedState, CreateRow};
         let caps = crate::model_info::capabilities_for_family("flux");
-        let fields = ParamField::visible_fields(&caps, InferenceMode::Auto);
-        assert_eq!(*fields.last().unwrap(), ParamField::UnloadModel);
-        // ResetDefaults should be just before UnloadModel
-        let reset_pos = fields
-            .iter()
-            .position(|f| *f == ParamField::ResetDefaults)
-            .unwrap();
-        let unload_pos = fields
-            .iter()
-            .position(|f| *f == ParamField::UnloadModel)
-            .unwrap();
-        assert_eq!(unload_pos, reset_pos + 1);
-    }
-
-    #[test]
-    fn reset_defaults_display_value() {
-        let config = Config::load_or_default();
-        let params = GenerateParams::from_config(&config);
-        let display = params.display_value(&ParamField::ResetDefaults);
-        assert_eq!(display, "restore model defaults");
-    }
-
-    #[test]
-    fn unload_model_display_value() {
-        let config = Config::load_or_default();
-        let params = GenerateParams::from_config(&config);
-        let display = params.display_value(&ParamField::UnloadModel);
-        assert_eq!(display, "free GPU memory");
-    }
-
-    #[test]
-    fn unload_model_label() {
-        assert!(ParamField::UnloadModel.label().contains("Unload"));
-    }
-
-    #[test]
-    fn unload_model_has_no_section_header() {
-        // UnloadModel is under the Actions section started by ResetDefaults
-        assert!(ParamField::UnloadModel.section_header().is_none());
-    }
-
-    #[test]
-    fn reset_defaults_starts_actions_section() {
-        assert_eq!(ParamField::ResetDefaults.section_header(), Some("Actions"));
-    }
-
-    #[test]
-    fn unload_model_always_visible() {
-        // UnloadModel should appear regardless of model family or inference mode
-        for family in &["flux", "sd15", "sdxl", "sd3", "flux2"] {
-            for mode in &[
-                InferenceMode::Auto,
-                InferenceMode::Local,
-                InferenceMode::Remote,
-            ] {
-                let caps = crate::model_info::capabilities_for_family(family);
-                let fields = ParamField::visible_fields(&caps, *mode);
-                assert!(
-                    fields.contains(&ParamField::UnloadModel),
-                    "UnloadModel missing for family={} mode={:?}",
-                    family,
-                    mode
-                );
-            }
+        for adv in [
+            AdvancedState::default(),
+            AdvancedState {
+                open: true,
+                expanded: None,
+            },
+        ] {
+            let rows = visible_rows(&caps, &adv);
+            assert_eq!(*rows.last().unwrap(), CreateRow::ResetDefaults);
         }
+    }
+
+    #[test]
+    fn upscale_display_value_off_by_default() {
+        let config = Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(params.display_value(&ParamField::Upscale), "off");
+        params.upscale_model = Some("real-esrgan-x2:fp16".to_string());
+        assert_eq!(
+            params.display_value(&ParamField::Upscale),
+            "real-esrgan-x2:fp16"
+        );
     }
 
     // ── Gallery tests ────────────────────────────────────
@@ -7157,7 +7164,8 @@ mod tests {
         let params = GenerateParams::from_config(&config);
         let family = crate::model_info::family_for_model(&params.model, &config);
         let caps = crate::model_info::capabilities_for_family(&family);
-        let visible = ParamField::visible_fields(&caps, params.inference_mode);
+        let advanced = crate::ui::create_form::AdvancedState::default();
+        let rows = crate::ui::create_form::visible_rows(&caps, &advanced);
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
 
         App {
@@ -7169,7 +7177,9 @@ mod tests {
                 params,
                 focus: GenerateFocus::Navigation,
                 param_index: 0,
-                visible_fields: visible,
+                rows,
+                advanced,
+                param_scroll: 0,
                 capabilities: caps,
                 progress: ProgressState::default(),
                 preview_image: None,
@@ -7181,9 +7191,7 @@ mod tests {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description: String::new(),
-                negative_collapsed: false,
                 last_output_path: None,
-                advanced_open: false,
             },
             gallery: GalleryState::default(),
             models: ModelsState {
@@ -7204,6 +7212,7 @@ mod tests {
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config,
             server_url: None,
+            motion: crate::motion::MotionState::new(false),
             picker,
             theme: crate::ui::theme::Theme::default(),
             popup: None,
@@ -7223,6 +7232,7 @@ mod tests {
             upscale_tile_progress: None,
             upscale_progress: ProgressState::default(),
             connecting: false,
+            show_timeline: true,
         }
     }
 
@@ -7534,13 +7544,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toggle_advanced_flips_flag() {
+    #[serial_test::serial(mold_env)]
+    async fn toggle_advanced_flips_disclosure_and_rows() {
+        use crate::ui::create_form::CreateRow;
         let mut app = make_settings_test_app();
-        assert!(!app.generate.advanced_open);
+        assert!(!app.generate.advanced.open);
+        let collapsed_rows = app.generate.rows.len();
         app.dispatch_action(Action::ToggleAdvanced);
-        assert!(app.generate.advanced_open);
+        assert!(app.generate.advanced.open);
+        assert!(
+            app.generate
+                .rows
+                .iter()
+                .any(|r| matches!(r, CreateRow::Section(_))),
+            "opening the disclosure must surface the section rows"
+        );
         app.dispatch_action(Action::ToggleAdvanced);
-        assert!(!app.generate.advanced_open);
+        assert!(!app.generate.advanced.open);
+        assert_eq!(app.generate.rows.len(), collapsed_rows);
     }
 
     // ── Settings E2E: display values ──────────────────────
@@ -7968,55 +7989,64 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn alt_n_while_typing_prompt_toggles_negative_collapse() {
+    async fn alt_n_focuses_inline_negative_editor() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::Prompt;
         app.active_view = View::Create;
-        assert!(!app.generate.negative_collapsed);
+        // Alt+N (even while typing in the prompt) opens the accordion,
+        // expands Negative, and drops focus into the inline editor.
         app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
-        assert!(app.generate.negative_collapsed);
-        // Toggle back — the binding should be symmetric.
-        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
-        assert!(!app.generate.negative_collapsed);
+        assert!(app.generate.advanced.open);
+        assert_eq!(app.generate.advanced.expanded, Some(AdvSection::Negative));
+        assert_eq!(app.generate.focus, GenerateFocus::NegativePrompt);
+        assert_eq!(
+            app.generate.rows.get(app.generate.param_index),
+            Some(&CreateRow::NegativeEditor),
+            "selection must land on the inline editor row"
+        );
     }
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn toggle_negative_prompt_flips_collapsed_flag() {
+    async fn alt_n_is_a_noop_without_negative_capability() {
+        use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
-        assert!(!app.generate.negative_collapsed);
-        app.dispatch_action(Action::ToggleNegativePrompt);
-        assert!(app.generate.negative_collapsed);
-        app.dispatch_action(Action::ToggleNegativePrompt);
-        assert!(!app.generate.negative_collapsed);
+        app.generate.capabilities.supports_negative_prompt = false;
+        app.refresh_create_rows();
+        app.generate.focus = GenerateFocus::Prompt;
+        app.active_view = View::Create;
+        app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
+        assert!(!app.generate.advanced.open);
+        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
     }
 
-    // ── Codex P2: focus must skip a collapsed Negative pane ──────
+    // ── Focus must skip the Negative editor when it isn't drawn ──────
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn tab_from_prompt_skips_negative_when_collapsed() {
+    async fn tab_from_prompt_skips_negative_when_accordion_closed() {
         let mut app = make_settings_test_app();
-        // Model supports negative prompt, but the user has collapsed it.
+        // Model supports negative prompts, but the inline editor only
+        // renders while Advanced → Negative is expanded.
         app.generate.capabilities.supports_negative_prompt = true;
-        app.generate.negative_collapsed = true;
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::Prompt;
         app.active_view = View::Create;
 
         app.dispatch_action(Action::FocusNext);
-        // Before the fix: focus lands on NegativePrompt even though the
-        // textarea is not rendered, and keystrokes are routed into a
-        // hidden field.
         assert_eq!(app.generate.focus, GenerateFocus::Parameters);
     }
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn shift_tab_from_parameters_skips_negative_when_collapsed() {
+    async fn shift_tab_from_parameters_skips_negative_when_accordion_closed() {
         let mut app = make_settings_test_app();
         app.generate.capabilities.supports_negative_prompt = true;
-        app.generate.negative_collapsed = true;
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::Parameters;
         app.active_view = View::Create;
 
@@ -8026,12 +8056,15 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn tab_still_visits_negative_when_expanded() {
-        // Regression guard: the skip-when-collapsed logic must not change
-        // the happy-path Tab order when the negative pane is visible.
+    async fn tab_still_visits_negative_when_editor_expanded() {
+        // Happy path: with Advanced → Negative expanded the Tab cycle
+        // includes the inline editor.
+        use crate::ui::create_form::AdvSection;
         let mut app = make_settings_test_app();
         app.generate.capabilities.supports_negative_prompt = true;
-        app.generate.negative_collapsed = false;
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Negative);
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::Prompt;
         app.active_view = View::Create;
 
@@ -8265,14 +8298,15 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn mouse_click_on_collapsed_negative_row_does_not_focus_it() {
+    async fn mouse_click_on_stale_negative_rect_does_not_focus_hidden_editor() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
         app.generate.capabilities.supports_negative_prompt = true;
-        app.generate.negative_collapsed = true;
+        // Accordion closed → the inline editor is not rendered, so a click
+        // on a stale stored rect must not focus the hidden textarea.
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::Prompt;
         app.active_view = View::Create;
-        // Pretend the collapsed negative row occupies cell (10, 5).
         app.layout.negative_prompt = ratatui::layout::Rect::new(0, 5, 80, 1);
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -8285,14 +8319,19 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn toggle_negative_prompt_while_focused_moves_focus_to_prompt() {
+    async fn closing_advanced_while_editing_negative_moves_focus_out() {
+        use crate::ui::create_form::AdvSection;
         let mut app = make_settings_test_app();
+        app.generate.capabilities.supports_negative_prompt = true;
+        app.generate.advanced.open = true;
+        app.generate.advanced.expanded = Some(AdvSection::Negative);
+        app.refresh_create_rows();
         app.generate.focus = GenerateFocus::NegativePrompt;
-        app.dispatch_action(Action::ToggleNegativePrompt);
-        // Collapsing while focused on Negative should shift focus so the
-        // user isn't stuck typing into a hidden textarea.
-        assert!(app.generate.negative_collapsed);
-        assert_eq!(app.generate.focus, GenerateFocus::Prompt);
+        // Closing the disclosure hides the editor; focus must escape so
+        // the user isn't stuck typing into a hidden textarea.
+        app.dispatch_action(Action::ToggleAdvanced);
+        assert!(!app.generate.advanced.open);
+        assert_eq!(app.generate.focus, GenerateFocus::Parameters);
     }
 
     #[tokio::test]
@@ -9048,6 +9087,377 @@ mod tests {
         }
     }
 
+    // ── Create redesign: layout, accordion behavior, timeline contract ──
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn saved_file_line_appears_in_timeline_after_completion() {
+        // The Recent strip is retired — its role is absorbed by the
+        // Timeline's `✓ Saved <file>` entries pushed on completion.
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.generating = true;
+            app.generate.batch_remaining = 1;
+            app.generate.prompt = TextArea::from(["a timeline test"]);
+
+            let response = GenerateResponse {
+                images: vec![mold_core::ImageData {
+                    data: vec![0u8; 4],
+                    format: OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                }],
+                generation_time_ms: 300,
+                model: "flux-schnell:q8".to_string(),
+                seed_used: 7,
+                video: None,
+                gpu: None,
+            };
+            app.bg_tx
+                .send(BackgroundEvent::GenerationComplete {
+                    response: Box::new(response),
+                    from_local: false,
+                })
+                .unwrap();
+            app.process_background_events();
+
+            assert!(
+                app.generate
+                    .progress
+                    .log
+                    .iter()
+                    .any(|e| e.message.starts_with("Saved ") && e.style == ProgressStyle::Done),
+                "completion must push a ✓ Saved <file> timeline entry: {:?}",
+                app.generate
+                    .progress
+                    .log
+                    .iter()
+                    .map(|e| &e.message)
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn create_layout_shows_preview_timeline_and_advanced() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        let text = render_view_to_string(&mut app, 110, 40);
+        assert!(text.contains("\u{250c} Prompt"), "Prompt panel:\n{text}");
+        assert!(
+            text.contains("\u{250c} Parameters"),
+            "Parameters panel:\n{text}"
+        );
+        assert!(text.contains("\u{250c} Preview"), "Preview panel:\n{text}");
+        assert!(
+            text.contains("\u{250c} Timeline"),
+            "Timeline panel:\n{text}"
+        );
+        assert!(text.contains("Advanced"), "Advanced header row:\n{text}");
+        // The Info sub-panel and Recent strip are retired from Create.
+        assert!(
+            !text.contains("\u{250c} Info"),
+            "Info must be gone:\n{text}"
+        );
+        assert!(
+            !text.contains("\u{250c} Recent"),
+            "Recent must be gone:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_layout_hides_timeline_when_pref_off() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.show_timeline = false;
+        let text = render_view_to_string(&mut app, 110, 40);
+        assert!(
+            !text.contains("\u{250c} Timeline"),
+            "tui.show_timeline=false must hide the panel:\n{text}"
+        );
+        assert!(text.contains("\u{250c} Preview"), "Preview keeps the row");
+    }
+
+    #[tokio::test]
+    async fn create_layout_collapses_timeline_below_min_height() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        // 22 rows total − 4 chrome rows = 18 content rows, below the
+        // 4 (prompt) + 8 (min preview) + 7 (timeline) = 19 budget.
+        let text = render_view_to_string(&mut app, 110, 22);
+        assert!(
+            !text.contains("\u{250c} Timeline"),
+            "Timeline must collapse (not squeeze) when short:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeline_empty_state_renders_idle_copy() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        let text = render_view_to_string(&mut app, 110, 40);
+        assert!(
+            text.contains("idle. no runs this session."),
+            "fresh session shows the timeline empty state:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_state_renders_press_enter_hint() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        let text = render_view_to_string(&mut app, 110, 40);
+        assert!(
+            text.contains("Press Enter to generate"),
+            "idle preview shows the hint:\n{text}"
+        );
+        assert!(text.contains("\u{25c7}"), "idle glyph:\n{text}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn enter_on_section_expands_and_collapses_others() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.dispatch_action(Action::ToggleAdvanced);
+        assert!(app.generate.advanced.open);
+
+        let sampling_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Sampling))
+            .unwrap();
+        app.generate.param_index = sampling_idx;
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(app.generate.advanced.expanded, Some(AdvSection::Sampling));
+        assert!(app.generate.rows.contains(&CreateRow::SectionField(
+            AdvSection::Sampling,
+            ParamField::Expand
+        )));
+
+        // Expanding another section collapses Sampling.
+        let output_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Output))
+            .unwrap();
+        app.generate.param_index = output_idx;
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(app.generate.advanced.expanded, Some(AdvSection::Output));
+        assert!(!app
+            .generate
+            .rows
+            .iter()
+            .any(|r| matches!(r, CreateRow::SectionField(AdvSection::Sampling, _))));
+
+        // Enter again on the expanded section collapses it.
+        let output_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Output))
+            .unwrap();
+        app.generate.param_index = output_idx;
+        app.dispatch_action(Action::Confirm);
+        assert_eq!(app.generate.advanced.expanded, None);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn accordion_dispatch_persists_state_to_db() {
+        use crate::ui::create_form::{AdvSection, AdvancedState, CreateRow};
+        crate::test_env::with_isolated_env(|_home| {
+            let mut app = make_settings_test_app();
+            app.active_view = View::Create;
+            app.generate.focus = GenerateFocus::Parameters;
+            app.dispatch_action(Action::ToggleAdvanced);
+            let lora_idx = app
+                .generate
+                .rows
+                .iter()
+                .position(|r| *r == CreateRow::Section(AdvSection::Lora))
+                .expect("flux2 supports LoRA");
+            app.generate.param_index = lora_idx;
+            app.dispatch_action(Action::Confirm);
+
+            let loaded = AdvancedState::load();
+            assert!(loaded.open, "tui.advanced_open must persist");
+            assert_eq!(
+                loaded.expanded,
+                Some(AdvSection::Lora),
+                "tui.advanced_section must persist the slug"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn size_row_cycles_aspect_presets() {
+        use crate::ui::create_form::{size_presets, CreateRow};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        let size_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Field(ParamField::Size))
+            .unwrap();
+        app.generate.param_index = size_idx;
+
+        let (dw, dh) = (app.generate.params.width, app.generate.params.height);
+        let presets = size_presets(dw, dh, 64);
+        assert_eq!((dw, dh), presets[0], "defaults are the 1:1 preset");
+
+        app.increment_param(1);
+        assert_eq!(
+            (app.generate.params.width, app.generate.params.height),
+            presets[1],
+            "◀▶ steps to the 3:2 preset"
+        );
+        app.increment_param(-1);
+        assert_eq!(
+            (app.generate.params.width, app.generate.params.height),
+            presets[0]
+        );
+        // A custom size snaps back onto the preset ring.
+        app.generate.params.width = 1000;
+        app.generate.params.height = 999;
+        app.increment_param(1);
+        assert_eq!(
+            (app.generate.params.width, app.generate.params.height),
+            presets[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_row_cycles_mode_with_arrows_and_enter_edits_value() {
+        use crate::ui::create_form::CreateRow;
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        let seed_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Field(ParamField::Seed))
+            .unwrap();
+        app.generate.param_index = seed_idx;
+
+        assert_eq!(app.generate.params.seed_mode, SeedMode::Random);
+        app.increment_param(1);
+        assert_eq!(app.generate.params.seed_mode, SeedMode::Fixed);
+        assert!(
+            app.generate.params.seed.is_some(),
+            "entering Fixed pins a seed"
+        );
+        app.increment_param(-1);
+        assert_eq!(app.generate.params.seed_mode, SeedMode::Random);
+
+        // Enter opens the SeedInput popup (the absorbed SeedValue row).
+        app.dispatch_action(Action::Confirm);
+        assert!(matches!(app.popup, Some(Popup::SeedInput { .. })));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn upscale_row_picker_sets_and_clears_generate_param() {
+        use crate::ui::create_form::{AdvSection, CreateRow};
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        app.dispatch_action(Action::ToggleAdvanced);
+        let sec_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Section(AdvSection::Upscale))
+            .unwrap();
+        app.generate.param_index = sec_idx;
+        app.dispatch_action(Action::Confirm);
+        let row_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::SectionField(AdvSection::Upscale, ParamField::Upscale))
+            .unwrap();
+        app.generate.param_index = row_idx;
+        app.dispatch_action(Action::Confirm);
+
+        let Some(Popup::UpscaleModelSelector {
+            filtered, purpose, ..
+        }) = &app.popup
+        else {
+            panic!("Enter on the Upscale row must open the picker");
+        };
+        assert_eq!(*purpose, UpscalePickerPurpose::SetGenerateParam);
+        assert_eq!(filtered[0], UPSCALE_OFF_ENTRY);
+        let picked = filtered[1].clone();
+
+        // Down + Enter picks the first real model.
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(
+            app.generate.params.upscale_model.as_deref(),
+            Some(picked.as_str())
+        );
+
+        // Re-open and select "(off)" to clear.
+        app.generate.param_index = row_idx;
+        app.dispatch_action(Action::Confirm);
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.generate.params.upscale_model, None);
+    }
+
+    #[tokio::test]
+    async fn size_input_popup_applies_wxh() {
+        use crate::ui::create_form::CreateRow;
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Parameters;
+        let size_idx = app
+            .generate
+            .rows
+            .iter()
+            .position(|r| *r == CreateRow::Field(ParamField::Size))
+            .unwrap();
+        app.generate.param_index = size_idx;
+        app.dispatch_action(Action::Confirm);
+        assert!(matches!(app.popup, Some(Popup::SizeInput { .. })));
+        // Clear the prefilled WxH and type a new one.
+        for _ in 0..12 {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        for c in "1152x832".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.generate.params.width, 1152);
+        assert_eq!(app.generate.params.height, 832);
+    }
+
     // ── Regression: batch_remaining tracks multi-image generation (#162) ────
 
     #[test]
@@ -9060,7 +9470,9 @@ mod tests {
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
-            visible_fields: vec![],
+            rows: vec![],
+            advanced: crate::ui::create_form::AdvancedState::default(),
+            param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
             preview_image: None,
@@ -9072,9 +9484,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
-            negative_collapsed: false,
             last_output_path: None,
-            advanced_open: false,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -9119,7 +9529,9 @@ mod tests {
             params: GenerateParams::from_config(&Config::load_or_default()),
             focus: GenerateFocus::Prompt,
             param_index: 0,
-            visible_fields: vec![],
+            rows: vec![],
+            advanced: crate::ui::create_form::AdvancedState::default(),
+            param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
             preview_image: None,
@@ -9131,9 +9543,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
-            negative_collapsed: false,
             last_output_path: None,
-            advanced_open: false,
         };
 
         // Simulate error mid-batch
@@ -9159,7 +9569,9 @@ mod tests {
             params,
             focus: GenerateFocus::Prompt,
             param_index: 0,
-            visible_fields: vec![],
+            rows: vec![],
+            advanced: crate::ui::create_form::AdvancedState::default(),
+            param_scroll: 0,
             capabilities: capabilities_for_family("flux"),
             progress: ProgressState::default(),
             preview_image: None,
@@ -9171,9 +9583,7 @@ mod tests {
             last_generation_time_ms: None,
             error_message: None,
             model_description: String::new(),
-            negative_collapsed: false,
             last_output_path: None,
-            advanced_open: false,
         };
 
         // Simulate setting batch to 4 and starting generation
@@ -9193,13 +9603,13 @@ mod tests {
         // Switch to Generate view with Parameters focus
         app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Parameters;
-        // Point param_index at the Batch field
+        // Point param_index at the Batch row
         let batch_idx = app
             .generate
-            .visible_fields
+            .rows
             .iter()
-            .position(|f| *f == ParamField::Batch)
-            .expect("Batch field should be in visible_fields");
+            .position(|r| *r == crate::ui::create_form::CreateRow::Field(ParamField::Batch))
+            .expect("Batch row should be in the Create form");
         app.generate.param_index = batch_idx;
 
         // Set batch to 16 and increment — should exceed old cap of 16
@@ -9246,17 +9656,20 @@ mod tests {
                 "real-esrgan-x4plus:fp16".into(),
                 "real-esrgan-x2:fp16".into(),
             ],
+            purpose: UpscalePickerPurpose::RunNow,
         };
         // Verify the variant can be pattern-matched and fields accessed
         if let Popup::UpscaleModelSelector {
             filter,
             selected,
             filtered,
+            purpose,
         } = &popup
         {
             assert!(filter.is_empty());
             assert_eq!(*selected, 0);
             assert_eq!(filtered.len(), 2);
+            assert_eq!(*purpose, UpscalePickerPurpose::RunNow);
         } else {
             panic!("expected UpscaleModelSelector");
         }
@@ -10138,6 +10551,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Serialized: the failure path spawns a gallery rescan whose
+    // `db.reconcile` write can outlive the test and race a parallel
+    // isolated-env round-trip (the intermittent session/theme/registry
+    // CI failures).
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_server_entry_emits_failure_on_api_error() {
         // When a gallery entry has `server_url: Some(...)`, the delete
         // must contact the server via `DELETE /api/gallery/image/:name`
@@ -10872,9 +11290,9 @@ mod tests {
         app.generate.focus = GenerateFocus::Parameters;
         let reset_idx = app
             .generate
-            .visible_fields
+            .rows
             .iter()
-            .position(|f| *f == ParamField::ResetDefaults)
+            .position(|r| *r == crate::ui::create_form::CreateRow::ResetDefaults)
             .unwrap();
         app.generate.param_index = reset_idx;
         app.activate_current_param();
@@ -10903,9 +11321,9 @@ mod tests {
         app.generate.focus = GenerateFocus::Parameters;
         let reset_idx = app
             .generate
-            .visible_fields
+            .rows
             .iter()
-            .position(|f| *f == ParamField::ResetDefaults)
+            .position(|r| *r == crate::ui::create_form::CreateRow::ResetDefaults)
             .unwrap();
         app.generate.param_index = reset_idx;
         app.activate_current_param();
