@@ -10073,6 +10073,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Serialized: the failure path spawns a gallery rescan whose
+    // `db.reconcile` write can outlive the test and race a parallel
+    // isolated-env round-trip (the intermittent session/theme/registry
+    // CI failures).
+    #[serial_test::serial(mold_env)]
     async fn delete_selected_gallery_image_server_entry_emits_failure_on_api_error() {
         // When a gallery entry has `server_url: Some(...)`, the delete
         // must contact the server via `DELETE /api/gallery/image/:name`
