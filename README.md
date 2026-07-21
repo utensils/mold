@@ -107,6 +107,17 @@ queue, byte/file progress, readiness, or retry without hiding reviewed prompts.
 
 **[Download Mold for macOS](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)** · **[Desktop guide](https://utensils.io/mold/guide/desktop)**
 
+Web, desktop, and iPhone frontend dependencies are installed once from the
+private repo-root Bun workspace. `studio/` contains browser-safe API contracts,
+Pinia state, and shared domain logic; `ui/` contains Mold Studio tokens and
+low-level Vue primitives; `web/` and `desktop/` are platform shells. Run `bun
+install --frozen-lockfile` at the repository root, followed by `bun run
+build:web`, `bun run build:desktop`, or `bun run build:mobile`.
+
+The browser uses `/create`, `/library`, `/models`, `/machines`, and `/settings`.
+The root redirects to Create; retired `/generate` and `/catalog` URLs render
+Page Not Found and the web client requires the current server API contract.
+
 The macOS DMG is signed and notarized. Linux builds are currently available
 through Nix or as source/CI artifacts; tagged releases do not publish an
 AppImage yet. Detailed setup, multi-host behavior, and update-channel guidance

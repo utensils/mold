@@ -75,9 +75,9 @@ describe("stylePresets", () => {
     expect(stylePresetLabel(null)).toBe("None");
   });
 
-  it("resolves the legacy desktop ids a shared print may carry", () => {
-    expect(stylePresetById("photographic")?.id).toBe("photoreal");
-    expect(stylePresetById("3d-render")?.id).toBe("3d");
+  it("ignores retired style ids", () => {
+    expect(stylePresetById("photographic")).toBeNull();
+    expect(stylePresetById("3d-render")).toBeNull();
   });
 
   it("cycles the five angles, wrapping past the end", () => {

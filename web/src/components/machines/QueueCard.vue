@@ -35,7 +35,7 @@ const queuedIds = computed(() =>
 );
 
 function laneValue(entry: QueueEntry): string {
-  const lane = entry.target_gpu ?? entry.preferred_gpu ?? null;
+  const lane = entry.target_gpu ?? null;
   return lane == null ? "" : String(lane);
 }
 

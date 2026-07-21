@@ -95,7 +95,7 @@ describe("useGenerateForm", () => {
     expect(second.state.value.maskImage?.base64).toBe("MASK_BYTES");
   });
 
-  it("migrates a version 1 persisted snapshot but drops source image bytes", () => {
+  it("discards persisted snapshots from pre-current schemas", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -114,50 +114,7 @@ describe("useGenerateForm", () => {
     );
 
     const form = useGenerateForm();
-    expect(form.state.value.prompt).toBe("a cat");
-    expect(form.state.value.model).toBe("flux-dev:q4");
-    expect(form.state.value.width).toBe(512);
-    expect(form.state.value.height).toBe(768);
-    expect(form.state.value.imageAttachments).toEqual([]);
-    // Untouched fields fall back to defaults.
-    expect(form.state.value.steps).toBe(20);
-  });
-
-  it("migrates a version 2 snapshot to v3, defaulting stylePreset to null and preserving everything else", () => {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        version: 2,
-        prompt: "a fox in snow",
-        negativePrompt: "blurry",
-        model: "sdxl:base",
-        modelFamily: "sdxl",
-        width: 768,
-        height: 1024,
-        steps: 32,
-        guidance: 6,
-        seedMode: "static",
-        seed: 4242,
-        batchSize: 3,
-        scheduler: "ddim",
-        loras: [{ path: "lora-a", scale: 0.8 }],
-      }),
-    );
-    const form = useGenerateForm();
-    expect(form.state.value.version).toBe(3);
-    expect(form.state.value.stylePreset).toBeNull();
-    // Every v2 field survives the migration untouched.
-    expect(form.state.value.prompt).toBe("a fox in snow");
-    expect(form.state.value.negativePrompt).toBe("blurry");
-    expect(form.state.value.model).toBe("sdxl:base");
-    expect(form.state.value.width).toBe(768);
-    expect(form.state.value.height).toBe(1024);
-    expect(form.state.value.steps).toBe(32);
-    expect(form.state.value.guidance).toBe(6);
-    expect(form.state.value.seed).toBe(4242);
-    expect(form.state.value.batchSize).toBe(3);
-    expect(form.state.value.scheduler).toBe("ddim");
-    expect(form.state.value.loras).toEqual([{ path: "lora-a", scale: 0.8 }]);
+    expect(form.state.value).toMatchObject({ version: 3, prompt: "" });
   });
 
   it("loads a version 3 snapshot preserving a saved stylePreset", () => {

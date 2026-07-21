@@ -2,6 +2,14 @@
 
 Sources of truth: CLI clap defs (`crates/mold-cli/src/main.rs`), core wire types (`crates/mold-core/src/types.rs`), shared desktop/mobile capability and request logic (`desktop/src/lib/`), desktop UI (`desktop/src/`), iPhone UI (`desktop/src/mobile/`), native iOS bridges (`apps/mobile/src-tauri/`), server routes (`crates/mold-server/src/routes.rs`), catalog (`crates/mold-catalog/`), config (`crates/mold-core/src/config.rs`, `crates/mold-db/src/settings.rs`), chain (`crates/mold-core/src/chain.rs`, `chain_toml.rs`), Discord (`crates/mold-discord/src/commands/`), and TUI (`crates/mold-tui/src/`).
 
+Frontend parity is maintained through the repo-root Bun workspace: `studio/`
+owns browser-safe current-contract transport, Pinia state, and shared domain
+logic; `ui/` owns tokens and low-level primitives; `web/` and `desktop/` own
+surface navigation and platform adapters. Web intentionally requires current
+server and storage schemas, while desktop and iPhone retain native
+compatibility normalization. Browser routes are `/create`, `/library`,
+`/models`, `/machines`, and `/settings`; retired routes are not redirected.
+
 ---
 
 ## 1. Core generation parameters (the shared `GenerateRequest`)

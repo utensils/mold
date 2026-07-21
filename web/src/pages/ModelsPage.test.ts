@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
-import CatalogPage from "./CatalogPage.vue";
+import ModelsPage from "./ModelsPage.vue";
 import type { ModelInfoExtended } from "../types";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 
@@ -39,7 +39,7 @@ vi.mock("../composables/useCatalog", () => ({
 }));
 
 const mountPage = () =>
-  mount(CatalogPage, {
+  mount(ModelsPage, {
     global: {
       stubs: {
         CatalogTopbar: true,
@@ -65,7 +65,7 @@ beforeEach(() => {
   };
 });
 
-describe("CatalogPage — Models workspace", () => {
+describe("ModelsPage — Models workspace", () => {
   it("refreshes installed models and the catalog on mount", () => {
     mountPage();
     expect(mock.refreshInstalled).toHaveBeenCalled();

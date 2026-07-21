@@ -498,7 +498,7 @@ mold rm flux-dev:q4 --force  # Remove without confirmation
 ## Model discovery catalog
 
 **Browse:** web UI `/models` route, **Discover** segment — cards and detail
-drawer. The legacy `/catalog` route permanently redirects there. Every read is
+drawer. Retired browser routes such as `/catalog` render Page Not Found. Every read is
 a live HF + Civitai proxy through `GET /api/catalog/search` with a 5-min
 in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
@@ -933,7 +933,7 @@ desktop-build      # build the Mold.app bundle
 desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
-desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+frontend-bun-lock  # regenerate the repo-root bun.lock and bun.nix
 ios-dev            # run the iPhone app with Tauri hot reload
 ios-run            # production run on an iPhone or simulator
 ios-check          # cross-check the simulator Rust target

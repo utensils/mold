@@ -299,7 +299,7 @@ function setStagePrompt(i: number, v: string) {
 
 /** Open the source-image picker for a specific stage. Exposed so the
  * parent Composer's toolbar can route its global image button to stage 0
- * in script mode without having to round-trip through GeneratePage. */
+ * in script mode without having to round-trip through CreatePage. */
 function openStagePicker(i: number) {
   if (i < 0 || i >= script.value.stage.length) return;
   pickerStageIndex.value = i;

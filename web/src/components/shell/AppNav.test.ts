@@ -4,7 +4,7 @@ import AppNav from "./AppNav.vue";
 import MobileNavSheet from "./MobileNavSheet.vue";
 
 const routeState = vi.hoisted(() => ({
-  name: "gallery" as string,
+  name: "library" as string,
   query: {} as Record<string, unknown>,
 }));
 const pushMock = vi.hoisted(() => vi.fn());
@@ -48,7 +48,7 @@ function mountNav() {
 
 describe("AppNav", () => {
   beforeEach(() => {
-    routeState.name = "gallery";
+    routeState.name = "library";
     routeState.query = {};
     dlState.activeJobs = [];
     dlState.queued = [];
@@ -66,12 +66,12 @@ describe("AppNav", () => {
       wrapper.get('[data-test="nav-create"]').attributes("data-active"),
     ).toBe("true");
     expect(
-      wrapper.get('[data-test="nav-gallery"]').attributes("data-active"),
+      wrapper.get('[data-test="nav-library"]').attributes("data-active"),
     ).toBe("false");
   });
 
   it("keeps the Machines pill active on a host detail route", () => {
-    routeState.name = "machine-detail";
+    routeState.name = "host-detail";
     const wrapper = mountNav();
 
     expect(
@@ -100,14 +100,14 @@ describe("AppNav", () => {
     expect(wrapper.find(".ms-badge").exists()).toBe(false);
   });
 
-  it("routes search submissions to the gallery with a q query", async () => {
+  it("routes search submissions to the Library with a q query", async () => {
     const wrapper = mountNav();
     const input = wrapper.get('input[type="search"]');
     await input.setValue("misty forest");
     await wrapper.get('form[role="search"]').trigger("submit");
 
     expect(pushMock).toHaveBeenCalledWith({
-      name: "gallery",
+      name: "library",
       query: { q: "misty forest" },
     });
   });
@@ -130,11 +130,11 @@ describe("AppNav", () => {
     expect(wrapper.findComponent(MobileNavSheet).props("open")).toBe(true);
   });
 
-  it("shows an accent dot on the Gallery pill for fresh prints", () => {
+  it("shows an accent dot on the Library pill for fresh prints", () => {
     notifState.fresh = 2;
     routeState.name = "create";
     const wrapper = mountNav();
-    expect(wrapper.find('[data-test="nav-dot-gallery"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="nav-dot-library"]').exists()).toBe(true);
     expect(wrapper.find('[data-test="nav-dot-machines"]').exists()).toBe(false);
   });
 
@@ -146,8 +146,8 @@ describe("AppNav", () => {
     expect(dot.classes()).toContain("seg-dot--stop");
   });
 
-  it("clears fresh prints when the gallery route is entered", () => {
-    routeState.name = "gallery";
+  it("clears fresh prints when the library route is entered", () => {
+    routeState.name = "library";
     mountNav();
     expect(markGalleryVisitedMock).toHaveBeenCalled();
   });
