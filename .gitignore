@@ -21,8 +21,9 @@ docs/superpowers/specs/*
 .playwright-mcp/
 .direnv/
 
-# Stray tool caches at the repo root (nothing here should ever install deps)
+# Frontend workspace dependencies live at the repo root.
 /node_modules/
+/*/node_modules/
 
 # Tauri frontend bundles
 desktop/dist/
@@ -34,9 +35,7 @@ website/.vitepress/cache/
 website/.vitepress/dist/
 
 # Web gallery SPA (crates/mold-server serves it from web/dist/)
-# Note: web/bun.lock (text lockfile) is committed for reproducible builds,
-# matching the pattern used by website/.
-web/node_modules/
+# Root bun.lock and bun.nix are committed for reproducible builds.
 web/dist/
 web/.vite/
 web/*.tsbuildinfo
@@ -57,6 +56,7 @@ web/*.tsbuildinfo
 !apps/mobile/src-tauri/gen/apple/Assets.xcassets/**/*.png
 apps/mobile/src-tauri/gen/schemas/
 result
+result-*
 *.swo
 *.swp
 # mold runpod run default output dir

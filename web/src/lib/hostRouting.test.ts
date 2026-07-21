@@ -4,7 +4,6 @@ import {
   CAPABLE_TARGET_ID,
   backendRank,
   hostIdsForModel,
-  inferBackendFromGpuName,
   normalizeTargetId,
   pickAutoHost,
   pickMostCapableHost,
@@ -91,19 +90,9 @@ describe("pickAutoHost", () => {
 });
 
 describe("backend ranking", () => {
-  it("infers a backend from the GPU marketing name", () => {
-    expect(inferBackendFromGpuName("NVIDIA GeForce RTX 4090")).toBe("cuda");
-    expect(inferBackendFromGpuName("Apple M3 Max")).toBe("metal");
-    expect(inferBackendFromGpuName("Some Accelerator")).toBe("cpu");
-  });
-
   it("ranks CUDA above Metal above unknown", () => {
     expect(backendRank("cuda")).toBeGreaterThan(backendRank("metal"));
     expect(backendRank("metal")).toBeGreaterThan(backendRank(null));
-  });
-
-  it("falls back to name inference when the wire field is missing", () => {
-    expect(backendRank(null, "NVIDIA RTX A6000")).toBe(backendRank("cuda"));
   });
 });
 

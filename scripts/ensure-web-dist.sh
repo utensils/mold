@@ -6,7 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 web_dir="${MOLD_WEB_ROOT:-$repo_root/web}"
 dist_dir="$web_dir/dist"
 stamp_file="$dist_dir/.mold-build-stamp"
-install_stamp="$web_dir/node_modules/.mold-install-stamp"
+workspace_install_stamp="$repo_root/node_modules/.mold-install-stamp"
 
 needs_build=0
 
@@ -22,12 +22,17 @@ else
         find \
             "$web_dir/src" \
             "$web_dir/public" \
-            -type f \
-            -print
+            "$repo_root/studio" \
+            "$repo_root/ui" \
+            \( -name node_modules -o -name dist \) -prune -o \
+            -type f -print
         printf '%s\n' \
             "$web_dir/package.json" \
-            "$web_dir/bun.lock" \
-            "$web_dir/bun.nix" \
+            "$repo_root/package.json" \
+            "$repo_root/bun.lock" \
+            "$repo_root/bun.nix" \
+            "$repo_root/studio/package.json" \
+            "$repo_root/ui/package.json" \
             "$web_dir/index.html" \
             "$web_dir/vite.config.ts" \
             "$web_dir/tsconfig.json" \
@@ -41,14 +46,14 @@ if [ "$needs_build" -eq 0 ]; then
     exit 0
 fi
 
-if [ ! -d "$web_dir/node_modules" ] \
-    || [ ! -f "$install_stamp" ] \
-    || [ "$web_dir/package.json" -nt "$install_stamp" ] \
-    || [ "$web_dir/bun.lock" -nt "$install_stamp" ]; then
+if [ ! -d "$repo_root/node_modules" ] \
+    || [ ! -f "$workspace_install_stamp" ] \
+    || [ "$repo_root/package.json" -nt "$workspace_install_stamp" ] \
+    || [ "$repo_root/bun.lock" -nt "$workspace_install_stamp" ]; then
     (
-        cd "$web_dir"
+        cd "$repo_root"
         bun install --frozen-lockfile
-        touch "$install_stamp"
+        touch "$workspace_install_stamp"
     )
 fi
 

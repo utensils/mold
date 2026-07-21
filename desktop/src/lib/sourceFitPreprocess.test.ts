@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
-import type { Rect, SourceFitPolicy, SourceFitTransform } from "./sourceFit";
+import type { Rect, SourceFitPolicy, SourceFitTransform } from "@studio/lib/sourceFit";
 import {
   applySourceFitPreprocess,
   drawableFitPolicy,

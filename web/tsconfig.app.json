@@ -19,9 +19,10 @@
     "types": ["vite/client"],
     "paths": {
       "@ui/*": ["../ui/*"],
-      "vue": ["./node_modules/vue"],
-      "vitest": ["./node_modules/vitest"],
-      "@vue/test-utils": ["./node_modules/@vue/test-utils"]
+      "@studio/*": ["../studio/*"],
+      "vue": ["../node_modules/vue"],
+      "vitest": ["../node_modules/vitest"],
+      "@vue/test-utils": ["../node_modules/@vue/test-utils"]
     }
   },
   "include": [
@@ -30,6 +31,8 @@
     "src/**/*.tsx",
     "src/**/*.vue",
     "../ui/**/*.ts",
-    "../ui/**/*.vue"
+    "../ui/**/*.vue",
+    "../studio/**/*.ts",
+    "../studio/**/*.vue"
   ]
 }

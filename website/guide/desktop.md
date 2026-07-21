@@ -59,7 +59,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   each prepared print's durable batch identity and sibling position. When the
   expansion model is missing, the same inline area follows its pull on that
   frozen host through connection, queue, byte/file/ETA progress, readiness, or
-  retry; it never redirects away from the composer or hides prepared work.
+  retry; it never redirects away from the composer or hides prepared work. The
+  right settings inspector resizes from its left divider across 280–480 px,
+  persists committed widths, and defaults to 340 px so all five shape ratios
+  stay on one row; double-click the divider to restore that default.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed
   gallery), with NEW badges on fresh prints, a two-pane lightbox, and a History
   drawer holding Runs and Prompts. **Space** opens
@@ -354,7 +357,7 @@ desktop-release    # signed + notarized + stapled app and DMG, then verify
 desktop-check      # CI gate: rustfmt, clippy, vue-tsc, prettier
 desktop-test       # cargo test (CPU) + vitest
 desktop-ui         # frontend-only Vite server (pair with a running `serve`)
-desktop-bun-lock   # regenerate desktop/bun.nix from bun.lock
+frontend-bun-lock  # regenerate the repo-root bun.lock and bun.nix
 ios-dev            # iPhone app with Tauri hot reload (Vite on :1431)
 ios-run            # production-mode run on an iPhone or simulator
 ios-check          # Rust check for the Apple Silicon simulator target

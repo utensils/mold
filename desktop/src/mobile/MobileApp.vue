@@ -65,7 +65,7 @@ import { isGenerationModel } from "../stores/models";
 import type { HostRoute } from "../stores/hosts";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
-import { coerceSourceFitForMaskless } from "../lib/sourceFit";
+import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import {
   isCancelledError,
   jobStatusCode,
