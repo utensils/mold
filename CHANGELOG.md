@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-07-21
+
 ### Fixed
 
 - **Models → Installed no longer lists models you don't have.** The shelf rendered every entry the server's manifest knows about — 97 rows on a machine with two models on disk — as though each were installed. It now shows only downloaded generation models, which also fixes the landing tab: a user with nothing installed was always sent to a fake Installed shelf instead of Discover.
@@ -1072,7 +1074,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.20.2...HEAD
+[0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/utensils/mold/compare/v0.18.0...v0.19.0
