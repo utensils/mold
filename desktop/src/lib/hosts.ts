@@ -260,3 +260,16 @@ export function pickDisplayHost(
   }
   return primaryId;
 }
+
+/**
+ * Stable signature of the ready host set — watch this to refetch merged,
+ * cross-host data (prompt history, model unions) exactly when a host comes
+ * up or drops, and never on unrelated telemetry churn.
+ */
+export function readyHostSignature(hosts: readonly { id: string; status: string }[]): string {
+  return hosts
+    .filter((h) => h.status === "ready")
+    .map((h) => h.id)
+    .sort()
+    .join(",");
+}

@@ -20,7 +20,7 @@ import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
-import { normalizeTargetHost } from "../lib/hosts";
+import { normalizeTargetHost, readyHostSignature } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
@@ -1162,6 +1162,16 @@ watch(
     }
   },
   { immediate: true },
+);
+
+// The boot fetch usually races the remote hosts' reconnect and captures only
+// this device's prompts; refetch the merged history whenever the set of
+// ready hosts changes so ↑/↓ recall spans every connected machine.
+watch(
+  () => readyHostSignature(hosts.all),
+  () => {
+    if (conn.ready) void loadPromptHistory();
+  },
 );
 
 /** Monotonic token: only the latest prefill's async source restore may touch
