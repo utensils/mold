@@ -29,6 +29,14 @@ pub const TUI_GALLERY_COLUMNS: &str = "tui.gallery_columns";
 /// Sentinel marking that the legacy `tui-session.json` + `prompt-history.jsonl`
 /// import has already run. Idempotent on subsequent launches.
 pub const TUI_MIGRATED_FROM_JSON: &str = "tui.migrated_from_json";
+/// JSON array of remembered TUI machine hosts (parity with the web's
+/// `mold.web.hosts.v1` registry shape).
+pub const TUI_HOSTS_V1: &str = "tui.hosts.v1";
+/// Prefix for per-host API keys: one row per host at
+/// `tui.host_key.<host_id>`, deleted when the host is forgotten.
+pub const TUI_HOST_KEY_PREFIX: &str = "tui.host_key.";
+/// Sticky generation target: `"auto"` | `"local"` | `"host:<host_id>"`.
+pub const TUI_GENERATE_TARGET: &str = "tui.generate_target";
 
 // Expand — the `[expand]` section of config.toml after it moves here.
 pub const EXPAND_ENABLED: &str = "expand.enabled";

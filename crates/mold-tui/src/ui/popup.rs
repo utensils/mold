@@ -9,6 +9,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Popup::Help) => render_help(frame, app),
         Some(Popup::ModelSelector { .. }) => render_model_selector(frame, app),
         Some(Popup::HostInput { .. }) => render_host_input(frame, app),
+        Some(Popup::MachineConnect { .. }) => render_machine_connect(frame, app),
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
@@ -110,6 +111,20 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  r                  Remove model"),
         Line::from("  u                  Unload from GPU"),
         Line::from("  /                  Filter by name"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Machines View",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  j/k                Select machine / queue lane"),
+        Line::from("  Enter              Set generation target (again = Auto)"),
+        Line::from("  Tab                Toggle host list / detail focus"),
+        Line::from("  c                  Connect a machine"),
+        Line::from("  d                  Forget host (deletes its API key)"),
+        Line::from("  r                  Refresh telemetry and queue"),
+        Line::from("  x                  Cancel selected queued job"),
         Line::from(""),
         Line::from(Span::styled(
             "Settings View",
@@ -423,6 +438,116 @@ fn render_host_input(frame: &mut Frame, app: &mut App) {
         };
         frame.render_widget(Paragraph::new(actions), actions_area);
     }
+}
+
+/// Render the stepped connect-a-machine flow (Machines workspace).
+fn render_machine_connect(frame: &mut Frame, app: &mut App) {
+    use crate::hosts::ConnectStep;
+
+    let theme = &app.theme;
+    let area = centered_rect(frame.area(), 55, 20);
+    frame.render_widget(Clear, area);
+
+    let Some(Popup::MachineConnect { form }) = &app.popup else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.popup_border())
+        .title(" Connect a machine ")
+        .title_style(theme.title_focused())
+        .style(theme.popup_bg());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 4 {
+        return;
+    }
+
+    let (hint, input_line, actions): (String, Option<Line>, Line) = match form.step {
+        ConnectStep::Url => (
+            "Server address (host, host:port, or URL)".into(),
+            Some(Line::from(Span::styled(
+                format!("{}\u{2588}", form.url),
+                Style::default().fg(theme.text),
+            ))),
+            action_hints(theme, &[("Enter", "Next"), ("Esc", "Cancel")]),
+        ),
+        ConnectStep::ApiKey => (
+            format!("API key for {} (optional — Enter to skip)", form.url),
+            Some(Line::from(Span::styled(
+                format!(
+                    "{}\u{2588}",
+                    "\u{2022}".repeat(form.api_key.chars().count())
+                ),
+                Style::default().fg(theme.text),
+            ))),
+            action_hints(theme, &[("Enter", "Test"), ("Esc", "Back")]),
+        ),
+        ConnectStep::Testing => (
+            format!("Testing {}\u{2026}", form.url),
+            None,
+            action_hints(theme, &[("Esc", "Cancel")]),
+        ),
+        ConnectStep::Failed => (
+            form.error
+                .clone()
+                .unwrap_or_else(|| "Connection failed".into()),
+            None,
+            action_hints(
+                theme,
+                &[("Enter", "Retry"), ("e", "Edit"), ("Esc", "Cancel")],
+            ),
+        ),
+    };
+
+    let hint_style = if form.step == ConnectStep::Failed {
+        theme.error()
+    } else {
+        theme.dim()
+    };
+    frame.render_widget(
+        Paragraph::new(hint)
+            .style(hint_style)
+            .wrap(Wrap { trim: true }),
+        Rect { height: 2, ..inner },
+    );
+
+    if let Some(line) = input_line {
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                y: inner.y + 2,
+                height: 1,
+                ..inner
+            },
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(actions),
+        Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        },
+    );
+}
+
+/// Build the `Key Action  Key Action` hint line used by popup footers.
+fn action_hints<'a>(theme: &crate::ui::theme::Theme, pairs: &[(&'a str, &'a str)]) -> Line<'a> {
+    let mut spans = Vec::new();
+    for (i, (key, label)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(theme.text)));
+        }
+        spans.push(Span::styled(*key, theme.status_key()));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.text),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn render_seed_input(frame: &mut Frame, app: &mut App) {
@@ -858,6 +983,8 @@ mod tests {
                 filter: String::new(),
                 filtering: false,
             },
+            machines: crate::hosts::MachinesState::default(),
+            target: crate::hosts::GenTarget::default(),
             settings: crate::app::SettingsState::default(),
             script: crate::ui::script_composer::ScriptComposerState::default(),
             config: mold_core::Config::default(),

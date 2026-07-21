@@ -129,6 +129,16 @@ pub enum Action {
     ScriptModalCancel,
     /// Script: submit the current chain script for generation.
     ScriptSubmit,
+    /// Machines: open the stepped connect-a-machine flow.
+    MachinesConnect,
+    /// Machines: set the selected row as the sticky generation target.
+    MachinesSetTarget,
+    /// Machines: forget the selected host (confirmed; deletes its API key).
+    MachinesForget,
+    /// Machines: refresh telemetry and queue for all hosts now.
+    MachinesRefresh,
+    /// Machines: cancel the selected queued job (confirmed).
+    MachinesCancelJob,
     /// No action (key not mapped or consumed by text input).
     None,
 }

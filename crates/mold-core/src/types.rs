@@ -984,6 +984,57 @@ pub struct DiskUsage {
     pub free_bytes: u64,
 }
 
+// ── GET /api/queue wire types ────────────────────────────────────────────────
+
+/// One row of `GET /api/queue` — the client-side, Deserialize-capable twin of
+/// mold-server's `job_registry::JobEntry` (which is Serialize-only).
+///
+/// Forward-compat rules:
+/// - `state` is a plain [`String`] rather than an enum — current servers ship
+///   `"queued"` / `"running"`, and a future server growing a new lifecycle
+///   state must not break older clients.
+/// - The additive fields (`gpu`, `target_gpu`, `seed_pinned`, `metadata`)
+///   `#[serde(default)]` so older servers that omit them still parse, and
+///   `skip_serializing_if` so re-serializing matches the server's contract
+///   (queued rows carry no `gpu` key at all — never `"gpu": null`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueueJobEntryWire {
+    pub id: String,
+    pub model: String,
+    /// Job lifecycle state — `"queued"` or `"running"` on current servers.
+    pub state: String,
+    /// Unix-epoch milliseconds when the job was accepted by the server.
+    pub started_at_unix_ms: u64,
+    /// 0-based index in the server's dispatch-priority order at snapshot
+    /// time — 0 is at the head (about to be dispatched, or already running).
+    pub position: usize,
+    /// GPU ordinal currently running this job (absent for queued rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+    /// Preferred GPU ordinal for queued jobs (absent means Auto).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_gpu: Option<usize>,
+    /// Whether the submitted request pinned a seed. Additive — absent on
+    /// older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_pinned: Option<bool>,
+    /// The submitted request's parameters, metadata-shaped so any client can
+    /// inspect a queued job and reuse its settings. Additive — absent on
+    /// older servers; never carries image payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Box<OutputMetadata>>,
+}
+
+/// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
+/// mold-server's `job_registry::QueueListing`. The server wraps the rows in
+/// an object (not a bare array) so the response can grow extra fields without
+/// a breaking change; unknown fields are ignored here for the same reason.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueListingWire {
+    #[serde(default)]
+    pub entries: Vec<QueueJobEntryWire>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct GpuInfo {
     #[schema(example = "NVIDIA GeForce RTX 4090")]
@@ -1439,6 +1490,131 @@ mod tests {
         assert_eq!(back.style, None);
         assert_eq!(back.model_family, "flux");
         assert_eq!(back.variations, 1);
+    }
+
+    // ── GET /api/queue wire types ────────────────────────────────────────
+
+    #[test]
+    fn queue_listing_wire_parses_a_realistic_snapshot() {
+        // Mirrors mold-server's job_registry serialization contract
+        // (`snapshot_serializes_with_snake_case_state_and_omits_gpu_when_queued`
+        // and `snapshot_carries_request_metadata_only_when_registered_with_it`):
+        // running rows carry `gpu`, queued rows omit it, and the additive
+        // `target_gpu` / `seed_pinned` / `metadata` fields ride only when
+        // present. Unknown fields (a future server growing the wrapper or a
+        // row) must be ignored.
+        let body = r#"{
+            "entries": [
+                {
+                    "id": "job-running",
+                    "model": "flux-dev:fp16",
+                    "state": "running",
+                    "started_at_unix_ms": 1711305600000,
+                    "position": 0,
+                    "gpu": 1
+                },
+                {
+                    "id": "job-queued",
+                    "model": "sdxl:q8",
+                    "state": "queued",
+                    "started_at_unix_ms": 1711305601000,
+                    "position": 1,
+                    "target_gpu": 0,
+                    "seed_pinned": true,
+                    "metadata": {
+                        "prompt": "a cat",
+                        "model": "sdxl:q8",
+                        "seed": 42,
+                        "steps": 20,
+                        "guidance": 5.0,
+                        "width": 1024,
+                        "height": 1024,
+                        "version": "0.20.2"
+                    },
+                    "some_future_row_field": true
+                }
+            ],
+            "some_future_total": 2
+        }"#;
+        let listing: QueueListingWire = serde_json::from_str(body).unwrap();
+        assert_eq!(listing.entries.len(), 2);
+
+        let running = &listing.entries[0];
+        assert_eq!(running.id, "job-running");
+        assert_eq!(running.model, "flux-dev:fp16");
+        assert_eq!(running.state, "running");
+        assert_eq!(running.started_at_unix_ms, 1_711_305_600_000);
+        assert_eq!(running.position, 0);
+        assert_eq!(running.gpu, Some(1));
+        assert_eq!(running.target_gpu, None);
+
+        let queued = &listing.entries[1];
+        assert_eq!(queued.state, "queued");
+        assert_eq!(queued.position, 1);
+        assert_eq!(queued.gpu, None);
+        assert_eq!(queued.target_gpu, Some(0));
+        assert_eq!(queued.seed_pinned, Some(true));
+        let meta = queued.metadata.as_deref().expect("metadata rides");
+        assert_eq!(meta.prompt, "a cat");
+        assert_eq!(meta.seed, 42);
+        assert_eq!(meta.width, 1024);
+    }
+
+    #[test]
+    fn queue_job_entry_wire_accepts_unknown_future_states() {
+        // `state` is deliberately a plain String, not an enum — a server
+        // that grows a new lifecycle state must not break older clients.
+        let json = r#"{"id":"j1","model":"flux-dev:q8","state":"some-future-state","started_at_unix_ms":1,"position":0}"#;
+        let entry: QueueJobEntryWire = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.state, "some-future-state");
+        // And it round-trips: Serialize is derived too.
+        let back: QueueJobEntryWire =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn queue_job_entry_wire_defaults_fields_absent_on_older_servers() {
+        // The endpoint originally shipped only the five required fields;
+        // `gpu` / `target_gpu` / `seed_pinned` / `metadata` are additive and
+        // must default when an older server omits them.
+        let json = r#"{"id":"j1","model":"flux-dev:q8","state":"queued","started_at_unix_ms":1711305600000,"position":3}"#;
+        let entry: QueueJobEntryWire = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.id, "j1");
+        assert_eq!(entry.position, 3);
+        assert_eq!(entry.gpu, None);
+        assert_eq!(entry.target_gpu, None);
+        assert_eq!(entry.seed_pinned, None);
+        assert!(entry.metadata.is_none());
+    }
+
+    #[test]
+    fn queue_job_entry_wire_serializes_like_the_server_omitting_absent_options() {
+        // Same wire contract as the server: absent options stay off the wire
+        // entirely (clients must not see `"gpu": null` and infer GPU 0).
+        let entry = QueueJobEntryWire {
+            id: "j1".to_string(),
+            model: "flux-dev:q8".to_string(),
+            state: "queued".to_string(),
+            started_at_unix_ms: 5,
+            position: 0,
+            gpu: None,
+            target_gpu: None,
+            seed_pinned: None,
+            metadata: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""state":"queued""#), "got: {json}");
+        assert!(!json.contains("gpu"), "leaked a gpu field: {json}");
+        assert!(!json.contains("seed_pinned"), "got: {json}");
+        assert!(!json.contains("metadata"), "got: {json}");
+    }
+
+    #[test]
+    fn queue_listing_wire_defaults_entries_when_absent() {
+        // Tolerate a hypothetical minimal wrapper — `entries` defaults empty.
+        let listing: QueueListingWire = serde_json::from_str("{}").unwrap();
+        assert!(listing.entries.is_empty());
     }
 
     #[test]

@@ -102,7 +102,7 @@ pub fn host_chip(app: &App) -> (ChipState, String) {
 }
 
 /// Backend label for the local engine, from compile-time features.
-fn local_backend() -> &'static str {
+pub(crate) fn local_backend() -> &'static str {
     if cfg!(feature = "metal") {
         "Metal"
     } else if cfg!(feature = "cuda") {
@@ -114,8 +114,9 @@ fn local_backend() -> &'static str {
 
 /// Backend label for a remote server — prefers the additive
 /// `gpu_info.backend` field, falling back to GPU-name inference for older
-/// servers (the same rule the desktop app uses).
-fn remote_backend(status: &mold_core::ServerStatus) -> Option<&'static str> {
+/// servers (the same rule the desktop app uses). Shared with the
+/// Machines workspace's host detail lines.
+pub(crate) fn remote_backend(status: &mold_core::ServerStatus) -> Option<&'static str> {
     let backend = status.gpu_info.as_ref().and_then(|g| g.backend);
     if let Some(b) = backend {
         return Some(match b {

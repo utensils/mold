@@ -296,7 +296,9 @@ See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM r
 - **Shell completions** — bash, zsh, fish, elvish, powershell
 - **REST API** — `mold serve` with SSE streaming, auth, rate limiting
 - **Discord bot** — slash commands with role permissions and quotas
-- **Interactive TUI** — generate, gallery, models, settings
+- **Interactive TUI** — the five Mold Studio workspaces in the terminal:
+  Create, Library, Models, multi-host Machines (connect remote servers,
+  telemetry, queue lanes, generation target), and Settings
 - **Native desktop** — local and multi-host generation across the Create,
   Library, Models, Machines, and Settings workspaces (chains, history, the job
   queue, and RunPod included)

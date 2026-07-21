@@ -144,7 +144,7 @@ scripts/tui-uat.sh quit
 | Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt, Parameters, Preview, Info, Progress |
 | Library | 2 | `┌ Library` | Print thumbnails in grid, detail view on Enter |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
-| Machines | 4 | `┌ Queue` (interim) | Read-only queue snapshot until the Machines workspace lands |
+| Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
 | Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme picker + config values |
 | Chain | c (from Create) | `┌ Stages` | Chain composer — a Create sub-mode, Esc returns to compose |
 
@@ -159,6 +159,8 @@ scripts/tui-uat.sh quit
 **Library (grid):** hjkl/arrows = navigate, Enter = detail, e = edit, d = delete, u = upscale, o = open
 
 **Models:** j/k = navigate, Enter = select, p = pull, r = remove, u = unload, / = filter
+
+**Machines:** j/k = select row, Enter = set generation target (again = back to Auto), Tab = host list ↔ detail lanes, c = connect a machine (stepped URL → API key → test popup), d = forget host (confirm; deletes its saved API key), r = refresh, x = cancel selected queued job (detail focus, confirm). Persisted keys for `db-get`: `tui.hosts.v1` (JSON registry), `tui.generate_target` (`auto`|`local`|`host:<id>`), `tui.host_key.<id>`.
 
 **Settings:** j/k = navigate, +/- = adjust values
 
@@ -320,8 +322,8 @@ scripts/tui-uat.sh theme-set gruvbox
 scripts/tui-uat.sh db-assert tui.theme gruvbox
 scripts/tui-uat.sh view create
 scripts/tui-uat.sh assert "flux2-klein"
-scripts/tui-uat.sh view gallery && scripts/tui-uat.sh assert "Gallery"
-scripts/tui-uat.sh view queue && scripts/tui-uat.sh assert "Queue"
+scripts/tui-uat.sh view library && scripts/tui-uat.sh assert "Library"
+scripts/tui-uat.sh view machines && scripts/tui-uat.sh assert "Machines"
 scripts/tui-uat.sh view models && scripts/tui-uat.sh assert "FAMILY"
 scripts/tui-uat.sh quit
 ```
