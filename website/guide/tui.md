@@ -10,8 +10,8 @@ back to halfblock rendering in other terminals.
 
 ::: warning Beta
 The TUI is under active development. Core generation, script-mode video
-authoring, model management, gallery, settings, and image preview work well.
-Some features, such as theme customization, are still planned.
+authoring, model management, gallery, settings, theming, and image preview
+work well.
 :::
 
 ![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
@@ -385,5 +385,27 @@ The Nix flake, pre-built releases, and Docker images include the TUI by default.
 
 ## Theme
 
-The TUI uses a Catppuccin Mocha color palette. Theme customization via
-`config.toml` is planned for a future release.
+The TUI ships eleven theme presets, selectable live from **Settings →
+Appearance** (Left/Right cycles with immediate apply; the choice persists in
+the metadata DB under `tui.theme`).
+
+The default is **Studio Dark** — the same Mold Studio look as the desktop,
+web, and iPhone apps — with its dual-accent role model: the warm _safelight_
+accent marks focus, selection, and primary actions, while the cool _halide_
+accent marks info and live state.
+
+| Preset          | Slug              | Notes                                     |
+| --------------- | ----------------- | ----------------------------------------- |
+| Studio Dark     | `studio-dark`     | Default. Mold family, dual accent         |
+| Studio Light    | `studio-light`    | Mold family, dual accent                  |
+| Safelight Dark  | `safelight-dark`  | Warm darkroom family, dual accent         |
+| Safelight Light | `safelight-light` | Warm darkroom family, dual accent         |
+| Mocha           | `mocha`           | Catppuccin Mocha — the pre-Studio default |
+| Latte           | `latte`           | Catppuccin Latte (light)                  |
+| Ristretto       | `ristretto`       | Monokai Ristretto                         |
+| Gruvbox         | `gruvbox`         | Gruvbox Dark (hard)                       |
+| Tokyo           | `tokyo`           | Tokyo Night (storm)                       |
+| Nord            | `nord`            | Nord                                      |
+| Dracula         | `dracula`         | Dracula                                   |
+
+`studio` and `safelight` are accepted as slug aliases for the dark variants.

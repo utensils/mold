@@ -6702,7 +6702,7 @@ mod tests {
         app.generate.progress.mark_generation_start();
 
         let before = app.settings.theme_preset;
-        assert_eq!(before, ThemePreset::Mocha);
+        assert_eq!(before, ThemePreset::StudioDark);
 
         // Right arrow on Appearance cycles the preset. The new palette
         // must apply to `app.theme` immediately so the next render
@@ -6781,15 +6781,15 @@ mod tests {
         use crate::ui::theme::ThemePreset;
         crate::test_env::with_isolated_env(|_home| {
             let mut app = make_settings_test_app();
-            // Starts on the default (Mocha).
-            assert_eq!(app.settings.theme_preset, ThemePreset::Mocha);
-            // Forward cycles to Latte and also rebuilds `app.theme`.
+            // Starts on the default (Studio Dark).
+            assert_eq!(app.settings.theme_preset, ThemePreset::StudioDark);
+            // Forward cycles to Studio Light and also rebuilds `app.theme`.
             app.settings_cycle_theme(1);
-            assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
-            // `app.theme` should now match the Latte palette.
-            assert_eq!(app.theme.bg, ThemePreset::Latte.build().bg);
-            // Backward from Mocha (index 0) wraps around to Dracula (last).
-            app.apply_theme_preset(ThemePreset::Mocha);
+            assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
+            // `app.theme` should now match the Studio Light palette.
+            assert_eq!(app.theme.bg, ThemePreset::StudioLight.build().bg);
+            // Backward from Studio Dark (index 0) wraps to Dracula (last).
+            app.apply_theme_preset(ThemePreset::StudioDark);
             app.settings_cycle_theme(-1);
             assert_eq!(app.settings.theme_preset, ThemePreset::Dracula);
         });
@@ -7193,7 +7193,7 @@ mod tests {
         let before = app.settings.theme_preset;
         app.settings_increment(1);
         assert_ne!(app.settings.theme_preset, before);
-        assert_eq!(app.settings.theme_preset, ThemePreset::Latte);
+        assert_eq!(app.settings.theme_preset, ThemePreset::StudioLight);
     }
 
     #[tokio::test]
@@ -8988,15 +8988,7 @@ mod tests {
     #[serial_test::serial(mold_env)]
     async fn theme_save_then_load_round_trip_preserves_preset() {
         crate::test_env::with_isolated_env(|_home| {
-            for preset in [
-                crate::ui::theme::ThemePreset::Mocha,
-                crate::ui::theme::ThemePreset::Latte,
-                crate::ui::theme::ThemePreset::Ristretto,
-                crate::ui::theme::ThemePreset::Gruvbox,
-                crate::ui::theme::ThemePreset::Tokyo,
-                crate::ui::theme::ThemePreset::Nord,
-                crate::ui::theme::ThemePreset::Dracula,
-            ] {
+            for preset in crate::ui::theme::ThemePreset::ALL {
                 let mut app = make_settings_test_app();
                 app.apply_theme_preset(preset);
 
@@ -9100,9 +9092,9 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn theme_default_is_mocha_when_session_is_missing() {
-        // The default theme must always be Mocha — Latte is the light
-        // counterpart and should only appear when explicitly selected.
+    async fn theme_default_is_studio_dark_when_session_is_missing() {
+        // The default theme must always be Studio Dark — the other presets
+        // should only appear when explicitly selected.
         crate::test_env::with_isolated_env(|_home| {
             let loaded = crate::session::TuiSession::load();
             let resolved = loaded
@@ -9112,8 +9104,8 @@ mod tests {
                 .unwrap_or_default();
             assert_eq!(
                 resolved,
-                crate::ui::theme::ThemePreset::Mocha,
-                "missing session must resolve to Mocha, never Latte"
+                crate::ui::theme::ThemePreset::StudioDark,
+                "missing session must resolve to Studio Dark"
             );
             assert!(
                 loaded.theme.is_none(),
@@ -9124,20 +9116,20 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn theme_default_is_mocha_when_slug_is_unknown_or_empty() {
+    async fn theme_default_is_studio_dark_when_slug_is_unknown_or_empty() {
         // An old session file or a hand-edited config could carry a
-        // garbage slug — it must fall back to Mocha, not Latte.
+        // garbage slug — it must fall back to the Studio Dark default.
         assert_eq!(
             crate::ui::theme::ThemePreset::from_slug(""),
-            crate::ui::theme::ThemePreset::Mocha
+            crate::ui::theme::ThemePreset::StudioDark
         );
         assert_eq!(
             crate::ui::theme::ThemePreset::from_slug("not-a-real-theme"),
-            crate::ui::theme::ThemePreset::Mocha
+            crate::ui::theme::ThemePreset::StudioDark
         );
         assert_eq!(
             crate::ui::theme::ThemePreset::default(),
-            crate::ui::theme::ThemePreset::Mocha
+            crate::ui::theme::ThemePreset::StudioDark
         );
     }
 
@@ -9606,8 +9598,9 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let mut app = make_settings_test_app();
-        // Tiny area: APPEARANCE_HEIGHT=4 plus Min(5) → inner of Configuration
-        // collapses to zero. The render path early-returns without painting.
+        // Tiny area: APPEARANCE_HEIGHT (5) plus Min(5) → inner of
+        // Configuration collapses to zero. The render path early-returns
+        // without painting.
         let backend = TestBackend::new(40, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal

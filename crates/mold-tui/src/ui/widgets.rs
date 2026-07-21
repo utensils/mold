@@ -84,13 +84,19 @@ pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+/// Number of theme swatches per Appearance-panel row.
+///
+/// Exposed `pub(crate)` so `ui::settings` can assert its panel height fits
+/// the resulting row count (layout constants keep contract tests).
+pub(crate) const SWATCHES_PER_ROW: usize = 4;
+
 /// Draw the theme swatch grid used by the Appearance panel.
 ///
 /// Each swatch is rendered as `●<space>Label` plus a trailing `✓` on the
-/// current selection. The row renders on a single `Line` with no wrap —
-/// terminals narrower than the combined label width clip the overflow. The
-/// Appearance panel is always drawn wide enough for seven swatches on any
-/// realistic TUI width, so wrapping isn't needed.
+/// current selection. With eleven presets a single line would clip on
+/// normal terminal widths, so swatches wrap into rows of
+/// [`SWATCHES_PER_ROW`]. Interim UI — the Settings redesign replaces this
+/// with theme cards.
 pub fn render_theme_swatches(
     frame: &mut Frame,
     theme: &Theme,
@@ -102,31 +108,35 @@ pub fn render_theme_swatches(
         return;
     }
 
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, preset) in ThemePreset::ALL.iter().enumerate() {
-        let is_active = *preset == current;
-        let dot_style = Style::default().fg(preset.swatch());
-        let label_style = if is_active {
-            if focused {
-                theme.param_selected().add_modifier(Modifier::BOLD)
+    let mut lines: Vec<Line> = Vec::new();
+    for chunk in ThemePreset::ALL.chunks(SWATCHES_PER_ROW) {
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, preset) in chunk.iter().enumerate() {
+            let is_active = *preset == current;
+            let dot_style = Style::default().fg(preset.swatch());
+            let label_style = if is_active {
+                if focused {
+                    theme.param_selected().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+                }
             } else {
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
-            }
-        } else {
-            theme.dim()
-        };
+                theme.dim()
+            };
 
-        if i > 0 {
-            spans.push(Span::raw("   "));
+            if i > 0 {
+                spans.push(Span::raw("   "));
+            }
+            spans.push(Span::styled("● ", dot_style));
+            spans.push(Span::styled(preset.label(), label_style));
+            if is_active {
+                spans.push(Span::styled(" ✓", theme.success()));
+            }
         }
-        spans.push(Span::styled("● ", dot_style));
-        spans.push(Span::styled(preset.label(), label_style));
-        if is_active {
-            spans.push(Span::styled(" ✓", theme.success()));
-        }
+        lines.push(Line::from(spans));
     }
 
-    let para = Paragraph::new(Line::from(spans));
+    let para = Paragraph::new(lines);
     frame.render_widget(para, area);
 }
 

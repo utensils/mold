@@ -49,7 +49,7 @@ scripts/tui-uat.sh db-dump                           # Pretty-print settings + m
 
 # Settings helpers
 scripts/tui-uat.sh settings-focus <appearance|configuration>
-scripts/tui-uat.sh theme-set <slug>  # mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
+scripts/tui-uat.sh theme-set <slug>  # studio-dark|studio-light|safelight-dark|safelight-light|mocha|latte|ristretto|gruvbox|tokyo|nord|dracula
 
 # Model + per-model prefs helpers
 scripts/tui-uat.sh model <name>                      # Full picker dance — Parameters → Model → type filter → Enter. Pass the exact `model:tag` to avoid matching the wrong variant.
