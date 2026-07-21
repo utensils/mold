@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import DrawerPanel from "./DrawerPanel.vue";
+import drawerSource from "./DrawerPanel.vue?raw";
 
 function make(
   props: Record<string, unknown> = {},
@@ -24,6 +25,10 @@ describe("DrawerPanel", () => {
     expect(dialog.attributes("aria-modal")).toBe("true");
     expect(dialog.attributes("aria-label")).toBe("Model details");
     expect(dialog.attributes("tabindex")).toBe("-1");
+  });
+
+  it("stacks above workbench popovers while open", () => {
+    expect(drawerSource).toMatch(/\.ms-drawer\s*\{[^}]*z-index:\s*40;/s);
   });
 
   it("renders the title and the default slot body", () => {
