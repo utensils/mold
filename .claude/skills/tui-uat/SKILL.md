@@ -58,6 +58,8 @@ scripts/tui-uat.sh db-model-assert <model> <col> <v> # Pass/fail on a single `mo
 
 **`--fresh`** creates a tmp MOLD_HOME and injects it into the TUI's env — zero chance of clobbering the user's real `~/.mold/` state. The isolated directory persists across `quit` so you can relaunch with `--env MOLD_HOME=$(mktemp -d)/…` or reuse the path from `status` to validate persistence.
 
+**Motion**: launch with `--env MOLD_TUI_NO_MOTION=1` when a scenario asserts on exact screen content immediately after a workspace switch — tachyonfx transitions recolor cells for ~160/320 ms and can race a capture.
+
 **`db-*` commands** refuse to write to the user's real DB without `--force`. Use `--fresh` for any test that mutates state.
 
 ## How to Run a UAT Session
@@ -141,7 +143,7 @@ scripts/tui-uat.sh quit
 
 | View | Key | Unique landmark | Content |
 |------|-----|----------------|---------|
-| Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt, Parameters, Preview, Info, Progress |
+| Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt; Parameters (6 essentials + `▸ Advanced` accordion + `↺ Reset to model defaults`); Preview; Timeline |
 | Library | 2 | `┌ Library` | All-machines print grid (local + connected server + every Machines host, deduped by filename) + Details side panel on wide terminals; header hint `{n} prints [· host \| · all machines] [· k hosts offline]` |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
 | Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
@@ -152,9 +154,11 @@ scripts/tui-uat.sh quit
 
 **Global:** Ctrl+C = quit, Alt+1-5 = switch workspace
 
-**Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = randomize seed
+**Create (prompt focused):** Enter = generate, Tab = next focus, Escape = nav mode, Ctrl+G = generate, Ctrl+M = model selector, Ctrl+R = cycle seed mode, Alt+N = open Advanced → Negative → focus inline editor
 
 **Create (nav mode):** 1-5 = switch workspace, c = chain composer, A = toggle Advanced, q = quit, Enter = focus prompt
+
+**Create (Parameters focus):** j/k = flat row traversal (essentials → `▸ Advanced` header → section rows → `↺ Reset`), +/- or ←/→ = adjust a field / expand-collapse a section, Enter = activate (Model picker, Size `WxH` popup, Seed value popup, section expand, Negative inline editor focus), A = toggle the accordion. Essentials order: Model (first row — `model <name>` relies on this), Size, Detail, Prompt strength, Seed, Batch. Accordion landmarks: `▸ Advanced` collapsed / `▾ Advanced` open with section rows (`Scheduler & sampling`, `Negative prompt`, `Source image`, `LoRA`, `Upscale after generate`, `Output format`, `Video` on video models). Persisted keys for `db-get`: `tui.advanced_open` (`true`/`false`), `tui.advanced_section` (section slug or empty).
 
 **Library (grid):** hjkl/arrows = navigate, Enter = detail, e/r = recall into Create, d = delete (multi-host prints delete on every owning host; confirm names the count), u = upscale (routes to the owning host), o = open, / = filter by prompt/model/filename (typed chars edit, Enter applies, Esc clears; Esc with a filter applied clears it before leaving the view)
 
@@ -170,7 +174,7 @@ scripts/tui-uat.sh quit
 
 2. **First key after Nav mode**: The first character key after entering Create nav mode may be consumed by a crossterm timing issue. The `view` command retries automatically.
 
-3. **Session persistence** (since #264): TUI state lives in the SQLite metadata DB at `~/.mold/mold.db` — `settings` table for global TUI prefs (theme, last_model, last_prompt, negative_collapsed), `model_prefs` table for per-model generation parameters (one row per resolved model tag), `prompt_history` table for the prev/next prompt stack. `~/.mold/tui-session.json` and `~/.mold/prompt-history.jsonl` are imported once on first launch and renamed to `.migrated`; they're no longer written. For a clean slate, isolate the DB with `MOLD_DB_PATH=$(mktemp -d)/mold.db scripts/tui-uat.sh launch …` (legacy: deleting `~/.mold/mold.db` also works but wipes the gallery DB too). `MOLD_DB_DISABLE=1` boots the TUI with in-memory-only defaults — useful for verifying the fail-safe fallback.
+3. **Session persistence** (since #264): TUI state lives in the SQLite metadata DB at `~/.mold/mold.db` — `settings` table for global TUI prefs (theme, last_model, last_prompt, advanced_open/advanced_section), `model_prefs` table for per-model generation parameters (one row per resolved model tag), `prompt_history` table for the prev/next prompt stack. `~/.mold/tui-session.json` and `~/.mold/prompt-history.jsonl` are imported once on first launch and renamed to `.migrated`; they're no longer written. For a clean slate, isolate the DB with `MOLD_DB_PATH=$(mktemp -d)/mold.db scripts/tui-uat.sh launch …` (legacy: deleting `~/.mold/mold.db` also works but wipes the gallery DB too). `MOLD_DB_DISABLE=1` boots the TUI with in-memory-only defaults — useful for verifying the fail-safe fallback.
 
 4. **`MOLD_BIN`**: Override the binary path: `MOLD_BIN=./target/release/mold scripts/tui-uat.sh launch`
 

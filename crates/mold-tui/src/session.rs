@@ -53,11 +53,14 @@ pub struct TuiSession {
     #[serde(default)]
     pub control_scale: Option<f64>,
     /// Theme preset slug (e.g. "mocha", "latte"). Missing = Mocha.
+    ///
+    /// Note: pre-redesign sessions also carried a `negative_collapsed`
+    /// flag (the old collapsible Negative panel). The accordion state at
+    /// `tui.advanced_open`/`tui.advanced_section` replaced it; legacy JSON
+    /// with the field still parses (serde ignores unknown fields) and the
+    /// old `tui.negative_collapsed` DB row is simply no longer read.
     #[serde(default)]
     pub theme: Option<String>,
-    /// Whether the Negative prompt panel was collapsed at exit. Missing = false.
-    #[serde(default)]
-    pub negative_collapsed: Option<bool>,
 }
 
 fn legacy_session_path() -> Option<PathBuf> {
@@ -133,7 +136,6 @@ impl TuiSession {
             strength: Some(params.strength),
             control_scale: Some(params.control_scale),
             theme: None,
-            negative_collapsed: None,
         }
     }
 
@@ -141,12 +143,6 @@ impl TuiSession {
     /// to `from_params` without adding a positional argument.
     pub fn with_theme(mut self, preset: super::ui::theme::ThemePreset) -> Self {
         self.theme = Some(preset.slug().to_string());
-        self
-    }
-
-    /// Record whether the negative-prompt panel was collapsed at save time.
-    pub fn with_negative_collapsed(mut self, collapsed: bool) -> Self {
-        self.negative_collapsed = Some(collapsed);
         self
     }
 
@@ -269,14 +265,12 @@ fn load_from_db(db: &MetadataDb) -> TuiSession {
         .unwrap_or(None)
         .unwrap_or_default();
     let theme = s.get_str(keys::TUI_THEME).unwrap_or(None);
-    let negative_collapsed = s.get_bool(keys::TUI_NEGATIVE_COLLAPSED).unwrap_or(None);
 
     let mut session = TuiSession {
         last_prompt,
         last_negative,
         last_model: last_model.clone(),
         theme,
-        negative_collapsed,
         ..Default::default()
     };
 
@@ -327,9 +321,6 @@ fn save_to_db(db: &MetadataDb, session: &TuiSession) {
     }
     if let Some(ref theme) = session.theme {
         let _ = s.set_str(keys::TUI_THEME, theme);
-    }
-    if let Some(collapsed) = session.negative_collapsed {
-        let _ = s.set_bool(keys::TUI_NEGATIVE_COLLAPSED, collapsed);
     }
 
     // Per-model row. We overwrite the row keyed on `last_model` with all
@@ -438,14 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn with_theme_and_with_negative_collapsed_are_chainable() {
+    fn with_theme_is_chainable() {
         use crate::ui::theme::ThemePreset;
         let params = crate::app::GenerateParams::from_config(&mold_core::Config::default());
-        let session = TuiSession::from_params("p", "n", &params)
-            .with_theme(ThemePreset::Dracula)
-            .with_negative_collapsed(true);
+        let session = TuiSession::from_params("p", "n", &params).with_theme(ThemePreset::Dracula);
         assert_eq!(session.theme.as_deref(), Some("dracula"));
-        assert_eq!(session.negative_collapsed, Some(true));
     }
 
     #[test]
@@ -471,7 +459,6 @@ mod tests {
                 strength: Some(0.8),
                 control_scale: Some(1.0),
                 theme: Some("dracula".into()),
-                negative_collapsed: Some(true),
             };
             seed.save();
             let loaded = TuiSession::load();
@@ -480,7 +467,6 @@ mod tests {
             assert_eq!(loaded.width, Some(1024));
             assert_eq!(loaded.steps, Some(20));
             assert_eq!(loaded.theme.as_deref(), Some("dracula"));
-            assert_eq!(loaded.negative_collapsed, Some(true));
         });
     }
 
@@ -622,6 +608,7 @@ mod tests {
             lora_scale: 0.7,
             expand: true,
             offload: true,
+            upscale_model: None,
             source_image_path: None,
             strength: 0.6,
             mask_image_path: None,
@@ -678,7 +665,6 @@ mod tests {
             strength: Some(0.3),
             control_scale: Some(1.5),
             theme: None,
-            negative_collapsed: None,
         };
 
         let mut params = GenerateParams::from_config(&mold_core::Config::default());

@@ -10,6 +10,7 @@ mod gallery_scan;
 mod history;
 mod hosts;
 mod model_info;
+mod motion;
 mod palette;
 mod prefs;
 mod session;

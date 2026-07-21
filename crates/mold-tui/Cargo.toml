@@ -23,6 +23,7 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 crossterm = "0.28"
 ratatui-image = "4"
 tui-textarea = "0.7"
+tachyonfx = "0.21"
 image = "0.25"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
