@@ -666,6 +666,11 @@ pub struct LiveSearchQuery {
     pub include_nsfw: Option<bool>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
+    /// `downloads` (default) / `recent` / `rating` — see
+    /// [`mold_catalog::live::CatalogSort::WIRE_VALUES`]. Anything else is
+    /// a 422: silently ignoring an unknown sort is exactly the bug that
+    /// shipped when this endpoint had no sort parameter at all.
+    pub sort: Option<String>,
 }
 
 /// `GET /api/catalog/search` — live proxy to upstream catalog APIs with
@@ -702,6 +707,22 @@ pub async fn live_search_catalog(
         }
         None => None,
     };
+    let sort = match q.sort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => match mold_catalog::live::CatalogSort::from_wire(s) {
+            Some(sort) => sort,
+            None => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "unknown sort: {s} (allowed values: {})",
+                        mold_catalog::live::CatalogSort::WIRE_VALUES.join(", ")
+                    ),
+                )
+                    .into_response()
+            }
+        },
+        None => mold_catalog::live::CatalogSort::default(),
+    };
 
     let server_civitai = env_catalog_token("CIVITAI_TOKEN");
     let server_hf = env_catalog_token("HF_TOKEN");
@@ -713,6 +734,7 @@ pub async fn live_search_catalog(
         page: q.page.unwrap_or(1).max(1),
         page_size: q.page_size.unwrap_or(20).clamp(1, 100),
         include_nsfw: q.include_nsfw.unwrap_or(true),
+        sort,
         civitai_token: server_civitai.clone().or_else(|| forwarded.civitai.clone()),
         hf_token: server_hf.clone().or_else(|| forwarded.hf.clone()),
     };

@@ -2672,6 +2672,10 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect::<Vec<_>>(),
+            sort: mold_catalog::live::CatalogSort::WIRE_VALUES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
         },
         events: mold_core::EventsCapabilities { available: true },
         queue: mold_core::QueueCapabilities {

@@ -34,6 +34,56 @@ use crate::normalizer::{
     HfTreeEntry, HF_RAW,
 };
 
+/// Result ordering requested from the upstream catalogs. Each variant
+/// maps to a native upstream sort so ordering happens server-side at the
+/// source — Civitai: `Most Downloaded` / `Newest` / `Highest Rated`;
+/// Hugging Face: `downloads` / `lastModified` / `likes` (all descending
+/// via `direction=-1`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CatalogSort {
+    #[default]
+    Downloads,
+    Recent,
+    Rating,
+}
+
+impl CatalogSort {
+    /// Wire vocabulary accepted by `GET /api/catalog/search`'s `sort=`
+    /// parameter, in the order clients should present it. Also what
+    /// `GET /api/capabilities` advertises for feature detection.
+    pub const WIRE_VALUES: [&'static str; 3] = ["downloads", "recent", "rating"];
+
+    /// Parse the caller-facing wire value. `None` for anything outside
+    /// [`Self::WIRE_VALUES`] — callers decide whether that's a 422.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "downloads" => Some(Self::Downloads),
+            "recent" => Some(Self::Recent),
+            "rating" => Some(Self::Rating),
+            _ => None,
+        }
+    }
+
+    /// Civitai `/api/v1/models` `sort=` value.
+    pub fn civitai_value(self) -> &'static str {
+        match self {
+            Self::Downloads => "Most Downloaded",
+            Self::Recent => "Newest",
+            Self::Rating => "Highest Rated",
+        }
+    }
+
+    /// Hugging Face `/api/models` `sort=` value (paired with
+    /// `direction=-1` for descending order).
+    pub fn hf_value(self) -> &'static str {
+        match self {
+            Self::Downloads => "downloads",
+            Self::Recent => "lastModified",
+            Self::Rating => "likes",
+        }
+    }
+}
+
 /// Request shape for [`search`]. Hash-equal opts hit the same cache key,
 /// so two callers asking the same question see identical results until
 /// the TTL expires.
@@ -58,6 +108,10 @@ pub struct LiveSearchOpts {
     /// When false, NSFW rows are filtered out post-fetch. Civitai's
     /// `nsfw=false` query param is not 100% reliable on its own.
     pub include_nsfw: bool,
+    /// Result ordering, forwarded to each upstream's native sort
+    /// parameter. Part of the cache key — two sorts of the same query
+    /// must never share a cached result vector.
+    pub sort: CatalogSort,
     /// Optional tokens forwarded as `Authorization: Bearer …` to the
     /// upstream when present.
     pub civitai_token: Option<String>,
@@ -74,6 +128,7 @@ impl Default for LiveSearchOpts {
             page: 1,
             page_size: 20,
             include_nsfw: true,
+            sort: CatalogSort::default(),
             civitai_token: None,
             hf_token: None,
         }
@@ -469,7 +524,7 @@ async fn civitai_search(
         if trimmed_q.is_none() {
             q.append_pair("page", &opts.page.max(1).to_string());
         }
-        q.append_pair("sort", "Most Downloaded");
+        q.append_pair("sort", opts.sort.civitai_value());
         if let Some(query) = trimmed_q.as_deref() {
             q.append_pair("query", query);
         }
@@ -603,7 +658,7 @@ async fn hf_search(
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("limit", &opts.page_size.clamp(1, 100).to_string());
-        q.append_pair("sort", "downloads");
+        q.append_pair("sort", opts.sort.hf_value());
         q.append_pair("direction", "-1");
         if let Some(query) = trimmed_q {
             q.append_pair("search", query);
@@ -984,6 +1039,42 @@ pub async fn fetch_hf_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_sort_maps_to_each_upstream_vocabulary() {
+        let cases = [
+            (CatalogSort::Downloads, "Most Downloaded", "downloads"),
+            (CatalogSort::Recent, "Newest", "lastModified"),
+            (CatalogSort::Rating, "Highest Rated", "likes"),
+        ];
+        for (sort, civitai, hf) in cases {
+            assert_eq!(sort.civitai_value(), civitai);
+            assert_eq!(sort.hf_value(), hf);
+        }
+    }
+
+    #[test]
+    fn catalog_sort_wire_round_trip() {
+        assert_eq!(
+            CatalogSort::from_wire("downloads"),
+            Some(CatalogSort::Downloads)
+        );
+        assert_eq!(CatalogSort::from_wire("recent"), Some(CatalogSort::Recent));
+        assert_eq!(CatalogSort::from_wire("rating"), Some(CatalogSort::Rating));
+        // "name" has no upstream mapping and is deliberately NOT accepted;
+        // the server turns it into a 422 rather than silently ignoring it.
+        assert_eq!(CatalogSort::from_wire("name"), None);
+        assert_eq!(CatalogSort::from_wire("Most Downloaded"), None);
+        for value in CatalogSort::WIRE_VALUES {
+            assert!(CatalogSort::from_wire(value).is_some(), "{value}");
+        }
+    }
+
+    #[test]
+    fn catalog_sort_defaults_to_downloads() {
+        assert_eq!(CatalogSort::default(), CatalogSort::Downloads);
+        assert_eq!(LiveSearchOpts::default().sort, CatalogSort::Downloads);
+    }
 
     const VERSION_DETAIL_BODY: &str = r#"{
         "id": 8001,

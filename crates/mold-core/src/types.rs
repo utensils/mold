@@ -3237,6 +3237,12 @@ pub struct CatalogCapabilities {
     pub available: bool,
     /// List of model family names available in the catalog.
     pub families: Vec<String>,
+    /// Sort orders `GET /api/catalog/search` accepts via `?sort=`
+    /// (`"downloads"`, `"recent"`, `"rating"`). Empty on older servers
+    /// that ignore the parameter — clients feature-detect against this
+    /// before offering sort controls.
+    #[serde(default)]
+    pub sort: Vec<String>,
 }
 
 /// Whether the server exposes the `GET /api/events` broadcast stream.
@@ -3713,6 +3719,18 @@ mod server_event_tests {
         )
         .unwrap();
         assert!(!caps.events.available);
+    }
+
+    #[test]
+    fn capabilities_catalog_without_sort_field_deserializes_as_empty() {
+        // Older servers predate server-side catalog sorting and omit
+        // `catalog.sort` — clients must see an empty vocabulary, not a
+        // deserialization failure.
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":true,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(caps.catalog.sort.is_empty());
     }
 
     #[test]

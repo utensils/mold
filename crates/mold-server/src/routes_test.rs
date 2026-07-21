@@ -1243,6 +1243,27 @@ mod tests {
         assert_eq!(body["queue"]["can_reorder"], true);
     }
 
+    /// Clients feature-detect server-side catalog sorting against this
+    /// advertisement — older servers omit the field entirely.
+    #[tokio::test]
+    async fn capabilities_reports_catalog_sort_vocabulary() {
+        let app = app_empty();
+        let resp = app
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(
+            body["catalog"]["sort"],
+            serde_json::json!(["downloads", "recent", "rating"])
+        );
+    }
+
     /// Poll the registry until the submitted job shows up (the generate
     /// handler registers before submit, so this resolves almost instantly).
     async fn wait_for_registered_job(state: &AppState) -> String {
