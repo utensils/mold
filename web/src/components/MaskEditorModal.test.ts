@@ -122,9 +122,13 @@ describe("MaskEditorModal", () => {
     expect(wrapper.exists()).toBe(true);
     await nextTick();
 
-    await bodyGet<HTMLButtonElement>("[data-test='mask-mode-erase']").trigger(
-      "click",
+    // The tool picker is the @ui SegmentedControl: two role=radio segments,
+    // Brush then Erase.
+    const segments = document.body.querySelectorAll<HTMLButtonElement>(
+      "[data-test='mask-mode'] [role=radio]",
     );
+    expect(segments).toHaveLength(2);
+    await new DOMWrapper(segments[1] as HTMLButtonElement).trigger("click");
     await bodyGet<HTMLInputElement>("[data-test='mask-brush-size']").setValue(
       "48",
     );
@@ -141,5 +145,75 @@ describe("MaskEditorModal", () => {
       0,
       Math.PI * 2,
     );
+  });
+
+  describe("overlay contract", () => {
+    function dialog(): HTMLElement {
+      const el = document.body.querySelector<HTMLElement>("[role=dialog]");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    }
+
+    it("is a labelled modal dialog", () => {
+      mount(MaskEditorModal, {
+        props: { open: true, sourceImage },
+        attachTo: document.body,
+      });
+      const el = dialog();
+      expect(el.getAttribute("aria-modal")).toBe("true");
+      expect(el.getAttribute("aria-label")).toBe("Mask editor");
+    });
+
+    it("closes on Escape and on backdrop click, but not inside the panel", async () => {
+      const wrapper = mount(MaskEditorModal, {
+        props: { open: true, sourceImage },
+        attachTo: document.body,
+      });
+
+      const panel = document.body.querySelector(
+        ".ms-modal__panel",
+      ) as HTMLElement;
+      panel.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await nextTick();
+      expect(wrapper.emitted("close")).toBeUndefined();
+
+      dialog().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await nextTick();
+      expect(wrapper.emitted("close")).toHaveLength(1);
+
+      dialog().dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await nextTick();
+      expect(wrapper.emitted("close")).toHaveLength(2);
+    });
+
+    it("restores focus to the opener when it closes", async () => {
+      const opener = document.createElement("button");
+      document.body.appendChild(opener);
+      opener.focus();
+
+      const wrapper = mount(MaskEditorModal, {
+        props: { open: false, sourceImage },
+        attachTo: document.body,
+      });
+      await wrapper.setProps({ open: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(dialog().contains(document.activeElement)).toBe(true);
+
+      await wrapper.setProps({ open: false });
+      expect(document.activeElement).toBe(opener);
+    });
+
+    it("renders no emoji", async () => {
+      const wrapper = mount(MaskEditorModal, {
+        props: { open: true, sourceImage },
+        attachTo: document.body,
+      });
+      await nextTick();
+      expect(wrapper.html()).not.toMatch(
+        /[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/u,
+      );
+    });
   });
 });

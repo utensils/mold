@@ -1,5 +1,18 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+/*
+ * Inpaint mask editor (spec §06 Create). Paint/erase a white mask over the
+ * source print and hand the flattened PNG back to the composer.
+ *
+ * Mold Studio migration: was a hand-rolled `fixed inset-0` panel with an emoji
+ * close glyph, Tailwind utility colors and no Escape handling. Now @ui
+ * ModalPanel + SegmentedControl + Icon, with `useOverlayFocus` supplying the
+ * Tab trap and opener restoration the kit leaves to the host.
+ */
+import { computed, nextTick, ref, watch } from "vue";
+import ModalPanel from "@ui/components/ModalPanel.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import Icon from "@ui/components/Icon.vue";
+import { useOverlayFocus } from "../composables/useOverlayFocus";
 import type { SourceImageState } from "../types";
 
 const props = defineProps<{
@@ -14,6 +27,14 @@ const emit = defineEmits<{
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const host = ref<HTMLElement | null>(null);
+const visible = computed(() => props.open && props.sourceImage !== null);
+const { onKeydown } = useOverlayFocus(visible, host);
+
+const modeOptions = [
+  { value: "brush" as const, label: "Brush" },
+  { value: "erase" as const, label: "Erase" },
+];
 const mode = ref<"brush" | "erase">("brush");
 const brushSize = ref(32);
 const drawing = ref(false);
@@ -202,88 +223,76 @@ function applyMask() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="open && sourceImage"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-bath/75 p-4 backdrop-blur-sm"
-      @click.self="emit('close')"
+  <!-- Viewport-fixed host: ModalPanel is `position: absolute; inset: 0` and
+       Create is a long scrolling column, so mounting inline would draw the
+       panel at the top of the document. Same host pattern as
+       ModelDetailDrawer. -->
+  <div
+    v-if="visible && sourceImage"
+    ref="host"
+    class="me-host"
+    data-test="mask-editor-host"
+    @keydown="onKeydown"
+  >
+    <ModalPanel
+      :open="true"
+      :width="900"
+      label="Mask editor"
+      @close="emit('close')"
     >
-      <div
-        class="bg-bench border border-edge flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl p-4"
-      >
-        <div class="flex items-center justify-between gap-3">
-          <h2 class="truncate text-lg font-semibold text-rebate">
-            Mask editor
+      <div class="me">
+        <header class="me__head">
+          <h2 class="me__title">
+            <Icon name="mask" :size="17" />
+            <span>Mask editor</span>
           </h2>
           <button
             type="button"
-            class="text-ink-3 hover:text-rebate"
+            class="me__close"
+            aria-label="Close"
+            data-test="mask-close"
             @click="emit('close')"
           >
-            ✕
+            <Icon name="close" :size="15" />
           </button>
-        </div>
+        </header>
 
-        <div
-          class="mt-4 flex flex-wrap items-center gap-2 border-y border-edge py-3"
-        >
-          <button
-            type="button"
-            class="rounded-lg px-3 py-1 text-sm"
-            :class="
-              mode === 'brush'
-                ? 'bg-safelight text-white'
-                : 'bg-bench/60 text-ink-2'
-            "
-            data-test="mask-mode-brush"
-            @click="mode = 'brush'"
-          >
-            Brush
-          </button>
-          <button
-            type="button"
-            class="rounded-lg px-3 py-1 text-sm"
-            :class="
-              mode === 'erase'
-                ? 'bg-safelight text-white'
-                : 'bg-bench/60 text-ink-2'
-            "
-            data-test="mask-mode-erase"
-            @click="mode = 'erase'"
-          >
-            Erase
-          </button>
-          <label class="ml-2 flex items-center gap-2 text-sm text-ink-2">
-            Size
+        <div class="me__tools">
+          <div class="me__mode" data-test="mask-mode">
+            <SegmentedControl
+              v-model="mode"
+              :options="modeOptions"
+              label="Mask tool"
+            />
+          </div>
+          <label class="me__size">
+            <span>Size</span>
             <input
               v-model.number="brushSize"
               type="range"
               min="4"
               max="128"
               step="1"
-              class="w-32"
               data-test="mask-brush-size"
             />
+            <span class="me__size-val">{{ brushSize }}</span>
           </label>
+          <span class="me__spacer" />
           <button
             type="button"
-            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2"
+            class="me__tool"
             data-test="mask-clear"
             @click="clearMask"
           >
             Clear
           </button>
-          <button
-            type="button"
-            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2"
-            @click="invertMask"
-          >
+          <button type="button" class="me__tool" @click="invertMask">
             Invert
           </button>
           <button
             type="button"
-            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2 disabled:opacity-40"
-            :class="{ 'opacity-40': undoStack.length === 0 }"
+            class="me__tool"
+            :disabled="undoStack.length === 0"
             data-test="mask-undo"
             @click="undo"
           >
@@ -291,8 +300,8 @@ function applyMask() {
           </button>
           <button
             type="button"
-            class="rounded-lg bg-bench/60 px-3 py-1 text-sm text-ink-2 disabled:opacity-40"
-            :class="{ 'opacity-40': redoStack.length === 0 }"
+            class="me__tool"
+            :disabled="redoStack.length === 0"
             data-test="mask-redo"
             @click="redo"
           >
@@ -300,18 +309,18 @@ function applyMask() {
           </button>
         </div>
 
-        <div class="mt-4 flex min-h-0 justify-center overflow-auto">
-          <div class="relative max-h-[65vh] max-w-full overflow-hidden">
+        <div class="me__stage">
+          <div class="me__canvas-wrap">
             <img
               :src="sourceUrl(sourceImage)"
               :alt="sourceImage.filename"
-              class="max-h-[65vh] max-w-full select-none object-contain"
+              class="me__source"
               draggable="false"
               @load="onSourceLoaded"
             />
             <canvas
               ref="canvasRef"
-              class="absolute inset-0 h-full w-full cursor-crosshair touch-none opacity-70"
+              class="me__canvas"
               data-test="mask-canvas"
               @pointerdown="startDrawing"
               @pointermove="keepDrawing"
@@ -320,25 +329,206 @@ function applyMask() {
             ></canvas>
           </div>
         </div>
-
-        <div class="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            class="rounded-lg bg-bench/60 px-4 py-2 text-sm text-ink-2"
-            @click="emit('close')"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="rounded-lg bg-safelight px-4 py-2 text-sm text-white"
-            data-test="mask-apply"
-            @click="applyMask"
-          >
-            Apply
-          </button>
-        </div>
       </div>
-    </div>
-  </Teleport>
+      <template #footer>
+        <span class="me__spacer" />
+        <button type="button" class="me__cancel" @click="emit('close')">
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="me__apply"
+          data-test="mask-apply"
+          @click="applyMask"
+        >
+          Apply
+        </button>
+      </template>
+    </ModalPanel>
+  </div>
 </template>
+
+<style scoped>
+.me-host {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.me {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--rebate);
+}
+
+.me__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.me__title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  min-width: 0;
+  font-family: var(--f-display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.me__title svg {
+  color: var(--ink-3);
+  flex: none;
+}
+
+.me__title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.me__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition:
+    color var(--dur-quick) var(--ease),
+    background var(--dur-quick) var(--ease);
+}
+
+.me__close:hover {
+  color: var(--rebate);
+  background: var(--surface);
+}
+
+.me__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--edge);
+  border-bottom: 1px solid var(--edge);
+}
+
+.me__mode {
+  width: 168px;
+}
+
+.me__size {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+.me__size input {
+  width: 120px;
+  accent-color: var(--safelight);
+}
+
+.me__size-val {
+  min-width: 22px;
+  color: var(--ink-2);
+}
+
+.me__spacer {
+  flex: 1;
+}
+
+.me__tool {
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 7px 13px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+
+.me__tool:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--rebate);
+}
+
+.me__tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.me__stage {
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+}
+
+.me__canvas-wrap {
+  position: relative;
+  max-width: 100%;
+  max-height: 58vh;
+  overflow: hidden;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-control-lg);
+  background: var(--bath);
+}
+
+.me__source {
+  display: block;
+  max-width: 100%;
+  max-height: 58vh;
+  object-fit: contain;
+  user-select: none;
+}
+
+.me__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+  opacity: 0.7;
+}
+
+.me__cancel {
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control-lg);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.me__apply {
+  border: 0;
+  border-radius: var(--radius-control-lg);
+  background: var(--safelight);
+  color: var(--on-accent);
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+</style>

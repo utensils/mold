@@ -2,10 +2,12 @@
 /*
  * Downloads panel body (spec §06, prototype web downloads popover). Three
  * sections — Downloading (name · % · progress bar · rate/eta), Queued, and a
- * divider then Recently installed (✓ · name · size). Cancel on active/queued,
+ * divider then Recently installed (status glyph · name · size). Cancel on
+ * active/queued,
  * retry on a failed history row. Presentational: the parent owns the download
  * state and wraps this in either an anchored panel or a bottom sheet.
  */
+import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import type { DownloadJobWire } from "../../types";
 
@@ -86,7 +88,7 @@ const isEmpty = () =>
             :aria-label="`Cancel ${job.model}`"
             @click="emit('cancel', job.id)"
           >
-            ✕
+            <Icon name="close" :size="12" />
           </button>
         </div>
         <ProgressBar :value="pct(job)" tone="accent" :height="6" />
@@ -116,7 +118,7 @@ const isEmpty = () =>
           :aria-label="`Cancel queued ${job.model}`"
           @click="emit('cancel', job.id)"
         >
-          ✕
+          <Icon name="close" :size="12" />
         </button>
       </div>
     </template>
@@ -139,7 +141,8 @@ const isEmpty = () =>
               job.status === 'failed' || job.status === 'cancelled',
           }"
         >
-          {{ job.status === "completed" ? "✓" : "!" }}
+          <Icon v-if="job.status === 'completed'" name="check" :size="12" />
+          <Icon v-else name="close" :size="12" />
         </span>
         <span class="dl-row__name">{{ job.model }}</span>
         <span v-if="job.status === 'completed'" class="dl-row__meta">
@@ -274,8 +277,10 @@ const isEmpty = () =>
 
 .dl-glyph {
   flex: 0 0 auto;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
+  color: var(--ink-3);
 }
 
 .dl-glyph--ok {
@@ -289,6 +294,8 @@ const isEmpty = () =>
 /* ── Actions ────────────────────────────────────────────────────────── */
 .dl-cancel {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
   border: 0;
   background: transparent;
   color: var(--ink-3);

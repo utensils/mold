@@ -1,6 +1,19 @@
 <script setup lang="ts">
+/*
+ * Prompt-expansion overlay (spec §06 Create). Previews LLM rewrites of the
+ * composer prompt and applies the one the user picks.
+ *
+ * Mold Studio migration: was a hand-rolled `fixed inset-0` panel with an emoji
+ * title, Tailwind utility colors and no Escape handling. Now @ui ModalPanel +
+ * SegmentedControl + Icon, with `useOverlayFocus` supplying the Tab trap and
+ * opener restoration the kit leaves to the host.
+ */
 import { computed, ref } from "vue";
+import ModalPanel from "@ui/components/ModalPanel.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import Icon from "@ui/components/Icon.vue";
 import { expandPrompt } from "../api";
+import { useOverlayFocus } from "../composables/useOverlayFocus";
 import type { ExpandFormState, ModelInfoExtended } from "../types";
 
 const props = defineProps<{
@@ -30,11 +43,23 @@ const previewing = ref(false);
 const previewError = ref<string | null>(null);
 const previewResults = ref<string[]>([]);
 
+const host = ref<HTMLElement | null>(null);
+const isOpen = computed(() => props.open);
+const { onKeydown } = useOverlayFocus(isOpen, host);
+
 const effectiveFamily = computed(
   () => props.expand.familyOverride ?? props.currentModel?.family ?? "flux",
 );
 
-const variationsOptions = [1, 3, 5] as const;
+type Variations = ExpandFormState["variations"];
+
+// Typed to the literal union so SegmentedControl's generic resolves to
+// `1 | 3 | 5` rather than widening to `number` at the update handler.
+const variationsOptions: { value: Variations; label: string }[] = [
+  { value: 1, label: "1" },
+  { value: 3, label: "3" },
+  { value: 5, label: "5" },
+];
 
 function patch<K extends keyof ExpandFormState>(key: K, v: ExpandFormState[K]) {
   emit("update:expand", { ...props.expand, [key]: v });
@@ -66,116 +91,309 @@ function pick(text: string) {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="open"
-      class="fixed inset-0 z-40 flex items-center justify-center bg-bath/70 backdrop-blur-sm"
-      @click.self="emit('close')"
+  <!-- Viewport-fixed host: ModalPanel is `position: absolute; inset: 0` and
+       Create is a long scrolling column, so mounting inline would draw the
+       panel at the top of the document. Same host pattern as
+       ModelDetailDrawer. -->
+  <div
+    v-if="open"
+    ref="host"
+    class="xm-host"
+    data-test="expand-modal-host"
+    @keydown="onKeydown"
+  >
+    <ModalPanel
+      :open="open"
+      :width="560"
+      label="Prompt expansion"
+      @close="emit('close')"
     >
-      <div
-        class="bg-bench border border-edge max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl p-6 sm:p-8"
-      >
-        <div class="flex items-center justify-between">
-          <h2 class="text-lg font-semibold text-rebate">✨ Prompt expansion</h2>
+      <div class="xm">
+        <header class="xm__head">
+          <h2 class="xm__title">
+            <Icon name="sparkle" :size="17" />
+            <span>Prompt expansion</span>
+          </h2>
           <button
             type="button"
-            class="text-ink-3 hover:text-rebate"
+            class="xm__close"
+            aria-label="Close"
+            data-test="expand-close"
             @click="emit('close')"
           >
-            ✕
+            <Icon name="close" :size="15" />
           </button>
-        </div>
+        </header>
 
-        <label class="mt-4 flex items-center gap-2 text-sm text-ink-2">
-          <input
-            type="checkbox"
-            :checked="expand.enabled"
-            @change="
-              patch('enabled', ($event.target as HTMLInputElement).checked)
-            "
-          />
-          Enable expansion before submit
-        </label>
-
-        <div class="mt-3">
-          <label class="text-xs uppercase text-ink-3">Variations</label>
-          <div class="mt-1 flex gap-1">
-            <button
-              v-for="n in variationsOptions"
-              :key="n"
-              type="button"
-              class="rounded-full px-3 py-1 text-sm"
-              :class="
-                expand.variations === n
-                  ? 'bg-safelight text-white'
-                  : 'bg-bench/60 text-ink-2'
+        <div class="xm__body">
+          <label class="xm__check">
+            <input
+              type="checkbox"
+              :checked="expand.enabled"
+              @change="
+                patch('enabled', ($event.target as HTMLInputElement).checked)
               "
-              @click="patch('variations', n)"
-            >
-              {{ n }}
-            </button>
+            />
+            <span>Enable expansion before submit</span>
+          </label>
+
+          <div class="xm__field">
+            <span class="xm__label">Variations</span>
+            <SegmentedControl
+              :model-value="expand.variations"
+              :options="variationsOptions"
+              label="Variations"
+              @update:model-value="(v: Variations) => patch('variations', v)"
+            />
           </div>
-        </div>
 
-        <details class="mt-3 text-sm text-ink-2">
-          <summary class="cursor-pointer text-ink-3">
-            Advanced: model family override
-          </summary>
-          <input
-            type="text"
-            :value="expand.familyOverride ?? ''"
-            placeholder="auto"
-            class="mt-1 w-full rounded-lg bg-bench/60 px-2 py-1 text-rebate"
-            @change="
-              patch(
-                'familyOverride',
-                ($event.target as HTMLInputElement).value || null,
-              )
-            "
-          />
-        </details>
+          <details class="xm__adv">
+            <summary>Advanced: model family override</summary>
+            <input
+              type="text"
+              :value="expand.familyOverride ?? ''"
+              placeholder="auto"
+              class="xm__input"
+              @change="
+                patch(
+                  'familyOverride',
+                  ($event.target as HTMLInputElement).value || null,
+                )
+              "
+            />
+          </details>
 
-        <div class="mt-4 flex items-center gap-2">
-          <button
-            type="button"
-            class="rounded-lg bg-safelight px-3 py-1.5 text-sm text-white disabled:opacity-50"
-            :disabled="previewing || !prompt.trim() || queueBusy"
-            :title="
-              queueBusy
-                ? 'Another generation is in the queue — wait for it to finish before previewing.'
-                : undefined
-            "
-            data-test="expand-preview"
-            @click="preview"
-          >
-            {{ previewing ? "Expanding…" : "Preview" }}
-          </button>
-          <span v-if="queueBusy" class="text-xs text-ink-3">
-            Queue busy — preview disabled.
-          </span>
-        </div>
-
-        <div v-if="previewError" class="mt-2 text-sm text-rose-300">
-          {{ previewError }}
-        </div>
-
-        <ul v-if="previewResults.length" class="mt-4 flex flex-col gap-2">
-          <li v-for="(text, i) in previewResults" :key="i">
+          <div class="xm__actions">
             <button
               type="button"
-              class="w-full rounded-xl bg-bench/60 p-3 text-left text-sm text-rebate hover:bg-surface/80"
-              @click="pick(text)"
+              class="xm__go"
+              :disabled="previewing || !prompt.trim() || queueBusy"
+              :title="
+                queueBusy
+                  ? 'Another generation is in the queue — wait for it to finish before previewing.'
+                  : undefined
+              "
+              data-test="expand-preview"
+              @click="preview"
             >
-              {{ text }}
+              {{ previewing ? "Expanding…" : "Preview" }}
             </button>
-          </li>
-        </ul>
+            <span v-if="queueBusy" class="xm__note">
+              queue busy — preview disabled
+            </span>
+          </div>
 
-        <p class="mt-4 text-xs text-ink-3">
-          Backend model, temperature, and thinking mode are controlled by the
-          server config. Ask your operator to adjust them.
-        </p>
+          <p v-if="previewError" class="xm__error">{{ previewError }}</p>
+
+          <ul v-if="previewResults.length" class="xm__results">
+            <li v-for="(text, i) in previewResults" :key="i">
+              <button type="button" class="xm__result" @click="pick(text)">
+                {{ text }}
+              </button>
+            </li>
+          </ul>
+
+          <p class="xm__foot">
+            Backend model, temperature, and thinking mode are controlled by the
+            server config. Ask your operator to adjust them.
+          </p>
+        </div>
       </div>
-    </div>
-  </Teleport>
+    </ModalPanel>
+  </div>
 </template>
+
+<style scoped>
+.xm-host {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.xm {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--rebate);
+}
+
+.xm__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.xm__title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-family: var(--f-display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.xm__title svg {
+  color: var(--safelight);
+}
+
+.xm__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition:
+    color var(--dur-quick) var(--ease),
+    background var(--dur-quick) var(--ease);
+}
+
+.xm__close:hover {
+  color: var(--rebate);
+  background: var(--surface);
+}
+
+.xm__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: min(62vh, 520px);
+  overflow-y: auto;
+}
+
+.xm__check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.xm__check input {
+  accent-color: var(--safelight);
+}
+
+.xm__field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.xm__label {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.xm__adv {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.xm__adv summary {
+  cursor: pointer;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.xm__input {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  background: var(--bath);
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  color: var(--rebate);
+  font-family: var(--f-mono);
+  font-size: 13px;
+  outline: none;
+}
+
+.xm__input:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
+.xm__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.xm__go {
+  border: 0;
+  background: var(--safelight);
+  color: var(--on-accent);
+  padding: 9px 18px;
+  border-radius: var(--radius-control-lg);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.xm__go:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.xm__note,
+.xm__error {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+.xm__error {
+  color: var(--stop);
+}
+
+.xm__results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xm__result {
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-control-lg);
+  background: var(--bath);
+  color: var(--rebate);
+  font-family: var(--f-body);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    border-color var(--dur-quick) var(--ease);
+}
+
+.xm__result:hover {
+  background: var(--surface);
+  border-color: var(--safelight);
+}
+
+.xm__foot {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+</style>
