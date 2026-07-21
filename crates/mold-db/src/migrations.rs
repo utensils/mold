@@ -468,11 +468,20 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
         );
     }
 
-    let mut current = current_version(conn)?;
-    for m in MIGRATIONS {
-        if m.version <= current {
-            continue;
-        }
+    // Concurrency: multiple processes open mold.db simultaneously in the
+    // default setup (`mold tui` beside its auto-spawned `mold serve`).
+    // Each migration therefore runs under an IMMEDIATE transaction — the
+    // write lock is taken up front — and re-reads `user_version` inside
+    // that lock. A connection that lost the race sees the bumped version
+    // and skips, instead of re-applying DDL and corrupting the schema
+    // ("duplicate column" on every subsequent open).
+    let mut current;
+    loop {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        current = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let Some(m) = MIGRATIONS.iter().find(|m| m.version > current) else {
+            break;
+        };
         if m.version != current + 1 {
             bail!(
                 "migration gap: DB at v{}, next migration is v{}, expected v{}",
@@ -481,7 +490,6 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
                 current + 1
             );
         }
-        let tx = conn.transaction()?;
         match &m.kind {
             MigrationKind::Sql(sql) => tx.execute_batch(sql)?,
             MigrationKind::Rust(run) => run(&tx)?,
@@ -491,7 +499,6 @@ pub fn apply_pending(conn: &mut Connection) -> Result<i64> {
         tx.execute_batch(&format!("PRAGMA user_version = {};", m.version))?;
         tx.commit()?;
         tracing::info!(version = m.version, "applied metadata DB migration");
-        current = m.version;
     }
     Ok(current)
 }
@@ -506,6 +513,39 @@ pub(crate) fn current_version(conn: &Connection) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_opens_of_a_fresh_db_all_migrate_safely() {
+        // Regression: `mold tui` + its auto-spawned `mold serve` open the
+        // same mold.db at boot. Racing connections both read the old
+        // user_version and both applied the same ALTER TABLE — the loser
+        // hit "duplicate column" and the file failed every later open.
+        let tmp = std::env::temp_dir().join(format!(
+            "mold-db-migrate-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("mold.db");
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || crate::MetadataDb::open(&path).map(|_| ()))
+            })
+            .collect();
+        for h in handles {
+            h.join()
+                .expect("thread panicked")
+                .expect("every racing open must migrate or observe cleanly");
+        }
+        // And the file must still open fine afterwards.
+        crate::MetadataDb::open(&path).expect("post-race open must succeed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn migration_list_invariants_hold() {
