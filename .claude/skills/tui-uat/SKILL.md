@@ -142,7 +142,7 @@ scripts/tui-uat.sh quit
 | View | Key | Unique landmark | Content |
 |------|-----|----------------|---------|
 | Create | 1 | `┌ Parameters` or `┌ Prompt` | Prompt, Parameters, Preview, Info, Progress |
-| Library | 2 | `┌ Library` | Print thumbnails in grid, detail view on Enter |
+| Library | 2 | `┌ Library` | All-machines print grid (local + connected server + every Machines host, deduped by filename) + Details side panel on wide terminals; header hint `{n} prints [· host \| · all machines] [· k hosts offline]` |
 | Models | 3 | `┌ Installed` or `┌ Available` | Model list with name, family, size, status |
 | Machines | 4 | `┌ Machines` | Host rows (local first) + telemetry/queue detail pane; connect flow on `c` |
 | Settings | 5 | `┌ Appearance` or `┌ Configuration` | Theme picker + config values |
@@ -156,7 +156,7 @@ scripts/tui-uat.sh quit
 
 **Create (nav mode):** 1-5 = switch workspace, c = chain composer, A = toggle Advanced, q = quit, Enter = focus prompt
 
-**Library (grid):** hjkl/arrows = navigate, Enter = detail, e = edit, d = delete, u = upscale, o = open
+**Library (grid):** hjkl/arrows = navigate, Enter = detail, e/r = recall into Create, d = delete (multi-host prints delete on every owning host; confirm names the count), u = upscale (routes to the owning host), o = open, / = filter by prompt/model/filename (typed chars edit, Enter applies, Esc clears; Esc with a filter applied clears it before leaving the view)
 
 **Models:** j/k = navigate, Enter = select, p = pull, r = remove, u = unload, / = filter
 

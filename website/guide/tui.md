@@ -77,7 +77,7 @@ iPhone apps, shown as tabs at the top of the screen:
 | Workspace | Key | Purpose                                               |
 | --------- | --- | ----------------------------------------------------- |
 | Create    | 1   | Write prompts, tune parameters, generate images/video |
-| Library   | 2   | Browse generated prints with preview                  |
+| Library   | 2   | Browse prints from this machine and every known host  |
 | Models    | 3   | View installed and available models                   |
 | Machines  | 4   | Connect remote Mold hosts, telemetry, queue, target   |
 | Settings  | 5   | Theme picker plus file-backed and DB-backed settings  |
@@ -170,23 +170,45 @@ The prompt editor supports standard emacs/shell keybindings:
 
 ## Library View
 
-Browse generated images stored in `~/.mold/output/` (or `MOLD_OUTPUT_DIR`).
-Images are displayed as a thumbnail grid with cached 256x256 thumbnails for fast
-loading. Only images with embedded `mold:parameters` metadata are shown (PNG and
-JPEG).
+The Library merges prints from **every machine you know about** into one
+grid — the local output directory (`~/.mold/output/` or `MOLD_OUTPUT_DIR`),
+the connected server, and every host registered in the Machines workspace
+(fetched with each host's saved API key). Cross-host copies of one print
+are collapsed by filename — the same identity rule the desktop's unified
+gallery uses — with the local copy preferred when one exists. The header
+is honest about sources: `28 prints` for local-only, `28 prints · hal9000`
+when everything came from one remote machine, `28 prints · all machines`
+once prints span more than one, and a dim `· 1 host offline` suffix when a
+host didn't answer the scan. Offline hosts never break the merge — their
+prints just drop out until the next rescan (entering the Library rescans
+automatically when the last scan is stale or a host was added/removed).
+
+On wide terminals a **Details side panel** shows the selected print: its
+thumbnail, the wrapped prompt (plus a dim `neg:` line), and Model / Seed /
+Size / **Machine** rows — Machine names the host the print lives on ("This
+Mac", a host name, or `2 machines` when copies exist on several). The
+panel hides automatically on narrow terminals.
 
 ### Grid Mode
 
-| Key        | Action                           |
-| ---------- | -------------------------------- |
-| h/j/k/l    | Navigate the grid                |
-| Arrow keys | Navigate the grid                |
-| Enter      | Open detail view                 |
-| e          | Load into Create (edit)          |
-| u          | Upscale with AI model            |
-| d          | Delete image (with confirmation) |
-| o          | Open in system viewer            |
-| Esc        | Back to Create                   |
+| Key        | Action                                          |
+| ---------- | ----------------------------------------------- |
+| h/j/k/l    | Navigate the grid                               |
+| Arrow keys | Navigate the grid                               |
+| Enter      | Open detail view                                |
+| e or r     | Recall into Create (edit)                       |
+| u          | Upscale with AI model (runs on the owning host) |
+| d          | Delete print (with confirmation)                |
+| o          | Open in system viewer                           |
+| /          | Filter by prompt, model, or filename            |
+| Esc        | Clear the filter, then back to Create           |
+
+Typing after **/** filters live (case-insensitive, matching prompt, model
+name, and filename); **Enter** keeps the filter applied, **Esc** clears
+it. Deleting a print that exists on several machines removes it from
+**all** of them — the confirmation says so before anything happens.
+Recall, upscale, and delete work on remote prints exactly like local
+ones; requests route to the machine that owns the print.
 
 ### Detail Mode
 
