@@ -8,11 +8,9 @@
 import { nextTick, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 
-export interface PaletteItem {
-  id: string;
-  section: string;
-  label: string;
-}
+import type { PaletteItem } from "./types";
+
+export type { PaletteItem };
 
 const props = withDefaults(
   defineProps<{

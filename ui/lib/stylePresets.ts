@@ -150,6 +150,35 @@ function splitFragments(value: string | undefined): string[] {
 }
 
 /**
+ * Merge a preset's curated negative into the user's negative prompt: their
+ * fragments first, the preset's appended, exact duplicates dropped. Returns
+ * the user's negative untouched when the model takes no negative prompt, when
+ * the id is empty/unknown, or when the preset has no curated negative.
+ *
+ * Exported on its own because bake-and-clear surfaces (a quick styled
+ * expansion writes the look into the prompt and drops the chip) still owe the
+ * user that negative — by then `composeStyle` no longer sees a preset.
+ */
+export function mergeStyleNegative(
+  negative: string | undefined,
+  presetId: string,
+  opts: { supportsNegativePrompt: boolean },
+): string {
+  const preset = stylePresetById(presetId);
+  if (!opts.supportsNegativePrompt || !preset?.negative) return negative ?? "";
+
+  const fragments = splitFragments(negative);
+  const seen = new Set(fragments);
+  for (const fragment of splitFragments(preset.negative)) {
+    if (!seen.has(fragment)) {
+      seen.add(fragment);
+      fragments.push(fragment);
+    }
+  }
+  return fragments.join(", ");
+}
+
+/**
  * Bake a preset into the outgoing request. Pure — callers pass a draft so the
  * live textarea is never mutated. An empty prompt, or an empty/unknown preset
  * id, returns the inputs unchanged. The preset negative is merged after the
@@ -169,20 +198,8 @@ export function composeStyle(
     ? preset.positive.replaceAll(PROMPT_PLACEHOLDER, base)
     : `${base}, ${preset.positive}`;
 
-  let negative = opts.negative;
-  if (opts.supportsNegativePrompt && preset.negative) {
-    const fragments = splitFragments(opts.negative);
-    const seen = new Set(fragments);
-    for (const fragment of splitFragments(preset.negative)) {
-      if (!seen.has(fragment)) {
-        seen.add(fragment);
-        fragments.push(fragment);
-      }
-    }
-    if (fragments.length > 0) negative = fragments.join(", ");
-  }
-
-  return { prompt: styled, negative };
+  const merged = mergeStyleNegative(opts.negative, presetId, opts);
+  return { prompt: styled, negative: merged === "" ? opts.negative : merged };
 }
 
 /**

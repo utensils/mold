@@ -52,33 +52,55 @@ const civitaiDraft = ref("");
 const editingHf = ref(false);
 const editingCivitai = ref(false);
 
+// Storage can refuse a write (quota, private mode, blocked by policy). The
+// store reports that honestly, so we only empty the field and claim a save
+// when the token really landed — otherwise the draft stays put and the user
+// is told what happened instead of quietly losing the token.
+const BLOCKED_SAVE = "This browser blocked storage — the token wasn't saved.";
+const BLOCKED_CLEAR =
+  "This browser blocked storage — the token wasn't removed.";
+
 function saveHf() {
   const value = hfDraft.value.trim();
   if (!value) return;
-  setHfToken(value);
+  if (!setHfToken(value)) {
+    toast("error", BLOCKED_SAVE);
+    return;
+  }
   saved.value = getAccountTokens();
   hfDraft.value = "";
   editingHf.value = false;
   toast("success", "Hugging Face token saved in this browser");
 }
 function removeHf() {
-  clearHfToken();
+  const cleared = clearHfToken();
   saved.value = getAccountTokens();
+  if (!cleared) {
+    toast("error", BLOCKED_CLEAR);
+    return;
+  }
   hfDraft.value = "";
   editingHf.value = false;
 }
 function saveCivitai() {
   const value = civitaiDraft.value.trim();
   if (!value) return;
-  setCivitaiToken(value);
+  if (!setCivitaiToken(value)) {
+    toast("error", BLOCKED_SAVE);
+    return;
+  }
   saved.value = getAccountTokens();
   civitaiDraft.value = "";
   editingCivitai.value = false;
   toast("success", "Civitai token saved in this browser");
 }
 function removeCivitai() {
-  clearCivitaiToken();
+  const cleared = clearCivitaiToken();
   saved.value = getAccountTokens();
+  if (!cleared) {
+    toast("error", BLOCKED_CLEAR);
+    return;
+  }
   civitaiDraft.value = "";
   editingCivitai.value = false;
 }

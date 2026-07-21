@@ -263,6 +263,7 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     await fieldControl("Prompt").setValue("a lighthouse");
+    await fieldControl("Negative prompt").setValue("text");
     await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
     await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
     await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
@@ -277,13 +278,45 @@ describe("MobileApp generation queue", () => {
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
       "a lighthouse · prepared 1",
     );
-    // Bake-and-clear: the rewrite absorbed the look, so the chip resets.
+    // Bake-and-clear: the rewrite absorbed the look, so the chip resets — and
+    // the curated negative moves into the form, its only remaining home.
     expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
 
     await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
     await flushPromises();
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a lighthouse");
     expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
+  });
+
+  it("merges the preset negative when a styled quick expansion clears the chip", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await fieldControl("Negative prompt").setValue("text");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    // Bake-and-clear drops the chip, so the curated negative has to land in the
+    // form now — the submit-time merge no longer sees a preset.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(1);
+    // …and exactly once — the cleared chip can't merge it a second time.
+    expect(openStreams[0]?.options.body.negative_prompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
   });
 
   it("keeps the chip frozen on a prepared batch and names style drift as stale work", async () => {
@@ -333,6 +366,7 @@ describe("MobileApp generation queue", () => {
 
     await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
     await fieldControl("Prompt").setValue("storm pair");
+    await fieldControl("Negative prompt").setValue("text");
     await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
     await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
     await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
@@ -347,6 +381,10 @@ describe("MobileApp generation queue", () => {
     );
     // The surviving reviewed text absorbed the frozen style — same bake-and-clear.
     expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    // …so the frozen style's negative moves into the form with it.
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
 
     await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
     await flushPromises();
@@ -354,6 +392,7 @@ describe("MobileApp generation queue", () => {
     // Undo restores the source prompt; the chip stays cleared because only a
     // quick-apply snapshot re-arms it (mirrors desktop).
     expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
   });
 
   it("re-requests a recovered expansion pull with the frozen style and still bakes on apply", async () => {

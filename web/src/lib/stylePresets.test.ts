@@ -3,11 +3,28 @@ import {
   STYLE_ANGLES,
   STYLE_PRESETS,
   angleForIndex,
+  composeStyle,
+  mergeStyleNegative,
   stylePresetById,
-  stylePresetExtras,
+  stylePresetLabel,
+  styleHint,
 } from "./stylePresets";
+import * as kit from "@ui/lib/stylePresets";
 
 describe("stylePresets", () => {
+  it("is the shared kit table, not a web-only fork", () => {
+    // Same entries, same order — the only addition is the `name` alias below.
+    expect(STYLE_PRESETS.map((preset) => preset.id)).toEqual(
+      kit.STYLE_PRESETS.map((preset) => preset.id),
+    );
+    for (const [index, preset] of STYLE_PRESETS.entries()) {
+      expect(preset).toMatchObject(kit.STYLE_PRESETS[index]!);
+    }
+    expect(composeStyle).toBe(kit.composeStyle);
+    expect(styleHint).toBe(kit.styleHint);
+    expect(mergeStyleNegative).toBe(kit.mergeStyleNegative);
+  });
+
   it("ships the eight prototype presets in chip order", () => {
     expect(STYLE_PRESETS.map((p) => p.id)).toEqual([
       "photoreal",
@@ -21,31 +38,46 @@ describe("stylePresets", () => {
     ]);
   });
 
-  it("keeps the exact extras strings", () => {
-    expect(stylePresetExtras("cinematic")).toBe(
-      "cinematic lighting, anamorphic, dramatic mood, subtle film grain",
+  it("keeps `name` as an alias of the kit label for existing consumers", () => {
+    for (const preset of STYLE_PRESETS) {
+      expect(preset.name).toBe(preset.label);
+    }
+    expect(stylePresetById("anime")?.name).toBe("Anime");
+    expect(stylePresetLabel("anime")).toBe("Anime");
+  });
+
+  it("composes the kit's positive template, not the old bare extras", () => {
+    expect(
+      composeStyle("a heron", "cinematic", { supportsNegativePrompt: false })
+        .prompt,
+    ).toBe(
+      "cinematic film still of a heron, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
     );
-    expect(stylePresetExtras("3d")).toBe(
-      "octane render, subsurface scattering, studio HDRI lighting",
-    );
-    expect(stylePresetExtras("product")).toBe(
-      "product photography, seamless backdrop, softbox lighting",
+    // Append-style presets still comma-join.
+    expect(
+      composeStyle("a red sneaker", "product", {
+        supportsNegativePrompt: false,
+      }).prompt,
+    ).toBe(
+      "a red sneaker, product photography, seamless backdrop, softbox lighting",
     );
   });
 
-  it("returns null for a null or unknown preset id", () => {
-    expect(stylePresetExtras(null)).toBeNull();
-    expect(stylePresetExtras("does-not-exist")).toBeNull();
+  it("carries the kit's curated negatives", () => {
+    expect(
+      mergeStyleNegative("text", "cinematic", { supportsNegativePrompt: true }),
+    ).toBe("text, anime, cartoon, graphic, washed out");
+  });
+
+  it("tolerates a null preset id (the form stores null for no style)", () => {
     expect(stylePresetById(null)).toBeNull();
     expect(stylePresetById("nope")).toBeNull();
+    expect(stylePresetLabel(null)).toBe("None");
   });
 
-  it("resolves a preset by id", () => {
-    expect(stylePresetById("anime")).toEqual({
-      id: "anime",
-      name: "Anime",
-      extras: "anime key art, cel shading, vibrant palette",
-    });
+  it("resolves the legacy desktop ids a shared print may carry", () => {
+    expect(stylePresetById("photographic")?.id).toBe("photoreal");
+    expect(stylePresetById("3d-render")?.id).toBe("3d");
   });
 
   it("cycles the five angles, wrapping past the end", () => {

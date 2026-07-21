@@ -32,19 +32,26 @@ function read(): AccountTokens {
   }
 }
 
-function write(next: AccountTokens): void {
+/**
+ * Persist the token set. Returns whether the browser actually kept it, so a
+ * caller never claims a save that didn't happen: quota-exceeded, Safari
+ * private mode and policy-blocked storage all fail here, some by throwing and
+ * some by accepting the call and dropping the value. Success is therefore
+ * decided by reading the row back, not by the absence of an exception.
+ */
+function write(next: AccountTokens): boolean {
+  // Drop empty entries so a cleared token doesn't linger as "".
+  const clean: AccountTokens = {};
+  if (next.hfToken) clean.hfToken = next.hfToken;
+  if (next.civitaiToken) clean.civitaiToken = next.civitaiToken;
+  const payload =
+    clean.hfToken || clean.civitaiToken ? JSON.stringify(clean) : null;
   try {
-    // Drop empty entries so a cleared token doesn't linger as "".
-    const clean: AccountTokens = {};
-    if (next.hfToken) clean.hfToken = next.hfToken;
-    if (next.civitaiToken) clean.civitaiToken = next.civitaiToken;
-    if (clean.hfToken || clean.civitaiToken) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
-    }
+    if (payload === null) localStorage.removeItem(STORAGE_KEY);
+    else localStorage.setItem(STORAGE_KEY, payload);
+    return localStorage.getItem(STORAGE_KEY) === payload;
   } catch {
-    /* quota / disabled storage — nothing persists, which the UI reflects */
+    return false;
   }
 }
 
@@ -52,24 +59,28 @@ export function getAccountTokens(): AccountTokens {
   return read();
 }
 
-export function setHfToken(token: string): void {
+/** @returns true only when the token is genuinely stored in this browser. */
+export function setHfToken(token: string): boolean {
   const cur = read();
-  write({ ...cur, hfToken: token.trim() || undefined });
+  return write({ ...cur, hfToken: token.trim() || undefined });
 }
 
-export function setCivitaiToken(token: string): void {
+/** @returns true only when the token is genuinely stored in this browser. */
+export function setCivitaiToken(token: string): boolean {
   const cur = read();
-  write({ ...cur, civitaiToken: token.trim() || undefined });
+  return write({ ...cur, civitaiToken: token.trim() || undefined });
 }
 
-export function clearHfToken(): void {
+/** @returns true only when the token is genuinely gone from this browser. */
+export function clearHfToken(): boolean {
   const cur = read();
-  write({ ...cur, hfToken: undefined });
+  return write({ ...cur, hfToken: undefined });
 }
 
-export function clearCivitaiToken(): void {
+/** @returns true only when the token is genuinely gone from this browser. */
+export function clearCivitaiToken(): boolean {
   const cur = read();
-  write({ ...cur, civitaiToken: undefined });
+  return write({ ...cur, civitaiToken: undefined });
 }
 
 /** A privacy-safe indicator: never the full token, just enough to recognize

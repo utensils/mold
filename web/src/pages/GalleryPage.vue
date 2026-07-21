@@ -14,8 +14,9 @@ import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
-import { deleteGalleryImage, imageUrl } from "../api";
+import { deleteGalleryImage } from "../api";
 import { blobToBase64 } from "../lib/base64";
+import { fetchGalleryBlob } from "../lib/galleryMedia";
 import { requestConfirm, toast, undoableAction } from "../lib/toasts";
 import {
   applyMetadataToForm,
@@ -23,6 +24,7 @@ import {
 } from "../composables/useGenerateForm";
 import {
   fetchMergedGallery,
+  printKey,
   type HostGalleryImage,
 } from "../lib/multiHostGallery";
 import {
@@ -131,24 +133,59 @@ function setMuted(next: boolean) {
   }
 }
 
+/*
+ * Print identity is the (host, filename) pair, never the filename alone: mold
+ * names outputs model+seed+timestamp, so two connected machines routinely hold
+ * the same filename. Keying on the filename made those one print — selecting,
+ * deleting or opening either one hit both, and the DELETE could land on the
+ * wrong host. Everything below keys on `printKey(entry)`.
+ */
+const keyOf = (entry: GalleryImage) =>
+  printKey(entry as { hostId?: string; filename: string });
+
+function entryForKey(key: string): HostGalleryImage | null {
+  return entries.value.find((e) => keyOf(e) === key) ?? null;
+}
+
+/*
+ * The host that owns a print. An entry tagged for a host the registry no longer
+ * knows resolves to nothing rather than quietly falling back to the origin —
+ * that fallback is how a remote print's delete or source-fetch lands on a
+ * same-named local file.
+ */
+function hostForEntry(entry: GalleryImage) {
+  const id = (entry as { hostId?: string }).hostId ?? ORIGIN_HOST_ID;
+  if (id === ORIGIN_HOST_ID) return originHost();
+  return getHost(id);
+}
+
+function missingHostError(entry: GalleryImage): Error {
+  const label =
+    (entry as { hostLabel?: string }).hostLabel ??
+    (entry as { hostId?: string }).hostId ??
+    "That host";
+  return new Error(`${label} isn't connected anymore.`);
+}
+
 // ── NEW badge tracking ──────────────────────────────────────────────────────
-// Filenames present on first load are "seen" (never badged). Anything that
+// Prints present on first load are "seen" (never badged). Anything that
 // arrives on a later refresh is fresh until the next reload.
 const seen = new Set<string>();
 const fresh = ref<Set<string>>(new Set());
 let firstLoadDone = false;
 function reconcileFresh(list: GalleryImage[]) {
   if (!firstLoadDone) {
-    for (const e of list) seen.add(e.filename);
+    for (const e of list) seen.add(keyOf(e));
     firstLoadDone = true;
     return;
   }
   let changed = false;
   const next = new Set(fresh.value);
   for (const e of list) {
-    if (!seen.has(e.filename)) {
-      seen.add(e.filename);
-      next.add(e.filename);
+    const key = keyOf(e);
+    if (!seen.has(key)) {
+      seen.add(key);
+      next.add(key);
       changed = true;
     }
   }
@@ -157,6 +194,7 @@ function reconcileFresh(list: GalleryImage[]) {
 
 // ── Multi-select ────────────────────────────────────────────────────────────
 const selectMode = ref(false);
+/** Selected print keys (`hostId|filename`). */
 const selection = ref<Set<string>>(new Set());
 const selectionAnchor = ref<string | null>(null);
 
@@ -174,42 +212,42 @@ function toggleSelect(payload: {
   meta: boolean;
 }) {
   const { item, shift, meta } = payload;
-  const name = item.filename;
+  const key = keyOf(item);
   if (shift && selectionAnchor.value) {
     const list = filtered.value;
-    const a = list.findIndex((e) => e.filename === selectionAnchor.value);
-    const b = list.findIndex((e) => e.filename === name);
+    const a = list.findIndex((e) => keyOf(e) === selectionAnchor.value);
+    const b = list.findIndex((e) => keyOf(e) === key);
     if (a === -1 || b === -1) {
-      toggleOne(name, meta);
+      toggleOne(key, meta);
       return;
     }
     const [lo, hi] = a < b ? [a, b] : [b, a];
     const next = new Set(selection.value);
     for (let i = lo; i <= hi; i++) {
-      const f = list[i]?.filename;
-      if (f) next.add(f);
+      const entry = list[i];
+      if (entry) next.add(keyOf(entry));
     }
     selection.value = next;
     return;
   }
-  toggleOne(name, meta);
-  selectionAnchor.value = name;
+  toggleOne(key, meta);
+  selectionAnchor.value = key;
 }
 
-function toggleOne(name: string, _meta: boolean) {
+function toggleOne(key: string, _meta: boolean) {
   const next = new Set(selection.value);
-  if (next.has(name)) next.delete(name);
-  else next.add(name);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
   selection.value = next;
 }
 
-function onDragSelect(payload: { filenames: string[] }) {
-  selection.value = new Set(payload.filenames);
+function onDragSelect(payload: { keys: string[] }) {
+  selection.value = new Set(payload.keys);
 }
 
 function selectAllVisible() {
   const next = new Set<string>();
-  for (const e of filtered.value) next.add(e.filename);
+  for (const e of filtered.value) next.add(keyOf(e));
   selection.value = next;
 }
 
@@ -219,46 +257,51 @@ function clearSelection() {
 }
 
 // Delete routes to the host that owns the print — a remote print is deleted on
-// its host, not the origin.
-function deleteRouted(filename: string): Promise<void> {
-  const entry = entries.value.find((e) => e.filename === filename);
-  const host = entry ? getHost(entry.hostId) : null;
-  if (!host || host.id === ORIGIN_HOST_ID) return deleteGalleryImage(filename);
-  return hostDeleteGalleryImage(host, filename);
+// its host, not the origin, and a same-named local twin is left alone.
+function deleteRouted(entry: GalleryImage): Promise<void> {
+  const host = hostForEntry(entry);
+  if (!host) return Promise.reject(missingHostError(entry));
+  if (host.id === ORIGIN_HOST_ID) return deleteGalleryImage(entry.filename);
+  return hostDeleteGalleryImage(host, entry.filename);
 }
 
-async function handleDeleteMany(names: string[]): Promise<number> {
-  const results = await Promise.allSettled(names.map((n) => deleteRouted(n)));
+async function handleDeleteMany(keys: string[]): Promise<number> {
+  const targets = keys
+    .map((key) => ({ key, entry: entryForKey(key) }))
+    .filter((t): t is { key: string; entry: HostGalleryImage } => !!t.entry);
+  const results = await Promise.allSettled(
+    targets.map((t) => deleteRouted(t.entry)),
+  );
   const deleted = new Set<string>();
   let failed = 0;
-  names.forEach((n, i) => {
-    if (results[i]?.status === "fulfilled") deleted.add(n);
+  targets.forEach((t, i) => {
+    if (results[i]?.status === "fulfilled") deleted.add(t.key);
     else failed++;
   });
-  entries.value = entries.value.filter((e) => !deleted.has(e.filename));
+  entries.value = entries.value.filter((e) => !deleted.has(keyOf(e)));
   if (deleted.size > 0) {
     const next = new Set(selection.value);
-    for (const n of deleted) next.delete(n);
+    for (const key of deleted) next.delete(key);
     selection.value = next;
   }
   if (failed > 0) {
-    errorMessage.value = `Deleted ${deleted.size} of ${names.length}. ${failed} failed.`;
+    errorMessage.value = `Deleted ${deleted.size} of ${keys.length}. ${failed} failed.`;
   }
   return deleted.size;
 }
 
 async function deleteSelected() {
-  const names = Array.from(selection.value);
-  if (names.length === 0) return;
+  const keys = Array.from(selection.value);
+  if (keys.length === 0) return;
   const accepted = await requestConfirm({
     title:
-      names.length === 1 ? "Delete print?" : `Delete ${names.length} prints?`,
+      keys.length === 1 ? "Delete print?" : `Delete ${keys.length} prints?`,
     body: "This can't be undone.",
     confirmLabel: "Delete",
     danger: true,
   });
   if (!accepted) return;
-  await handleDeleteMany(names);
+  await handleDeleteMany(keys);
 }
 
 async function deleteAllFiltered() {
@@ -275,8 +318,7 @@ async function deleteAllFiltered() {
     typedPhrase: "delete",
   });
   if (!accepted) return;
-  const names = list.map((e) => e.filename);
-  await handleDeleteMany(names);
+  await handleDeleteMany(list.map((e) => keyOf(e)));
 }
 
 // ── Filtering ────────────────────────────────────────────────────────────────
@@ -357,9 +399,8 @@ const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
 function openItem(item: GalleryImage) {
-  selectedIndex.value = filtered.value.findIndex(
-    (e) => e.filename === item.filename,
-  );
+  const key = keyOf(item);
+  selectedIndex.value = filtered.value.findIndex((e) => keyOf(e) === key);
   selected.value = item;
 }
 function closeLightbox() {
@@ -386,9 +427,11 @@ function onReuse(item: GalleryImage) {
 
 async function setAsSource(item: GalleryImage): Promise<boolean> {
   try {
-    const res = await fetch(imageUrl(item.filename));
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    const blob = await res.blob();
+    // Bytes come from the host that owns the print, with that host's key —
+    // fetching the origin would 404 or, worse, grab a same-named local file.
+    const host = hostForEntry(item);
+    if (!host) throw missingHostError(item);
+    const blob = await fetchGalleryBlob(host, item.filename);
     const base64 = await blobToBase64(blob);
     form.state.value.imageAttachments = [
       { kind: "gallery", filename: item.filename, base64 },
@@ -421,12 +464,13 @@ async function onLightboxDelete(item: GalleryImage) {
     danger: true,
   });
   if (!accepted) return;
-  const entryIdx = entries.value.findIndex((e) => e.filename === item.filename);
+  const key = keyOf(item);
+  const entryIdx = entries.value.findIndex((e) => keyOf(e) === key);
   if (entryIdx === -1) return;
   const removed = entries.value[entryIdx]!;
 
   // Optimistic removal; commit the DELETE only once the undo window elapses.
-  entries.value = entries.value.filter((e) => e.filename !== item.filename);
+  entries.value = entries.value.filter((e) => keyOf(e) !== key);
   if (filtered.value.length === 0) {
     closeLightbox();
   } else {
@@ -447,7 +491,7 @@ async function onLightboxDelete(item: GalleryImage) {
     },
     commit: async () => {
       try {
-        await deleteRouted(item.filename);
+        await deleteRouted(removed);
       } catch (err) {
         // Roll the print back into the list so the failure isn't silent.
         const next = entries.value.slice();

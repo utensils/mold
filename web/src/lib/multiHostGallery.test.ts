@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchMergedGallery } from "./multiHostGallery";
-import type { HostEntry } from "./hostRegistry";
+import { fetchMergedGallery, makePrintKey, printKey } from "./multiHostGallery";
+import { ORIGIN_HOST_ID, type HostEntry } from "./hostRegistry";
 import type { GalleryImage } from "../types";
 
 function host(id: string, name: string): HostEntry {
@@ -77,5 +77,28 @@ describe("fetchMergedGallery", () => {
     expect(solo.remoteHostCount).toBe(0);
     const multi = await fetchMergedGallery([origin, a, b], fetcher);
     expect(multi.remoteHostCount).toBe(2);
+  });
+});
+
+describe("printKey", () => {
+  it("keeps same-named prints on different hosts apart", () => {
+    // mold names prints model+seed+timestamp, so two boxes routinely hold the
+    // same filename. Filename alone is not an identity.
+    const mine = printKey({ hostId: ORIGIN_HOST_ID, filename: "flux_42.png" });
+    const theirs = printKey({ hostId: "bender", filename: "flux_42.png" });
+    expect(mine).not.toBe(theirs);
+    expect(mine).toBe(makePrintKey(ORIGIN_HOST_ID, "flux_42.png"));
+    expect(theirs).toBe(makePrintKey("bender", "flux_42.png"));
+  });
+
+  it("treats an untagged entry as the origin's", () => {
+    expect(printKey({ filename: "cat.png" })).toBe(
+      makePrintKey(ORIGIN_HOST_ID, "cat.png"),
+    );
+  });
+
+  it("stays stable for the same entry", () => {
+    const entry = { hostId: "bender", filename: "cat.png" };
+    expect(printKey(entry)).toBe(printKey({ ...entry }));
   });
 });

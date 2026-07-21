@@ -39,6 +39,16 @@ export function hostMediaBase(host: HostEntry): string {
   return host.id === ORIGIN_HOST_ID ? "" : host.url.replace(/\/$/, "");
 }
 
+/** Direct (keyless) URL for a host's thumbnail — relative for the origin. */
+export function directThumbnailUrl(host: HostEntry, filename: string): string {
+  return `${hostMediaBase(host)}${thumbnailPath(filename)}`;
+}
+
+/** Direct (keyless) URL for a host's full-size media — relative for the origin. */
+export function directMediaUrl(host: HostEntry, filename: string): string {
+  return `${hostMediaBase(host)}${mediaPath(filename)}`;
+}
+
 function authHeaders(host: HostEntry): Record<string, string> {
   return host.apiKey ? { "x-api-key": host.apiKey } : {};
 }
@@ -86,7 +96,7 @@ export function resolveThumbnailSrc(
 ): Promise<string> {
   const path = thumbnailPath(filename);
   if (!needsAuthedMedia(host)) {
-    return Promise.resolve(`${hostMediaBase(host)}${path}`);
+    return Promise.resolve(directThumbnailUrl(host, filename));
   }
   const key = keyOf(host.id, path);
   let url = cache.get(key);
@@ -132,7 +142,7 @@ export async function resolveStreamableSrc(
   opts: StreamableOptions,
 ): Promise<string> {
   const path = mediaPath(filename);
-  const directUrl = `${hostMediaBase(host)}${path}`;
+  const directUrl = directMediaUrl(host, filename);
   if (!needsAuthedMedia(host)) return directUrl;
 
   try {

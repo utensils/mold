@@ -15,6 +15,15 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { imageUrl, thumbnailUrl } from "../../api";
+import { getHost } from "../../lib/hostRegistry";
+import {
+  MediaUpgradeRequiredError,
+  directMediaUrl,
+  directThumbnailUrl,
+  needsAuthedMedia,
+  resolveStreamableSrc,
+  resolveThumbnailSrc,
+} from "../../lib/galleryMedia";
 import type { GalleryImage } from "../../types";
 import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
@@ -46,12 +55,81 @@ const kind = computed(() =>
   props.item ? mediaKind(props.item.format, props.item.filename) : "image",
 );
 const isVideoFile = computed(() => kind.value === "video");
-const mediaSrc = computed(() =>
-  props.item ? imageUrl(props.item.filename) : "",
+
+/*
+ * Full-size media is addressed on the host that owns the print. Keyless hosts
+ * (the serving origin included) resolve synchronously to a plain URL. A keyed
+ * host exchanges its key for a short-lived `media-token` ticket so WebKit can
+ * Range-stream video without the durable key ever entering a URL; images may
+ * fall back to a bounded blob on a host too old to issue tickets, but a video
+ * surfaces the "can't stream" state rather than buffering the whole file.
+ */
+const hostEntry = computed(() => {
+  const id = (props.item as { hostId?: string } | null)?.hostId;
+  return id ? getHost(id) : null;
+});
+const hostLabel = computed(() => {
+  const item = props.item as { hostLabel?: string } | null;
+  return item?.hostLabel ?? hostEntry.value?.name ?? "local";
+});
+
+const mediaSrc = ref("");
+const posterSrc = ref("");
+const streamBlocked = ref(false);
+const streamMessage = ref("");
+let resolveGeneration = 0;
+
+function resolveMedia() {
+  const item = props.item;
+  const generation = ++resolveGeneration;
+  streamBlocked.value = false;
+  if (!item) {
+    mediaSrc.value = "";
+    posterSrc.value = "";
+    return;
+  }
+  const host = hostEntry.value;
+  if (!host) {
+    mediaSrc.value = imageUrl(item.filename);
+    posterSrc.value = thumbnailUrl(item.filename);
+    return;
+  }
+  if (!needsAuthedMedia(host)) {
+    mediaSrc.value = directMediaUrl(host, item.filename);
+    posterSrc.value = directThumbnailUrl(host, item.filename);
+    return;
+  }
+  mediaSrc.value = "";
+  posterSrc.value = "";
+  void resolveThumbnailSrc(host, item.filename)
+    .then((url) => {
+      if (generation === resolveGeneration) posterSrc.value = url;
+    })
+    .catch(() => {
+      /* no poster is fine — the media itself still loads */
+    });
+  void resolveStreamableSrc(host, item.filename, {
+    allowLegacyBlob: !isVideoFile.value,
+  })
+    .then((url) => {
+      if (generation === resolveGeneration) mediaSrc.value = url;
+    })
+    .catch((err) => {
+      if (generation !== resolveGeneration) return;
+      streamBlocked.value = true;
+      streamMessage.value =
+        err instanceof MediaUpgradeRequiredError
+          ? "Connect a newer Mold host to stream this clip."
+          : "Couldn't reach the host that holds this print.";
+    });
+}
+
+watch(() => props.item, resolveMedia, { immediate: true });
+
+const blockedTitle = computed(() =>
+  isVideoFile.value ? "Can't stream this clip" : "Can't load this print",
 );
-const posterSrc = computed(() =>
-  props.item ? thumbnailUrl(props.item.filename) : "",
-);
+
 const prompt = computed(() => props.item?.metadata.prompt ?? "");
 const modelLabel = computed(() =>
   props.item ? shortModel(props.item.metadata.model) : "",
@@ -139,8 +217,12 @@ function onDelete() {
       <!-- ============================ DESKTOP ============================ -->
       <div v-if="wide" class="lb__card" @click.stop>
         <div class="lb__stage">
+          <p v-if="streamBlocked" class="lb__blocked" role="status">
+            <span class="lb__blocked-title">{{ blockedTitle }}</span>
+            <span class="lb__blocked-body">{{ streamMessage }}</span>
+          </p>
           <video
-            v-if="isVideoFile"
+            v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"
             :poster="posterSrc"
             class="lb__media"
@@ -151,7 +233,7 @@ function onDelete() {
             :muted="muted"
           />
           <img
-            v-else
+            v-else-if="mediaSrc"
             :src="mediaSrc"
             :alt="prompt || item.filename"
             class="lb__media"
@@ -259,7 +341,7 @@ function onDelete() {
               ><span>{{ dimensions || "—" }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Host</span><span>local</span>
+              <span class="lb__rowk">Host</span><span>{{ hostLabel }}</span>
             </div>
           </div>
 
@@ -285,6 +367,7 @@ function onDelete() {
               Use as source
             </button>
             <a
+              v-if="mediaSrc"
               class="lb__quiet"
               :href="mediaSrc"
               :download="item.filename"
@@ -292,6 +375,7 @@ function onDelete() {
             >
               Download
             </a>
+            <span v-else class="lb__quiet lb__quiet--off">Download</span>
           </div>
         </div>
       </div>
@@ -316,6 +400,7 @@ function onDelete() {
           >
           <span class="lb__flex"></span>
           <a
+            v-if="mediaSrc"
             class="lb__circle"
             :href="mediaSrc"
             :download="item.filename"
@@ -369,8 +454,12 @@ function onDelete() {
         </div>
 
         <div class="lb__stage lb__stage--full">
+          <p v-if="streamBlocked" class="lb__blocked" role="status">
+            <span class="lb__blocked-title">{{ blockedTitle }}</span>
+            <span class="lb__blocked-body">{{ streamMessage }}</span>
+          </p>
           <video
-            v-if="isVideoFile"
+            v-else-if="isVideoFile && mediaSrc"
             :src="mediaSrc"
             :poster="posterSrc"
             class="lb__media"
@@ -381,7 +470,7 @@ function onDelete() {
             :muted="muted"
           />
           <img
-            v-else
+            v-else-if="mediaSrc"
             :src="mediaSrc"
             :alt="prompt || item.filename"
             class="lb__media"
@@ -428,7 +517,7 @@ function onDelete() {
             <span class="lb__chip">{{ modelLabel }}</span>
             <span class="lb__chip">seed {{ seed ?? "—" }}</span>
             <span v-if="dimensions" class="lb__chip">{{ dimensions }}</span>
-            <span class="lb__chip">local</span>
+            <span class="lb__chip">{{ hostLabel }}</span>
           </div>
           <button class="lb__reuse" @click="onReuse">
             <svg
@@ -450,6 +539,7 @@ function onDelete() {
               Use as source
             </button>
             <a
+              v-if="mediaSrc"
               class="lb__quiet"
               :href="mediaSrc"
               :download="item.filename"
@@ -457,6 +547,7 @@ function onDelete() {
             >
               Save
             </a>
+            <span v-else class="lb__quiet lb__quiet--off">Save</span>
           </div>
         </div>
       </div>
@@ -509,6 +600,34 @@ function onDelete() {
   max-height: 100%;
   object-fit: contain;
   display: block;
+}
+
+/* Shown instead of the media when the owning host can't serve it — a video on
+   a host too old to issue a streaming ticket, or an unreachable host. */
+.lb__blocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 320px;
+  margin: 0;
+  padding: 22px;
+  text-align: center;
+  color: var(--on-media);
+}
+.lb__blocked-title {
+  font-family: var(--f-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+.lb__blocked-body {
+  font-size: 13px;
+  line-height: 1.45;
+  opacity: 0.78;
+}
+
+.lb__quiet--off {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .lb__nav {

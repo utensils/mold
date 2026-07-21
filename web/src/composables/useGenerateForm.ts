@@ -23,17 +23,17 @@ import {
   supportsNegativePrompt,
   supportsScheduler,
 } from "../lib/generateCapabilities";
-import { stylePresetExtras } from "../lib/stylePresets";
+import { composeStyle } from "../lib/stylePresets";
 
-/** The prompt actually sent to the server: the textarea content with the
- * active style preset's extras appended. Never mutates `state.prompt` — the
- * style row is a request-time modifier, not a rewrite of what the user typed.
- * Shared by `toRequest` and the estimate/summary display so both agree. */
+/** The prompt actually sent to the server: the textarea content composed with
+ * the active style preset (the shared kit substitutes a "{prompt}" template,
+ * otherwise it comma-appends). Never mutates `state.prompt` — the style row is
+ * a request-time modifier, not a rewrite of what the user typed. Shared by
+ * `toRequest` and the estimate/summary display so both agree. */
 export function promptWithStyle(state: GenerateFormState): string {
-  const extras = stylePresetExtras(state.stylePreset);
-  if (!extras) return state.prompt;
-  if (!state.prompt.trim()) return extras;
-  return `${state.prompt}, ${extras}`;
+  return composeStyle(state.prompt, state.stylePreset ?? "", {
+    supportsNegativePrompt: false,
+  }).prompt;
 }
 
 /** Output-format options for a given model family, ordered by preference.
@@ -565,10 +565,18 @@ export function useGenerateForm(): UseGenerateForm {
       const sourceVideoPath = s.sourceVideoPath.trim();
       const family = selectedFamily(s);
       const ltx2 = family === "ltx2" || family === "ltx-2";
+      // The style preset is baked into the OUTGOING request — prompt template
+      // plus the preset's curated negative, merged after the user's own
+      // fragments and only for families that accept a negative prompt. Neither
+      // field on screen is rewritten.
+      const styled = composeStyle(s.prompt, s.stylePreset ?? "", {
+        supportsNegativePrompt: capabilities.supportsNegativePrompt,
+        negative: s.negativePrompt,
+      });
       return {
-        prompt: promptWithStyle(s),
+        prompt: styled.prompt,
         negative_prompt: capabilities.supportsNegativePrompt
-          ? s.negativePrompt || null
+          ? styled.negative || null
           : null,
         model: s.model,
         width: s.width,

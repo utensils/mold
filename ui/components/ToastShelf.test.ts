@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
-import ToastShelf, { type Toast } from "./ToastShelf.vue";
+import ToastShelf from "./ToastShelf.vue";
+import type { Toast } from "./types";
 
 const TOASTS: readonly Toast[] = [
   { id: "t1", kind: "success", text: "Saved to library" },

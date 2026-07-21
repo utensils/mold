@@ -55,7 +55,7 @@ describe("GalleryGrid", () => {
       props: {
         entries: [image, video],
         loading: false,
-        fresh: new Set(["recent.png"]),
+        fresh: new Set(["origin|recent.png"]),
       },
     });
     const badges = wrapper.findAll(".ms-tile__fresh");
@@ -111,5 +111,102 @@ describe("GalleryGrid", () => {
     });
     expect(wrapper.findAll(".gg__skel").length).toBeGreaterThan(0);
     expect(wrapper.findAll(".gg__cell")).toHaveLength(0);
+  });
+});
+
+describe("GalleryGrid multi-host thumbnails", () => {
+  beforeEach(() => {
+    (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
+    localStorage.clear();
+  });
+  afterEach(() => {
+    delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
+    localStorage.clear();
+  });
+
+  it("addresses a remote print's thumbnail on its own host", async () => {
+    // A merged remote entry resolved against the origin 404s — the print
+    // lives on the other machine, so its thumbnail must too.
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        { id: "studio-7680", name: "studio", url: "http://studio:7680" },
+      ]),
+    );
+    const remote = { ...image, hostId: "studio-7680", hostLabel: "studio" };
+    const w = mount(GalleryGrid, {
+      props: { entries: [remote], loading: false },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const src = w.find("img").attributes("src") ?? "";
+    expect(src).toContain("http://studio:7680/api/gallery/thumbnail/");
+  });
+
+  it("selects only the collided print that belongs to the selected host", async () => {
+    // Same filename on two machines. Selection is keyed on (host, filename),
+    // so highlighting the remote copy must leave the local one untouched.
+    localStorage.setItem(
+      "mold.web.hosts.v1",
+      JSON.stringify([
+        { id: "studio-7680", name: "studio", url: "http://studio:7680" },
+      ]),
+    );
+    const mine = { ...image, hostId: "origin", hostLabel: "this server" };
+    const theirs = { ...image, hostId: "studio-7680", hostLabel: "studio" };
+    const w = mount(GalleryGrid, {
+      props: {
+        entries: [mine, theirs],
+        loading: false,
+        selectMode: true,
+        selection: new Set(["studio-7680|recent.png"]),
+      },
+    });
+    const hits = w.findAll(".gg__hit");
+    expect(hits).toHaveLength(2);
+    expect(hits[0]!.classes()).not.toContain("gg__hit--on");
+    expect(hits[1]!.classes()).toContain("gg__hit--on");
+  });
+
+  it("emits toggle-select carrying the host-tagged entry", async () => {
+    const mine = { ...image, hostId: "origin", hostLabel: "this server" };
+    const theirs = { ...image, hostId: "studio-7680", hostLabel: "studio" };
+    const w = mount(GalleryGrid, {
+      props: {
+        entries: [mine, theirs],
+        loading: false,
+        selectMode: true,
+        selection: new Set<string>(),
+      },
+    });
+    await w.findAll(".gg__hit")[1]!.trigger("click");
+    const payload = w.emitted("toggle-select")![0]![0] as {
+      item: { hostId?: string };
+    };
+    expect(payload.item.hostId).toBe("studio-7680");
+  });
+
+  it("badges only the collided print that is actually fresh", () => {
+    const mine = { ...image, hostId: "origin", hostLabel: "this server" };
+    const theirs = { ...image, hostId: "studio-7680", hostLabel: "studio" };
+    const w = mount(GalleryGrid, {
+      props: {
+        entries: [mine, theirs],
+        loading: false,
+        fresh: new Set(["studio-7680|recent.png"]),
+      },
+    });
+    expect(w.findAll(".ms-tile__fresh")).toHaveLength(1);
+  });
+
+  it("keeps origin prints on relative URLs", async () => {
+    const w = mount(GalleryGrid, {
+      props: {
+        entries: [{ ...image, hostId: "origin", hostLabel: "this server" }],
+        loading: false,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const src = w.find("img").attributes("src") ?? "";
+    expect(src.startsWith("/api/gallery/thumbnail/")).toBe(true);
   });
 });

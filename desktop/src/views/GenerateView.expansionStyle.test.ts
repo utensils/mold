@@ -17,6 +17,7 @@ import { useGenerateFormStore } from "../stores/generateForm";
 import { useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
+import { useUiStore } from "../stores/ui";
 import { expandPrompt } from "../lib/api/expand";
 import { styleHint } from "../lib/stylePresets";
 import type { ModelEntry } from "../lib/api/types";
@@ -138,6 +139,77 @@ describe("GenerateView style-aware expansion", () => {
     expect(form.prompt).toBe("storm light over a cinematic coast");
     // Bake-and-clear: the expansion output absorbed the style.
     expect(form.stylePreset).toBe("");
+  });
+
+  it("merges the preset negative into the composer when a quick apply clears the chip", async () => {
+    const form = useGenerateFormStore().form;
+    form.model = sdxlModel.name;
+    form.family = sdxlModel.family;
+    form.negativePrompt = "text";
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light over a cinematic coast"],
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    // Bake-and-clear drops the chip, so the curated negative has to land in the
+    // form now — the submit-time merge no longer sees a preset.
+    expect(form.stylePreset).toBe("");
+    expect(form.negativePrompt).toBe("text, anime, cartoon, graphic, washed out");
+
+    useUiStore().generateTick++;
+    await flushPromises();
+    expect(submit).toHaveBeenCalledTimes(1);
+    const [request] = submit.mock.calls[0]!;
+    // …and exactly once — the cleared chip can't merge it a second time.
+    expect(request.negative_prompt).toBe("text, anime, cartoon, graphic, washed out");
+  });
+
+  it("leaves the negative alone when the family takes no negative prompt", async () => {
+    const form = useGenerateFormStore().form;
+    form.negativePrompt = "text";
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light over a cinematic coast"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    // flux ignores a negative prompt — baking one in would be noise the user
+    // then has to delete by hand.
+    expect(form.negativePrompt).toBe("text");
+  });
+
+  it("restoring the quick expansion restores the negative alongside the chip", async () => {
+    const form = useGenerateFormStore().form;
+    form.model = sdxlModel.name;
+    form.family = sdxlModel.family;
+    form.negativePrompt = "text";
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light over a cinematic coast"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("restore");
+    await flushPromises();
+
+    expect(form.negativePrompt).toBe("text");
+    expect(form.stylePreset).toBe("cinematic");
   });
 
   it("restoring the quick expansion restores the preset chip", async () => {
@@ -285,5 +357,30 @@ describe("GenerateView style-aware expansion", () => {
     expect(form.prompt).toBe("storm light");
     // The surviving reviewed text absorbed the style — same bake-and-clear.
     expect(form.stylePreset).toBe("");
+  });
+
+  it("carries the preset negative across a prepared-pair collapse", async () => {
+    const form = useGenerateFormStore().form;
+    form.model = sdxlModel.name;
+    form.family = sdxlModel.family;
+    form.negativePrompt = "text";
+    form.batchSize = 2;
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light", "sea mist"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+
+    const prepared = wrapper.findComponent(PreparedExpansionBatch);
+    prepared.vm.$emit("collapse", prepared.props("batch").prompts[1]!.id);
+    await flushPromises();
+
+    // Collapse clears the chip too, so the frozen style's negative has to move
+    // into the form with it.
+    expect(form.stylePreset).toBe("");
+    expect(form.negativePrompt).toBe("text, anime, cartoon, graphic, washed out");
   });
 });

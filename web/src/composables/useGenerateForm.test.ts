@@ -169,16 +169,41 @@ describe("useGenerateForm", () => {
     expect(form.state.value.stylePreset).toBe("cinematic");
   });
 
-  it("toRequest appends the active style preset's extras without mutating the prompt", () => {
+  it("toRequest bakes the shared kit's style template without mutating the prompt", () => {
     const form = useGenerateForm();
     form.state.value.model = "flux2-klein:q4";
     form.state.value.prompt = "a lighthouse in a storm";
     form.state.value.stylePreset = "cinematic";
     expect(form.toRequest().prompt).toBe(
-      "a lighthouse in a storm, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
+      "cinematic film still of a lighthouse in a storm, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
     );
     // The textarea content itself is never rewritten by the style row.
     expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+  });
+
+  it("toRequest merges the preset's curated negative for families that take one", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    // User fragments first, preset fragments appended.
+    expect(form.toRequest().negative_prompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+    // The visible negative field is untouched — composition happens on the way out.
+    expect(form.state.value.negativePrompt).toBe("text");
+  });
+
+  it("toRequest never ships a preset negative to a family that rejects one", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "flux2-klein:q4";
+    form.state.value.modelFamily = "flux2";
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    expect(form.toRequest().negative_prompt).toBeNull();
   });
 
   it("toRequest sends the bare prompt when no style preset is active", () => {
@@ -189,13 +214,11 @@ describe("useGenerateForm", () => {
     expect(form.toRequest().prompt).toBe("a lighthouse in a storm");
   });
 
-  it("promptWithStyle uses the extras alone when the prompt is empty (no stray comma)", () => {
+  it("promptWithStyle leaves an empty prompt empty (a template has nothing to wrap)", () => {
     const form = useGenerateForm();
     form.state.value.prompt = "";
     form.state.value.stylePreset = "anime";
-    expect(promptWithStyle(form.state.value)).toBe(
-      "anime key art, cel shading, vibrant palette",
-    );
+    expect(promptWithStyle(form.state.value)).toBe("");
   });
 
   it("discards a snapshot with a mismatched version to avoid stale schemas", () => {

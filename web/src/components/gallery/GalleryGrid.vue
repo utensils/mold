@@ -13,6 +13,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import MediaTile from "@ui/components/MediaTile.vue";
 import { thumbnailUrl } from "../../api";
+import { getHost } from "../../lib/hostRegistry";
+import { resolveThumbnailSrc } from "../../lib/galleryMedia";
+import { printKey } from "../../lib/multiHostGallery";
 import type { GalleryImage } from "../../types";
 import { mediaKind } from "../../types";
 
@@ -21,8 +24,9 @@ const props = withDefaults(
     entries: GalleryImage[];
     loading: boolean;
     selectMode?: boolean;
+    /** Selected print keys — `hostId|filename`, never a bare filename. */
     selection?: Set<string>;
-    /** Filenames that arrived this session — badged NEW. */
+    /** Print keys that arrived this session — badged NEW. */
     fresh?: Set<string>;
   }>(),
   {
@@ -38,7 +42,7 @@ const emit = defineEmits<{
     e: "toggle-select",
     payload: { item: GalleryImage; shift: boolean; meta: boolean },
   ): void;
-  (e: "drag-select", payload: { filenames: string[] }): void;
+  (e: "drag-select", payload: { keys: string[] }): void;
 }>();
 
 // ── Chunked rendering ──────────────────────────────────────────────────────
@@ -102,8 +106,36 @@ function isMotion(entry: GalleryImage): boolean {
   return k === "video" || k === "animated";
 }
 // The grid always shows the cached thumbnail (fast, poster-friendly for video).
+// A merged entry carries the host it came from: resolving every tile against
+// the origin 404s every remote print, because the file lives on that machine.
+// Keyless hosts (including the origin) resolve synchronously to a direct URL;
+// an authenticated host needs a blob fetch, so its tile fills in once resolved.
+const remoteSrc = ref(new Map<string, string>());
+
+function hostOf(entry: GalleryImage) {
+  const id = (entry as { hostId?: string }).hostId;
+  return id ? getHost(id) : null;
+}
+
+/** Composite identity for a tile: two hosts can hold the same filename. */
+function keyOf(entry: GalleryImage): string {
+  return printKey(entry as { hostId?: string; filename: string });
+}
+
 function tileSrc(entry: GalleryImage): string {
-  return thumbnailUrl(entry.filename);
+  const host = hostOf(entry);
+  if (!host) return thumbnailUrl(entry.filename);
+  const key = keyOf(entry);
+  const resolved = remoteSrc.value.get(key);
+  if (resolved) return resolved;
+  void resolveThumbnailSrc(host, entry.filename)
+    .then((url) => {
+      remoteSrc.value = new Map(remoteSrc.value).set(key, url);
+    })
+    .catch(() => {
+      /* a tile that can't resolve keeps the browser's broken-image state */
+    });
+  return resolved ?? "";
 }
 function durationLabel(entry: GalleryImage): string {
   const frames = entry.metadata.frames;
@@ -156,7 +188,7 @@ function onPointerDown(evt: PointerEvent) {
   const target = evt.target as HTMLElement | null;
   // Clicks on a tile / control toggle selection directly — only empty gaps
   // start a marquee.
-  if (target?.closest("[data-filename]")) return;
+  if (target?.closest("[data-print-key]")) return;
   if (target?.closest("button, a, input, textarea")) return;
   drag = {
     startX: evt.clientX,
@@ -184,7 +216,7 @@ function onPointerMove(evt: PointerEvent) {
   const final = drag.additive
     ? new Set([...drag.base, ...hits])
     : new Set(hits);
-  emit("drag-select", { filenames: Array.from(final) });
+  emit("drag-select", { keys: Array.from(final) });
 }
 
 function onPointerUp() {
@@ -195,7 +227,8 @@ function onPointerUp() {
 
 function collectHits(x: number, y: number, w: number, h: number): string[] {
   if (!gridRoot.value) return [];
-  const cells = gridRoot.value.querySelectorAll<HTMLElement>("[data-filename]");
+  const cells =
+    gridRoot.value.querySelectorAll<HTMLElement>("[data-print-key]");
   const hits: string[] = [];
   const right = x + w;
   const bottom = y + h;
@@ -209,8 +242,8 @@ function collectHits(x: number, y: number, w: number, h: number): string[] {
     ) {
       continue;
     }
-    const name = cell.dataset.filename;
-    if (name) hits.push(name);
+    const key = cell.dataset.printKey;
+    if (key) hits.push(key);
   }
   return hits;
 }
@@ -240,15 +273,16 @@ onBeforeUnmount(() => {
       <div class="gg__grid">
         <div
           v-for="entry in visibleEntries"
-          :key="entry.filename"
+          :key="keyOf(entry)"
           class="gg__cell"
           :data-filename="entry.filename"
-          :data-selected="selection.has(entry.filename) ? 'true' : 'false'"
+          :data-print-key="keyOf(entry)"
+          :data-selected="selection.has(keyOf(entry)) ? 'true' : 'false'"
         >
           <MediaTile
             :src="tileSrc(entry)"
             :alt="entry.metadata.prompt || entry.filename"
-            :fresh="fresh.has(entry.filename)"
+            :fresh="fresh.has(keyOf(entry))"
             @open="onTileOpen(entry)"
           >
             <template v-if="isMotion(entry)" #overlay>
@@ -274,9 +308,9 @@ onBeforeUnmount(() => {
             v-if="selectMode"
             type="button"
             class="gg__hit"
-            :class="{ 'gg__hit--on': selection.has(entry.filename) }"
-            :aria-pressed="selection.has(entry.filename)"
-            :aria-label="`${selection.has(entry.filename) ? 'Deselect' : 'Select'} ${entry.filename}`"
+            :class="{ 'gg__hit--on': selection.has(keyOf(entry)) }"
+            :aria-pressed="selection.has(keyOf(entry))"
+            :aria-label="`${selection.has(keyOf(entry)) ? 'Deselect' : 'Select'} ${entry.filename}`"
             @click="onSelectClick(entry, $event)"
           >
             <span class="gg__check" aria-hidden="true">

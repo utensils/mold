@@ -8,7 +8,7 @@ import {
   useGenerateForm,
   __testing__ as generateFormTesting,
 } from "../../composables/useGenerateForm";
-import type { PaletteItem } from "@ui/components/PalettePanel.vue";
+import type { PaletteItem } from "@ui/components/types";
 
 const pushMock = vi.hoisted(() => vi.fn());
 // Full-enough model rows so applyModelDefaults can resolve family + defaults.

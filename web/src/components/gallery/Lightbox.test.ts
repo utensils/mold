@@ -1,6 +1,7 @@
-import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Lightbox from "./Lightbox.vue";
+import { __resetGalleryMediaForTests } from "../../lib/galleryMedia";
 import type { GalleryImage } from "../../types";
 
 const item: GalleryImage = {
@@ -137,5 +138,111 @@ describe("Lightbox (mobile full-screen)", () => {
     expect(text).toContain("a lighthouse at dusk");
     expect(text).toContain("seed 4242");
     expect(text).toContain("Reuse these settings");
+  });
+});
+
+describe("Lightbox multi-host media", () => {
+  const STUDIO = {
+    id: "studio-7680",
+    name: "studio",
+    url: "http://studio:7680",
+    apiKey: "studio-secret-key",
+  };
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    setViewportWidth(1200);
+    localStorage.clear();
+    __resetGalleryMediaForTests();
+    localStorage.setItem("mold.web.hosts.v1", JSON.stringify([STUDIO]));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function mockFetch(handler: (url: string, init?: RequestInit) => unknown) {
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) =>
+      handler(url, init),
+    ) as never;
+  }
+
+  it("keeps an origin print on the same-origin URL", async () => {
+    mockFetch(() => {
+      throw new Error("should not reach the network");
+    });
+    const wrapper = mountWide({
+      item: { ...item, hostId: "origin", hostLabel: "this server" },
+    });
+    await flushPromises();
+    expect(wrapper.find("img").attributes("src")).toBe(
+      "/api/gallery/image/print.png",
+    );
+  });
+
+  it("streams a keyed remote print through a media-token ticket", async () => {
+    mockFetch((url) => {
+      expect(url).toBe("http://studio:7680/api/gallery/media-token");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          token: "tkt",
+          expires_at: 1900,
+          auth_required: true,
+        }),
+      };
+    });
+    const wrapper = mountWide({
+      item: { ...item, hostId: "studio-7680", hostLabel: "studio" },
+    });
+    await flushPromises();
+
+    const src = wrapper.find("img").attributes("src") ?? "";
+    const url = new URL(src);
+    expect(url.origin + url.pathname).toBe(
+      "http://studio:7680/api/gallery/image/print.png",
+    );
+    expect(url.searchParams.get("media_token")).toBe("tkt");
+    // The durable key never rides in a URL.
+    expect(src).not.toContain("studio-secret-key");
+  });
+
+  it("names the owning host in the details panel", async () => {
+    mockFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        token: "tkt",
+        expires_at: 1900,
+        auth_required: true,
+      }),
+    }));
+    const wrapper = mountWide({
+      item: { ...item, hostId: "studio-7680", hostLabel: "studio" },
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("studio");
+  });
+
+  it("shows the can't-stream state for video on a ticket-less host", async () => {
+    mockFetch((url) => {
+      if (url.endsWith("/media-token")) return { ok: false, status: 404 };
+      throw new Error("must not buffer a whole video");
+    });
+    const clip: GalleryImage = {
+      ...item,
+      filename: "clip.mp4",
+      format: "mp4",
+    };
+    const wrapper = mountWide({
+      item: { ...clip, hostId: "studio-7680", hostLabel: "studio" },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("video").exists()).toBe(false);
+    expect(wrapper.text()).toContain("Can't stream this clip");
   });
 });

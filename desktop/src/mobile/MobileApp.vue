@@ -32,7 +32,7 @@ import {
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
 import { percent } from "../lib/format";
-import { composeStyle, styleHint } from "../lib/stylePresets";
+import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   guidanceValidationError,
   inlineGenerationMediaBytes,
@@ -212,6 +212,12 @@ const expansionRecovery = ref<MobileExpansionRecoveryRecord | null>(null);
 const expansionPullAttempt = ref<MobileExpansionPullAttempt | null>(null);
 const quickExpansionOriginal = ref<string | null>(null);
 const quickExpansionSnapshot = ref<QuickExpansionSnapshot | null>(null);
+/**
+ * The negative prompt before and after a bake-and-clear merged the preset's
+ * curated fragments into it. Undo re-arms `before` alongside the prompt and
+ * chip; `baked` lets it bow out when the user has since edited the field.
+ */
+const quickExpansionNegative = ref<{ before: string; baked: string } | null>(null);
 const preparedSubmitting = ref(false);
 const preparationGuard = new PreparationRequestGuard();
 const submissionGuard = new PreparationRequestGuard();
@@ -1001,6 +1007,7 @@ function commitExpandedPrompts(
     // the frozen-style indicator for the reviewed set (a style change is a
     // named staleness axis) and their submit path never re-composes it into
     // the reviewed prompt text.
+    bakeStyleNegative(inputs.stylePreset ?? "", inputs.family);
     form.stylePreset = "";
     if (replacePrepared) preparedBatch.value = null;
     clearExpansionRecovery(false);
@@ -1088,14 +1095,37 @@ async function expandForCurrentBatch(
   }
 }
 
+/**
+ * Bake-and-clear owes the user the preset's curated negative: the chip is
+ * about to be dropped, so submit-time composition will never see it again.
+ * The look itself already reached the rewritten prompt through the expansion
+ * directive — only the negative half has nowhere else to live (mirrors
+ * desktop).
+ */
+function bakeStyleNegative(presetId: string, family: string): void {
+  quickExpansionNegative.value = null;
+  const merged = mergeStyleNegative(form.negativePrompt, presetId, {
+    supportsNegativePrompt: generationCapabilitiesForFamily(family).supportsNegativePrompt,
+  });
+  if (merged === form.negativePrompt) return;
+  quickExpansionNegative.value = { before: form.negativePrompt, baked: merged };
+  form.negativePrompt = merged;
+}
+
 function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
   submissionGuard.invalidate();
   preparationGuard.invalidate();
   // Undo re-arms the whole pre-expansion state, including the chip the
-  // bake-and-clear apply removed.
+  // bake-and-clear apply removed and the negative fragments it merged in —
+  // unless the user has edited the negative since, which is theirs to keep.
   const snapshot = quickExpansionSnapshot.value;
   if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
+  const negative = quickExpansionNegative.value;
+  if (negative && form.negativePrompt === negative.baked) {
+    form.negativePrompt = negative.before;
+  }
+  quickExpansionNegative.value = null;
   form.prompt = quickExpansionOriginal.value;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
@@ -1158,7 +1188,9 @@ function collapsePreparedBatch(removedId: string): void {
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
   // Same bake-and-clear rule as a quick apply: the surviving reviewed text
-  // absorbed the frozen style, so keeping the chip would re-apply the look.
+  // absorbed the frozen style, so keeping the chip would re-apply the look —
+  // and the frozen style's negative moves into the form with it.
+  bakeStyleNegative(batch.stylePreset ?? "", batch.family);
   form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;

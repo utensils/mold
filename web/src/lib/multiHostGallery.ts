@@ -36,6 +36,22 @@ export interface MergedGallery {
   remoteHostCount: number;
 }
 
+/**
+ * Stable identity for one print: the pair of the host that holds it and its
+ * filename. mold names outputs model+seed+timestamp, so two machines routinely
+ * hold the same filename — keying selection, delete routing or lightbox lookup
+ * on the filename alone makes those two prints the same print, which deletes
+ * the wrong file on the wrong box. Host ids are URL slugs, so "|" can't collide.
+ */
+export function makePrintKey(hostId: string, filename: string): string {
+  return `${hostId}|${filename}`;
+}
+
+/** `makePrintKey` for a gallery entry; an untagged entry is the origin's. */
+export function printKey(entry: { hostId?: string; filename: string }): string {
+  return makePrintKey(entry.hostId ?? ORIGIN_HOST_ID, entry.filename);
+}
+
 export type HostGalleryFetcher = (host: HostEntry) => Promise<GalleryImage[]>;
 
 /** Fetch + merge every host's gallery. `fetcher` is injectable for tests. */

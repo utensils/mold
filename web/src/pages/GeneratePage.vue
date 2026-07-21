@@ -44,7 +44,11 @@ import {
   promptWithStyle,
   useGenerateForm,
 } from "../composables/useGenerateForm";
-import { angleForIndex } from "../lib/stylePresets";
+import {
+  angleForIndex,
+  mergeStyleNegative,
+  styleHint,
+} from "../lib/stylePresets";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
@@ -107,6 +111,17 @@ const submitStatus = computed(
 // batch = 1 rewrites the prompt in place (undoable); batch > 1 fans out into
 // editable variations reviewed in the canvas before queueing.
 const prevPrompt = ref<string | null>(null);
+/**
+ * The style state a quick expansion's bake-and-clear replaced: the chip it
+ * dropped, and the negative prompt before and after the preset's curated
+ * fragments merged in. Undo re-arms it; `baked` lets the negative half bow out
+ * when the user has edited the field since.
+ */
+const prevStyle = ref<{
+  preset: string | null;
+  negativeBefore: string;
+  negativeBaked: string;
+} | null>(null);
 const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
 
@@ -177,6 +192,13 @@ function setComposerMode(v: ComposerMode) {
 
 const expandStageIndex = ref<number | null>(null);
 const expandStagePrompt = ref("");
+// The composer's style chip steers the main-prompt expansion as natural
+// language. Chain stages are their own text — the style row never touches them.
+const expandStyleDirective = computed(() =>
+  expandStageIndex.value !== null
+    ? null
+    : styleHint(form.state.value.stylePreset ?? ""),
+);
 const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 
 // Drawer state (mirrors GalleryPage).
@@ -328,6 +350,7 @@ function onNewPrint() {
   form.state.value.controlImage = null;
   variations.value = [];
   prevPrompt.value = null;
+  prevStyle.value = null;
   composerError.value = null;
   preprocessingStatus.value = null;
   void nextTick(() => composerCardRef.value?.focus?.());
@@ -665,6 +688,24 @@ function onExpandStage(stageIndex: number, prompt: string) {
   showExpand.value = true;
 }
 
+/**
+ * Bake-and-clear owes the user the preset's curated negative: the chip is
+ * about to be dropped, so submit-time composition will never see it again.
+ * The look itself already reached the prompt — through the server's expansion
+ * directive, or through the baked variation text — so only the negative half
+ * has nowhere else to live. Returns the pre-bake negative for undo.
+ */
+function bakeStyleAndClear() {
+  const preset = form.state.value.stylePreset;
+  const negativeBefore = form.state.value.negativePrompt;
+  const negativeBaked = mergeStyleNegative(negativeBefore, preset ?? "", {
+    supportsNegativePrompt: capabilities.value.supportsNegativePrompt,
+  });
+  form.state.value.negativePrompt = negativeBaked;
+  form.state.value.stylePreset = null;
+  prevStyle.value = { preset, negativeBefore, negativeBaked };
+}
+
 function applyExpandedPrompt(v: string) {
   if (expandStageIndex.value !== null) {
     scriptComposerRef.value?.setStagePrompt(expandStageIndex.value, v);
@@ -672,12 +713,26 @@ function applyExpandedPrompt(v: string) {
   }
   prevPrompt.value = form.state.value.prompt;
   form.state.value.prompt = v;
+  // Same bake-and-clear as the desktop app: the rewrite absorbed the look, so
+  // leaving the chip lit would apply it twice at submit.
+  bakeStyleAndClear();
 }
 
 function undoExpand() {
   if (prevPrompt.value === null) return;
   form.state.value.prompt = prevPrompt.value;
+  // Undo re-arms the whole pre-expansion state: prompt, chip, and the negative
+  // fragments the bake merged in — unless the user has edited the negative
+  // since, which is theirs to keep.
+  const style = prevStyle.value;
+  if (style) {
+    form.state.value.stylePreset = style.preset;
+    if (form.state.value.negativePrompt === style.negativeBaked) {
+      form.state.value.negativePrompt = style.negativeBefore;
+    }
+  }
   prevPrompt.value = null;
+  prevStyle.value = null;
 }
 
 // ── Variations review (batch > 1) ─────────────────────────────────────
@@ -685,7 +740,9 @@ function useVariation(index: number) {
   const v = variations.value[index];
   if (v == null) return;
   form.state.value.prompt = v;
-  form.state.value.stylePreset = null; // extras are already baked into `v`
+  // The variation text already carries the baked look, so the chip clears —
+  // and the preset's curated negative comes with it.
+  bakeStyleAndClear();
   variations.value = [];
 }
 
@@ -1098,6 +1155,7 @@ onBeforeUnmount(() => {
       :expand="form.state.value.expand"
       :current-model="currentModel"
       :queue-busy="!!runningJob"
+      :style-directive="expandStyleDirective"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
       @apply-prompt="applyExpandedPrompt"
       @close="

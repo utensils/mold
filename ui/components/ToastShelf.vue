@@ -5,12 +5,9 @@
  * reports dismiss(id) / action(id). Errors are alerts with a stop-tinted
  * border; success/info are polite status rows. Optional action button (undo).
  */
-export interface Toast {
-  id: string;
-  kind: "info" | "success" | "error";
-  text: string;
-  actionLabel?: string;
-}
+import type { Toast } from "./types";
+
+export type { Toast };
 
 defineProps<{
   toasts: readonly Toast[];

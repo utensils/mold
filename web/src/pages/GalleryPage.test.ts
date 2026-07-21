@@ -18,6 +18,10 @@ const { listGalleryMock, deleteMock } = vi.hoisted(() => ({
   listGalleryMock: vi.fn(),
   deleteMock: vi.fn(),
 }));
+const { hostDeleteMock, fetchBlobMock } = vi.hoisted(() => ({
+  hostDeleteMock: vi.fn(),
+  fetchBlobMock: vi.fn(),
+}));
 const { pushMock, replaceMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
@@ -30,23 +34,39 @@ vi.mock("../api", () => ({
   thumbnailUrl: (f: string) => `/api/gallery/thumbnail/${f}`,
 }));
 
-// The gallery now merges every host; in tests the origin's list (listGalleryMock)
-// is the single source, tagged as the origin host.
-vi.mock("../lib/multiHostGallery", () => ({
-  fetchMergedGallery: async () => {
-    const list = (await listGalleryMock()) as unknown[];
-    return {
-      entries: list.map((e) => ({
-        ...(e as object),
-        hostId: "origin",
-        hostLabel: "this server",
-      })),
-      reachableHostIds: ["origin"],
-      unreachableHostIds: [],
-      remoteHostCount: 0,
-    };
-  },
+vi.mock("../components/machines/hostClient", () => ({
+  hostDeleteGalleryImage: hostDeleteMock,
+  hostGallery: vi.fn(),
 }));
+
+vi.mock("../lib/galleryMedia", () => ({
+  fetchGalleryBlob: fetchBlobMock,
+}));
+
+// The gallery now merges every host; in tests the origin's list (listGalleryMock)
+// is the single source. Entries default to the origin but may carry their own
+// host tag so collisions across machines can be exercised.
+vi.mock("../lib/multiHostGallery", async () => {
+  const actual = await vi.importActual<
+    typeof import("../lib/multiHostGallery")
+  >("../lib/multiHostGallery");
+  return {
+    ...actual,
+    fetchMergedGallery: async () => {
+      const list = (await listGalleryMock()) as object[];
+      return {
+        entries: list.map((e) => ({
+          hostId: "origin",
+          hostLabel: "this server",
+          ...e,
+        })),
+        reachableHostIds: ["origin"],
+        unreachableHostIds: [],
+        remoteHostCount: 0,
+      };
+    },
+  };
+});
 
 vi.mock("vue-router", () => ({
   useRoute: () => ({ query: {} }),
@@ -98,7 +118,9 @@ const GalleryGridStub = defineComponent({
   emits: ["open", "toggle-select", "drag-select"],
   template: `<div data-test="grid">
     <button data-test="grid-open" @click="$emit('open', entries[0])">open</button>
+    <button data-test="grid-open-last" @click="$emit('open', entries[entries.length - 1])">open last</button>
     <span data-test="grid-count">{{ entries.length }}</span>
+    <span data-test="grid-keys">{{ entries.map((e) => e.hostId + '|' + e.filename).join(',') }}</span>
   </div>`,
 });
 
@@ -116,6 +138,8 @@ const LightboxStub = defineComponent({
   template: `<div v-if="item" data-test="lightbox">
     <button data-test="lb-reuse" @click="$emit('reuse', item)">reuse</button>
     <button data-test="lb-delete" @click="$emit('delete', item)">delete</button>
+    <button data-test="lb-source" @click="$emit('use-source', item)">source</button>
+    <span data-test="lb-key">{{ item.hostId }}|{{ item.filename }}</span>
   </div>`,
 });
 
@@ -145,6 +169,8 @@ describe("GalleryPage", () => {
     formTesting.resetForTest();
     listGalleryMock.mockReset().mockResolvedValue([cat, dog]);
     deleteMock.mockReset().mockResolvedValue(undefined);
+    hostDeleteMock.mockReset().mockResolvedValue(undefined);
+    fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
     pushMock.mockReset();
     replaceMock.mockReset();
     vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
@@ -279,6 +305,178 @@ describe("GalleryPage", () => {
     await wrapper.find("[aria-label='Refresh gallery']").trigger("click");
     await flushPromises();
 
-    expect((grid.props("fresh") as Set<string>).has("new.png")).toBe(true);
+    expect((grid.props("fresh") as Set<string>).has("origin|new.png")).toBe(
+      true,
+    );
+  });
+});
+
+describe("GalleryPage multi-host identity", () => {
+  const STUDIO = {
+    id: "studio-7680",
+    name: "studio",
+    url: "http://studio:7680",
+    apiKey: "studio-key",
+  };
+  // Same filename on two machines — mold names prints model+seed+timestamp,
+  // so this is the common case once a second host is connected.
+  const mine = {
+    ...makeEntry("twin.png", "a twin print", "flux-dev:fp16", 5),
+    hostId: "origin",
+    hostLabel: "this server",
+  };
+  const theirs = {
+    ...makeEntry("twin.png", "a twin print", "flux-dev:fp16", 6),
+    hostId: "studio-7680",
+    hostLabel: "studio",
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem("mold.web.hosts.v1", JSON.stringify([STUDIO]));
+    resetNotifications();
+    formTesting.resetForTest();
+    listGalleryMock.mockReset().mockResolvedValue([theirs, mine]);
+    deleteMock.mockReset().mockResolvedValue(undefined);
+    hostDeleteMock.mockReset().mockResolvedValue(undefined);
+    fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    vi.mocked(requestConfirm).mockReset().mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  it("deletes the remote twin on its own host and keeps the local one", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
+
+    // entries[0] is the studio copy.
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+
+    // The local twin survives the optimistic removal.
+    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
+      "origin|twin.png",
+    );
+
+    vi.advanceTimersByTime(6000);
+    await flushPromises();
+    expect(hostDeleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680" }),
+      "twin.png",
+    );
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it("deletes the local twin on the origin and keeps the remote one", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+
+    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='grid-keys']").text()).toBe(
+      "studio-7680|twin.png",
+    );
+
+    vi.advanceTimersByTime(6000);
+    await flushPromises();
+    expect(deleteMock).toHaveBeenCalledWith("twin.png");
+    expect(hostDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it("bulk delete routes each selected twin to its own host", async () => {
+    const wrapper = mountPage();
+    await flushPromises();
+    await wrapper.find("[data-test='gallery-select']").trigger("click");
+    await wrapper.vm.$nextTick();
+
+    const deleteAll = wrapper
+      .findAll(".gal__bar-danger")
+      .find((b) => b.text() === "Delete all");
+    await deleteAll!.trigger("click");
+    await flushPromises();
+
+    expect(deleteMock).toHaveBeenCalledTimes(1);
+    expect(deleteMock).toHaveBeenCalledWith("twin.png");
+    expect(hostDeleteMock).toHaveBeenCalledTimes(1);
+    expect(hostDeleteMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680" }),
+      "twin.png",
+    );
+    expect(wrapper.text()).toContain("No prints yet");
+  });
+
+  it("fetches Use as source from the host that owns the print", async () => {
+    const wrapper = mountPage();
+    await flushPromises();
+
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("[data-test='lb-key']").text()).toBe(
+      "studio-7680|twin.png",
+    );
+
+    await wrapper.find("[data-test='lb-source']").trigger("click");
+    await flushPromises();
+
+    expect(fetchBlobMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "studio-7680", apiKey: "studio-key" }),
+      "twin.png",
+    );
+    expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+  });
+
+  it("fetches a local print's source bytes from the origin", async () => {
+    const wrapper = mountPage();
+    await flushPromises();
+
+    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-source']").trigger("click");
+    await flushPromises();
+
+    expect(fetchBlobMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "origin" }),
+      "twin.png",
+    );
+  });
+
+  it("never falls back to the origin for a print whose host is gone", async () => {
+    // The host was forgotten between the merge and the action. Deleting or
+    // sourcing against the origin would hit the same-named local twin.
+    localStorage.removeItem("mold.web.hosts.v1");
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-source']").trigger("click");
+    await flushPromises();
+    expect(fetchBlobMock).not.toHaveBeenCalled();
+
+    await wrapper.find("[data-test='grid-open']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-delete']").trigger("click");
+    await flushPromises();
+    vi.advanceTimersByTime(6000);
+    await flushPromises();
+
+    expect(deleteMock).not.toHaveBeenCalled();
+    expect(hostDeleteMock).not.toHaveBeenCalled();
+    // The print comes back rather than vanishing on a delete that never ran.
+    expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
   });
 });

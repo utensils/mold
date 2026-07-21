@@ -41,10 +41,27 @@ export type ModelDetail =
 export type ModelsTab = "installed" | "discover";
 
 /** Single variant a catalog row resolves to. Label leans on the file format
- * since the live search wire exposes one downloadable form per row. */
+ * since the live search wire exposes one downloadable form per row; a row
+ * without one simply offers no variant chips rather than an empty button. */
 function catalogVariants(entry: CatalogEntryWire): ModelVariant[] {
+  if (!entry?.file_format) return [];
   return [{ id: entry.id, label: entry.file_format }];
 }
+
+/** The minimum a row needs to back a detail view. Anything less can only
+ * paint an empty panel, so the drawer shows its retryable error instead —
+ * that dead panel is exactly what users reported. */
+function isRenderableEntry(entry: unknown): entry is CatalogEntryWire {
+  if (typeof entry !== "object" || entry === null) return false;
+  const e = entry as Partial<CatalogEntryWire>;
+  return (
+    typeof e.id === "string" &&
+    typeof e.name === "string" &&
+    typeof e.family === "string"
+  );
+}
+
+const DETAIL_ERROR_MESSAGE = "Couldn't load this model's details.";
 
 const DEBOUNCE_MS = 250;
 const PAGE_SIZE = 48;
@@ -157,14 +174,21 @@ function build() {
     // to the API when the user opens an id that isn't in the current page —
     // e.g. a future deep-link path.
     detailError.value = null;
-    const cached = entries.value.find((e) => e.id === id);
+    const cached = entries.value.find((e) => e?.id === id);
     if (cached) {
-      detailLoadingId.value = null;
-      detail.value = {
-        kind: "catalog",
-        entry: cached,
-        variants: catalogVariants(cached),
-      };
+      // Everything from here to `detail.value = …` runs on wire data. A throw
+      // would escape the async function (callers use `void openDetail(id)`)
+      // and leave the drawer open on nothing — surface a retryable error.
+      try {
+        if (!isRenderableEntry(cached)) throw new Error("malformed entry");
+        const variants = catalogVariants(cached);
+        detailLoadingId.value = null;
+        detail.value = { kind: "catalog", entry: cached, variants };
+      } catch {
+        detail.value = null;
+        detailLoadingId.value = null;
+        detailError.value = { id, message: DETAIL_ERROR_MESSAGE };
+      }
       return;
     }
     // Not on the current page — open the drawer in a loading state while the
@@ -174,22 +198,19 @@ function build() {
     try {
       const entry = await fetchCatalogEntry(id);
       if (detailLoadingId.value !== id) return; // superseded by another open
+      if (!isRenderableEntry(entry)) throw new Error("malformed entry");
+      const variants = catalogVariants(entry);
       detailLoadingId.value = null;
-      detail.value = {
-        kind: "catalog",
-        entry,
-        variants: catalogVariants(entry),
-      };
+      detail.value = { kind: "catalog", entry, variants };
     } catch {
       if (detailLoadingId.value !== id) return;
+      detail.value = null;
       detailLoadingId.value = null;
-      // 404 (live row not in DB) / 502 (upstream) / transient network — show a
-      // retryable error in the drawer instead of a blank panel or a silent
-      // close the user can't tell apart from a mis-click.
-      detailError.value = {
-        id,
-        message: "Couldn't load this model's details.",
-      };
+      // 404 (live row not in DB) / 502 (upstream) / transient network /
+      // unusable payload — show a retryable error in the drawer instead of a
+      // blank panel or a silent close the user can't tell apart from a
+      // mis-click.
+      detailError.value = { id, message: DETAIL_ERROR_MESSAGE };
     }
   }
 

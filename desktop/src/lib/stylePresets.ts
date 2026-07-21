@@ -17,6 +17,7 @@ export {
   STYLE_PRESETS,
   angleForIndex,
   composeStyle,
+  mergeStyleNegative,
   resolveStyleId,
   styleHint,
   stylePresetById,

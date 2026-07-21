@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { GalleryImage } from "../types";
+import { printKey } from "../lib/multiHostGallery";
 import GalleryCard from "./GalleryCard.vue";
 
 type ViewMode = "feed" | "grid";
@@ -14,6 +15,7 @@ const props = withDefaults(
     view: ViewMode;
     muted: boolean;
     selectMode?: boolean;
+    /** Selected print keys — `hostId|filename`, never a bare filename. */
     selection?: Set<string>;
     showRecreate?: boolean;
   }>(),
@@ -35,8 +37,13 @@ const emit = defineEmits<{
   // should adopt. We snapshot the starting selection at pointerdown so
   // additive drags (shift/meta) merge cleanly with the existing set;
   // plain drags replace it. The parent just assigns whatever arrives.
-  (e: "drag-select", payload: { filenames: string[] }): void;
+  (e: "drag-select", payload: { keys: string[] }): void;
 }>();
+
+/** Composite identity for a card: two hosts can hold the same filename. */
+function keyOf(entry: GalleryImage): string {
+  return printKey(entry as { hostId?: string; filename: string });
+}
 
 /*
  * Chunked rendering
@@ -146,7 +153,7 @@ function onPointerDown(evt: PointerEvent) {
   // space (gaps between cards, padding around the grid) is the drag
   // surface.
   const target = evt.target as HTMLElement | null;
-  if (target?.closest("[data-filename]")) return;
+  if (target?.closest("[data-print-key]")) return;
   if (target?.closest("button, a, input, textarea, [data-swipe-ignore]")) {
     return;
   }
@@ -178,7 +185,7 @@ function onPointerMove(evt: PointerEvent) {
   const final = drag.additive
     ? new Set([...drag.base, ...hits])
     : new Set(hits);
-  emit("drag-select", { filenames: Array.from(final) });
+  emit("drag-select", { keys: Array.from(final) });
 }
 
 function onPointerUp() {
@@ -189,7 +196,8 @@ function onPointerUp() {
 
 function collectHits(x: number, y: number, w: number, h: number): string[] {
   if (!feedRoot.value) return [];
-  const cards = feedRoot.value.querySelectorAll<HTMLElement>("[data-filename]");
+  const cards =
+    feedRoot.value.querySelectorAll<HTMLElement>("[data-print-key]");
   const hits: string[] = [];
   const right = x + w;
   const bottom = y + h;
@@ -204,8 +212,8 @@ function collectHits(x: number, y: number, w: number, h: number): string[] {
     ) {
       continue;
     }
-    const name = card.dataset.filename;
-    if (name) hits.push(name);
+    const key = card.dataset.printKey;
+    if (key) hits.push(key);
   }
   return hits;
 }
@@ -284,12 +292,13 @@ onBeforeUnmount(() => {
     >
       <GalleryCard
         v-for="entry in visibleEntries"
-        :key="entry.filename"
+        :key="keyOf(entry)"
         :item="entry"
         :muted="muted"
         variant="feed"
         :select-mode="selectMode"
-        :selected="selection.has(entry.filename)"
+        :print-key="keyOf(entry)"
+        :selected="selection.has(keyOf(entry))"
         :show-recreate="showRecreate"
         @open="emit('open', entry)"
         @recreate="emit('recreate', $event)"
@@ -304,12 +313,13 @@ onBeforeUnmount(() => {
     >
       <GalleryCard
         v-for="entry in visibleEntries"
-        :key="entry.filename"
+        :key="keyOf(entry)"
         :item="entry"
         :muted="muted"
         variant="grid"
         :select-mode="selectMode"
-        :selected="selection.has(entry.filename)"
+        :print-key="keyOf(entry)"
+        :selected="selection.has(keyOf(entry))"
         :show-recreate="showRecreate"
         @open="emit('open', entry)"
         @recreate="emit('recreate', $event)"

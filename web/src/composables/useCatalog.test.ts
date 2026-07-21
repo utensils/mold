@@ -191,6 +191,60 @@ describe("useCatalog", () => {
     expect(cat.detail.value).toBeNull();
   });
 
+  it("openDetail on a malformed cached entry sets a retryable error, not a dead drawer", async () => {
+    // A row that survived the list render but can't back a detail view (no
+    // name/family) must open the error state — never a `detail` the drawer
+    // can only paint blank, and never an exception out of the async call.
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/catalog/families")) {
+        return { ok: true, json: async () => ({ families: [] }) };
+      }
+      if (url.startsWith("/api/catalog/search")) {
+        return {
+          ok: true,
+          json: async () => ({
+            entries: [{ id: "hf:bad" }],
+            page: 1,
+            page_size: 48,
+            total: 1,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    const cat = useCatalog();
+    await cat.refresh();
+    await cat.openDetail("hf:bad");
+    expect(cat.detail.value).toBeNull();
+    expect(cat.detailLoadingId.value).toBeNull();
+    expect(cat.detailError.value?.id).toBe("hf:bad");
+  });
+
+  it("openDetail survives a null row sitting in the cached list", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/catalog/families")) {
+        return { ok: true, json: async () => ({ families: [] }) };
+      }
+      if (url.startsWith("/api/catalog/search")) {
+        return {
+          ok: true,
+          json: async () => ({
+            entries: [null, ...makePageEntries(1, 1)],
+            page: 1,
+            page_size: 48,
+            total: 2,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    const cat = useCatalog();
+    await cat.refresh();
+    await cat.openDetail("hf:row-0");
+    expect(cat.detail.value?.kind).toBe("catalog");
+    expect(cat.detailError.value).toBeNull();
+  });
+
   it("enables download for engine_phase 1–5, disables for engine_phase >= 6", async () => {
     const cat = useCatalog();
     expect(cat.canDownload({ engine_phase: 1 } as any)).toBe(true);

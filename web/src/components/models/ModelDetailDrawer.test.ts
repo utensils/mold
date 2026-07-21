@@ -30,6 +30,8 @@ const makeEntry = (over: Partial<CatalogEntryWire> = {}): CatalogEntryWire => ({
   license: "apache-2.0",
   license_flags: null,
   tags: [],
+  trained_words: [],
+  page_url: null,
   companions: [],
   companion_details: [],
   download_recipe: { files: [], needs_token: null },
@@ -145,6 +147,28 @@ describe("ModelDetailDrawer", () => {
       expect(w.find(".md").exists()).toBe(true);
       expect(w.text()).toContain("Malformed Model");
     });
+
+    it("falls back to a terminal state when the detail has no renderable payload", () => {
+      // The photographed bug: `detail` is set but carries nothing the drawer
+      // can render, so every branch of the state chain misses and the open
+      // panel paints blank. There must always be a last branch.
+      mockDetail.value = {
+        kind: "catalog",
+        entry: null,
+        variants: [],
+      } as unknown as ModelDetail;
+      const w = mount(ModelDetailDrawer);
+      const fallback = w.find("[data-test='detail-unrenderable']");
+      expect(fallback.exists()).toBe(true);
+      expect(fallback.text().length).toBeGreaterThan(0);
+    });
+
+    it("falls back to a terminal state for an unknown detail kind", () => {
+      mockDetail.value = { kind: "future-thing" } as unknown as ModelDetail;
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test='detail-unrenderable']").exists()).toBe(true);
+      expect(w.find("[data-test='detail-content']").exists()).toBe(false);
+    });
   });
 
   describe("catalog (Discover)", () => {
@@ -255,6 +279,134 @@ describe("ModelDetailDrawer", () => {
     });
   });
 
+  describe("hero preview", () => {
+    it("renders the thumbnail as a hero image", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          thumbnail_url:
+            "https://image.civitai.com/abc/def/width=512/12345.jpeg",
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const img = w.find("[data-test=detail-hero] img");
+      expect(img.exists()).toBe(true);
+      expect(img.attributes("src")).toContain("12345.jpeg");
+    });
+
+    it("renders no hero block when there is no thumbnail", () => {
+      mockDetail.value = catalogDetail(makeEntry({ thumbnail_url: null }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=detail-hero]").exists()).toBe(false);
+    });
+
+    it("drops the hero block when the image fails to load", async () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({ thumbnail_url: "https://image.example/broken.jpeg" }),
+      );
+      const w = mount(ModelDetailDrawer);
+      await w.get("[data-test=detail-hero] img").trigger("error");
+      expect(w.find("[data-test=detail-hero]").exists()).toBe(false);
+    });
+
+    it("uses a video element for Civitai video previews", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          thumbnail_url:
+            "https://image.civitai.com/abc/def/width=512/75044257.mp4",
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=detail-hero] video").exists()).toBe(true);
+      expect(w.find("[data-test=detail-hero] img").exists()).toBe(false);
+    });
+  });
+
+  describe("catalog metadata", () => {
+    it("renders downloads, likes, rating, kind, format and updated date", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          kind: "lora",
+          file_format: "safetensors",
+          download_count: 1_579_037,
+          likes: 4200,
+          rating: 4.7,
+          // 2025-06-01T00:00:00Z
+          updated_at: 1_748_736_000,
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const rows = w.get("[data-test=meta-rows]").text();
+      expect(rows).toContain("Downloads");
+      expect(rows).toContain("1.6M");
+      expect(rows).toContain("Likes");
+      expect(rows).toContain("4.2k");
+      expect(rows).toContain("Rating");
+      expect(rows).toContain("4.7");
+      expect(rows).toContain("lora");
+      expect(rows).toContain("safetensors");
+      expect(rows).toContain("Updated");
+      expect(rows).toContain("2025");
+    });
+
+    it("skips null fields instead of printing an em dash for each", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          author: null,
+          license: null,
+          rating: null,
+          likes: 0,
+          download_count: 0,
+          updated_at: null,
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const rows = w.get("[data-test=meta-rows]").text();
+      expect(rows).not.toContain("—");
+      expect(rows).not.toContain("Rating");
+      expect(rows).not.toContain("Likes");
+      expect(rows).not.toContain("License");
+      // Source is always known for a catalog row.
+      expect(rows).toContain("Hugging Face");
+    });
+
+    it("renders trained words as chips", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({ trained_words: ["ohwx woman", "cinematic glow"] }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const chips = w.get("[data-test=trained-words]");
+      expect(chips.text()).toContain("ohwx woman");
+      expect(chips.text()).toContain("cinematic glow");
+    });
+
+    it("omits the trained-words section when there are none", () => {
+      mockDetail.value = catalogDetail(makeEntry({ trained_words: [] }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=trained-words]").exists()).toBe(false);
+    });
+
+    it("links out to the upstream model page", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          source: "civitai",
+          page_url: "https://civitai.com/models/133005",
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const link = w.get("[data-test=page-link]");
+      expect(link.attributes("href")).toBe("https://civitai.com/models/133005");
+      expect(link.attributes("target")).toBe("_blank");
+      expect(link.attributes("rel")).toContain("noopener");
+      expect(link.text()).toContain("Civitai");
+    });
+
+    it("omits the page link when the entry has no page url", () => {
+      mockDetail.value = catalogDetail(makeEntry({ page_url: null }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=page-link]").exists()).toBe(false);
+    });
+  });
+
   describe("installed model", () => {
     it("renders Load, Unload and Delete actions", () => {
       mockDetail.value = {
@@ -361,5 +513,35 @@ describe("ModelDetailDrawer", () => {
     const w = mount(ModelDetailDrawer);
     await w.find("button[aria-label=Close]").trigger("click");
     expect(mockCloseDetail).toHaveBeenCalled();
+  });
+});
+
+describe("viewport anchoring", () => {
+  it("mounts the panel in a viewport-fixed host so scroll position can't hide it", async () => {
+    // DrawerPanel/SheetPanel are `position: absolute; inset: 0` — they fill
+    // their nearest positioned ancestor. Mounted inline on the long Models
+    // page that ancestor is the scrolling column, so opening a card far down
+    // the list drew the drawer at the top of the DOCUMENT, off-screen. The
+    // fixed host re-anchors it to the viewport.
+    mockDetail.value = {
+      kind: "catalog",
+      entry: null,
+      variants: [],
+    } as unknown as ModelDetail;
+    const w = mount(ModelDetailDrawer);
+    await flushPromises();
+
+    const host = w.find("[data-test='detail-drawer-host']");
+    expect(host.exists()).toBe(true);
+    expect(host.classes()).toContain("fixed");
+    expect(host.classes()).toContain("inset-0");
+  });
+
+  it("renders no host at all while closed", () => {
+    mockDetail.value = null;
+    mockDetailLoadingId.value = null;
+    mockDetailError.value = null;
+    const w = mount(ModelDetailDrawer);
+    expect(w.find("[data-test='detail-drawer-host']").exists()).toBe(false);
   });
 });

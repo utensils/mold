@@ -512,6 +512,12 @@ export interface ExpandRequestWire {
   prompt: string;
   model_family: string;
   variations: number;
+  /**
+   * Natural-language style directive (see `styleHint`) the server appends to
+   * the expander's system message so the look is woven into the rewrite —
+   * never the literal preset suffix, and never appended to the prompt text.
+   */
+  style?: string;
 }
 
 export interface ExpandResponseWire {
@@ -877,6 +883,9 @@ export interface CatalogEntryWire {
    * for non-LoRA rows or when the upstream API didn't supply any. The
    * SPA renders these as click-to-insert chips inside the LoRA picker. */
   trained_words?: string[];
+  /** Upstream model page (civitai.com / huggingface.co). Absent on older
+   * servers; the model detail drawer links out to it when present. */
+  page_url?: string | null;
 }
 
 export interface CatalogListResponse {

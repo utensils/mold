@@ -5,6 +5,7 @@ import {
   STYLE_PRESETS,
   angleForIndex,
   composeStyle,
+  mergeStyleNegative,
   resolveStyleId,
   styleHint,
   stylePresetById,
@@ -178,6 +179,83 @@ describe("composeStyle negative gating", () => {
       supportsNegativePrompt: true,
     });
     expect(out.negative).toBeUndefined();
+  });
+});
+
+describe("mergeStyleNegative", () => {
+  it("merges the preset negative after the user's fragments", () => {
+    expect(
+      mergeStyleNegative("text, watermark", "cinematic", {
+        supportsNegativePrompt: true,
+      }),
+    ).toBe("text, watermark, anime, cartoon, graphic, washed out");
+  });
+
+  it("uses the preset negative alone when the user gave none", () => {
+    expect(
+      mergeStyleNegative("", "cinematic", { supportsNegativePrompt: true }),
+    ).toBe("anime, cartoon, graphic, washed out");
+    expect(
+      mergeStyleNegative(undefined, "cinematic", {
+        supportsNegativePrompt: true,
+      }),
+    ).toBe("anime, cartoon, graphic, washed out");
+  });
+
+  it("dedupes fragments the user already wrote", () => {
+    expect(
+      mergeStyleNegative("cartoon,  text ", "cinematic", {
+        supportsNegativePrompt: true,
+      }),
+    ).toBe("cartoon, text, anime, graphic, washed out");
+  });
+
+  it("returns the user negative untouched when the family has no negative", () => {
+    expect(
+      mergeStyleNegative("text", "cinematic", {
+        supportsNegativePrompt: false,
+      }),
+    ).toBe("text");
+  });
+
+  it("returns the user negative untouched for a preset without one", () => {
+    expect(
+      mergeStyleNegative("text", "watercolor", {
+        supportsNegativePrompt: true,
+      }),
+    ).toBe("text");
+  });
+
+  it("returns the user negative untouched for an empty or unknown id", () => {
+    expect(
+      mergeStyleNegative("text", "", { supportsNegativePrompt: true }),
+    ).toBe("text");
+    expect(
+      mergeStyleNegative("text", "nope", { supportsNegativePrompt: true }),
+    ).toBe("text");
+    expect(
+      mergeStyleNegative(undefined, "", { supportsNegativePrompt: true }),
+    ).toBe("");
+  });
+
+  it("resolves legacy ids", () => {
+    expect(
+      mergeStyleNegative("", "photographic", { supportsNegativePrompt: true }),
+    ).toBe(
+      mergeStyleNegative("", "photoreal", { supportsNegativePrompt: true }),
+    );
+  });
+
+  it("is the same merge composeStyle applies", () => {
+    const composed = composeStyle("a cat", "photoreal", {
+      supportsNegativePrompt: true,
+      negative: "text, watermark",
+    });
+    expect(composed.negative).toBe(
+      mergeStyleNegative("text, watermark", "photoreal", {
+        supportsNegativePrompt: true,
+      }),
+    );
   });
 });
 

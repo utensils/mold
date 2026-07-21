@@ -11,6 +11,7 @@ import {
   settleConfirm,
   useNotifications,
 } from "../lib/toasts";
+import { styleHint } from "../lib/stylePresets";
 import type { ChainJobDetail, GalleryImage } from "../types";
 
 const entry: GalleryImage = {
@@ -280,6 +281,132 @@ describe("GeneratePage layout and behavior", () => {
     }
   });
 
+  it("sends the active style as a directive on the main-prompt expand", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("open")).toBe(true);
+    // The chip travels as natural language the server weaves into the
+    // expander's system message — never as a literal prompt suffix.
+    expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
+  });
+
+  it("never steers a chain-stage expand with the composer's style chip", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2:q8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    await nextTick();
+
+    const modal = wrapper.getComponent({ name: "ExpandModal" });
+    expect(modal.props("prompt")).toBe("a stage prompt");
+    // The style row belongs to the single-print composer, not to stage text.
+    expect(modal.props("styleDirective")).toBeNull();
+  });
+
+  it("bakes and clears the chip when a quick expansion is applied", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over a cinematic coast");
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("storm light over a cinematic coast");
+    // Bake-and-clear: the rewrite absorbed the look, so the chip drops — and
+    // the curated negative moves into the form, its only remaining home.
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+    // Applied exactly once — the cleared chip can't merge it again at submit.
+    expect(form.toRequest().negative_prompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+
+    await wrapper.get("[data-test='composer-undo']").trigger("click");
+    await nextTick();
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.negativePrompt).toBe("text");
+  });
+
+  it("keeps a stage expansion out of the composer's prompt and style", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "ltx2:q8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.stylePreset = "cinematic";
+    await nextTick();
+
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "a rewritten stage");
+    await nextTick();
+
+    expect(form.state.value.prompt).toBe("a lighthouse");
+    expect(form.state.value.stylePreset).toBe("cinematic");
+  });
+
+  it("carries the preset negative when a variation is adopted into the composer", async () => {
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.negativePrompt = "text";
+    form.state.value.stylePreset = "cinematic";
+    form.state.value.batchSize = 3;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await nextTick();
+    const canvas = wrapper.getComponent({ name: "ResultCanvas" });
+    const variations = canvas.props("variations") as string[];
+    canvas.vm.$emit("use-variation", 0);
+    await nextTick();
+
+    // The variation already carries the baked look, so the chip clears — the
+    // curated negative has to come with it.
+    expect(form.state.value.prompt).toBe(variations[0]);
+    expect(form.state.value.stylePreset).toBeNull();
+    expect(form.state.value.negativePrompt).toBe(
+      "text, anime, cartoon, graphic, washed out",
+    );
+  });
+
   it("resets to a fresh print on the mold:new-print event, keeping the model", async () => {
     const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     await flushPromises(); // onMounted registers the mold:new-print listener
@@ -341,7 +468,7 @@ function pageStubs() {
     ComposerCard: {
       name: "ComposerCard",
       template:
-        '<div><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button></div>',
+        '<div><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -357,7 +484,8 @@ function pageStubs() {
     ActivityStrip: { name: "ActivityStrip", template: "<div />" },
     ScriptComposer: {
       name: "ScriptComposer",
-      template: "<div data-test='script-composer' />",
+      template:
+        "<div data-test='script-composer'><button data-test='stage-expand' @click=\"$emit('expand', 0, 'a stage prompt')\">expand stage</button></div>",
       methods: { setStagePrompt: vi.fn() },
     },
     ChainJobCard: {
@@ -365,7 +493,18 @@ function pageStubs() {
       props: ["job"],
       template: '<div data-test="chain-job-card">{{ job.id }}</div>',
     },
-    ExpandModal: { name: "ExpandModal", template: "<div />" },
+    ExpandModal: {
+      name: "ExpandModal",
+      props: [
+        "open",
+        "prompt",
+        "expand",
+        "currentModel",
+        "queueBusy",
+        "styleDirective",
+      ],
+      template: "<div />",
+    },
     ImagePickerModal: {
       name: "ImagePickerModal",
       props: ["open"],

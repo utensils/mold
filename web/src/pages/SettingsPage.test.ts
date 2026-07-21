@@ -105,6 +105,52 @@ describe("SettingsPage", () => {
     expect(localStorage.getItem("mold.web.accounts.v1")).toBeNull();
   });
 
+  it("keeps the token in the field and says so when the browser blocks storage", async () => {
+    localStorage.clear();
+    const wrapper = mount(SettingsPage);
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+
+    await wrapper.get("input[name=hf_token]").setValue("hf_secretvalue1234");
+    await wrapper.get('[data-test="save-hf"]').trigger("click");
+    await flushPromises();
+
+    const input = wrapper.get("input[name=hf_token]")
+      .element as HTMLInputElement;
+    expect(input.value).toBe("hf_secretvalue1234");
+    expect(wrapper.find('[data-test="hf-mask"]').exists()).toBe(false);
+
+    const { toasts } = useNotifications();
+    expect(toasts.some((t) => t.kind === "success")).toBe(false);
+    const error = toasts.find((t) => t.kind === "error");
+    expect(error?.text).toBe(
+      "This browser blocked storage — the token wasn't saved.",
+    );
+  });
+
+  it("does not claim a token was removed when the clear could not persist", async () => {
+    localStorage.setItem(
+      "mold.web.accounts.v1",
+      JSON.stringify({ civitaiToken: "cv_abcdef7890" }),
+    );
+    const wrapper = mount(SettingsPage);
+    vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
+      throw new Error("storage blocked");
+    });
+
+    await wrapper.get('[data-test="clear-civitai"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="civitai-mask"]').text()).toBe(
+      "cv_••••7890",
+    );
+    const error = useNotifications().toasts.find((t) => t.kind === "error");
+    expect(error?.text).toBe(
+      "This browser blocked storage — the token wasn't removed.",
+    );
+  });
+
   it("does not render a fictional default-scheduler control", () => {
     const wrapper = mount(SettingsPage);
     expect(wrapper.find("select[name=default_scheduler]").exists()).toBe(false);
