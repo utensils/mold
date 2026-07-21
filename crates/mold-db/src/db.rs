@@ -495,7 +495,6 @@ mod tests {
         assert_eq!(timeout, 5000, "busy_timeout must be pinned at 5000ms");
         let _ = std::fs::remove_dir_all(&tmp);
     }
-    use super::*;
     use crate::record::GenerationRecord;
     use mold_core::OutputMetadata;
     use std::path::Path;
