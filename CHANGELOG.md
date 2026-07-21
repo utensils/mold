@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The TUI gains a `^K` command palette.** `Ctrl+K` from any workspace or focus opens a filterable launcher — the terminal translation of the GUI surfaces' ⌘K — covering navigation to all five workspaces and the chain composer, actions (toggle Advanced, randomize seed, expand prompt, prompt history search, help, quit), and one-keystroke switching between all eleven theme presets. Typing filters case-insensitively, Enter runs the selection, Esc closes; while open the palette swallows every key, so `q` filters instead of quitting. As part of the rebind, `Ctrl+K` no longer performs kill-to-end-of-line in the prompt fields.
 - **The TUI ships the four Mold Studio themes.** Studio Dark, Studio Light, Safelight Dark, and Safelight Light join the seven existing presets in the Appearance picker (now two rows of swatches), each carrying the design system's dual-accent model — safelight for focus/selection/primary action, halide for info/live state — via new `frame`, `surface2`, `faint`, and `info` theme tokens. Selection tints are pre-blended solids derived from the design mockup's CSS rgba values.
 
 ### Changed

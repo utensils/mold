@@ -237,6 +237,7 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
                 generating_shortcuts(status, app.generate.focus)
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
+                    ("^K", "Commands"),
                     ("1-5", "Workspace"),
                     ("Enter", "Edit"),
                     ("c", "Chain"),
@@ -298,6 +299,7 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
             }
         }
         View::Models => vec![
+            ("^K", "Commands"),
             ("1-5", "Workspace"),
             ("Enter", "Select"),
             ("p", "Pull"),
@@ -307,6 +309,7 @@ pub(crate) fn status_shortcuts(app: &App) -> Vec<(String, String)> {
             ("q", "Quit"),
         ],
         View::Machines => vec![
+            ("^K", "Commands"),
             ("1-5", "Workspace"),
             ("Esc", "Back"),
             ("?", "Help"),

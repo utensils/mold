@@ -972,6 +972,12 @@ pub enum Popup {
         selected: usize,
         results: Vec<String>,
     },
+    /// The ^K command palette (see `crate::palette`).
+    CommandPalette {
+        filter: String,
+        selected: usize,
+        filtered: Vec<crate::palette::CommandId>,
+    },
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
@@ -1937,13 +1943,17 @@ impl App {
                 if let CrosstermEvent::Key(key) = &event {
                     // Let certain keys bypass the textarea
                     match (key.code, key.modifiers) {
-                        // TUI-global shortcuts that bypass the textarea
+                        // TUI-global shortcuts that bypass the textarea.
+                        // ^K deliberately no longer performs the emacs
+                        // kill-to-end-of-line in prompt fields — it opens
+                        // the command palette everywhere instead.
                         (KeyCode::Tab, KeyModifiers::NONE)
                         | (KeyCode::BackTab, KeyModifiers::SHIFT)
                         | (KeyCode::Char('c'), KeyModifiers::CONTROL) // quit
                         | (KeyCode::Char('g'), KeyModifiers::CONTROL) // generate
                         | (KeyCode::Char('m'), KeyModifiers::CONTROL) // model selector
                         | (KeyCode::Char('r'), KeyModifiers::CONTROL) // seed mode
+                        | (KeyCode::Char('k'), KeyModifiers::CONTROL) // command palette
                         | (KeyCode::Enter, KeyModifiers::NONE)        // generate
                         | (KeyCode::Esc, KeyModifiers::NONE) => {     // nav mode
                             // Fall through to action mapping
@@ -2311,6 +2321,49 @@ impl App {
                     }
                     _ => {}
                 },
+                Some(Popup::CommandPalette {
+                    filter,
+                    selected,
+                    filtered,
+                }) => match key.code {
+                    KeyCode::Esc => self.close_popup(),
+                    KeyCode::Enter => {
+                        if let Some(id) = filtered.get(*selected).copied() {
+                            self.close_popup();
+                            self.dispatch_action(crate::palette::command_action(id));
+                        } else {
+                            self.close_popup();
+                        }
+                    }
+                    // No j/k aliases — labels contain those letters.
+                    KeyCode::Up if *selected > 0 => {
+                        *selected -= 1;
+                    }
+                    KeyCode::Down if *selected + 1 < filtered.len() => {
+                        *selected += 1;
+                    }
+                    KeyCode::Char(c) => {
+                        filter.push(c);
+                        *filtered = crate::palette::filter_commands(filter)
+                            .into_iter()
+                            .map(|cmd| cmd.id)
+                            .collect();
+                        if *selected >= filtered.len() {
+                            *selected = filtered.len().saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        *filtered = crate::palette::filter_commands(filter)
+                            .into_iter()
+                            .map(|cmd| cmd.id)
+                            .collect();
+                        if *selected >= filtered.len() {
+                            *selected = filtered.len().saturating_sub(1);
+                        }
+                    }
+                    _ => {}
+                },
                 Some(Popup::Confirm { on_confirm, .. }) => match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => {
                         let action = on_confirm.clone();
@@ -2570,6 +2623,19 @@ impl App {
             }
             Action::ToggleAdvanced => {
                 self.generate.advanced_open = !self.generate.advanced_open;
+            }
+            Action::OpenPalette => {
+                self.popup = Some(Popup::CommandPalette {
+                    filter: String::new(),
+                    selected: 0,
+                    filtered: crate::palette::all_commands()
+                        .into_iter()
+                        .map(|cmd| cmd.id)
+                        .collect(),
+                });
+            }
+            Action::SetTheme(preset) => {
+                self.apply_theme_preset(preset);
             }
             Action::FocusNext if self.active_view == View::Create => {
                 // Use `negative_visible()` instead of `supports_negative_prompt`
@@ -6523,6 +6589,111 @@ mod tests {
         // ChainExit is the only way back to compose.
         app.dispatch_action(Action::ChainExit);
         assert_eq!(app.create_mode, CreateMode::Compose);
+    }
+
+    #[tokio::test]
+    async fn ctrl_k_opens_palette_from_every_view_and_focus() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        for view in View::ALL {
+            let mut app = make_settings_test_app();
+            app.active_view = view;
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+            )));
+            assert!(
+                matches!(app.popup, Some(Popup::CommandPalette { .. })),
+                "^K must open the palette from {view:?}"
+            );
+        }
+        // Even while the prompt textarea has focus.
+        let mut app = make_settings_test_app();
+        app.active_view = View::Create;
+        app.generate.focus = GenerateFocus::Prompt;
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(matches!(app.popup, Some(Popup::CommandPalette { .. })));
+    }
+
+    #[tokio::test]
+    async fn palette_filters_dispatches_and_closes() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.dispatch_action(Action::OpenPalette);
+
+        // Typing filters instead of triggering view actions — `q` while
+        // the palette is open must not quit.
+        for c in "quit".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        assert!(!app.should_quit, "typing in the palette must not quit");
+        let Some(Popup::CommandPalette { filter, .. }) = &app.popup else {
+            panic!("palette should still be open");
+        };
+        assert_eq!(filter, "quit");
+
+        // Backspace all, filter to Library, Enter navigates and closes.
+        for _ in 0..4 {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        for c in "library".chars() {
+            app.handle_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.active_view, View::Library);
+        assert!(app.popup.is_none(), "palette closes after dispatch");
+    }
+
+    #[tokio::test]
+    async fn palette_esc_closes_without_action() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = make_settings_test_app();
+        let before = app.active_view;
+        app.dispatch_action(Action::OpenPalette);
+        app.handle_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.popup.is_none());
+        assert_eq!(app.active_view, before);
+        assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(mold_env)]
+    async fn palette_set_theme_applies_and_persists_slug() {
+        crate::test_env::with_isolated_env(|_home| {
+            use crate::ui::theme::ThemePreset;
+            let mut app = make_settings_test_app();
+            app.dispatch_action(Action::SetTheme(ThemePreset::SafelightDark));
+            assert_eq!(app.settings.theme_preset, ThemePreset::SafelightDark);
+            assert_eq!(app.theme.bg, ThemePreset::SafelightDark.build().bg);
+            let loaded = crate::session::TuiSession::load();
+            assert_eq!(loaded.theme.as_deref(), Some("safelight-dark"));
+        });
+    }
+
+    #[tokio::test]
+    async fn palette_renders_on_narrow_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = make_settings_test_app();
+        app.dispatch_action(Action::OpenPalette);
+        let backend = TestBackend::new(30, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
     }
 
     #[tokio::test]

@@ -87,6 +87,15 @@ Switch workspaces with **Esc** then **1**–**5**, or click the tabs.
 workspace returns to Create. The chain composer opens with **c** from
 Create — it is a Create sub-mode, not a tab.
 
+## Command Palette
+
+**Ctrl+K** opens the command palette from any workspace or focus — the
+TUI's version of the GUI surfaces' ⌘K launcher. Type to filter, **Up**/
+**Down** to select, **Enter** to run, **Esc** to close. It covers
+navigation (all five workspaces, the chain composer), actions (toggle
+Advanced, randomize seed, expand prompt, prompt history, help, quit),
+and switching between all eleven theme presets.
+
 ## Create View
 
 The main workspace with five panels:
@@ -149,16 +158,15 @@ Previous prompts persist across sessions in `~/.mold/prompt-history.jsonl`:
 
 The prompt editor supports standard emacs/shell keybindings:
 
-| Key    | Action              |
-| ------ | ------------------- |
-| Ctrl+A | Beginning of line   |
-| Ctrl+E | End of line         |
-| Ctrl+K | Kill to end of line |
-| Ctrl+U | Kill to start       |
-| Ctrl+W | Delete word back    |
-| Ctrl+D | Delete forward      |
-| Ctrl+F | Forward char        |
-| Ctrl+B | Backward char       |
+| Key    | Action            |
+| ------ | ----------------- |
+| Ctrl+A | Beginning of line |
+| Ctrl+E | End of line       |
+| Ctrl+U | Kill to start     |
+| Ctrl+W | Delete word back  |
+| Ctrl+D | Delete forward    |
+| Ctrl+F | Forward char      |
+| Ctrl+B | Backward char     |
 
 ## Library View
 

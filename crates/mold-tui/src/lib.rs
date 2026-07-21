@@ -9,6 +9,7 @@ mod event;
 mod gallery_scan;
 mod history;
 mod model_info;
+mod palette;
 mod session;
 #[cfg(test)]
 pub(crate) mod test_env;

@@ -72,6 +72,10 @@ pub enum Action {
     ToggleNegativePrompt,
     /// Toggle the Advanced disclosure on the Create view.
     ToggleAdvanced,
+    /// Open the ^K command palette.
+    OpenPalette,
+    /// Apply a theme preset (palette theme commands).
+    SetTheme(crate::ui::theme::ThemePreset),
     /// Enter the chain composer sub-mode of the Create view.
     ChainEnter,
     /// Leave the chain composer back to the Create compose mode.

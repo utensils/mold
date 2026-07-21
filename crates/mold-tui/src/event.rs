@@ -16,6 +16,10 @@ fn map_key(key: &KeyEvent, app: &App) -> Action {
     // Global shortcuts (available in all views)
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Quit,
+        // ^K opens the command palette from every view and focus — the
+        // GUI surfaces' ⌘K, translated. (Compare models moved into the
+        // palette; ^K previously mapped to it in the Create view.)
+        (KeyCode::Char('k'), KeyModifiers::CONTROL) => return Action::OpenPalette,
         (KeyCode::Char('?'), KeyModifiers::NONE)
             if app.active_view != View::Create
                 || matches!(
@@ -66,7 +70,6 @@ fn map_generate_key(key: &KeyEvent, app: &App) -> Action {
         (KeyCode::Char('m'), KeyModifiers::CONTROL) => return Action::OpenModelSelector,
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => return Action::RandomizeSeed,
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => return Action::SaveImage,
-        (KeyCode::Char('k'), KeyModifiers::CONTROL) => return Action::CompareModels,
         (KeyCode::Char('g'), KeyModifiers::CONTROL) => return Action::Generate,
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => return Action::HistoryPrev,
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => return Action::HistoryNext,
