@@ -14,7 +14,7 @@ authoring, model management, gallery, settings, theming, and image preview
 work well.
 :::
 
-![mold TUI — Generate view with image preview](/gallery/tui-generate.png)
+![mold TUI — Create view with image preview](/gallery/tui-generate.png)
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ work well.
 mold tui
 ```
 
-The TUI launches in the **Generate** view with your cursor in the prompt field.
+The TUI launches in the **Create** workspace with your cursor in the prompt field.
 Type a prompt, press **Enter**, and watch the progress panel as your image
 generates. The result appears in the Preview panel and is saved to
 `~/.mold/output/`.
@@ -69,22 +69,25 @@ file = true
 # max_days = 7
 ```
 
-## Views
+## Workspaces
 
-The TUI has five main views, shown as tabs at the top of the screen:
+The TUI shares the five Mold Studio workspaces with the desktop, web, and
+iPhone apps, shown as tabs at the top of the screen:
 
-| View     | Purpose                                               |
-| -------- | ----------------------------------------------------- |
-| Generate | Write prompts, tune parameters, generate images/video |
-| Script   | Author and validate multi-stage LTX-2 chain scripts   |
-| Gallery  | Browse generated images and videos with preview       |
-| Models   | View installed and available models                   |
-| Settings | View and edit file-backed and DB-backed settings      |
+| Workspace | Key | Purpose                                               |
+| --------- | --- | ----------------------------------------------------- |
+| Create    | 1   | Write prompts, tune parameters, generate images/video |
+| Library   | 2   | Browse generated prints with preview                  |
+| Models    | 3   | View installed and available models                   |
+| Machines  | 4   | Queue snapshot (full multi-host workspace coming)     |
+| Settings  | 5   | Theme picker plus file-backed and DB-backed settings  |
 
-Switch views with **Esc** then **1**/**2**/**3**/**4**, arrow keys, or click the
-tabs. **Alt+1**/**Alt+2**/**Alt+3**/**Alt+4** works from anywhere.
+Switch workspaces with **Esc** then **1**–**5**, or click the tabs.
+**Alt+1**–**Alt+5** works from anywhere, and **Esc** from any other
+workspace returns to Create. The chain composer opens with **c** from
+Create — it is a Create sub-mode, not a tab.
 
-## Generate View
+## Create View
 
 The main workspace with five panels:
 
@@ -157,7 +160,7 @@ The prompt editor supports standard emacs/shell keybindings:
 | Ctrl+F | Forward char        |
 | Ctrl+B | Backward char       |
 
-## Gallery View
+## Library View
 
 Browse generated images stored in `~/.mold/output/` (or `MOLD_OUTPUT_DIR`).
 Images are displayed as a thumbnail grid with cached 256x256 thumbnails for fast
@@ -171,25 +174,25 @@ JPEG).
 | h/j/k/l    | Navigate the grid                |
 | Arrow keys | Navigate the grid                |
 | Enter      | Open detail view                 |
-| e          | Load into Generate (edit)        |
+| e          | Load into Create (edit)          |
 | u          | Upscale with AI model            |
 | d          | Delete image (with confirmation) |
 | o          | Open in system viewer            |
-| Esc        | Back to Generate                 |
+| Esc        | Back to Create                   |
 
 ### Detail Mode
 
 Press **Enter** on a grid thumbnail to see the full image with all metadata.
 
-| Key | Action                    |
-| --- | ------------------------- |
-| e   | Load into Generate (edit) |
-| r   | Regenerate immediately    |
-| u   | Upscale with AI model     |
-| d   | Delete image              |
-| o   | Open in system viewer     |
-| j/k | Previous / next image     |
-| Esc | Back to grid              |
+| Key | Action                  |
+| --- | ----------------------- |
+| e   | Load into Create (edit) |
+| r   | Regenerate immediately  |
+| u   | Upscale with AI model   |
+| d   | Delete image            |
+| o   | Open in system viewer   |
+| j/k | Previous / next image   |
+| Esc | Back to grid            |
 
 ### Thumbnails
 
@@ -197,9 +200,11 @@ Thumbnails are cached at `~/.mold/cache/thumbnails/` and generated automatically
 on first scan and after each generation. Delete the cache directory to force
 regeneration.
 
-## Script View
+## Chain Composer
 
-Script mode authors `mold.chain.v1` TOML for LTX-2 chains. It lets you build
+The chain composer authors `mold.chain.v1` TOML for LTX-2 chains. Press
+**c** from Create's navigation mode to open it (Esc returns to composing —
+a chain in progress survives switching workspaces). It lets you build
 per-stage prompts, frame counts, source images, and `smooth` / `cut` / `fade`
 transitions, then submit the normalised script through the same chain endpoint
 used by `mold run --script`.
@@ -214,7 +219,7 @@ See all installed and available models with family, size, defaults, and status.
 | Enter | Set as default model          |
 | p     | Pull (download) a model       |
 | u     | Unload the active model (GPU) |
-| Esc   | Back to Generate              |
+| Esc   | Back to Create                |
 
 ## Settings View
 
@@ -228,7 +233,7 @@ per-model generation defaults persist to the SQLite settings DB at
 | j/k        | Navigate settings                            |
 | +/- or L/R | Adjust numeric or cycle toggle values        |
 | Enter      | Edit text/path field (opens popup) or toggle |
-| Esc        | Back to Generate                             |
+| Esc        | Back to Create                               |
 
 ### Field Types
 
@@ -272,19 +277,19 @@ views.
 
 ### Global Shortcuts
 
-| Key               | Action                            |
-| ----------------- | --------------------------------- |
-| Esc               | Unfocus / navigation mode         |
-| 1 / 2 / 3 / 4     | Switch views (in navigation mode) |
-| Left / Right      | Cycle views (in navigation mode)  |
-| Alt+1 / 2 / 3 / 4 | Switch views (from anywhere)      |
-| Tab               | Cycle focus to next panel         |
-| Shift+Tab         | Cycle focus to previous panel     |
-| Ctrl+C            | Quit                              |
-| q                 | Quit (when not in a text field)   |
-| ?                 | Show help overlay                 |
+| Key           | Action                                |
+| ------------- | ------------------------------------- |
+| Esc           | Unfocus / navigation mode             |
+| 1 – 5         | Switch workspace (in navigation mode) |
+| Left / Right  | Cycle workspaces (in navigation mode) |
+| Alt+1 – Alt+5 | Switch workspace (from anywhere)      |
+| Tab           | Cycle focus to next panel             |
+| Shift+Tab     | Cycle focus to previous panel         |
+| Ctrl+C        | Quit                                  |
+| q             | Quit (when not in a text field)       |
+| ?             | Show help overlay                     |
 
-### Generate Shortcuts
+### Create Shortcuts
 
 | Key    | Context    | Action                           |
 | ------ | ---------- | -------------------------------- |
@@ -293,6 +298,8 @@ views.
 | Ctrl+G | Any        | Start generation                 |
 | Ctrl+M | Any        | Open model selector              |
 | Ctrl+R | Any        | Cycle seed mode                  |
+| c      | Navigation | Open chain composer              |
+| A      | Navigation | Toggle Advanced options          |
 | +/-    | Parameters | Adjust numeric value             |
 | j/k    | Parameters | Navigate fields                  |
 

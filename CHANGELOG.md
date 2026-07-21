@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The TUI now navigates the five shared Mold Studio workspaces.** Tabs are Create · Library · Models · Machines · Settings on keys `1`–`5` (previously Generate/Gallery/Models/Queue/Settings/Script on `1`–`6`), matching the desktop, web, and iPhone IA. The chain composer is no longer a tab: `c` opens it from Create (mirroring the desktop's `/create/chain` nesting), Esc returns to composing, and a chain in progress survives switching workspaces. The Machines tab shows the read-only queue snapshot until the full Machines workspace lands, `Esc` from any workspace returns to Create, and a new `A` binding toggles the upcoming Advanced disclosure. `scripts/tui-uat.sh view` accepts the new names with the old ones as aliases.
 - **The default TUI theme is now Studio Dark** (previously Catppuccin Mocha), matching the desktop, web, and iPhone default look. A persisted `tui.theme` choice is honored unchanged; unknown or missing slugs now resolve to Studio Dark. Mocha and the other six legacy presets remain selectable, and `studio` / `safelight` are accepted as slug aliases for the dark variants.
 - **Dracula's focused-panel border is now purple** (its accent hue) instead of cyan; the cyan moved to Dracula's new info role. Every preset now uses one hue for focus, selection, and primary action.
 

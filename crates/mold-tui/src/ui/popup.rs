@@ -60,17 +60,21 @@ fn render_help(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Tab / Shift+Tab    Cycle focus between panels"),
-        Line::from("  Alt+1/2/3          Switch to Generate/Gallery/Models"),
+        Line::from(
+            "  1-5 / Alt+1-5      Switch workspace (Create/Library/Models/Machines/Settings)",
+        ),
         Line::from("  Esc                Close popup / cancel"),
         Line::from("  q / Ctrl+C         Quit"),
         Line::from(""),
         Line::from(Span::styled(
-            "Generate View",
+            "Create View",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Enter              Start generation"),
+        Line::from("  c                  Open chain composer"),
+        Line::from("  A                  Toggle Advanced options"),
         Line::from("  Ctrl+E             Expand prompt via LLM"),
         Line::from("  Ctrl+S             Save current image"),
         Line::from("  Ctrl+R             Randomize seed"),
@@ -80,7 +84,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  +/- or Left/Right  Adjust parameter value"),
         Line::from(""),
         Line::from(Span::styled(
-            "Gallery View",
+            "Library View",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -115,7 +119,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         Line::from("  j/k                Navigate settings"),
         Line::from("  +/- or Left/Right  Adjust value"),
         Line::from("  Enter              Edit text field / toggle"),
-        Line::from("  Esc                Return to Generate"),
+        Line::from("  Esc                Return to Create"),
     ];
 
     let paragraph = Paragraph::new(help_text)
@@ -707,7 +711,8 @@ mod tests {
         let picker = ratatui_image::picker::Picker::from_fontsize((8, 16));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App {
-            active_view: crate::action::View::Gallery,
+            active_view: crate::action::View::Library,
+            create_mode: crate::app::CreateMode::default(),
             generate: crate::app::GenerateState {
                 prompt: tui_textarea::TextArea::default(),
                 negative_prompt: tui_textarea::TextArea::default(),
@@ -729,6 +734,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 negative_collapsed: false,
+                advanced_open: false,
             },
             gallery: crate::app::GalleryState {
                 entries: Vec::new(),

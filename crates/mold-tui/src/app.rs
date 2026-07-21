@@ -298,6 +298,20 @@ impl ProgressState {
     }
 }
 
+/// Which sub-mode the Create view is in.
+///
+/// The chain composer is nested under Create (mirroring the desktop's
+/// `/create/chain` route) rather than being a tab of its own. Switching
+/// workspaces does not reset the mode — a chain in progress survives a
+/// round-trip through Library and back; only [`Action::ChainExit`]
+/// returns to Compose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateMode {
+    #[default]
+    Compose,
+    Chain,
+}
+
 /// Which panel is focused in the Generate view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerateFocus {
@@ -735,6 +749,10 @@ pub struct GenerateState {
     /// `Alt+N`; models that don't support negative prompts ignore the flag
     /// entirely and hide the row regardless.
     pub negative_collapsed: bool,
+    /// Whether the Advanced disclosure on the Create view is expanded
+    /// (toggled with `A`). Rendering lands with the Create redesign; the
+    /// flag ships first so the key contract is stable.
+    pub advanced_open: bool,
 }
 
 impl GenerateState {
@@ -983,6 +1001,8 @@ pub enum ConfirmAction {
 /// The root application state.
 pub struct App {
     pub active_view: View,
+    /// Compose vs chain-composer sub-mode of the Create view.
+    pub create_mode: CreateMode,
     pub generate: GenerateState,
     pub gallery: GalleryState,
     pub models: ModelsState,
@@ -1265,7 +1285,8 @@ impl App {
             .unwrap_or_default();
 
         let app = Ok(Self {
-            active_view: View::Generate,
+            active_view: View::Create,
+            create_mode: CreateMode::default(),
             generate: GenerateState {
                 prompt,
                 negative_prompt,
@@ -1285,6 +1306,7 @@ impl App {
                 error_message: None,
                 model_description,
                 negative_collapsed: session.negative_collapsed.unwrap_or(false),
+                advanced_open: false,
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -1924,7 +1946,7 @@ impl App {
         }
 
         // If we're in a text input field, let the textarea handle the event first
-        if self.active_view == View::Generate {
+        if self.active_view == View::Create {
             let in_text_field = matches!(
                 self.generate.focus,
                 GenerateFocus::Prompt | GenerateFocus::NegativePrompt
@@ -2366,7 +2388,7 @@ impl App {
                 }
 
                 // Generate view clicks
-                if self.active_view == View::Generate {
+                if self.active_view == View::Create {
                     let pos: ratatui::layout::Position = (col, row).into();
                     if self.layout.prompt.contains(pos) {
                         self.generate.focus = GenerateFocus::Prompt;
@@ -2390,7 +2412,7 @@ impl App {
                 }
 
                 // Gallery view clicks
-                if self.active_view == View::Gallery
+                if self.active_view == View::Library
                     && self.gallery.view_mode == GalleryViewMode::Grid
                 {
                     let pos: ratatui::layout::Position = (col, row).into();
@@ -2433,7 +2455,7 @@ impl App {
                             if was_selected {
                                 let name = self.models.catalog[relative_row].name.clone();
                                 self.update_model(&name);
-                                self.active_view = View::Generate;
+                                self.active_view = View::Create;
                                 self.generate.focus = GenerateFocus::Prompt;
                             }
                         }
@@ -2550,44 +2572,42 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::SwitchView(view) => self.active_view = view,
             Action::ViewNext => {
-                self.active_view = match self.active_view {
-                    View::Generate => View::Gallery,
-                    View::Gallery => View::Models,
-                    View::Models => View::Queue,
-                    View::Queue => View::Settings,
-                    View::Settings => View::Script,
-                    View::Script => View::Generate,
-                };
+                let i = self.active_view.index();
+                self.active_view = View::ALL[(i + 1) % View::ALL.len()];
             }
             Action::ViewPrev => {
-                self.active_view = match self.active_view {
-                    View::Generate => View::Script,
-                    View::Gallery => View::Generate,
-                    View::Models => View::Gallery,
-                    View::Queue => View::Models,
-                    View::Settings => View::Queue,
-                    View::Script => View::Settings,
-                };
+                let i = self.active_view.index();
+                self.active_view = View::ALL[(i + View::ALL.len() - 1) % View::ALL.len()];
             }
-            Action::FocusNext if self.active_view == View::Generate => {
+            Action::ChainEnter => {
+                self.active_view = View::Create;
+                self.create_mode = CreateMode::Chain;
+            }
+            Action::ChainExit => {
+                self.create_mode = CreateMode::Compose;
+            }
+            Action::ToggleAdvanced => {
+                self.generate.advanced_open = !self.generate.advanced_open;
+            }
+            Action::FocusNext if self.active_view == View::Create => {
                 // Use `negative_visible()` instead of `supports_negative_prompt`
                 // alone so Tab skips the Negative pane when the user has
                 // collapsed it. Otherwise focus can land on a hidden textarea
                 // and keystrokes get routed nowhere.
                 self.generate.focus = self.generate.focus.next(self.generate.negative_visible());
             }
-            Action::FocusPrev if self.active_view == View::Generate => {
+            Action::FocusPrev if self.active_view == View::Create => {
                 self.generate.focus = self.generate.focus.prev(self.generate.negative_visible());
             }
             Action::Up => match self.active_view {
-                View::Generate => {
+                View::Create => {
                     if self.generate.focus == GenerateFocus::Parameters
                         && self.generate.param_index > 0
                     {
                         self.generate.param_index -= 1;
                     }
                 }
-                View::Gallery => {
+                View::Library => {
                     let cols = self.gallery.grid_cols.max(1);
                     match self.gallery.view_mode {
                         GalleryViewMode::Grid => {
@@ -2608,19 +2628,18 @@ impl App {
                         self.models.selected -= 1;
                     }
                 }
-                View::Queue => {}
+                View::Machines => {}
                 View::Settings => self.settings_navigate(-1),
-                View::Script => {}
             },
             Action::Down => match self.active_view {
-                View::Generate => {
+                View::Create => {
                     if self.generate.focus == GenerateFocus::Parameters
                         && self.generate.param_index + 1 < self.generate.visible_fields.len()
                     {
                         self.generate.param_index += 1;
                     }
                 }
-                View::Gallery => {
+                View::Library => {
                     let cols = self.gallery.grid_cols.max(1);
                     let len = self.gallery.entries.len();
                     match self.gallery.view_mode {
@@ -2643,9 +2662,8 @@ impl App {
                         self.models.selected += 1;
                     }
                 }
-                View::Queue => {}
+                View::Machines => {}
                 View::Settings => self.settings_navigate(1),
-                View::Script => {}
             },
             Action::Increment => {
                 if self.active_view == View::Settings {
@@ -2661,7 +2679,7 @@ impl App {
                     self.increment_param(-1);
                 }
             }
-            Action::Generate if self.active_view == View::Generate && !self.generate.generating => {
+            Action::Generate if self.active_view == View::Create && !self.generate.generating => {
                 self.start_generation();
             }
             Action::ToggleNegativePrompt => {
@@ -2676,14 +2694,14 @@ impl App {
                 }
             }
             Action::Confirm => match self.active_view {
-                View::Generate => {
+                View::Create => {
                     if self.generate.focus == GenerateFocus::Parameters {
                         self.activate_current_param();
                     } else if !self.generate.generating {
                         self.start_generation();
                     }
                 }
-                View::Gallery => match self.gallery.view_mode {
+                View::Library => match self.gallery.view_mode {
                     GalleryViewMode::Grid => {
                         if !self.gallery.entries.is_empty() {
                             self.gallery.view_mode = GalleryViewMode::Detail;
@@ -2700,11 +2718,11 @@ impl App {
                     if let Some(model) = self.models.catalog.get(self.models.selected) {
                         let name = model.name.clone();
                         self.update_model(&name);
-                        self.active_view = View::Generate;
+                        self.active_view = View::Create;
                         self.generate.focus = GenerateFocus::Prompt;
                     }
                 }
-                View::Queue => {}
+                View::Machines => {}
                 View::Settings => {
                     // Enter only edits a Configuration row. When the
                     // Appearance swatch grid holds focus the preset is
@@ -2717,7 +2735,6 @@ impl App {
                         self.settings_confirm();
                     }
                 }
-                View::Script => {}
             },
             Action::PullModel if self.active_view == View::Models => {
                 if let Some(model) = self.models.catalog.get(self.models.selected) {
@@ -2802,7 +2819,7 @@ impl App {
                 self.popup = Some(Popup::Help);
             }
             Action::Cancel => {
-                if self.active_view == View::Gallery && self.upscale_in_progress {
+                if self.active_view == View::Library && self.upscale_in_progress {
                     // Cancel in-progress upscale. abort() cancels the outer async
                     // task so no UpscaleComplete event is sent, but the inner
                     // spawn_blocking thread (GPU inference) runs to completion —
@@ -2817,7 +2834,7 @@ impl App {
                         message: "Upscale cancelled".into(),
                         style: ProgressStyle::Warning,
                     });
-                } else if self.active_view == View::Gallery
+                } else if self.active_view == View::Library
                     && self.gallery.view_mode == GalleryViewMode::Detail
                 {
                     self.gallery.view_mode = GalleryViewMode::Grid;
@@ -2829,7 +2846,7 @@ impl App {
                 }
             }
             Action::HistoryPrev
-                if self.active_view == View::Generate
+                if self.active_view == View::Create
                     && self.generate.focus == GenerateFocus::Prompt =>
             {
                 let current = self.generate.prompt.lines().join("\n");
@@ -2842,7 +2859,7 @@ impl App {
                 }
             }
             Action::HistoryNext
-                if self.active_view == View::Generate
+                if self.active_view == View::Create
                     && self.generate.focus == GenerateFocus::Prompt =>
             {
                 let current = self.generate.prompt.lines().join("\n");
@@ -2867,33 +2884,33 @@ impl App {
                     results: all,
                 });
             }
-            Action::Unfocus if self.active_view == View::Generate => {
+            Action::Unfocus if self.active_view == View::Create => {
                 self.generate.focus = GenerateFocus::Navigation;
             }
             Action::GridLeft
-                if self.active_view == View::Gallery
+                if self.active_view == View::Library
                     && self.gallery.view_mode == GalleryViewMode::Grid
                     && self.gallery.selected > 0 =>
             {
                 self.gallery.selected -= 1;
             }
             Action::GridRight
-                if self.active_view == View::Gallery
+                if self.active_view == View::Library
                     && self.gallery.view_mode == GalleryViewMode::Grid
                     && self.gallery.selected + 1 < self.gallery.entries.len() =>
             {
                 self.gallery.selected += 1;
             }
-            Action::EditAndGenerate if self.active_view == View::Gallery => {
+            Action::EditAndGenerate if self.active_view == View::Library => {
                 self.load_gallery_into_generate();
             }
-            Action::Regenerate if self.active_view == View::Gallery => {
+            Action::Regenerate if self.active_view == View::Library => {
                 self.load_gallery_into_generate();
                 if !self.generate.generating {
                     self.start_generation();
                 }
             }
-            Action::DeleteImage if self.active_view == View::Gallery => {
+            Action::DeleteImage if self.active_view == View::Library => {
                 if let Some(entry) = self.gallery.entries.get(self.gallery.selected) {
                     let filename = entry.filename();
                     self.popup = Some(Popup::Confirm {
@@ -2906,7 +2923,7 @@ impl App {
                 self.open_gallery_file();
             }
             Action::UpscaleImage
-                if self.active_view == View::Gallery
+                if self.active_view == View::Library
                     && !self.upscale_in_progress
                     && self.gallery.entries.get(self.gallery.selected).is_some() =>
             {
@@ -3027,7 +3044,7 @@ impl App {
     }
 
     fn increment_param(&mut self, delta: i32) {
-        if self.active_view != View::Generate || self.generate.focus != GenerateFocus::Parameters {
+        if self.active_view != View::Create || self.generate.focus != GenerateFocus::Parameters {
             return;
         }
         let field = match self.generate.visible_fields.get(self.generate.param_index) {
@@ -3270,7 +3287,7 @@ impl App {
         }
 
         // Switch to Generate view
-        self.active_view = View::Generate;
+        self.active_view = View::Create;
         self.generate.focus = GenerateFocus::Prompt;
     }
 
@@ -6347,6 +6364,7 @@ mod tests {
 
         App {
             active_view: View::Settings,
+            create_mode: CreateMode::default(),
             generate: GenerateState {
                 prompt: TextArea::default(),
                 negative_prompt: TextArea::default(),
@@ -6366,6 +6384,7 @@ mod tests {
                 error_message: None,
                 model_description: String::new(),
                 negative_collapsed: false,
+                advanced_open: false,
             },
             gallery: GalleryState {
                 entries: Vec::new(),
@@ -6484,24 +6503,46 @@ mod tests {
 
     #[test]
     fn view_labels_and_indices() {
-        assert_eq!(View::Generate.label(), "Generate");
-        assert_eq!(View::Gallery.label(), "Gallery");
+        assert_eq!(View::Create.label(), "Create");
+        assert_eq!(View::Library.label(), "Library");
         assert_eq!(View::Models.label(), "Models");
-        assert_eq!(View::Queue.label(), "Queue");
+        assert_eq!(View::Machines.label(), "Machines");
         assert_eq!(View::Settings.label(), "Settings");
-        // Queue sits at index 3 between Models and Settings.
-        assert_eq!(View::Queue.index(), 3);
+        // Machines sits at index 3 between Models and Settings.
+        assert_eq!(View::Machines.index(), 3);
         assert_eq!(View::Settings.index(), 4);
-        assert_eq!(View::ALL.len(), 6);
-        assert_eq!(View::ALL[3], View::Queue);
+        assert_eq!(View::ALL.len(), 5);
+        assert_eq!(View::ALL[3], View::Machines);
         assert_eq!(View::ALL[4], View::Settings);
-        assert_eq!(View::ALL[5], View::Script);
     }
 
-    #[test]
-    fn view_all_includes_script() {
-        assert_eq!(View::ALL.len(), 6);
-        assert_eq!(View::ALL[5], View::Script);
+    #[tokio::test]
+    async fn chain_is_a_create_submode_not_a_tab() {
+        // The chain composer must never reappear as a sixth tab — it nests
+        // under Create like the desktop's /create/chain route.
+        assert_eq!(View::ALL.len(), 5);
+        let mut app = make_settings_test_app();
+        app.active_view = View::Settings;
+        app.dispatch_action(Action::ChainEnter);
+        assert_eq!(app.active_view, View::Create);
+        assert_eq!(app.create_mode, CreateMode::Chain);
+        // Leaving Create and coming back keeps the chain in progress.
+        app.dispatch_action(Action::SwitchView(View::Library));
+        app.dispatch_action(Action::SwitchView(View::Create));
+        assert_eq!(app.create_mode, CreateMode::Chain);
+        // ChainExit is the only way back to compose.
+        app.dispatch_action(Action::ChainExit);
+        assert_eq!(app.create_mode, CreateMode::Compose);
+    }
+
+    #[tokio::test]
+    async fn toggle_advanced_flips_flag() {
+        let mut app = make_settings_test_app();
+        assert!(!app.generate.advanced_open);
+        app.dispatch_action(Action::ToggleAdvanced);
+        assert!(app.generate.advanced_open);
+        app.dispatch_action(Action::ToggleAdvanced);
+        assert!(!app.generate.advanced_open);
     }
 
     // ── Settings E2E: display values ──────────────────────
@@ -6674,7 +6715,7 @@ mod tests {
     async fn alt_5_while_generating_from_prompt_focus_switches_to_settings() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = make_settings_test_app();
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Prompt;
         app.generate.generating = true;
         app.generate.progress.mark_generation_start();
@@ -6720,7 +6761,7 @@ mod tests {
     async fn esc_then_5_reaches_settings_while_generating() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = make_settings_test_app();
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Prompt;
         app.generate.generating = true;
         app.generate.progress.mark_generation_start();
@@ -6829,7 +6870,7 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         // While focused on the Prompt textarea, Alt+5 must reach the action
         // mapper and switch the active view. Before the bypass fix this
         // event would be consumed by `TextArea::input` and the view would
@@ -6844,11 +6885,11 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         // Alt+4 was re-pointed to Queue in phase 4. Regression guard so the
         // old Alt+4 → Settings mapping can't sneak back in.
         app.handle_crossterm_event(alt_key_event(KeyCode::Char('4')));
-        assert_eq!(app.active_view, View::Queue);
+        assert_eq!(app.active_view, View::Machines);
     }
 
     #[tokio::test]
@@ -6857,7 +6898,7 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut app = make_settings_test_app();
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         assert!(!app.generate.negative_collapsed);
         app.handle_crossterm_event(alt_key_event(KeyCode::Char('n')));
         assert!(app.generate.negative_collapsed);
@@ -6887,7 +6928,7 @@ mod tests {
         app.generate.capabilities.supports_negative_prompt = true;
         app.generate.negative_collapsed = true;
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
 
         app.dispatch_action(Action::FocusNext);
         // Before the fix: focus lands on NegativePrompt even though the
@@ -6903,7 +6944,7 @@ mod tests {
         app.generate.capabilities.supports_negative_prompt = true;
         app.generate.negative_collapsed = true;
         app.generate.focus = GenerateFocus::Parameters;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
 
         app.dispatch_action(Action::FocusPrev);
         assert_eq!(app.generate.focus, GenerateFocus::Prompt);
@@ -6918,7 +6959,7 @@ mod tests {
         app.generate.capabilities.supports_negative_prompt = true;
         app.generate.negative_collapsed = false;
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
 
         app.dispatch_action(Action::FocusNext);
         assert_eq!(app.generate.focus, GenerateFocus::NegativePrompt);
@@ -6934,7 +6975,7 @@ mod tests {
         // tile (or nothing).
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
-        app.active_view = View::Gallery;
+        app.active_view = View::Library;
         app.gallery.view_mode = GalleryViewMode::Grid;
         // 3 columns, 3 rows worth of tiles = 9 entries.
         for i in 0..9 {
@@ -7018,41 +7059,36 @@ mod tests {
         //   col 68       → Settings pad_right
         //
         // Trailing dividers fold into the preceding tab's click zone so
-        // there's no dead pixel. Cols 0..=15 → Generate, 16..=29 → Gallery,
-        // 30..=42 → Models, 43..=54 → Queue, 55..=68 → Settings.
+        // there's no dead pixel. Cols 0..=13 → Create, 14..=27 → Library,
+        // 28..=40 → Models, 41..=55 → Machines, 56..=69 → Settings.
         let cases: &[(u16, View, &str)] = &[
-            (0, View::Generate, "block padding"),
-            (3, View::Generate, "Generate '1'"),
-            (9, View::Generate, "Generate 'a'"),
-            (15, View::Generate, "Generate trailing divider"),
-            (16, View::Gallery, "Gallery pad_left"),
-            (18, View::Gallery, "Gallery '2'"),
-            (24, View::Gallery, "Gallery 'r'"),
-            (29, View::Gallery, "Gallery trailing divider"),
-            (30, View::Models, "Models pad_left"),
-            (32, View::Models, "Models '3'"),
-            (38, View::Models, "Models 'e'"),
-            (42, View::Models, "Models trailing divider"),
-            (43, View::Queue, "Queue pad_left (was 'finicky')"),
-            (45, View::Queue, "Queue '4'"),
-            (48, View::Queue, "Queue 'e' (body of label)"),
-            (52, View::Queue, "Queue end of title"),
-            (54, View::Queue, "Queue trailing divider"),
-            (55, View::Settings, "Settings pad_left"),
-            (57, View::Settings, "Settings '5'"),
-            (62, View::Settings, "Settings 'n'"),
-            (68, View::Settings, "Settings pad_right"),
-            (69, View::Settings, "Settings trailing divider"),
-            (70, View::Script, "Script pad_left"),
-            (72, View::Script, "Script '6'"),
-            (76, View::Script, "Script 'p'"),
-            (81, View::Script, "Script pad_right"),
+            (0, View::Create, "block padding"),
+            (3, View::Create, "Create '1'"),
+            (9, View::Create, "Create 'e'"),
+            (13, View::Create, "Create trailing divider"),
+            (14, View::Library, "Library pad_left"),
+            (16, View::Library, "Library '2'"),
+            (22, View::Library, "Library 'r'"),
+            (27, View::Library, "Library trailing divider"),
+            (28, View::Models, "Models pad_left"),
+            (30, View::Models, "Models '3'"),
+            (36, View::Models, "Models 's'"),
+            (40, View::Models, "Models trailing divider"),
+            (41, View::Machines, "Machines pad_left"),
+            (43, View::Machines, "Machines '4'"),
+            (48, View::Machines, "Machines body of label"),
+            (53, View::Machines, "Machines end of title"),
+            (55, View::Machines, "Machines trailing divider"),
+            (56, View::Settings, "Settings pad_left"),
+            (58, View::Settings, "Settings '5'"),
+            (63, View::Settings, "Settings 'i'"),
+            (69, View::Settings, "Settings pad_right"),
         ];
 
         for (col, expected, name) in cases {
             let mut app = make_settings_test_app();
             app.layout.tab_bar = tab_bar;
-            app.active_view = View::Generate; // deterministic starting view
+            app.active_view = View::Create; // deterministic starting view
             app.handle_mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: *col,
@@ -7077,7 +7113,7 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut app = make_settings_test_app();
         app.layout.tab_bar = ratatui::layout::Rect::new(0, 0, 120, 3);
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
 
         // Col 90 is well past Script (which ends around col 82) — it sits
         // under the right-aligned "mold 0.9.0" version indicator.
@@ -7090,7 +7126,7 @@ mod tests {
 
         assert_eq!(
             app.active_view,
-            View::Generate,
+            View::Create,
             "clicks past the last rendered tab must be a no-op, not a stealth jump to Settings"
         );
     }
@@ -7108,7 +7144,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = make_settings_test_app();
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
@@ -7122,12 +7158,11 @@ mod tests {
         // anchor the hit-test and are the visually obvious click target.
         let buf = terminal.backend().buffer();
         let digit_to_view: &[(&str, View)] = &[
-            ("1", View::Generate),
-            ("2", View::Gallery),
+            ("1", View::Create),
+            ("2", View::Library),
             ("3", View::Models),
-            ("4", View::Queue),
+            ("4", View::Machines),
             ("5", View::Settings),
-            ("6", View::Script),
         ];
         for (digit, expected) in digit_to_view {
             let col = (0..tab_bar.width)
@@ -7137,7 +7172,7 @@ mod tests {
 
             let mut click_app = make_settings_test_app();
             click_app.layout.tab_bar = tab_bar;
-            click_app.active_view = View::Generate;
+            click_app.active_view = View::Create;
             click_app.handle_mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: click_col,
@@ -7160,7 +7195,7 @@ mod tests {
         app.generate.capabilities.supports_negative_prompt = true;
         app.generate.negative_collapsed = true;
         app.generate.focus = GenerateFocus::Prompt;
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         // Pretend the collapsed negative row occupies cell (10, 5).
         app.layout.negative_prompt = ratatui::layout::Rect::new(0, 5, 80, 1);
         app.handle_mouse(MouseEvent {
@@ -7657,7 +7692,7 @@ mod tests {
         // to model B before generation completes. Metadata must record
         // model A (from the response), not model B (current UI state).
         let mut app = make_settings_test_app();
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.generating = true;
         app.generate.batch_remaining = 1;
 
@@ -7737,6 +7772,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            advanced_open: false,
         };
 
         // Simulate receiving first image — still 2 more to go
@@ -7794,6 +7830,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            advanced_open: false,
         };
 
         // Simulate error mid-batch
@@ -7832,6 +7869,7 @@ mod tests {
             error_message: None,
             model_description: String::new(),
             negative_collapsed: false,
+            advanced_open: false,
         };
 
         // Simulate setting batch to 4 and starting generation
@@ -7849,7 +7887,7 @@ mod tests {
     async fn batch_increment_no_upper_cap() {
         let mut app = make_settings_test_app();
         // Switch to Generate view with Parameters focus
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Parameters;
         // Point param_index at the Batch field
         let batch_idx = app
@@ -9281,7 +9319,7 @@ mod tests {
         app.generate.params.format = OutputFormat::Jpeg;
 
         // Focus on parameters, select ResetDefaults, and trigger it
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Parameters;
         let reset_idx = app
             .generate
@@ -9312,7 +9350,7 @@ mod tests {
         app.generate.params.steps = 999;
         app.generate.params.batch = 10;
 
-        app.active_view = View::Generate;
+        app.active_view = View::Create;
         app.generate.focus = GenerateFocus::Parameters;
         let reset_idx = app
             .generate

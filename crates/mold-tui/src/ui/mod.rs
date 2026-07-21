@@ -44,8 +44,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // ── Content ─────────────────────────────────────────────────
     match app.active_view {
-        View::Generate => generate::render(frame, app, layout[1]),
-        View::Gallery => {
+        View::Create if app.create_mode == crate::app::CreateMode::Chain => {
+            script_composer::render(frame, &app.script, layout[1], &app.theme)
+        }
+        View::Create => generate::render(frame, app, layout[1]),
+        View::Library => {
             gallery::render(frame, app, layout[1]);
             // Upscale progress bar overlay at bottom of gallery area
             if app.upscale_in_progress {
@@ -53,9 +56,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             }
         }
         View::Models => models::render(frame, app, layout[1]),
-        View::Queue => queue::render(frame, app, layout[1]),
+        View::Machines => queue::render(frame, app, layout[1]),
         View::Settings => settings::render(frame, app, layout[1]),
-        View::Script => script_composer::render(frame, &app.script, layout[1], &app.theme),
     }
 
     // ── Status bar ──────────────────────────────────────────────
@@ -268,7 +270,15 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let shortcuts = match app.active_view {
-        View::Generate => {
+        View::Create if app.create_mode == crate::app::CreateMode::Chain => vec![
+            ("j/k", "Navigate"),
+            ("a/d", "Add/Del"),
+            ("t", "Transition"),
+            ("i", "Prompt"),
+            ("f", "Frames"),
+            ("Esc", "Back"),
+        ],
+        View::Create => {
             if app.generate.generating {
                 let status = if app.generate.progress.is_downloading() {
                     app.generate.progress.download_status_text()
@@ -278,9 +288,10 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 generating_shortcuts(status, app.generate.focus)
             } else if app.generate.focus == crate::app::GenerateFocus::Navigation {
                 vec![
-                    ("1-6", "Views"),
-                    ("Alt+\u{2190}\u{2192}", "Views"),
+                    ("1-5", "Workspace"),
                     ("Enter", "Edit"),
+                    ("c", "Chain"),
+                    ("A", "Advanced"),
                     ("?", "Help"),
                     ("q", "Quit"),
                 ]
@@ -311,7 +322,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ]
             }
         }
-        View::Gallery => {
+        View::Library => {
             if app.upscale_in_progress {
                 vec![("Esc", "Cancel"), ("", upscale_status.as_str())]
             } else if app.gallery.view_mode == crate::app::GalleryViewMode::Detail {
@@ -338,7 +349,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
         View::Models => vec![
-            ("1-6", "Views"),
+            ("1-5", "Workspace"),
             ("Enter", "Select"),
             ("p", "Pull"),
             ("u", "Unload"),
@@ -346,8 +357,8 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             ("?", "Help"),
             ("q", "Quit"),
         ],
-        View::Queue => vec![
-            ("1-6", "Views"),
+        View::Machines => vec![
+            ("1-5", "Workspace"),
             ("Esc", "Back"),
             ("?", "Help"),
             ("q", "Quit"),
@@ -372,14 +383,6 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
                 ]
             }
         }
-        View::Script => vec![
-            ("j/k", "Navigate"),
-            ("a/d", "Add/Del"),
-            ("t", "Transition"),
-            ("i", "Prompt"),
-            ("f", "Frames"),
-            ("Esc", "Back"),
-        ],
     };
 
     let mut spans = Vec::new();
@@ -410,7 +413,7 @@ pub(crate) fn generating_shortcuts(
     status: &str,
     focus: crate::app::GenerateFocus,
 ) -> Vec<(&str, &str)> {
-    let mut v = vec![("", status), ("Alt+1-6", "Views"), ("Esc", "Unfocus")];
+    let mut v = vec![("", status), ("Alt+1-5", "Workspace"), ("Esc", "Unfocus")];
     if !matches!(
         focus,
         crate::app::GenerateFocus::Prompt | crate::app::GenerateFocus::NegativePrompt

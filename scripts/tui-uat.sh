@@ -484,10 +484,11 @@ cmd_send() {
 
 # Reliable view navigation.
 #
-# All views (Generate, Gallery, Models, Settings) handle number keys 1-4
-# for view switching. However, in Generate view with prompt focused, number
-# keys type into the prompt instead. We detect this and send Escape to
-# enter nav mode first.
+# All views handle number keys 1-5 for workspace switching (Create,
+# Library, Models, Machines, Settings). However, in Create view with the
+# prompt focused, number keys type into the prompt instead. We detect this
+# and send Escape to enter nav mode first. The chain composer is a Create
+# sub-mode: `view chain` navigates to Create and presses `c`.
 cmd_view() {
     require_session
     local target="$1"
@@ -496,17 +497,30 @@ cmd_view() {
     term_id=$(load_state)
 
     # Landmarks must be unique to each view's content area, NOT the tab header.
-    # The tab header ("1 Generate  2 Gallery  3 Models  4 Settings") is on every screen,
-    # so we use box-drawing prefixes (┌) to match section headers instead.
+    # The tab header ("1 Create  2 Library …") is on every screen, so we use
+    # box-drawing prefixes (┌) to match section headers instead.
+    # Legacy names (generate/gallery/queue/script) stay as aliases for one
+    # release so existing UAT transcripts keep working.
     case "$target" in
-        1|generate|Generate)  key="1"; landmark="┌ Parameters|┌ Prompt";;
-        2|gallery|Gallery)    key="2"; landmark="┌ Gallery";;
-        3|models|Models)      key="3"; landmark="┌ Installed|┌ Available";;
-        4|queue|Queue)        key="4"; landmark="┌ Queue";;
-        5|settings|Settings)  key="5"; landmark="┌ Appearance|┌ Configuration";;
-        6|script|Script)      key="6"; landmark="┌ Stages|Stages";;
+        1|create|Create|generate|Generate)   key="1"; landmark="┌ Parameters|┌ Prompt";;
+        2|library|Library|gallery|Gallery)   key="2"; landmark="┌ Library";;
+        3|models|Models)                     key="3"; landmark="┌ Installed|┌ Available";;
+        4|machines|Machines|queue|Queue)     key="4"; landmark="┌ Queue";;
+        5|settings|Settings)                 key="5"; landmark="┌ Appearance|┌ Configuration";;
+        chain|Chain|script|Script)
+            # Chain is a Create sub-mode, not a tab: go to Create, press c.
+            cmd_view create >/dev/null
+            send_one_key "$term_id" "c"
+            sleep 0.7
+            if capture | grep -Eq "┌ Stages|Stages"; then
+                echo "OK: Switched to view chain"
+                return 0
+            fi
+            echo "FAIL: Could not enter the chain composer" >&2
+            return 1
+            ;;
         *)
-            echo "ERROR: Unknown view '$target'. Use 1-6 or generate/gallery/models/queue/settings/script." >&2
+            echo "ERROR: Unknown view '$target'. Use 1-5, create/library/models/machines/settings, or chain." >&2
             exit 1
             ;;
     esac
@@ -622,7 +636,7 @@ cmd_cleanup() {
     # Then walk every live Ghostty terminal, peek at its screen, and
     # close the ones that show mold TUI chrome. We look for the
     # docked-view header text ("mold " + a version/tab line) plus the
-    # Generate/Gallery/Models/Queue tab strip since that combo is
+    # workspace tab strip since that combo is
     # unique to the running TUI and won't false-positive a
     # `mold --help` or shell pane.
     local reaped=0
@@ -685,8 +699,8 @@ APPLESCRIPT
         # Match on the TUI's unique chrome. Require both the view-tab
         # strip and a characteristic panel label so a plain shell
         # running `mold --help` doesn't get yanked.
-        if echo "$content" | grep -q "Generate" && \
-           echo "$content" | grep -q "Gallery" && \
+        if echo "$content" | grep -qE "(Create|Generate)" && \
+           echo "$content" | grep -qE "(Library|Gallery)" && \
            echo "$content" | grep -qE "(Parameters|Prompt|Installed|Available|Timeline|Recent)"; then
             osascript -e "
                 tell application \"Ghostty\"
@@ -878,7 +892,7 @@ cmd_model() {
     fi
     local term_id
     term_id=$(load_state)
-    cmd_view generate >/dev/null
+    cmd_view create >/dev/null
     # Reach Parameters reliably: Escape → Nav mode → Shift+Tab (FocusPrev
     # from Nav lands directly on Parameters, regardless of whether the
     # Negative pane is visible). Then up-key to row 0 (Model) and Enter
@@ -1058,8 +1072,8 @@ case "${1:-help}" in
                 require_session
                 TERM_ID=$(load_state)
 
-                echo "Step 1: Navigate to Script view"
-                cmd_view script
+                echo "Step 1: Open the chain composer (Create sub-mode)"
+                cmd_view chain
                 sleep 0.5
                 cmd_assert "Stages"
 
@@ -1098,7 +1112,7 @@ case "${1:-help}" in
                     exit 1
                 fi
 
-                echo "Step 5: Return to Generate"
+                echo "Step 5: Return to Create compose mode"
                 send_one_key "$TERM_ID" "escape"
                 sleep 0.3
 
@@ -1166,9 +1180,10 @@ Screen I/O:
   capture                         Print current screen (plain text)
   screenshot [output.png]         Native Ghostty screenshot (PNG)
   send <key>...                   Send keystrokes (see KEYS below)
-  view <1-6|name>                 Navigate to view (1=Generate,
-                                  2=Gallery, 3=Models, 4=Queue,
-                                  5=Settings, 6=Script)
+  view <1-5|name>                 Navigate to workspace (1=Create,
+                                  2=Library, 3=Models, 4=Machines,
+                                  5=Settings; 'chain' opens the Create
+                                  chain composer via c)
   wait-for <pattern> [timeout]    Wait up to N seconds for text
   assert <pattern>                Fail if text missing from screen
 
