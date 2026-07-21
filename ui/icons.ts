@@ -30,10 +30,17 @@ export const ICONS = {
   "chevron-right": '<path d="M9 6l6 6-6 6"/>',
   "chevron-left": '<path d="M15 6l-6 6 6 6"/>',
   "arrow-right": '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  "arrow-up": '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  "arrow-down": '<path d="M12 5v14M6 13l6 6 6-6"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   check: '<path d="M4 12.5l5 5 11-11"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   minus: '<path d="M5 12h14"/>',
+  // Six-dot handle for drag-reorderable rows (grip-vertical geometry).
+  grip: '<circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15a2 2 0 01-2-2V5a2 2 0 012-2h8a2 2 0 012 2"/>',
+  // Two-way horizontal arrows — swap width/height (orientation).
+  swap: '<path d="M4 8h14l-4-4M20 16H6l4 4"/>',
 
   // Media / actions
   image:

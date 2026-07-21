@@ -38,6 +38,33 @@ describe("ComposerCard", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
+  it("recalls prompt history with ArrowUp/ArrowDown at the caret edges", async () => {
+    const wrapper = factory({ prompt: "", history: ["newest", "older"] });
+    const ta = wrapper.get("[data-test='composer-prompt']");
+    const el = ta.element as HTMLTextAreaElement;
+    el.selectionStart = 0;
+    el.selectionEnd = 0;
+
+    await ta.trigger("keydown", { key: "ArrowUp" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)?.[0]).toBe("newest");
+    await ta.trigger("keydown", { key: "ArrowUp" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)?.[0]).toBe("older");
+    await ta.trigger("keydown", { key: "ArrowDown" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)?.[0]).toBe("newest");
+  });
+
+  it("exposes record() to seed just-submitted prompts into recall", async () => {
+    const wrapper = factory({ prompt: "", history: [] });
+    (wrapper.vm as unknown as { record: (p: string) => void }).record(
+      "fresh prompt",
+    );
+    const ta = wrapper.get("[data-test='composer-prompt']");
+    const el = ta.element as HTMLTextAreaElement;
+    el.selectionStart = 0;
+    await ta.trigger("keydown", { key: "ArrowUp" });
+    expect(wrapper.emitted("update:prompt")?.at(-1)?.[0]).toBe("fresh prompt");
+  });
+
   it("does not submit while busy", async () => {
     const wrapper = factory({ busy: true });
     await wrapper

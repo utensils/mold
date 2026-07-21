@@ -12,6 +12,11 @@ import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import Keycap from "@ui/components/Keycap.vue";
 import { STYLE_PRESETS, stylePresetById } from "../../lib/stylePresets";
+import {
+  PromptCycler,
+  caretOnFirstLine,
+  caretOnLastLine,
+} from "../../lib/promptCycler";
 
 const props = withDefaults(
   defineProps<{
@@ -29,8 +34,10 @@ const props = withDefaults(
     expanded?: boolean;
     /** Disable submit/expand (e.g. a job is mid-flight). */
     busy?: boolean;
+    /** Prompt history (newest first) for ↑/↓ recall. */
+    history?: string[];
   }>(),
-  { expanded: false, busy: false },
+  { expanded: false, busy: false, history: () => [] },
 );
 
 const emit = defineEmits<{
@@ -56,7 +63,18 @@ const expandLabel = computed(() =>
   props.batchSize > 1 ? `Expand to ${props.batchSize}` : "Expand prompt",
 );
 
+// Shell-style ↑/↓ prompt-history recall. The cycler is fed the latest history
+// and gated on caret line so ↑/↓ still move the caret within a multi-line
+// prompt; only an edge caret walks history.
+const cycler = new PromptCycler();
+watch(
+  () => props.history,
+  (h) => cycler.setEntries(h ?? []),
+  { immediate: true },
+);
+
 function onInput(event: Event) {
+  cycler.reset(); // hand-editing abandons history navigation
   emit("update:prompt", (event.target as HTMLTextAreaElement).value);
 }
 
@@ -64,6 +82,25 @@ function onKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
     if (!props.busy) emit("submit");
+    return;
+  }
+  const el = event.target as HTMLTextAreaElement;
+  if (event.key === "ArrowUp" && caretOnFirstLine(el)) {
+    const recalled = cycler.prev(props.prompt);
+    if (recalled !== null) {
+      event.preventDefault();
+      emit("update:prompt", recalled);
+    }
+  } else if (
+    event.key === "ArrowDown" &&
+    cycler.navigating &&
+    caretOnLastLine(el)
+  ) {
+    const recalled = cycler.next();
+    if (recalled !== null) {
+      event.preventDefault();
+      emit("update:prompt", recalled);
+    }
   }
 }
 
@@ -72,10 +109,14 @@ function pickStyle(id: string) {
   emit("update:stylePreset", props.stylePreset === id ? null : id);
 }
 
-// Let the parent focus the prompt bed (⌘K "New print" starts here).
+// Let the parent focus the prompt bed (⌘K "New print" starts here) and push a
+// just-submitted prompt to the front of history for instant ↑ recall.
 defineExpose({
   focus() {
     textarea.value?.focus();
+  },
+  record(prompt: string) {
+    cycler.record(prompt);
   },
 });
 

@@ -358,11 +358,21 @@ const menuOpen = ref(false);
   gap: 8px;
   height: 36px;
   width: 210px;
-  flex: 0 0 auto;
+  /* Shrinkable so the wide bar never overflows on narrow tablet widths. */
+  flex: 0 1 210px;
+  min-width: 0;
   padding: 0 12px;
   background: var(--bath);
   border: 1px solid var(--ce);
   border-radius: var(--radius-control);
+}
+
+/* Between the phone boundary and ~900px the pills + downloads + avatar already
+ * fill the bar; drop the search box there rather than overflow the header. */
+@media (max-width: 899px) {
+  .search-box {
+    display: none;
+  }
 }
 
 .search-icon {

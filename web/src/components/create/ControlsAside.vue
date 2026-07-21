@@ -18,6 +18,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { ASPECTS, dimsForMp } from "@ui/lib/resolution";
 import type { GenerateFormState } from "../../types";
+import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
 import {
   ORIGIN_HOST_ID,
@@ -32,14 +33,30 @@ const props = withDefaults(
     family: string;
     /** Count of active advanced fields (drives the badge). */
     advCount?: number;
+    /** Phone surface: the Advanced sheet button shows here; on tablet+ the
+     * Advanced sections render inline in the controls region instead. */
+    mobile?: boolean;
   }>(),
-  { advCount: 0 },
+  { advCount: 0, mobile: false },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
   "open-advanced": [];
 }>();
+
+const capabilities = computed(() =>
+  generationCapabilitiesForFamily(props.family),
+);
+// Edit families (Qwen image edit) render one print at a time.
+const batchLocked = computed(() => capabilities.value.forcesBatchSizeOne);
+
+// Reroll: a fresh random seed for the next print without leaving Fixed mode —
+// mirrors the desktop inspector's reroll. Switches to Random so the server
+// draws a new seed each generate.
+function reroll() {
+  patch({ seedMode: "random", seed: null });
+}
 
 // Generation target row (spec §08 multi-host, light). The row reflects the
 // chosen target from the host registry (origin by default) and opens Machines
@@ -153,7 +170,19 @@ function setSeed(value: number) {
     </div>
 
     <div class="controls__group">
-      <div class="controls__label">Seed</div>
+      <div class="controls__seed-head">
+        <span class="controls__label controls__label--inline">Seed</span>
+        <button
+          type="button"
+          class="controls__reroll"
+          data-test="seed-reroll"
+          title="New random seed next print"
+          @click="reroll"
+        >
+          <Icon name="reroll" :size="13" />
+          reroll
+        </button>
+      </div>
       <SegmentedControl
         data-test="seed-seg"
         :model-value="seedSegment"
@@ -173,18 +202,24 @@ function setSeed(value: number) {
       />
     </div>
 
-    <div class="controls__group controls__batch">
-      <span class="controls__label controls__label--inline">Batch</span>
-      <Stepper
-        :model-value="modelValue.batchSize"
-        :min="1"
-        :max="8"
-        label="Batch size"
-        @update:model-value="patch({ batchSize: $event })"
-      />
+    <div class="controls__group">
+      <div class="controls__batch">
+        <span class="controls__label controls__label--inline">Batch</span>
+        <Stepper
+          :model-value="batchLocked ? 1 : modelValue.batchSize"
+          :min="1"
+          :max="batchLocked ? 1 : 8"
+          label="Batch size"
+          @update:model-value="patch({ batchSize: $event })"
+        />
+      </div>
+      <p v-if="batchLocked" class="controls__hint" data-test="batch-locked">
+        locked to 1 — edit models render one print at a time.
+      </p>
     </div>
 
     <button
+      v-if="mobile"
       type="button"
       class="controls__advanced"
       data-test="open-advanced"
@@ -275,6 +310,36 @@ function setSeed(value: number) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.controls__seed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 9px;
+}
+
+.controls__reroll {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0;
+}
+.controls__reroll:hover {
+  color: var(--safelight);
+}
+
+.controls__hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--ink-3);
+  line-height: 1.4;
 }
 
 .controls__advanced {

@@ -90,6 +90,22 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     );
   });
 
+  it("pluralizes the stage count in the summary line (1 stage vs N stages)", async () => {
+    vi.spyOn(api, "fetchChainLimits").mockResolvedValue(ltx2Limits());
+    const w = mount(ScriptComposer, { props: props() });
+    await flushPromises();
+
+    const summary = () => w.find('[data-test="script-summary"]').text();
+    expect(summary()).toContain("1 stage");
+    expect(summary()).not.toContain("1 stages");
+
+    const addStage = w
+      .findAll("button")
+      .find((b) => b.text().includes("Add stage"))!;
+    await addStage.trigger("click");
+    expect(summary()).toContain("2 stages");
+  });
+
   it("clears stale enable_audio from the persisted draft when the current model has no audio path", async () => {
     // Reproduces the reported bug: the user generated with LTX-2.3 (which
     // sets `enable_audio: true` in the persisted chain draft), then

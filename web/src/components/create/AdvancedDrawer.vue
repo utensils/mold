@@ -1,17 +1,21 @@
 <script setup lang="ts">
 /*
- * Advanced drawer (Mold Studio Create) — the capability-gated accordion of
- * fine controls. One section open at a time (parent-held `openSection`). Each
- * section maps onto EXISTING form fields (see GenerateParamsPanel semantics);
- * sections a family doesn't support never render. DrawerPanel on wide screens
- * (≥640px, 560px), SheetPanel "full" on phones. Reset clears advanced fields
- * only — the prompt, model, shape, resolution, detail and seed survive.
+ * Advanced controls (Mold Studio Create) — the capability-gated accordion of
+ * fine controls. One section open at a time. Each section maps onto EXISTING
+ * form fields; sections a family doesn't support never render.
+ *
+ * Surface split (spec §06 v0.12): the web app is the power surface, so at
+ * tablet width and above these six sections render INLINE as an always-visible
+ * column in the Create controls region (`mobile` false → a plain <section>).
+ * On phones (`mobile` true) the same content collapses into the full-screen
+ * Advanced SheetPanel. Reset clears advanced fields only — the prompt, model,
+ * shape, resolution, detail and seed survive.
  */
 import { computed, ref, watch } from "vue";
-import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
+import Icon from "@ui/components/Icon.vue";
 import SliderRow from "@ui/components/SliderRow.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
@@ -44,7 +48,8 @@ type SectionKey =
 
 const props = withDefaults(
   defineProps<{
-    open: boolean;
+    /** Sheet open state (phone only; ignored when inline). */
+    open?: boolean;
     modelValue: GenerateFormState;
     family: string;
     advCount?: number;
@@ -56,7 +61,13 @@ const props = withDefaults(
     /** GPUs for the placement section (empty → section hidden). */
     placementGpus?: { ordinal: number; name: string }[];
   }>(),
-  { advCount: 0, mobile: false, openTo: null, placementGpus: () => [] },
+  {
+    open: false,
+    advCount: 0,
+    mobile: false,
+    openTo: null,
+    placementGpus: () => [],
+  },
 );
 
 const emit = defineEmits<{
@@ -75,6 +86,10 @@ const NEG_CHIPS = [
   "low quality",
   "oversaturated",
 ];
+
+// Desktop/tablet web (spec §06 v0.12): render inline as an always-visible
+// column. Phone: render inside the Advanced sheet.
+const inline = computed(() => !props.mobile);
 
 const caps = computed(() => generationCapabilitiesForFamily(props.family));
 const formats = computed(() => outputFormatsForFamily(props.family));
@@ -100,27 +115,37 @@ const visibleSections = computed<SectionKey[]>(() => {
   return out;
 });
 
-const openSection = ref<SectionKey | null>(visibleSections.value[0] ?? null);
+function initialSection(): SectionKey | null {
+  const sections = visibleSections.value;
+  if (props.openTo && sections.includes(props.openTo)) return props.openTo;
+  return sections[0] ?? null;
+}
+const openSection = ref<SectionKey | null>(initialSection());
 function toggle(section: SectionKey) {
   openSection.value = openSection.value === section ? null : section;
 }
 
-// When the drawer opens: reveal `openTo` if provided and available, otherwise
-// keep the current section if it's still visible, else fall back to the first
-// available one. Runs immediately so a drawer mounted already-open behaves too.
+// Reveal `openTo` whenever it's set (inline: "+ Add LoRA" jumps to the LoRA
+// section without any open/close event; sheet: applied when it opens).
+watch(
+  () => props.openTo,
+  (to) => {
+    if (to && visibleSections.value.includes(to)) openSection.value = to;
+  },
+);
+// Phone sheet: when it opens, resolve to openTo or the first available section.
 watch(
   () => props.open,
   (isOpen) => {
-    if (!isOpen) return;
-    const sections = visibleSections.value;
-    if (props.openTo && sections.includes(props.openTo)) {
-      openSection.value = props.openTo;
-    } else if (!openSection.value || !sections.includes(openSection.value)) {
-      openSection.value = sections[0] ?? null;
-    }
+    if (isOpen) openSection.value = initialSection();
   },
-  { immediate: true },
 );
+// Family switch changes which sections exist — never leave a hidden one open.
+watch(visibleSections, (sections) => {
+  if (!openSection.value || !sections.includes(openSection.value)) {
+    openSection.value = sections[0] ?? null;
+  }
+});
 
 // The Scheduler type permits parameterized object variants; the drawer only
 // surfaces the named string schedulers.
@@ -210,7 +235,21 @@ function toggleUpscale(on: boolean) {
   if (on) openSection.value = "upscale";
 }
 
-// ── Output & seed ─────────────────────────────────────────────────────
+// ── Output & seed: exact size (snap to the 16px grid, like desktop) ───
+function snapDim(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 16;
+  return Math.max(16, Math.round(v / 16) * 16);
+}
+function setWidth(raw: string) {
+  patch({ width: snapDim(Number(raw)) });
+}
+function setHeight(raw: string) {
+  patch({ height: snapDim(Number(raw)) });
+}
+function swapDims() {
+  patch({ width: props.modelValue.height, height: props.modelValue.width });
+}
+
 const seedModes = [
   { value: "random", label: "Random" },
   { value: "static", label: "Fixed" },
@@ -263,14 +302,15 @@ function resetAdvanced() {
 
 <template>
   <component
-    :is="mobile ? SheetPanel : DrawerPanel"
-    :open="open"
-    :width="560"
+    :is="mobile ? SheetPanel : 'section'"
+    :class="inline ? 'adv adv--inline' : undefined"
+    data-test="advanced-root"
+    :open="mobile ? open : undefined"
     :variant="mobile ? 'full' : undefined"
-    title="Advanced"
+    :title="mobile ? 'Advanced' : undefined"
     @close="emit('close')"
   >
-    <template v-if="!mobile" #header>
+    <template v-if="mobile" #header>
       <div class="adv__head" data-test="advanced-header">
         <div class="adv__title">Advanced</div>
         <div class="adv__subtitle">
@@ -281,6 +321,22 @@ function resetAdvanced() {
         >{{ advCount }} active</BadgePill
       >
     </template>
+
+    <div v-if="inline" class="adv__inline-head">
+      <span class="adv__kicker">Advanced</span>
+      <BadgePill v-if="advCount > 0" data-test="advanced-active"
+        >{{ advCount }} on</BadgePill
+      >
+      <span class="adv__inline-spacer" />
+      <button
+        type="button"
+        class="adv__inline-reset"
+        data-test="advanced-reset"
+        @click="resetAdvanced"
+      >
+        Reset
+      </button>
+    </div>
 
     <div class="adv__sections">
       <AccordionSection
@@ -547,6 +603,42 @@ function resetAdvanced() {
           />
         </div>
         <div class="adv__field">
+          <label class="adv__label">Exact size</label>
+          <div class="adv__size">
+            <input
+              class="adv__input"
+              type="number"
+              min="16"
+              step="16"
+              data-test="exact-width"
+              aria-label="Width in pixels"
+              :value="modelValue.width"
+              @change="setWidth(($event.target as HTMLInputElement).value)"
+            />
+            <button
+              type="button"
+              class="adv__swap"
+              data-test="exact-swap"
+              aria-label="Swap width and height"
+              title="Swap width and height"
+              @click="swapDims"
+            >
+              <Icon name="swap" :size="15" />
+            </button>
+            <input
+              class="adv__input"
+              type="number"
+              min="16"
+              step="16"
+              data-test="exact-height"
+              aria-label="Height in pixels"
+              :value="modelValue.height"
+              @change="setHeight(($event.target as HTMLInputElement).value)"
+            />
+          </div>
+          <p class="adv__hint">snaps to the nearest 16px.</p>
+        </div>
+        <div class="adv__field">
           <label class="adv__label">Seed</label>
           <SegmentedControl
             :model-value="modelValue.seedMode"
@@ -647,11 +739,11 @@ function resetAdvanced() {
       </AccordionSection>
     </div>
 
-    <div class="adv__footer">
+    <div v-if="mobile" class="adv__footer">
       <button
         type="button"
         class="adv__reset"
-        data-test="advanced-reset"
+        data-test="advanced-reset-sheet"
         @click="resetAdvanced"
       >
         Reset
@@ -670,6 +762,48 @@ function resetAdvanced() {
 </template>
 
 <style scoped>
+/* Inline (tablet+ web) container — a card in the controls region. */
+.adv--inline {
+  display: block;
+  background: var(--bench);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-card-lg);
+  box-shadow: inset 0 1px 0 var(--card-hi);
+  padding: 18px;
+}
+.adv__inline-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 14px;
+}
+.adv__kicker {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.adv__inline-spacer {
+  flex: 1;
+}
+.adv__inline-reset {
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.adv__inline-reset:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
+}
 .adv__head {
   flex: 1;
 }
@@ -740,6 +874,31 @@ function resetAdvanced() {
   flex-wrap: wrap;
   gap: 7px;
   margin-top: 10px;
+}
+.adv__size {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.adv__swap {
+  height: 40px;
+  width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.adv__swap:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
 }
 .adv__dropzone {
   width: 100%;

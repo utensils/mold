@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
+import Icon from "@ui/components/Icon.vue";
 import StageCard from "./StageCard.vue";
 import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
@@ -269,6 +270,18 @@ const canGenerate = computed(
     script.value.stage.some((s) => s.prompt.trim()),
 );
 
+const stageCountLabel = computed(() => {
+  const n = script.value.stage.length;
+  return `${n} ${n === 1 ? "stage" : "stages"}`;
+});
+
+const summaryLine = computed(
+  () =>
+    `${stageCountLabel.value} · ${totalFrames.value} frames · ${(
+      totalFrames.value / script.value.chain.fps
+    ).toFixed(1)}s @ ${script.value.chain.fps}fps`,
+);
+
 function submit() {
   if (!canGenerate.value) return;
   emit("submit", script.value);
@@ -297,13 +310,13 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 
 <template>
   <div class="flex flex-col gap-3">
-    <div class="flex items-center gap-2 text-sm">
-      <span class="font-semibold text-rebate">Script mode</span>
+    <div class="flex items-center gap-2">
+      <span class="font-display text-sm font-semibold text-rebate"
+        >Script mode</span
+      >
       <div class="ml-auto flex gap-2">
-        <button
-          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
-          @click="importFileInput?.click()"
-        >
+        <button type="button" class="sc-tool" @click="importFileInput?.click()">
+          <Icon name="upload" :size="13" />
           Import
         </button>
         <input
@@ -313,16 +326,12 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
           class="hidden"
           @change="handleImportChange"
         />
-        <button
-          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
-          @click="downloadToml()"
-        >
+        <button type="button" class="sc-tool" @click="downloadToml()">
+          <Icon name="download" :size="13" />
           Export
         </button>
-        <button
-          class="rounded-lg bg-bench/60 px-3 py-1 text-xs text-ink-2 hover:bg-surface/80"
-          @click="copyToml()"
-        >
+        <button type="button" class="sc-tool" @click="copyToml()">
+          <Icon name="copy" :size="13" />
           Copy TOML
         </button>
       </div>
@@ -357,19 +366,19 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
           : undefined
       "
     >
-      <span>
-        {{ script.stage.length }} stages · {{ totalFrames }} frames ·
-        {{ (totalFrames / script.chain.fps).toFixed(1) }}s @
-        {{ script.chain.fps }}fps
-      </span>
+      <span class="font-mono" data-test="script-summary">{{
+        summaryLine
+      }}</span>
       <button
         v-if="canAddStage"
-        class="rounded-lg bg-bench/60 px-3 py-1 text-ink-2 hover:bg-surface/80"
+        type="button"
+        class="sc-tool"
         @click="addStage"
       >
-        + Add stage
+        <Icon name="plus" :size="13" />
+        Add stage
       </button>
-      <span v-else class="text-ink-3">Max stages reached</span>
+      <span v-else class="font-mono text-ink-3">max stages reached</span>
     </div>
 
     <label
@@ -427,3 +436,26 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
     />
   </div>
 </template>
+
+<style scoped>
+.sc-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.sc-tool:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
+}
+</style>

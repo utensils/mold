@@ -48,6 +48,7 @@ vi.mock("../api", () => ({
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
   upscaleStream: vi.fn(async () => undefined),
+  fetchPromptHistory: vi.fn(async () => []),
   imageUrl: (name: string) => `/api/gallery/image/${name}`,
   thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
 }));
@@ -94,13 +95,13 @@ describe("GeneratePage layout and behavior", () => {
     vi.stubGlobal("prompt", vi.fn());
   });
 
-  it("uses the Mold Studio three-column workspace", () => {
+  it("uses the Mold Studio composer + controls-region workspace", () => {
     const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     expect(wrapper.get("[data-test='generate-shell']").classes()).toContain(
       "max-w-[1600px]",
     );
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
-      "xl:grid-cols-[238px_minmax(0,1fr)_296px]",
+      "md:grid-cols-[minmax(0,1fr)_340px]",
     );
   });
 
@@ -372,5 +373,6 @@ function pageStubs() {
     GenerationTemplatesPanel: { template: "<div />" },
     RecentGrid: RecentGridStub,
     Lightbox: { template: "<div />" },
+    RouterLink: { template: "<a><slot /></a>" },
   };
 }

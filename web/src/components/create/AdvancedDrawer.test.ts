@@ -338,8 +338,35 @@ describe("AdvancedDrawer interactions", () => {
     expect(next.upscaleModel).toBe("");
   });
 
-  it("emits close from Done", async () => {
-    const wrapper = factory("sdxl");
+  it("exact-size inputs snap to 16px and swap orientation", async () => {
+    const wrapper = factory("flux");
+    await wrapper
+      .get("[data-test='section-output'] .ms-acc__head")
+      .trigger("click");
+    const width = wrapper.get("[data-test='exact-width']");
+    await width.setValue("1000");
+    await width.trigger("change");
+    let next = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as {
+      width: number;
+    };
+    expect(next.width).toBe(1008); // 1000 → nearest multiple of 16
+
+    await wrapper.setProps({
+      modelValue: { ...baseForm({ width: 1216, height: 704 }) },
+    });
+    await wrapper.get("[data-test='exact-swap']").trigger("click");
+    const swapped = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as {
+      width: number;
+      height: number;
+    };
+    expect(swapped.width).toBe(704);
+    expect(swapped.height).toBe(1216);
+  });
+
+  it("emits close from Done in the phone sheet", async () => {
+    // Inline (desktop) has no Done — it's always visible. The Done button
+    // lives only in the phone Advanced sheet (mobile: true).
+    const wrapper = factory("sdxl", {}, { mobile: true });
     await wrapper.get("[data-test='advanced-done']").trigger("click");
     expect(wrapper.emitted("close")).toHaveLength(1);
   });

@@ -1,5 +1,13 @@
 <script setup lang="ts">
+/*
+ * Stage card (Mold Studio Sequence composer) — one clip in a chain script.
+ * Kit-native: Icon glyphs (no emoji/text symbols), token surfaces, a proper
+ * drop-target attach tile, and a transition segmented control. The grip keeps
+ * the `.drag-handle` class VueDraggable binds to for reordering.
+ */
 import { computed } from "vue";
+import Icon from "@ui/components/Icon.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type { ChainStageToml } from "../lib/chainToml";
 
 const props = defineProps<{
@@ -27,9 +35,19 @@ function updatePrompt(v: string) {
 function updateFrames(v: number) {
   emit("update:stage", { ...props.stage, frames: v });
 }
-function updateTransition(v: "smooth" | "cut" | "fade") {
-  emit("update:stage", { ...props.stage, transition: v });
+function updateTransition(v: string) {
+  emit("update:stage", {
+    ...props.stage,
+    transition: v as "smooth" | "cut" | "fade",
+  });
 }
+
+const transitionOptions = [
+  { value: "smooth", label: "Smooth" },
+  { value: "cut", label: "Cut" },
+  { value: "fade", label: "Fade" },
+] as const;
+const transitionValue = computed(() => props.stage.transition ?? "smooth");
 
 const durationSec = computed(() => (props.stage.frames / 24).toFixed(2));
 const frameOptions = computed(() => {
@@ -47,156 +65,325 @@ const sourceImageLabel = computed(() => {
 </script>
 
 <template>
-  <div class="bg-bench border border-edge rounded-2xl p-3 space-y-2">
-    <div class="flex items-center gap-2 text-xs text-ink-3">
-      <span class="drag-handle cursor-grab select-none">⋮⋮</span>
-      <span>{{ index + 1 }}</span>
-      <template v-if="!isFirst">
-        <div class="inline-flex rounded-full bg-bench/60 p-0.5">
-          <button
-            type="button"
-            :class="
-              (stage.transition ?? 'smooth') === 'smooth'
-                ? 'bg-safelight/60'
-                : ''
-            "
-            class="rounded-full px-2 py-0.5"
-            @click="updateTransition('smooth')"
-          >
-            smooth
-          </button>
-          <button
-            type="button"
-            :class="stage.transition === 'cut' ? 'bg-safelight/60' : ''"
-            class="rounded-full px-2 py-0.5"
-            @click="updateTransition('cut')"
-          >
-            cut
-          </button>
-          <button
-            type="button"
-            :class="stage.transition === 'fade' ? 'bg-safelight/60' : ''"
-            class="rounded-full px-2 py-0.5"
-            @click="updateTransition('fade')"
-          >
-            fade
-          </button>
-        </div>
-      </template>
-      <span v-else class="italic opacity-60">Opening frame</span>
-      <div class="ml-auto flex items-center gap-2">
+  <div class="sc" data-test="stage-card">
+    <div class="sc__head">
+      <button
+        type="button"
+        class="sc__grip drag-handle"
+        data-test="stage-drag-handle"
+        aria-label="Drag to reorder stage"
+        title="Drag to reorder"
+      >
+        <Icon name="grip" :size="16" />
+      </button>
+      <span class="sc__index">{{ index + 1 }}</span>
+
+      <SegmentedControl
+        v-if="!isFirst"
+        class="sc__transition"
+        :model-value="transitionValue"
+        :options="transitionOptions"
+        label="Transition"
+        data-test="stage-transition"
+        @update:model-value="updateTransition"
+      />
+      <span v-else class="sc__opening">opening frame</span>
+
+      <div class="sc__actions">
         <select
-          class="rounded-full bg-bench/60 px-2 py-0.5 text-xs"
+          class="sc__frames"
           :value="stage.frames"
+          aria-label="Frames for this stage"
           @change="
             updateFrames(Number(($event.target as HTMLSelectElement).value))
           "
         >
           <option v-for="n in frameOptions" :key="n" :value="n">
-            {{ n }}f ({{ (n / 24).toFixed(2) }}s)
+            {{ n }}f · {{ (n / 24).toFixed(2) }}s
           </option>
         </select>
         <button
-          class="icon-btn"
-          aria-label="Duplicate"
+          type="button"
+          class="sc__icon"
+          aria-label="Duplicate stage"
+          title="Duplicate"
           @click="emit('duplicate')"
         >
-          ⎘
-        </button>
-        <button class="icon-btn" aria-label="Move up" @click="emit('move-up')">
-          ↑
+          <Icon name="copy" :size="15" />
         </button>
         <button
-          class="icon-btn"
-          aria-label="Move down"
+          type="button"
+          class="sc__icon"
+          aria-label="Move stage up"
+          title="Move up"
+          @click="emit('move-up')"
+        >
+          <Icon name="arrow-up" :size="15" />
+        </button>
+        <button
+          type="button"
+          class="sc__icon"
+          aria-label="Move stage down"
+          title="Move down"
           @click="emit('move-down')"
         >
-          ↓
+          <Icon name="arrow-down" :size="15" />
         </button>
-        <button class="icon-btn" aria-label="Delete" @click="emit('delete')">
-          ✕
+        <button
+          type="button"
+          class="sc__icon sc__icon--danger"
+          aria-label="Delete stage"
+          title="Delete"
+          @click="emit('delete')"
+        >
+          <Icon name="close" :size="15" />
         </button>
       </div>
     </div>
 
-    <div class="flex items-start gap-2">
-      <div v-if="hasSourceImage" class="relative flex-shrink-0">
+    <div class="sc__body">
+      <div v-if="hasSourceImage" class="sc__thumb">
         <img
           :src="`data:image/png;base64,${stage.source_image_b64}`"
           :alt="sourceImageLabel"
-          class="h-12 w-12 rounded-xl object-cover"
         />
         <button
           type="button"
-          class="absolute -right-1 -top-1 h-5 w-5 rounded-full bg-bench/90 text-xs text-rebate hover:bg-surface"
+          class="sc__thumb-remove"
           aria-label="Remove source image"
           title="Remove source image"
           @click="emit('clear-image')"
         >
-          ✕
+          <Icon name="close" :size="12" />
         </button>
       </div>
       <button
         v-else
         type="button"
-        class="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl border border-dashed border-edge bg-bench/40 text-lg text-ink-3 hover:border-ce hover:text-ink-2"
+        class="sc__attach"
+        data-test="stage-attach"
         aria-label="Attach source image"
         title="Attach source image"
         @click="emit('pick-image')"
       >
-        🖼️
+        <Icon name="image" :size="18" />
       </button>
 
       <textarea
-        class="min-h-[2.5rem] flex-1 resize-none bg-transparent text-base text-rebate placeholder:text-ink-3 focus:outline-none"
+        class="sc__prompt"
         :value="stage.prompt"
         placeholder="Describe this stage…"
         @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
       />
     </div>
 
-    <div class="flex flex-wrap items-center gap-2 text-xs text-ink-3">
-      <button class="hover:text-ink-2" @click="emit('expand')">
-        ✨ Expand
+    <div class="sc__foot">
+      <button type="button" class="sc__link" @click="emit('expand')">
+        <Icon name="sparkle" :size="13" />
+        expand
       </button>
-      <button
-        v-if="hasSourceImage"
-        class="hover:text-ink-2"
-        @click="emit('pick-image')"
-      >
-        🖼️ Replace image
+      <button type="button" class="sc__link" @click="emit('pick-image')">
+        <Icon name="image" :size="13" />
+        {{ hasSourceImage ? "replace image" : "attach image" }}
       </button>
-      <button v-else class="hover:text-ink-2" @click="emit('pick-image')">
-        🖼️ Attach image
-      </button>
-      <span>{{ durationSec }}s</span>
+      <span class="sc__dur">{{ durationSec }}s</span>
       <span
         v-if="
           !isFirst &&
           (stage.transition ?? 'smooth') === 'smooth' &&
           stage.source_image_b64
         "
-        class="text-amber-400"
+        class="sc__anchor"
         title="Smooth transitions use the prior clip's motion tail; this image still anchors character/scene identity across the stage boundary"
       >
-        smooth transition — image used as identity anchor
+        identity anchor across the cut
       </span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.icon-btn {
+.sc {
+  background: var(--bench);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-card);
+  box-shadow: inset 0 1px 0 var(--card-hi);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sc__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sc__grip {
   display: inline-flex;
-  height: 1.5rem;
-  width: 1.5rem;
   align-items: center;
   justify-content: center;
-  border-radius: 9999px;
-  color: rgb(148 163 184);
-  transition: color 150ms ease;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: grab;
+  padding: 2px;
 }
-.icon-btn:hover {
-  color: rgb(226 232 240);
+.sc__grip:active {
+  cursor: grabbing;
+}
+.sc__index {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  min-width: 12px;
+}
+.sc__transition {
+  flex: 0 0 auto;
+}
+.sc__opening {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.sc__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.sc__frames {
+  height: 30px;
+  background: var(--bath);
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  color: var(--rebate);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  padding: 0 8px;
+}
+.sc__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  width: 30px;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.sc__icon:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
+}
+.sc__icon--danger:hover {
+  border-color: var(--stop);
+  color: var(--stop);
+}
+.sc__body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.sc__thumb {
+  position: relative;
+  flex: 0 0 auto;
+}
+.sc__thumb img {
+  height: 48px;
+  width: 48px;
+  border-radius: var(--radius-control);
+  object-fit: cover;
+  display: block;
+}
+.sc__thumb-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  height: 20px;
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--edge);
+  background: var(--bench);
+  color: var(--rebate);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.sc__thumb-remove:hover {
+  color: var(--stop);
+  border-color: var(--stop);
+}
+.sc__attach {
+  height: 48px;
+  width: 48px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed var(--ce);
+  background: var(--bath);
+  color: var(--ink-3);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.sc__attach:hover {
+  border-color: var(--safelight);
+  color: var(--ink-2);
+}
+.sc__prompt {
+  flex: 1;
+  min-width: 0;
+  min-height: 48px;
+  resize: none;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--rebate);
+  font-family: var(--f-body);
+  /* 16px avoids iOS focus-zoom on phone browsers. */
+  font-size: 16px;
+  line-height: 1.4;
+}
+.sc__prompt::placeholder {
+  color: var(--ink-3);
+}
+.sc__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.sc__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 0;
+}
+.sc__link:hover {
+  color: var(--rebate);
+}
+.sc__dur {
+  font-variant-numeric: tabular-nums;
+}
+.sc__anchor {
+  color: var(--warning);
 }
 </style>

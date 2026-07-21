@@ -11,6 +11,7 @@ import { requestChoice, toast } from "../lib/toasts";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
 import ControlsAside from "../components/create/ControlsAside.vue";
+import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
@@ -27,12 +28,12 @@ import Lightbox from "../components/gallery/Lightbox.vue";
 import { blobToBase64 } from "../lib/base64";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
-import BadgePill from "@ui/components/BadgePill.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
   createChainJob,
   deleteGalleryImage,
   fetchModels,
+  fetchPromptHistory,
   imageUrl,
   listGallery,
   upscaleStream,
@@ -84,6 +85,7 @@ const models = ref<ModelInfoExtended[]>([]);
 // resolves so we never flash the guide while the list is still in flight.
 const modelsLoaded = ref(false);
 const galleryEntries = ref<GalleryImage[]>([]);
+const promptHistory = ref<string[]>([]);
 const muted = ref(loadMuted());
 
 const showExpand = ref(false);
@@ -204,6 +206,10 @@ async function refreshGallery() {
   }
 }
 
+async function refreshHistory() {
+  promptHistory.value = await fetchPromptHistory();
+}
+
 const doneJobIds = computed(() =>
   stream.jobs.value
     .filter((j) => j.state === "done")
@@ -222,7 +228,10 @@ watch(
       seenDoneIds.add(j.id);
       added = true;
     }
-    if (added) void refreshGallery();
+    if (added) {
+      void refreshGallery();
+      void refreshHistory();
+    }
   },
   { immediate: true },
 );
@@ -267,13 +276,6 @@ const capabilities = computed(() =>
 // stitch multiple clips. For everything else the Sequence tab stays
 // discoverable but explains itself instead of offering a dead Generate button.
 const supportsChain = computed(() => capabilities.value.supportsVideo);
-
-// LoRA stack lives in the left rail as a live summary. The stack stores paths;
-// the display name is the file's basename without its extension.
-function loraLabel(path: string): string {
-  const base = path.split(/[\\/]/).pop() ?? path;
-  return base.replace(/\.(safetensors|ckpt|pt|bin)$/i, "");
-}
 
 const gpuListForPlacement = computed(
   () =>
@@ -599,6 +601,8 @@ async function onSubmit() {
   await fitStillSourceToRequest();
   const req = form.toRequest();
   stream.submit(req, decision);
+  // Push to history immediately so ↑ recalls it before the server round-trips.
+  composerCardRef.value?.record(req.prompt);
   if (
     form.state.value.seedMode === "increment" &&
     form.state.value.seed !== null
@@ -828,11 +832,6 @@ function openAdvanced() {
   showAdvanced.value = true;
 }
 
-function openAdvancedLora() {
-  advOpenTo.value = "lora";
-  showAdvanced.value = true;
-}
-
 onMounted(async () => {
   if (typeof window.matchMedia === "function") {
     phoneQuery = window.matchMedia("(max-width: 639px)");
@@ -845,6 +844,7 @@ onMounted(async () => {
   } catch (e) {
     console.error(e);
   }
+  void refreshHistory();
   if (!form.state.value.model) {
     const first = installedModels.value[0];
     if (first) form.applyModelDefaults(first);
@@ -868,99 +868,8 @@ onBeforeUnmount(() => {
   >
     <div
       data-test="generate-workspace"
-      class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_296px] xl:grid-cols-[238px_minmax(0,1fr)_296px]"
+      class="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px]"
     >
-      <!-- Left rail: model list + LoRA card -->
-      <aside class="hidden flex-col gap-3.5 xl:flex">
-        <div class="rounded-card border border-edge bg-bench p-4">
-          <div
-            class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-3"
-          >
-            Model
-          </div>
-          <div class="mt-3 flex flex-col gap-1">
-            <button
-              v-for="m in installedModels"
-              :key="m.name"
-              type="button"
-              class="flex items-center gap-2 rounded-control px-2.5 py-2 text-left font-mono text-xs text-ink-2 transition hover:bg-white/5"
-              :class="{ 'text-rebate': m.name === form.state.value.model }"
-              :data-test="`model-row-${m.name}`"
-              @click="selectModel(m)"
-            >
-              <span class="min-w-0 flex-1 truncate">{{ m.name }}</span>
-              <span
-                v-if="m.name === form.state.value.model"
-                class="font-extrabold text-safelight"
-                >✓</span
-              >
-            </button>
-            <router-link
-              to="/models"
-              class="mt-1 px-2.5 py-1 text-left font-mono text-[11px] text-ink-3 hover:text-safelight"
-              >All models →</router-link
-            >
-          </div>
-        </div>
-
-        <div
-          v-if="capabilities.supportsLora"
-          class="rounded-card border border-edge bg-bench p-4"
-          data-test="lora-rail"
-        >
-          <div class="flex items-center justify-between">
-            <span
-              class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-3"
-              >LoRA stack</span
-            >
-            <BadgePill
-              v-if="form.state.value.loras.length"
-              data-test="lora-count"
-              >{{ form.state.value.loras.length }}</BadgePill
-            >
-          </div>
-
-          <ul
-            v-if="form.state.value.loras.length"
-            class="mt-3 flex flex-col gap-1.5"
-          >
-            <li
-              v-for="(lora, i) in form.state.value.loras"
-              :key="`${lora.path}-${i}`"
-              class="flex items-center gap-2 rounded-control border border-edge bg-bath px-2.5 py-1.5"
-              data-test="lora-rail-row"
-            >
-              <span
-                class="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2"
-                >{{ loraLabel(lora.path) }}</span
-              >
-              <span class="shrink-0 font-mono text-[10px] text-safelight"
-                >{{ lora.scale.toFixed(2) }}×</span
-              >
-              <button
-                type="button"
-                class="shrink-0 text-ink-3 hover:text-stop"
-                :aria-label="`Remove ${loraLabel(lora.path)}`"
-                data-test="lora-rail-remove"
-                @click="form.removeLora(i)"
-              >
-                <Icon name="close" :size="13" />
-              </button>
-            </li>
-          </ul>
-
-          <button
-            type="button"
-            class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-control border border-dashed border-ce p-2.5 text-xs text-ink-2 transition hover:border-safelight hover:text-rebate"
-            data-test="add-lora"
-            @click="openAdvancedLora"
-          >
-            <Icon name="plus" :size="13" />
-            {{ form.state.value.loras.length ? "Manage LoRAs" : "Add LoRA" }}
-          </button>
-        </div>
-      </aside>
-
       <!-- Center: activity + composer + canvas + recent -->
       <main class="flex min-w-0 flex-col gap-4">
         <ActivityStrip
@@ -1063,6 +972,7 @@ onBeforeUnmount(() => {
             :steps="form.state.value.steps"
             :batch-size="form.state.value.batchSize"
             :expanded="expanded"
+            :history="promptHistory"
             @submit="onSubmit"
             @expand="onExpand"
             @undo-expand="undoExpand"
@@ -1127,29 +1037,58 @@ onBeforeUnmount(() => {
         </section>
       </main>
 
-      <!-- Right: controls -->
-      <ControlsAside
+      <!-- Right: controls region — model + basics + inline Advanced (spec §06
+           v0.12 surface split). On phones the Advanced column collapses into
+           the Advanced sheet, opened from the button inside ControlsAside. -->
+      <div class="flex min-w-0 flex-col gap-4">
+        <CreateModelPicker
+          :models="installedModels"
+          :model="form.state.value.model"
+          @select="selectModel"
+        />
+        <ControlsAside
+          v-model="form.state.value"
+          :family="currentFamily"
+          :adv-count="advCount"
+          :mobile="isPhone"
+          @open-advanced="openAdvanced"
+        />
+        <!-- Tablet+ : inline, always-visible Advanced column. -->
+        <AdvancedDrawer
+          v-if="!isPhone"
+          :mobile="false"
+          v-model="form.state.value"
+          :family="currentFamily"
+          :adv-count="advCount"
+          :open-to="advOpenTo"
+          :placement-gpus="gpuListForPlacement"
+          @open-picker="showPicker = true"
+          @clear-source="onClearSource"
+          @open-mask="showMask = true"
+          @append-prompt="form.appendPromptPhrase"
+        />
+      </div>
+    </div>
+
+    <!-- Phone: the same Advanced content in a viewport-fixed sheet host, so it
+         overlays the scrolling document rather than anchoring in the tall
+         controls column (SheetPanel is absolute-in-frame by design). -->
+    <div v-if="isPhone && showAdvanced" class="fixed inset-0 z-40">
+      <AdvancedDrawer
+        :open="true"
+        :mobile="true"
         v-model="form.state.value"
         :family="currentFamily"
         :adv-count="advCount"
-        @open-advanced="openAdvanced"
+        :open-to="advOpenTo"
+        :placement-gpus="gpuListForPlacement"
+        @close="showAdvanced = false"
+        @open-picker="showPicker = true"
+        @clear-source="onClearSource"
+        @open-mask="showMask = true"
+        @append-prompt="form.appendPromptPhrase"
       />
     </div>
-
-    <AdvancedDrawer
-      :open="showAdvanced"
-      v-model="form.state.value"
-      :family="currentFamily"
-      :adv-count="advCount"
-      :mobile="isPhone"
-      :open-to="advOpenTo"
-      :placement-gpus="gpuListForPlacement"
-      @close="showAdvanced = false"
-      @open-picker="showPicker = true"
-      @clear-source="onClearSource"
-      @open-mask="showMask = true"
-      @append-prompt="form.appendPromptPhrase"
-    />
 
     <ExpandModal
       :open="showExpand"

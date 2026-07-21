@@ -587,3 +587,23 @@ export async function deleteModel(model: string): Promise<ModelRemovalResult> {
     throw new Error(`DELETE /api/models/${model} failed: ${res.status}`);
   return (await res.json()) as ModelRemovalResult;
 }
+
+/// Prompt history for ↑/↓ recall in the Create composer (`GET /api/history`,
+/// newest-first). Returns just the prompt strings; the server also carries the
+/// model + timestamp, which the composer doesn't need. Never throws — a server
+/// without the history route just yields an empty list so ↑/↓ falls back to
+/// plain caret movement.
+export async function fetchPromptHistory(limit = 100): Promise<string[]> {
+  try {
+    const res = await fetch(`${base}/api/history?limit=${limit}`);
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      entries?: { prompt?: string }[];
+    };
+    return (body.entries ?? [])
+      .map((e) => (e.prompt ?? "").trim())
+      .filter((p) => p.length > 0);
+  } catch {
+    return [];
+  }
+}

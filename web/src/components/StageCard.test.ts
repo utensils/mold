@@ -23,7 +23,42 @@ describe("StageCard source image affordance", () => {
     // should point at the pick-image event.
     const attach = card.find('[aria-label="Attach source image"]');
     expect(attach.exists()).toBe(true);
-    expect(card.text()).toContain("Attach image");
+    expect(card.text()).toContain("attach image");
+  });
+
+  it("uses kit icons, never emoji or text glyphs, for its controls", () => {
+    const card = mount(StageCard, {
+      props: props({ prompt: "", frames: 97 }),
+    });
+    // Spec voice bans emoji; the old card leaned on 🖼 ✨ ⋮⋮ ↑ ↓ ✕ ⎘.
+    const banned = ["🖼", "✨", "⋮", "↑", "↓", "✕", "⎘", "🖼️"];
+    const html = card.html();
+    for (const glyph of banned) {
+      expect(html).not.toContain(glyph);
+    }
+    // The @ui Icon renders inline <svg> markup.
+    expect(card.find("svg").exists()).toBe(true);
+  });
+
+  it("emits reorder / duplicate / delete from the header controls", async () => {
+    const card = mount(StageCard, {
+      props: props({ prompt: "one", frames: 97 }),
+    });
+    await card.find('[aria-label="Move stage up"]').trigger("click");
+    await card.find('[aria-label="Move stage down"]').trigger("click");
+    await card.find('[aria-label="Duplicate stage"]').trigger("click");
+    await card.find('[aria-label="Delete stage"]').trigger("click");
+    expect(card.emitted("move-up")).toHaveLength(1);
+    expect(card.emitted("move-down")).toHaveLength(1);
+    expect(card.emitted("duplicate")).toHaveLength(1);
+    expect(card.emitted("delete")).toHaveLength(1);
+  });
+
+  it("keeps the .drag-handle hook VueDraggable binds to", () => {
+    const card = mount(StageCard, {
+      props: props({ prompt: "", frames: 97 }),
+    });
+    expect(card.find(".drag-handle").exists()).toBe(true);
   });
 
   it("emits pick-image when the attach button is clicked", async () => {

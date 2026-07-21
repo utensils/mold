@@ -107,13 +107,48 @@ describe("ControlsAside", () => {
     expect(next.batchSize).toBe(3);
   });
 
-  it("shows the advanced badge and opens the drawer", async () => {
+  it("shows the advanced badge and opens the sheet on phones", async () => {
+    // On tablet+ the Advanced sections render inline, so the sheet button is
+    // phone-only (mobile: true).
     const wrapper = mount(ControlsAside, {
-      props: { modelValue: baseForm(), family: "flux", advCount: 3 },
+      props: {
+        modelValue: baseForm(),
+        family: "flux",
+        advCount: 3,
+        mobile: true,
+      },
     });
     expect(wrapper.get("[data-test='adv-badge']").text()).toContain("3");
     await wrapper.get("[data-test='open-advanced']").trigger("click");
     expect(wrapper.emitted("open-advanced")).toHaveLength(1);
+  });
+
+  it("hides the Advanced sheet button on tablet+ (inline advanced instead)", () => {
+    const wrapper = mount(ControlsAside, {
+      props: { modelValue: baseForm(), family: "flux", advCount: 3 },
+    });
+    expect(wrapper.find("[data-test='open-advanced']").exists()).toBe(false);
+  });
+
+  it("locks batch to 1 for edit families", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm(),
+        family: "qwen-image-edit",
+        advCount: 0,
+      },
+    });
+    expect(wrapper.find("[data-test='batch-locked']").exists()).toBe(true);
+    expect(wrapper.getComponent(Stepper).props("max")).toBe(1);
+  });
+
+  it("reroll switches seed back to random", async () => {
+    const wrapper = factory({ seedMode: "static", seed: 42 });
+    await wrapper.get("[data-test='seed-reroll']").trigger("click");
+    const events = wrapper.emitted("update:modelValue") ?? [];
+    const last = events.at(-1)?.[0] as GenerateFormState;
+    expect(last.seedMode).toBe("random");
+    expect(last.seed).toBeNull();
   });
 
   it("defaults the run-on row to this server with no caption", () => {
