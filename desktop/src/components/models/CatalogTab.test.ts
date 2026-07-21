@@ -297,39 +297,69 @@ describe("CatalogTab host fallback when the local engine is down", () => {
   });
 });
 
-describe("CatalogTab Installed source chip", () => {
-  it("never fires a live search for the Installed tab and keeps loaded pages intact", async () => {
-    vi.useFakeTimers();
+describe("CatalogTab Discover source chips", () => {
+  it("offers exactly All / HuggingFace / Civitai — Installed is now a segment", async () => {
     setActivePinia(createPinia());
-    searchCatalog.mockResolvedValue({
-      entries: [entry("live-model", "flux")],
-      page: 1,
-      page_size: PAGE_SIZE,
-      total: 1,
-    });
     const wrapper = mount(CatalogTab, {
       props: { query: "", layout: "grid" as const },
       global: { plugins: [] },
     });
-    await vi.runAllTimersAsync();
-    const callsAfterMount = searchCatalog.mock.calls.length;
+    await flushPromises();
 
     const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
-    await chips[3]!.trigger("click"); // Installed
-    await vi.advanceTimersByTimeAsync(1000);
+    expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai"]);
+    expect(chips[0]!.attributes("aria-pressed")).toBe("true");
+  });
+});
 
-    // No request went out for the pseudo-source (the server would 400 it).
-    expect(searchCatalog.mock.calls.length).toBe(callsAfterMount);
-    expect(
-      searchCatalog.mock.calls.some(
-        (call) => (call[0] as { source?: string }).source === "installed",
-      ),
-    ).toBe(false);
+describe("CatalogTab variant chips", () => {
+  it("surfaces a manifest model's quant variants in the detail drawer", async () => {
+    setActivePinia(createPinia());
+    // Two undrawn manifest variants of the same base model → catalog cards.
+    useModelStore().all = [
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        size_gb: 6,
+        is_loaded: false,
+        hf_repo: "org/flux-dev",
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "",
+        downloaded: false,
+      },
+      {
+        name: "flux-dev:q8",
+        family: "flux",
+        size_gb: 12,
+        is_loaded: false,
+        hf_repo: "org/flux-dev",
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "",
+        downloaded: false,
+      },
+    ];
+    const wrapper = mount(CatalogTab, {
+      props: { query: "", layout: "grid" as const },
+      global: { plugins: [] },
+    });
+    await flushPromises();
 
-    // Flipping back re-renders the still-loaded results without a blank gap.
-    await chips[0]!.trigger("click");
-    await vi.runAllTimersAsync();
-    expect(wrapper.text()).toContain("live-model");
-    vi.useRealTimers();
+    await wrapper.findAll("[data-test='catalog-card']")[0]!.trigger("click");
+    await flushPromises();
+
+    const chips = wrapper
+      .get("[data-test='drawer-variants']")
+      .findAll("[data-test='variant-chip']");
+    const labels = chips.map((c) => c.text());
+    expect(labels.some((t) => t.includes("q4"))).toBe(true);
+    expect(labels.some((t) => t.includes("q8"))).toBe(true);
+    // Each variant advertises its footprint so the choice is informed.
+    expect(labels.some((t) => t.includes("6.0 GB"))).toBe(true);
   });
 });

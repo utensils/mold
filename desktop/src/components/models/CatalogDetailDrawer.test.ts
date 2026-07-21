@@ -243,4 +243,50 @@ describe("CatalogDetailDrawer", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(wrapper.emitted("close")).toHaveLength(2);
   });
+
+  it("renders a media badge, source, and the checkpoint/footprint stat tiles", async () => {
+    const wrapper = await mountDrawer(summary());
+    expect(wrapper.get("[data-test='drawer-media-badge']").text()).toBe("image");
+    expect(wrapper.get("[data-test='drawer-source']").text()).toBe("Civitai");
+
+    const tiles = wrapper.get("[data-test='drawer-stat-tiles']");
+    expect(tiles.text()).toContain("Checkpoint weights");
+    expect(tiles.text()).toContain("Full footprint");
+    // SIZE = 8 GB weights; FETCH = 8 + 16 + 0.168 GB, and FETCH ≥ SIZE always.
+    expect(wrapper.get("[data-test='stat-checkpoint']").text()).toBe("8.0 GB");
+    expect(wrapper.get("[data-test='stat-footprint']").text()).toBe("24.2 GB");
+  });
+
+  it("shows no variant chips when no variants are supplied", async () => {
+    const wrapper = await mountDrawer(summary());
+    expect(wrapper.find("[data-test='drawer-variants']").exists()).toBe(false);
+  });
+
+  it("pulls exactly the row it opened for when no variant is chosen", async () => {
+    const wrapper = await mountDrawer(summary());
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
+  });
+
+  it("makes the selected variant the exact pull target", async () => {
+    const wrapper = await mountDrawer(summary(), {
+      variants: [
+        { id: "flux-dev:q4", label: "q4" },
+        { id: "flux-dev:q8", label: "q8" },
+      ],
+    });
+    const chips = wrapper
+      .get("[data-test='drawer-variants']")
+      .findAll("[data-test='variant-chip']");
+    expect(chips.map((c) => c.text().trim())).toEqual(["q4", "q8"]);
+    // No id in the variant list matches the opened entry, so the first is the
+    // default target; pulling it downloads q4.
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "flux-dev:q4" });
+
+    // Selecting q8 repoints the pull without re-opening the drawer.
+    await chips[1]!.trigger("click");
+    await wrapper.get("[data-test='drawer-pull']").trigger("click");
+    expect(wrapper.emitted("pull")?.[1]?.[0]).toMatchObject({ id: "flux-dev:q8" });
+  });
 });

@@ -1,24 +1,18 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import AccordionSection from "@ui/components/AccordionSection.vue";
+import CardSurface from "@ui/components/CardSurface.vue";
+import AppearanceCard from "../components/settings/AppearanceCard.vue";
+import UpdatesSection from "../components/settings/UpdatesSection.vue";
+import AboutSection from "../components/settings/AboutSection.vue";
 import HostsSection from "../components/settings/HostsSection.vue";
 import PerformanceSection from "../components/settings/PerformanceSection.vue";
 import GenerationSection from "../components/settings/GenerationSection.vue";
 import ExpansionSection from "../components/settings/ExpansionSection.vue";
 import AccountsSection from "../components/settings/AccountsSection.vue";
-import AppSection from "../components/settings/AppSection.vue";
-import UpdatesSection from "../components/settings/UpdatesSection.vue";
 import ProfilesSection from "../components/settings/ProfilesSection.vue";
 import AdvancedSection from "../components/settings/AdvancedSection.vue";
-import AboutSection from "../components/settings/AboutSection.vue";
-import ConfigSettingRow from "../components/settings/ConfigSettingRow.vue";
-import {
-  ENGINE_KEY_SCHEMAS,
-  ENV_KNOB_SCHEMAS,
-  matchesSearch,
-  SECTIONS,
-  type SectionId,
-} from "../lib/settingsSchema";
+import { ACCORDION_SECTIONS, sectionMatchesSearch, type SectionId } from "../lib/settingsSchema";
 import { useConnectionStore } from "../stores/connection";
 import { useModelStore } from "../stores/models";
 import { useSettingsConfigStore } from "../stores/settingsConfig";
@@ -26,34 +20,10 @@ import { useSettingsConfigStore } from "../stores/settingsConfig";
 const conn = useConnectionStore();
 const config = useSettingsConfigStore();
 const models = useModelStore();
-const route = useRoute();
-const router = useRouter();
 
-function sectionFromQuery(value: unknown): SectionId {
-  return typeof value === "string" && SECTIONS.some((candidate) => candidate.id === value)
-    ? (value as SectionId)
-    : "hosts";
-}
-
-const section = ref<SectionId>(sectionFromQuery(route.query.section));
 const query = ref("");
-
-watch(
-  () => route.query.section,
-  (value) => {
-    section.value = sectionFromQuery(value);
-    query.value = "";
-  },
-);
-
-function selectSection(next: SectionId) {
-  section.value = next;
-  query.value = "";
-  const nextQuery = { ...route.query };
-  if (next === "hosts") delete nextQuery.section;
-  else nextQuery.section = next;
-  void router.replace({ query: nextQuery });
-}
+/** Which "All settings" accordion is open (one at a time) when not searching. */
+const openSection = ref<SectionId | null>(null);
 
 watch(
   () => conn.ready,
@@ -66,124 +36,111 @@ watch(
   { immediate: true },
 );
 
-/**
- * Search spans every curated key (engine + env knobs) plus raw advanced
- * rows. Results render as a flat list of curated rows; matches that are
- * whole sections (accounts/app/about) surface as section links.
- */
 const searching = computed(() => query.value.trim().length > 0);
+const advancedKeys = computed(() => config.advancedRows.map((row) => row.key));
 
-const matchedConfigKeys = computed(() =>
-  ENGINE_KEY_SCHEMAS.filter((s) => matchesSearch(query.value, s) && config.row(s.key) !== null).map(
-    (s) => s.key,
-  ),
-);
-const matchedKnobs = computed(() => ENV_KNOB_SCHEMAS.some((s) => matchesSearch(query.value, s)));
-const matchedAdvanced = computed(() =>
-  config.advancedRows.filter((r) => matchesSearch(query.value, { key: r.key, label: r.key })),
-);
-
-const componentFor: Record<SectionId, unknown> = {
-  hosts: HostsSection,
+const componentFor: Record<string, unknown> = {
   performance: PerformanceSection,
   generation: GenerationSection,
   expansion: ExpansionSection,
   accounts: AccountsSection,
-  app: AppSection,
-  updates: UpdatesSection,
   profiles: ProfilesSection,
   advanced: AdvancedSection,
-  about: AboutSection,
 };
+
+/** While searching, only the matching accordions show; otherwise all of them. */
+const visibleSections = computed(() =>
+  ACCORDION_SECTIONS.filter(
+    (section) => !searching.value || sectionMatchesSearch(query.value, section, advancedKeys.value),
+  ),
+);
+
+/** Search auto-opens every match; otherwise the single manually-opened one. */
+function isOpen(id: SectionId): boolean {
+  return searching.value ? true : openSection.value === id;
+}
+
+function toggle(id: SectionId): void {
+  if (searching.value) return;
+  openSection.value = openSection.value === id ? null : id;
+}
 </script>
 
 <template>
-  <div class="flex h-full min-h-0">
-    <!-- Section rail -->
-    <nav
-      class="border-edge flex w-44 shrink-0 flex-col gap-0.5 border-r bg-bench px-2 py-3"
-      aria-label="Settings sections"
-    >
-      <span
-        class="font-display px-2 pb-2 text-display-sm font-bold text-ink"
-        style="font-stretch: 90%"
-      >
+  <div class="flex h-full min-h-0 flex-col">
+    <!-- Workspace header -->
+    <header class="border-edge flex h-13 shrink-0 items-center gap-3 border-b px-6">
+      <h1 class="font-display text-display-sm font-bold text-ink" style="font-stretch: 90%">
         Settings
-      </span>
-      <button
-        v-for="s in SECTIONS"
-        :key="s.id"
-        type="button"
-        :aria-current="section === s.id && !searching ? 'page' : undefined"
-        class="h-7 rounded-control px-2.5 text-left text-body transition-colors duration-100"
-        :class="
-          section === s.id && !searching
-            ? 'bg-[color-mix(in_srgb,var(--safelight)_14%,transparent)] text-ink'
-            : 'text-ink-2 hover:text-ink'
-        "
-        @click="selectSection(s.id)"
-      >
-        {{ s.label }}
-      </button>
-    </nav>
+      </h1>
+      <div class="flex-1" />
+      <input
+        v-model="query"
+        data-selectable
+        data-test="settings-search"
+        type="search"
+        aria-label="Search settings"
+        placeholder="Search settings…"
+        class="border-edge h-8 w-64 rounded-control border bg-bench px-2.5 text-body text-ink placeholder:text-ink-3"
+      />
+    </header>
 
-    <div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
-      <header
-        class="border-edge sticky top-0 z-10 flex h-11 items-center gap-3 border-b bg-bath px-5"
-      >
-        <span class="text-body font-medium text-ink">
-          {{ searching ? "Search" : SECTIONS.find((s) => s.id === section)?.label }}
-        </span>
-        <input
-          v-model="query"
-          data-selectable
-          type="search"
-          aria-label="Search settings"
-          placeholder="Search settings…"
-          class="border-edge ml-auto h-7 w-64 rounded-control border bg-bench px-2 text-body text-ink placeholder:text-ink-3"
-        />
-      </header>
+    <div class="min-h-0 flex-1 overflow-y-auto">
+      <div class="mx-auto flex max-w-2xl flex-col gap-7 px-6 py-6">
+        <!-- Always-open top cards — nothing here blocks first use (G7) -->
+        <template v-if="!searching">
+          <section data-test="appearance-card">
+            <div class="edge-code mb-2.5 uppercase">Appearance</div>
+            <AppearanceCard />
+          </section>
 
-      <div class="max-w-2xl px-5 py-4">
-        <!-- Search results: flat curated rows + knob/advanced pointers -->
-        <template v-if="searching">
-          <p v-if="config.available === false" class="text-caption text-ink-3">
-            This engine doesn't expose configuration.
-          </p>
-          <ConfigSettingRow v-for="key in matchedConfigKeys" :key="key" :schema-key="key" />
-          <button
-            v-if="matchedKnobs"
-            type="button"
-            class="border-edge mt-3 h-8 w-full rounded-control border px-3 text-left text-body text-ink-2 hover:text-ink"
-            @click="selectSection('performance')"
-          >
-            Performance knobs match — open Performance →
-          </button>
-          <div v-if="matchedAdvanced.length" class="mt-3">
-            <span class="edge-code">ADVANCED MATCHES</span>
-            <AdvancedSection :filter="(r) => matchesSearch(query, { key: r.key, label: r.key })" />
+          <section data-test="updates-card">
+            <div class="edge-code mb-2.5 uppercase">Updates</div>
+            <UpdatesSection />
+          </section>
+
+          <section data-test="about-card">
+            <div class="edge-code mb-2.5 uppercase">About</div>
+            <CardSurface>
+              <AboutSection />
+            </CardSurface>
+          </section>
+
+          <!-- Hosts live in the Machines workspace — this is the doorway -->
+          <section data-test="hosts-region">
+            <div class="edge-code mb-2.5 uppercase">Hosts</div>
+            <HostsSection />
+          </section>
+        </template>
+
+        <!-- Everything deeper, collapsed until wanted -->
+        <section data-test="all-settings">
+          <div class="edge-code mb-2.5 uppercase">
+            {{ searching ? "Search results" : "All settings" }}
           </div>
-          <p
-            v-if="matchedConfigKeys.length === 0 && !matchedKnobs && matchedAdvanced.length === 0"
-            class="text-caption text-ink-3"
-          >
-            Nothing matches “{{ query }}”.
+          <p v-if="config.available === false" class="mb-3 text-caption text-ink-3">
+            This engine doesn't expose configuration — some sections below may be empty.
           </p>
-        </template>
-
-        <!-- Section content -->
-        <template v-else>
-          <p
-            v-if="
-              config.available === false &&
-              ['generation', 'expansion', 'advanced', 'profiles'].includes(section)
-            "
-            class="text-caption text-ink-3"
-          >
-            This engine doesn't expose configuration — it may predate the config API.
-          </p>
-          <component :is="componentFor[section]" v-else />
-        </template>
+          <div class="flex flex-col gap-2.5">
+            <AccordionSection
+              v-for="s in visibleSections"
+              :key="s.id"
+              :data-test="`accordion-${s.id}`"
+              :title="s.label"
+              :open="isOpen(s.id)"
+              @toggle="toggle(s.id)"
+            >
+              <component :is="componentFor[s.id]" />
+            </AccordionSection>
+            <p
+              v-if="searching && visibleSections.length === 0"
+              class="text-caption text-ink-3"
+              data-test="no-search-results"
+            >
+              Nothing matches “{{ query }}”.
+            </p>
+          </div>
+        </section>
       </div>
     </div>
   </div>

@@ -50,6 +50,9 @@ async function copyDiagnostics() {
         {{ engine ? `mold ${engine.version}` : "offline" }}
       </span>
     </SettingRow>
+    <SettingRow label="Processing" help="Where generations run.">
+      <span class="data-mono text-body text-ink-3">Local + your hosts</span>
+    </SettingRow>
     <SettingRow label="Logs" help="Engine and app logs live in ~/.mold/logs.">
       <button
         type="button"

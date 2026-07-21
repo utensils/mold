@@ -23,6 +23,9 @@ export type SectionId =
 export interface SectionInfo {
   id: SectionId;
   label: string;
+  /** Extra search terms for sections whose controls carry no curated key
+   *  (Accounts tokens, Profiles) so the global search still finds them. */
+  keywords?: string[];
 }
 
 export const SECTIONS: SectionInfo[] = [
@@ -36,6 +39,26 @@ export const SECTIONS: SectionInfo[] = [
   { id: "profiles", label: "Profiles" },
   { id: "advanced", label: "Advanced" },
   { id: "about", label: "About" },
+];
+
+/**
+ * The Settings surface is now a single column: Appearance, Updates, and About
+ * ride at the top as always-open cards, Hosts is a link to the Machines
+ * workspace, and everything deeper collapses into the "All settings" region as
+ * one-open-at-a-time accordions. This list is that region, in order — none of
+ * it blocks first use (spec G7).
+ */
+export const ACCORDION_SECTIONS: SectionInfo[] = [
+  { id: "performance", label: "Performance" },
+  { id: "generation", label: "Generation" },
+  { id: "expansion", label: "Prompt expansion" },
+  {
+    id: "accounts",
+    label: "Accounts & tokens",
+    keywords: ["hugging face", "huggingface", "hf", "civitai", "token", "api key"],
+  },
+  { id: "profiles", label: "Profiles", keywords: ["profile"] },
+  { id: "advanced", label: "Advanced" },
 ];
 
 export type EditorKind = "toggle" | "select" | "number" | "text" | "slider" | "path" | "secret";
@@ -336,4 +359,29 @@ export function matchesSearch(query: string, item: Searchable): boolean {
     item.label.toLowerCase().includes(q) ||
     (item.help ?? "").toLowerCase().includes(q)
   );
+}
+
+/** Curated schemas that live in a given accordion section. */
+export function schemasForSection(sectionId: SectionId): KeySchema[] {
+  return [...ENGINE_KEY_SCHEMAS, ...ENV_KNOB_SCHEMAS].filter((s) => s.section === sectionId);
+}
+
+/**
+ * Whether a settings accordion has anything matching the query — its label,
+ * its declared keywords, any curated key it owns, or (Advanced only) a raw
+ * engine row. Drives which accordion the global search opens.
+ */
+export function sectionMatchesSearch(
+  query: string,
+  section: SectionInfo,
+  advancedRowKeys: string[] = [],
+): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  if (section.label.toLowerCase().includes(q)) return true;
+  if (section.keywords?.some((keyword) => keyword.includes(q))) return true;
+  if (schemasForSection(section.id).some((schema) => matchesSearch(query, schema))) return true;
+  if (section.id === "advanced" && advancedRowKeys.some((key) => key.toLowerCase().includes(q)))
+    return true;
+  return false;
 }

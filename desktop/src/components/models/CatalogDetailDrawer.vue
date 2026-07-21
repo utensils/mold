@@ -10,12 +10,22 @@ import {
   catalogActionLabel,
   downloadContentsTotalBytes,
 } from "../../lib/catalogDetail";
+import { catalogSizeInfo } from "../../lib/catalog";
+import { isVideoFamily } from "../../lib/capabilities";
 import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount, formatGB } from "../../lib/format";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import type { ModelSource } from "../../lib/modelSource";
 import type { CatalogEntry, ModelComponentStatus } from "../../lib/api/types";
+
+/** A selectable pull variant (e.g. quantization); selecting one sets the exact
+ *  id a Pull targets, honoring the manifest-variant precedence the list built. */
+export interface DrawerVariant {
+  id: string;
+  label: string;
+  sizeBytes?: number | null;
+}
 
 /**
  * In-app catalog detail: description, license, tags, modality/format, and
@@ -33,6 +43,8 @@ const props = defineProps<{
   /** Host the catalog view is browsing; undefined = current primary. */
   target?: ApiTarget | undefined;
   forwardCredentials?: boolean | undefined;
+  /** Selectable pull variants; the chosen chip is the exact pull target. */
+  variants?: DrawerVariant[] | undefined;
 }>();
 const emit = defineEmits<{
   (e: "close"): void;
@@ -174,6 +186,56 @@ const pullLabel = computed(() => {
   return downloadTotal.value.bytes != null ? `Pull · ${downloadTotalLabel.value}` : "Pull";
 });
 
+/** Media badge (image/video) — from the detail's modality, else the family. */
+const mediaBadge = computed(
+  () => merged.value.modality ?? (isVideoFamily(merged.value.family) ? "video" : "image"),
+);
+
+/** SIZE = checkpoint weights; FETCH = full footprint (weights + shared
+ *  components). FETCH ≥ SIZE always (project SIZE/FETCH semantics). */
+const sizeInfo = computed(() => catalogSizeInfo(merged.value));
+const checkpointLabel = computed(() =>
+  sizeInfo.value.weightsBytes != null ? formatGB(sizeInfo.value.weightsBytes) : "—",
+);
+const footprintLabel = computed(() => {
+  const fetchBytes = sizeInfo.value.fetchBytes ?? sizeInfo.value.weightsBytes;
+  return fetchBytes != null ? formatGB(fetchBytes) : "—";
+});
+
+const SOURCE_LABEL: Record<string, string> = {
+  hf: "Hugging Face",
+  civitai: "Civitai",
+  local: "Local file",
+};
+const sourceLabel = computed(() => SOURCE_LABEL[merged.value.source] ?? merged.value.source);
+
+/**
+ * Which variant a Pull targets. Defaults to the entry's own id, so a drawer
+ * opened without explicit variants pulls exactly the row it came from
+ * (preserving the list's manifest-variant precedence). Selecting a chip
+ * repoints the pull without re-opening the drawer.
+ */
+const selectedVariantId = ref<string>(props.entry.id);
+watch(
+  () => props.entry.id,
+  (id) => {
+    selectedVariantId.value = id;
+  },
+);
+watch(
+  () => props.variants,
+  (variants) => {
+    if (variants?.length && !variants.some((variant) => variant.id === selectedVariantId.value)) {
+      selectedVariantId.value = variants[0]!.id;
+    }
+  },
+  { immediate: true },
+);
+
+/** The exact entry a Pull/Repair submits — `merged`, repointed to the chosen
+ *  variant id so the selection is the download target. */
+const pullEntry = computed<CatalogEntry>(() => ({ ...merged.value, id: selectedVariantId.value }));
+
 function formatSize(bytes: number | null): string {
   return bytes != null ? formatGB(bytes) : "—";
 }
@@ -226,6 +288,16 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       </div>
 
       <div class="flex flex-col gap-3 p-4">
+        <!-- Media kind -->
+        <div>
+          <span
+            class="data-mono inline-block rounded-full border border-halide/40 px-2 py-0.5 text-caption uppercase text-halide"
+            data-test="drawer-media-badge"
+          >
+            {{ mediaBadge }}
+          </span>
+        </div>
+
         <!-- State chips -->
         <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
           <span
@@ -252,6 +324,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <div>
             <dt class="text-caption text-ink-3">Family</dt>
             <dd class="data-mono text-body text-ink-2">{{ merged.family }}</dd>
+          </div>
+          <div>
+            <dt class="text-caption text-ink-3">Source</dt>
+            <dd class="text-body text-ink-2" data-test="drawer-source">{{ sourceLabel }}</dd>
           </div>
           <div v-if="merged.modality">
             <dt class="text-caption text-ink-3">Modality</dt>
@@ -286,6 +362,53 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           {{ merged.description }}
         </p>
         <p v-else-if="loading" class="text-caption text-ink-3">Loading details…</p>
+
+        <!-- Footprint tiles: checkpoint weights (SIZE) vs full footprint (FETCH,
+             which includes shared components and is always ≥ SIZE). -->
+        <div
+          v-if="sizeInfo.weightsBytes != null"
+          class="flex gap-2.5"
+          data-test="drawer-stat-tiles"
+        >
+          <div class="border-edge flex-1 rounded-card border bg-bath p-3">
+            <div class="edge-code uppercase">Checkpoint weights</div>
+            <div class="data-mono mt-1 text-body-lg text-ink" data-test="stat-checkpoint">
+              {{ checkpointLabel }}
+            </div>
+          </div>
+          <div class="border-edge flex-1 rounded-card border bg-bath p-3">
+            <div class="edge-code uppercase">Full footprint</div>
+            <div class="data-mono mt-1 text-body-lg text-ink" data-test="stat-footprint">
+              {{ footprintLabel }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Variants: the selected chip is the exact pull target. -->
+        <section v-if="variants?.length" data-test="drawer-variants">
+          <div class="edge-code mb-1.5 uppercase">Variants</div>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              v-for="variant in variants"
+              :key="variant.id"
+              type="button"
+              data-test="variant-chip"
+              class="data-mono rounded-full border px-2.5 py-1 text-caption transition-colors duration-100"
+              :class="
+                variant.id === selectedVariantId
+                  ? 'border-safelight text-safelight'
+                  : 'border-edge text-ink-2 hover:text-ink'
+              "
+              :aria-pressed="variant.id === selectedVariantId"
+              @click="selectedVariantId = variant.id"
+            >
+              {{ variant.label }}
+              <span v-if="variant.sizeBytes != null" class="text-ink-3">
+                · {{ formatSize(variant.sizeBytes) }}
+              </span>
+            </button>
+          </div>
+        </section>
 
         <!-- Download contents -->
         <section
@@ -378,7 +501,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         class="border-edge h-8 w-full rounded-control border text-body text-ink-2 transition-colors duration-150 hover:border-safelight hover:text-ink active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
         title="Re-fetch any missing or incomplete files for this model"
-        @click="emit('pull', merged)"
+        @click="emit('pull', pullEntry)"
       >
         {{ pulling ? "Repairing…" : "Repair" }}
       </button>
@@ -389,7 +512,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         class="border-edge h-8 w-full rounded-control border text-body text-safelight transition-colors duration-150 hover:border-safelight active:translate-y-px disabled:opacity-50"
         :disabled="pulling || !downloadable"
         :title="downloadable ? 'Download this model' : 'Unsupported catalog package'"
-        @click="emit('pull', merged)"
+        @click="emit('pull', pullEntry)"
       >
         {{ pullLabel }}
       </button>
