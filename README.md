@@ -203,9 +203,9 @@ mold tui
 ```
 
 <p align="center">
-  <img src="website/public/gallery/tui-generate.png" alt="mold TUI — Generate view with image preview" width="720" />
+  <img src="website/public/gallery/tui-generate.png" alt="mold TUI — Create view with image preview" width="720" />
   <br/>
-  <em>The TUI Generate view with Kitty graphics protocol image preview in Ghostty</em>
+  <em>The TUI Create view with Kitty graphics protocol image preview in Ghostty</em>
 </p>
 
 ### Model management

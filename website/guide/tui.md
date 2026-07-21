@@ -98,44 +98,63 @@ and switching between all eleven theme presets.
 
 ## Create View
 
-The main workspace with five panels:
+The main workspace with four panels:
 
 - **Prompt** — Multi-line text area (Shift+Enter for newlines, emacs
   keybindings)
-- **Negative** — (CFG models only) Describes what to avoid
-- **Parameters** — Model, dimensions, steps, guidance, seed, and more
-- `qwen-image-edit` shows a source image and negative prompt without img2img
-  `strength` or `mask` controls
-- **Info** — Model description, system memory, process memory usage
-- **Preview** — Generated image with Kitty/sixel/halfblock rendering
+- **Parameters** — six essentials rows plus the Advanced accordion
+- **Preview** — idle hint, live "Developing…" progress, then the finished
+  print with a `model · seed · time · host` caption
+  (Kitty/sixel/halfblock rendering)
+- **Timeline** — the glyph-styled session log (`•` info, `✓` done with
+  stage timings, `!` warning, `✗` error, `★` model loaded), including a
+  `✓ Saved <file>` entry per print; shows "— idle. no runs this session."
+  until the first run. Hidden when `tui.show_timeline` is off or the
+  terminal is too short.
 
-### Editing Parameters
+The model's description is the dim line under the Model row; host and
+memory telemetry live in the Machines workspace and the chrome host chip.
 
-Navigate to Parameters with **Tab** or click, then:
+### Essentials
 
-- **j**/**k** or arrow keys to move between fields
-- **+**/**-** or left/right to adjust numeric values
-- **Enter** or click to activate a field:
-  - **Model** — opens the fuzzy model selector
-  - **Frames** / **FPS** — (video models only) adjust frame count and FPS
-  - **Seed** (mode row) — cycles random / fixed / increment
-  - **Seed** (value row) — opens seed value input popup
-  - **Format** / **Mode** / **Expand** / **Offload** — toggles the value
-  - **Scheduler** — cycles through Ddim, Euler Ancestral, UniPC
-  - **Reset** — restores all parameters to model defaults (keeps prompt)
-  - **Unload** — unloads the model from GPU to free memory
+| Row             | Shows                    | ◀▶ / +/-           | Enter                |
+| --------------- | ------------------------ | -------------------- | -------------------- |
+| Model           | model name + description | —                    | fuzzy model selector |
+| Size            | `1024 × 1024`            | cycle aspect presets | type an exact `WxH`  |
+| Detail          | `●●●●○○○○ 28` step dots  | adjust steps         | —                    |
+| Prompt strength | guidance                 | adjust               | —                    |
+| Seed            | `random` / `fixed · 42`  | cycle seed mode      | type an exact seed   |
+| Batch           | image count              | adjust               | —                    |
 
-### Seed Modes
+Size's `◀▶` cycles 1:1, 3:2, 2:3, 16:9, and 9:16 presets fitted to the
+model's default pixel area (64-aligned). Seed modes are `random` (new seed
+every run), `fixed` (reproducible), and `increment` (+1 per run) — **Ctrl+R**
+still cycles them from anywhere.
 
-Cycle with **Ctrl+R** or **+/-** on the Seed field:
+### Advanced accordion
 
-| Mode      | Behavior                               |
-| --------- | -------------------------------------- |
-| random    | New random seed each generation        |
-| fixed     | Same seed every time (reproducibility) |
-| increment | Seed +1 after each generation          |
+Press **A** anywhere in Create (or **Enter**/**→** on the `▸ Advanced`
+row) to open the disclosure; **Enter** or **→** on a section expands it,
+collapsing any other, and **←** collapses. Each collapsed section shows a
+summary (`default`, `off`, `none`, `png`, or the set value) and the header
+carries a count of advanced values that differ from their defaults. The
+open state and expanded section persist across sessions
+(`tui.advanced_open` / `tui.advanced_section`).
 
-Press **Enter** on the Seed value row to type an exact value.
+| Section                | Rows                                                 |
+| ---------------------- | ---------------------------------------------------- |
+| Scheduler & sampling   | Scheduler (CFG models), Expand prompt, Offload       |
+| Negative prompt        | inline editor (CFG models; **Alt+N** jumps here)     |
+| Source image           | Source, Strength, Mask, ControlNet (per model)       |
+| LoRA                   | LoRA path + scale                                    |
+| Upscale after generate | post-generate upscaler (Enter picks, `(off)` clears) |
+| Output format          | png / jpeg / gif / apng / webp / mp4                 |
+| Video                  | Frames, FPS (video models only)                      |
+
+The `↺ Reset to model defaults` action row at the bottom restores every
+parameter (keeping the model and your prompt). `qwen-image-edit` shows a
+source image and negative prompt without img2img `strength` or `mask`
+controls.
 
 ### Model Selector
 
@@ -349,17 +368,19 @@ views.
 
 ### Create Shortcuts
 
-| Key    | Context    | Action                           |
-| ------ | ---------- | -------------------------------- |
-| Enter  | Prompt     | Start generation                 |
-| Enter  | Parameters | Activate field (selector/toggle) |
-| Ctrl+G | Any        | Start generation                 |
-| Ctrl+M | Any        | Open model selector              |
-| Ctrl+R | Any        | Cycle seed mode                  |
-| c      | Navigation | Open chain composer              |
-| A      | Navigation | Toggle Advanced options          |
-| +/-    | Parameters | Adjust numeric value             |
-| j/k    | Parameters | Navigate fields                  |
+| Key    | Context    | Action                                   |
+| ------ | ---------- | ---------------------------------------- |
+| Enter  | Prompt     | Start generation                         |
+| Enter  | Parameters | Activate row (selector/toggle/expand)    |
+| Ctrl+G | Any        | Start generation                         |
+| Ctrl+M | Any        | Open model selector                      |
+| Ctrl+R | Any        | Cycle seed mode                          |
+| Ctrl+E | Any        | Expand prompt via LLM                    |
+| Alt+N  | Any        | Open Advanced → Negative → focus editor  |
+| c      | Navigation | Open chain composer                      |
+| A      | Anywhere   | Toggle the Advanced accordion            |
+| +/-    | Parameters | Adjust value / expand-collapse a section |
+| j/k    | Parameters | Navigate rows (flat, sections included)  |
 
 ### Mouse Support
 
@@ -380,40 +401,24 @@ restored on next launch:
 - All generation parameters (dimensions, steps, guidance, seed mode, batch,
   format, scheduler, lora, expand, offload, strength)
 
-Use **Reset** in the Actions section of Parameters to restore model defaults
-without losing your prompt. **Unload** frees GPU memory by unloading the active
-model.
+Use the `↺ Reset to model defaults` row at the bottom of Parameters to restore
+model defaults without losing your prompt. Unloading the active model moved to
+the Models workspace (**u**).
 
 Generated images are saved to `~/.mold/output/` by default (override with
 `MOLD_OUTPUT_DIR` env var or `output_dir` in config). All images include
 embedded PNG metadata that preserves the full generation parameters, making them
 portable across machines.
 
-## Info Panel
+## Routing
 
-The Info panel below Parameters shows:
-
-- **Model description** from the manifest
-- **System memory** — free and available (macOS unified memory / NVIDIA VRAM)
-- **Mold memory** — total physical footprint of all mold processes (includes
-  mmap'd model weights)
-
-## Server Fallback
-
-The TUI uses a three-mode inference system:
-
-| Mode   | Behavior                                           |
-| ------ | -------------------------------------------------- |
-| auto   | Try server first, fall back to local GPU (default) |
-| local  | Force local GPU only                               |
-| remote | Force remote server only (error if unreachable)    |
-
-Cycle with **+/-** on the Mode field. The Host field (visible in auto/remote
-mode) can be edited with **Enter** to point at a custom server. Host input is
-normalized automatically: `hal9000` becomes `http://hal9000:7680`,
-`hal9000:8080` becomes `http://hal9000:8080`, and full URLs like
-`https://gpu.example.com` are used as-is. The TUI verifies connectivity before
-switching.
+Where Generate runs is owned by the **Machines** workspace, not the Create
+form: press **Enter** on a machine row to pin it as the sticky generation
+target (persisted as `tui.generate_target`), or leave it on **Auto** — try
+the connected server first, fall back to the local GPU. `mold tui --local`
+pins the session to the local engine. A pinned remote host never silently
+falls back to local; an unreachable target fails with an error naming the
+host. See the Machines section above for connecting hosts and API keys.
 
 ## Image Preview
 

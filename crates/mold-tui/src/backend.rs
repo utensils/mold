@@ -527,7 +527,7 @@ fn build_request(
         lora,
         frames: Some(params.frames),
         fps: Some(params.fps),
-        upscale_model: None,
+        upscale_model: params.upscale_model.clone(),
         gif_preview: true,
         enable_audio: None,
         audio_file: None,
@@ -769,5 +769,24 @@ mod tests {
         assert_eq!(params.batch, 1);
         let req = build_request(&params, "test prompt", &None);
         assert_eq!(req.batch_size, 1);
+    }
+
+    #[test]
+    fn build_request_carries_upscale_model() {
+        // Create → Advanced → Upscale: the picked upscaler must ride the
+        // existing wire field (this used to be hardcoded to None).
+        let config = mold_core::Config::load_or_default();
+        let mut params = GenerateParams::from_config(&config);
+        assert_eq!(
+            build_request(&params, "p", &None).upscale_model,
+            None,
+            "off by default"
+        );
+        params.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let req = build_request(&params, "p", &None);
+        assert_eq!(
+            req.upscale_model.as_deref(),
+            Some("real-esrgan-x4plus:fp16")
+        );
     }
 }

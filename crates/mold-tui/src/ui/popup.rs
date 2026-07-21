@@ -8,9 +8,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.popup {
         Some(Popup::Help) => render_help(frame, app),
         Some(Popup::ModelSelector { .. }) => render_model_selector(frame, app),
-        Some(Popup::HostInput { .. }) => render_host_input(frame, app),
         Some(Popup::MachineConnect { .. }) => render_machine_connect(frame, app),
         Some(Popup::SeedInput { .. }) => render_seed_input(frame, app),
+        Some(Popup::SizeInput { .. }) => render_size_input(frame, app),
         Some(Popup::HistorySearch { .. }) => render_history_search(frame, app),
         Some(Popup::CommandPalette { .. }) => render_command_palette(frame, app),
         Some(Popup::Confirm { message, .. }) => render_confirm(frame, app, message.clone()),
@@ -77,13 +77,14 @@ fn render_help(frame: &mut Frame, app: &App) {
         )),
         Line::from("  Enter              Start generation"),
         Line::from("  c                  Open chain composer"),
-        Line::from("  A                  Toggle Advanced options"),
+        Line::from("  A                  Toggle the Advanced accordion"),
+        Line::from("  Alt+N              Edit the negative prompt"),
         Line::from("  Ctrl+E             Expand prompt via LLM"),
         Line::from("  Ctrl+S             Save current image"),
-        Line::from("  Ctrl+R             Randomize seed"),
+        Line::from("  Ctrl+R             Cycle seed mode"),
         Line::from("  Ctrl+M             Open model selector"),
         Line::from("  j/k                Navigate parameters"),
-        Line::from("  +/- or Left/Right  Adjust parameter value"),
+        Line::from("  +/- or Left/Right  Adjust / expand a section"),
         Line::from(""),
         Line::from(Span::styled(
             "Library View",
@@ -357,6 +358,7 @@ fn render_upscale_model_selector(frame: &mut Frame, app: &mut App) {
         filter,
         selected,
         filtered,
+        ..
     }) = &app.popup
     {
         let filter = filter.clone();
@@ -381,17 +383,17 @@ fn render_upscale_model_selector(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_host_input(frame: &mut Frame, app: &mut App) {
+fn render_size_input(frame: &mut Frame, app: &mut App) {
     let theme = &app.theme;
-    let area = centered_rect(frame.area(), 50, 15);
+    let area = centered_rect(frame.area(), 45, 15);
 
     frame.render_widget(Clear, area);
 
-    if let Some(Popup::HostInput { input }) = &app.popup {
+    if let Some(Popup::SizeInput { input }) = &app.popup {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.popup_border())
-            .title(" Server Host ")
+            .title(" Size ")
             .title_style(theme.title_focused())
             .style(theme.popup_bg());
 
@@ -402,41 +404,35 @@ fn render_host_input(frame: &mut Frame, app: &mut App) {
             return;
         }
 
-        let hint =
-            Paragraph::new("Enter server address (or clear for local mode)").style(theme.dim());
-        let hint_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(hint, hint_area);
+        let hint = Paragraph::new("Enter size as WxH (e.g. 1024x768)").style(theme.dim());
+        frame.render_widget(hint, Rect { height: 1, ..inner });
 
         // Input field with cursor
         let display = format!("{input}\u{2588}"); // block cursor
         let input_line = Paragraph::new(display).style(Style::default().fg(theme.text));
-        let input_area = Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(input_line, input_area);
+        frame.render_widget(
+            input_line,
+            Rect {
+                y: inner.y + 2,
+                height: 1,
+                ..inner
+            },
+        );
 
-        // Hint at bottom
         let actions = Line::from(vec![
             Span::styled("Enter", theme.status_key()),
             Span::styled(" Confirm  ", Style::default().fg(theme.text)),
             Span::styled("Esc", theme.status_key()),
             Span::styled(" Cancel", Style::default().fg(theme.text)),
         ]);
-        let actions_area = Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(Paragraph::new(actions), actions_area);
+        frame.render_widget(
+            Paragraph::new(actions),
+            Rect {
+                y: inner.y + inner.height.saturating_sub(1),
+                height: 1,
+                ..inner
+            },
+        );
     }
 }
 
@@ -945,7 +941,9 @@ mod tests {
                 params: crate::app::GenerateParams::from_config(&mold_core::Config::default()),
                 focus: crate::app::GenerateFocus::Navigation,
                 param_index: 0,
-                visible_fields: Vec::new(),
+                rows: Vec::new(),
+                advanced: crate::ui::create_form::AdvancedState::default(),
+                param_scroll: 0,
                 capabilities: crate::model_info::capabilities_for_family(
                     &crate::model_info::family_for_model("", &mold_core::Config::default()),
                 ),
@@ -959,9 +957,7 @@ mod tests {
                 last_generation_time_ms: None,
                 error_message: None,
                 model_description: String::new(),
-                negative_collapsed: false,
                 last_output_path: None,
-                advanced_open: false,
             },
             gallery: crate::app::GalleryState {
                 entries: Vec::new(),
@@ -1014,6 +1010,7 @@ mod tests {
             upscale_tile_progress: None,
             upscale_progress: crate::app::ProgressState::default(),
             connecting: false,
+            show_timeline: true,
         };
 
         terminal.draw(|f| super::render(f, &mut app)).unwrap();

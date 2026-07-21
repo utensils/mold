@@ -37,6 +37,10 @@ pub const TUI_HOSTS_V1: &str = "tui.hosts.v1";
 pub const TUI_HOST_KEY_PREFIX: &str = "tui.host_key.";
 /// Sticky generation target: `"auto"` | `"local"` | `"host:<host_id>"`.
 pub const TUI_GENERATE_TARGET: &str = "tui.generate_target";
+/// Whether the Create view's Advanced accordion disclosure is open.
+pub const TUI_ADVANCED_OPEN: &str = "tui.advanced_open";
+/// Slug of the one expanded Advanced section (empty/absent = none).
+pub const TUI_ADVANCED_SECTION: &str = "tui.advanced_section";
 
 // Expand — the `[expand]` section of config.toml after it moves here.
 pub const EXPAND_ENABLED: &str = "expand.enabled";
