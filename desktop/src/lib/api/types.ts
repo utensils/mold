@@ -169,6 +169,9 @@ export interface ExpandRequest {
   prompt: string;
   model_family?: string;
   variations?: number;
+  /** Natural-language visual-style directive the server weaves into the
+   * expander's system message (additive; absent on the wire when unset). */
+  style?: string;
 }
 
 /** `POST /api/expand` — mirrors mold-core `ExpandResponse`. */

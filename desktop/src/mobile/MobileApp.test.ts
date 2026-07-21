@@ -86,6 +86,10 @@ const model: ModelEntry = {
   description: "Video model",
   downloaded: true,
 };
+// The kit's natural-language expansion directive for the cinematic chip
+// (`styleHint("cinematic")`) — pinned verbatim so the wire contract is explicit.
+const cinematicHint =
+  "Cinematic look — cinematic film still, cinematic lighting, anamorphic, dramatic mood, subtle film grain";
 const print: GalleryImage = {
   filename: "storm clip.mp4",
   timestamp: 1_700_000_000,
@@ -246,11 +250,167 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     expect(openStreams).toHaveLength(1);
+    // The shared kit's cinematic preset templates the prompt into the look.
     expect(openStreams[0]?.options.body.prompt).toBe(
-      "a red fox in snow, cinematic lighting, film grain, shallow depth of field",
+      "cinematic film still of a red fox in snow, cinematic lighting, anamorphic, dramatic mood, subtle film grain",
     );
     // The composition is applied to a draft clone at submit — the live prompt stays the user's words.
     expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a red fox in snow");
+  });
+
+  it("bakes a styled quick expansion, clears the chip, and restores it on Undo", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    // The chip travels as a natural-language directive, never a prompt suffix.
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "a lighthouse",
+      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse · prepared 1",
+    );
+    // Bake-and-clear: the rewrite absorbed the look, so the chip resets.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a lighthouse");
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
+  });
+
+  it("keeps the chip frozen on a prepared batch and names style drift as stale work", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("three storm studies");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenCalledWith(
+      "three storm studies",
+      { variations: 3, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    // Prepared keeps the chip — it is the frozen-style indicator…
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("Cinematic");
+
+    // …so style drift is specifically named stale work.
+    await wrapper.get("[data-test='mobile-style-anime']").trigger("click");
+    expect(wrapper.get(".mobile-prepared-stale").text()).toContain(
+      "Style changed from Cinematic to Anime.",
+    );
+    await wrapper.get("[data-test='mobile-style-anime']").trigger("click");
+    expect(wrapper.get(".mobile-prepared-stale").text()).toContain(
+      "Style Cinematic was removed after these variations were prepared.",
+    );
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    expect(wrapper.find(".mobile-prepared-stale").exists()).toBe(false);
+
+    await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+    await flushPromises();
+    // Reviewed prompts ship verbatim — the prepared submit path never suffixes.
+    expect(openStreams.map((stream) => stream.options.body.prompt)).toEqual([
+      "three storm studies · prepared 1",
+      "three storm studies · prepared 2",
+    ]);
+  });
+
+  it("clears the chip when a prepared pair collapses into the composer", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+    await fieldControl("Prompt").setValue("storm pair");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    await wrapper.findAll("[data-test='mobile-prepared-remove']")[0]!.trigger("click");
+    await wrapper.get("[data-test='mobile-confirm-collapse']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "storm pair · prepared 2",
+    );
+    // The surviving reviewed text absorbed the frozen style — same bake-and-clear.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+
+    await wrapper.get("[data-test='mobile-prompt-undo']").trigger("click");
+    await flushPromises();
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("storm pair");
+    // Undo restores the source prompt; the chip stays cleared because only a
+    // quick-apply snapshot re-arms it (mirrors desktop).
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
+  });
+
+  it("re-requests a recovered expansion pull with the frozen style and still bakes on apply", async () => {
+    expandPrompt
+      .mockRejectedValueOnce(
+        new Error("local expand model not found, run: mold pull qwen3-expand:q8"),
+      )
+      .mockResolvedValueOnce({ expanded: ["a lighthouse after the storm"] });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("lighthouse");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-pull-expansion']").trigger("click");
+    await flushPromises();
+    const downloadStream = openStreams.find((stream) => stream.path === "/api/downloads/stream");
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "snapshot", listing: { active_jobs: [], queued: [], history: [] } }),
+    );
+    await flushPromises();
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({
+        type: "enqueued",
+        id: "expansion-job",
+        model: "qwen3-expand:q8",
+        position: 0,
+      }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "started", id: "expansion-job", files_total: 2, bytes_total: 1_000 }),
+    );
+    downloadStream?.options.onEvent(
+      "download",
+      JSON.stringify({ type: "job_done", id: "expansion-job", model: "qwen3-expand:q8" }),
+    );
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-retry-expansion']").trigger("click");
+    await flushPromises();
+
+    // The retried request reuses the immutable recovery record's frozen style.
+    expect(expandPrompt).toHaveBeenLastCalledWith(
+      "lighthouse",
+      { variations: 1, modelFamily: model.family, style: cinematicHint },
+      target,
+    );
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a lighthouse after the storm",
+    );
+    // The retried apply is still a quick Batch 1 — it bakes and clears too.
+    expect(wrapper.get("[data-test='mobile-style-active']").text()).toBe("None");
   });
 
   it("shows a useful retry state when the selected host cannot load models", async () => {

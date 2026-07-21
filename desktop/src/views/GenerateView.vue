@@ -48,7 +48,7 @@ import {
   type ChainRoutingDecision,
 } from "../lib/chainRouting";
 import { applyPrefillToForm, buildRequest, cloneGenerateForm } from "../lib/generateForm";
-import { composeStylePrompt } from "../lib/stylePresets";
+import { composeStyle, styleHint } from "../lib/stylePresets";
 import { frames8n1Error } from "../lib/chain";
 import {
   advancedVideoValidationError,
@@ -371,6 +371,7 @@ const preparedStaleReasons = computed(() => {
     model: form.model,
     family: form.family,
     requestedCount: effectiveBatchSize.value,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
     readyHostIds: new Set(
       hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
@@ -526,6 +527,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     requestedCount: count,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: stickyTarget.value,
   };
 }
@@ -601,11 +603,15 @@ async function expandForCurrentBatch(
   expansionError.value = null;
   expansionMissingModel.value = null;
   try {
+    // The active chip travels as a natural-language directive the server
+    // weaves into the expander's system message — never the literal suffix.
+    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
+        ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
     );
@@ -622,11 +628,12 @@ async function expandForCurrentBatch(
         current.sourcePrompt !== inputs.sourcePrompt ||
         current.model !== inputs.model ||
         current.family !== inputs.family ||
+        current.stylePreset !== inputs.stylePreset ||
         current.selectedHostPolicy !== inputs.selectedHostPolicy ||
         !hostStillReady
       ) {
         expansionError.value =
-          "The prompt or generation host changed while expansion was running. Expand again to use the current inputs.";
+          "The prompt, style, or generation host changed while expansion was running. Expand again to use the current inputs.";
         return;
       }
       quickExpansionOriginal.value = inputs.sourcePrompt;
@@ -638,9 +645,17 @@ async function expandForCurrentBatch(
         expandedPrompt: prompts[0]!,
         model: inputs.model,
         family: inputs.family,
+        stylePreset: inputs.stylePreset,
         selectedHostPolicy: inputs.selectedHostPolicy,
         route: { ...route, target: { ...route.target } },
       };
+      // Bake-and-clear: the rewrite absorbed the style (the server received
+      // it as a directive), so the chip clears here — leaving it lit would
+      // apply the look twice at submit. Prepared batches below KEEP the chip:
+      // it is the frozen-style indicator for the reviewed set (a style change
+      // is a named staleness axis) and their submit path never re-composes it
+      // into the reviewed prompt text.
+      form.stylePreset = "";
       if (replacePrepared) {
         const active = document.activeElement;
         const shouldRestoreFocus =
@@ -665,6 +680,10 @@ function restoreQuickExpansion() {
   const original = quickExpansionOriginal.value;
   if (original === null) return;
   submissionGuard.invalidate();
+  // Undo re-arms the whole pre-expansion state, including the chip the
+  // bake-and-clear apply removed.
+  const snapshot = quickExpansionSnapshot.value;
+  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
   form.prompt = original;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
@@ -702,6 +721,9 @@ function collapsePreparedBatch(removedId: string) {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
+  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
+  // absorbed the frozen style, so keeping the chip would re-apply the look.
+  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   void nextTick(() => composerRef.value?.focus?.());
@@ -971,11 +993,20 @@ async function generate() {
   preparedSubmitting.value = preparedSubmission !== null;
   try {
     const draft = cloneGenerateForm(form);
-    // The composer style preset is a look modifier composed into the outgoing
-    // prompt at submit — the textarea itself is never mutated. Reviewed
-    // prepared prompts ship verbatim, so it only applies to the ordinary path.
-    if (!preparedSubmission) draft.prompt = composeStylePrompt(draft.prompt, draft.stylePreset);
     const draftCaps = generationCapabilitiesForFamily(draft.family);
+    // The composer style preset is baked into the OUTGOING request at submit —
+    // the textarea and negative field are never mutated. Reviewed prepared
+    // prompts ship verbatim (the style already reached them through the
+    // expansion directive; staleness pins the chip to the frozen style), so
+    // the prompt half only applies to the ordinary path. The preset negative
+    // is separate from the reviewed prompt text and merges for BOTH paths,
+    // gated on the family's negative-prompt support.
+    const styled = composeStyle(draft.prompt, draft.stylePreset, {
+      supportsNegativePrompt: draftCaps.supportsNegativePrompt,
+      negative: draft.negativePrompt,
+    });
+    if (!preparedSubmission) draft.prompt = styled.prompt;
+    draft.negativePrompt = styled.negative ?? "";
     const batch = preparedSubmission
       ? preparedSubmission.batch
       : draftCaps.forcesBatchSizeOne

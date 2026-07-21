@@ -178,6 +178,12 @@ pub struct ExpandRequest {
     #[serde(default = "default_expand_variations")]
     #[schema(example = 1)]
     pub variations: usize,
+    /// Optional visual style the expansion should absorb (e.g. a style preset
+    /// label). Sent as a natural-language instruction to the expander — never
+    /// appended to the prompt verbatim. Additive: old clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "gritty film noir")]
+    pub style: Option<String>,
 }
 
 fn default_expand_model_family() -> String {
@@ -1394,6 +1400,45 @@ mod tests {
         assert_eq!(json, r#""png""#);
         let back: OutputFormat = serde_json::from_str(&json).unwrap();
         assert_eq!(back, fmt);
+    }
+
+    #[test]
+    fn expand_request_serde_roundtrip_with_style() {
+        let req = ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 4,
+            style: Some("gritty film noir".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ExpandRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.style.as_deref(), Some("gritty film noir"));
+        assert_eq!(back.prompt, "a cat");
+        assert_eq!(back.variations, 4);
+    }
+
+    #[test]
+    fn expand_request_serde_roundtrip_without_style() {
+        let req = ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "sdxl".to_string(),
+            variations: 1,
+            style: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // No style set — the field stays off the wire entirely.
+        assert!(!json.contains("style"));
+        let back: ExpandRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.style, None);
+    }
+
+    #[test]
+    fn expand_request_old_client_missing_style_is_none() {
+        // Old clients don't know about `style` — the field must default to None.
+        let back: ExpandRequest = serde_json::from_str(r#"{"prompt":"a cat"}"#).unwrap();
+        assert_eq!(back.style, None);
+        assert_eq!(back.model_family, "flux");
+        assert_eq!(back.variations, 1);
     }
 
     #[test]

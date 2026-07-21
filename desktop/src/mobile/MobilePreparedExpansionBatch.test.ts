@@ -17,6 +17,7 @@ const batch = () =>
       model: "flux-dev:q8",
       family: "flux",
       requestedCount: 3,
+      stylePreset: null,
       selectedHostPolicy: "studio",
     },
     route,

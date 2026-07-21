@@ -21,6 +21,7 @@ const inputs: PreparedExpansionInputs = {
   model: "flux-dev:q8",
   family: "flux",
   requestedCount: 3,
+  stylePreset: null,
   selectedHostPolicy: null,
 };
 
@@ -73,6 +74,7 @@ describe("prepared expansion lifecycle", () => {
       model: "sdxl-base:fp16",
       family: "sdxl",
       requestedCount: 5,
+      stylePreset: null,
       selectedHostPolicy: "capable",
       readyHostIds: new Set([route.hostId]),
       hostLabels: new Map([[route.hostId, route.label]]),
@@ -155,6 +157,49 @@ describe("prepared expansion lifecycle", () => {
     ).toEqual([]);
   });
 
+  it("names style changes, removals, and additions as specifically named stale work", () => {
+    const host = {
+      readyHostIds: new Set([route.hostId]),
+      hostLabels: new Map([[route.hostId, route.label]]),
+    };
+    const styled = createPreparedExpansionBatch(
+      { ...inputs, stylePreset: "cinematic" },
+      route,
+      ["one", "two", "three"],
+      1,
+    );
+
+    expect(
+      preparedExpansionStaleReasons(styled, { ...inputs, ...host, stylePreset: "anime" }),
+    ).toEqual(["Style changed from Cinematic to Anime."]);
+    expect(
+      preparedExpansionStaleReasons(styled, { ...inputs, ...host, stylePreset: null }),
+    ).toEqual(["Style Cinematic was removed after these variations were prepared."]);
+
+    const unstyled = createPreparedExpansionBatch(inputs, route, ["one", "two", "three"], 1);
+    expect(
+      preparedExpansionStaleReasons(unstyled, { ...inputs, ...host, stylePreset: "anime" }),
+    ).toEqual(["Style Anime was added after these variations were prepared."]);
+  });
+
+  it("treats a legacy style id and its canonical twin as the same frozen style", () => {
+    const styled = createPreparedExpansionBatch(
+      { ...inputs, stylePreset: "photographic" },
+      route,
+      ["one", "two", "three"],
+      1,
+    );
+
+    expect(
+      preparedExpansionStaleReasons(styled, {
+        ...inputs,
+        stylePreset: "photoreal",
+        readyHostIds: new Set([route.hostId]),
+        hostLabels: new Map([[route.hostId, route.label]]),
+      }),
+    ).toEqual([]);
+  });
+
   it("lets only the newest request apply and invalidates a discarded request", () => {
     const guard = new PreparationRequestGuard();
     const first = guard.begin();
@@ -175,6 +220,7 @@ describe("prepared expansion lifecycle", () => {
           expandedPrompt: "a detailed lighthouse",
           model: inputs.model,
           family: inputs.family,
+          stylePreset: null,
           selectedHostPolicy: null,
           route,
         },
@@ -203,6 +249,7 @@ describe("prepared expansion lifecycle", () => {
           expandedPrompt: "a detailed lighthouse",
           model: inputs.model,
           family: inputs.family,
+          stylePreset: null,
           selectedHostPolicy: null,
           route: { ...route, instanceId: null },
         },

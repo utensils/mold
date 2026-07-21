@@ -11,6 +11,7 @@ const inputs: PreparedExpansionInputs = {
   model: "flux-dev:q8",
   family: "flux",
   requestedCount: 3,
+  stylePreset: null,
   selectedHostPolicy: "studio",
 };
 const route: HostRoute = {
@@ -80,6 +81,55 @@ describe("mobile expansion recovery", () => {
         tokenCurrent: true,
       }),
     ).toContain("connection details changed");
+  });
+
+  it("freezes the style chip and stales a pull whose style drifts", () => {
+    const styled: PreparedExpansionInputs = { ...inputs, stylePreset: "cinematic" };
+    const recovery = createMobileExpansionRecovery({
+      id: 3,
+      leaseId: "lease-3",
+      model: "qwen3-expand:q8",
+      inputs: styled,
+      route,
+      requestToken: 5,
+      replacePrepared: false,
+    });
+
+    expect(recovery.inputs.stylePreset).toBe("cinematic");
+    expect(
+      mobileExpansionRecoveryStaleReason(recovery, {
+        inputs: { ...styled },
+        currentHost: recovery.host,
+        tokenCurrent: true,
+      }),
+    ).toBeNull();
+    expect(
+      mobileExpansionRecoveryStaleReason(recovery, {
+        inputs: { ...inputs, stylePreset: null },
+        currentHost: recovery.host,
+        tokenCurrent: true,
+      }),
+    ).toContain("inputs changed");
+  });
+
+  it("treats a legacy style id and its canonical twin as the same frozen style", () => {
+    const recovery = createMobileExpansionRecovery({
+      id: 4,
+      leaseId: "lease-4",
+      model: "qwen3-expand:q8",
+      inputs: { ...inputs, stylePreset: "photographic" },
+      route,
+      requestToken: 6,
+      replacePrepared: false,
+    });
+
+    expect(
+      mobileExpansionRecoveryStaleReason(recovery, {
+        inputs: { ...inputs, stylePreset: "photoreal" },
+        currentHost: recovery.host,
+        tokenCurrent: true,
+      }),
+    ).toBeNull();
   });
 
   it("rejects selected-host and form changes without altering the frozen record", () => {

@@ -1,4 +1,5 @@
 import type { HostRoute } from "../stores/hosts";
+import { resolveStyleId, stylePresetLabel } from "./stylePresets";
 
 export type HostSelectionPolicy = string | null;
 
@@ -7,6 +8,9 @@ export interface PreparedExpansionInputs {
   model: string;
   family: string;
   requestedCount: number;
+  /** Style-preset chip active when the expansion was requested (`null` = none).
+   * Frozen with the batch — prepared work keeps the chip as its indicator. */
+  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
 }
 
@@ -27,6 +31,9 @@ export interface QuickExpansionSnapshot {
   expandedPrompt: string;
   model: string;
   family: string;
+  /** Chip active when the quick expansion was requested — the bake-and-clear
+   * apply clears the live chip, and undo restores it from here. */
+  stylePreset: string | null;
   selectedHostPolicy: HostSelectionPolicy;
   route: HostRoute;
 }
@@ -123,6 +130,28 @@ export function hostSelectionLabel(
   return hostLabels.get(policy) ?? policy;
 }
 
+/** Legacy chip ids (e.g. "photographic") equal their canonical twin. */
+function canonicalStyle(id: string | null): string | null {
+  return id ? resolveStyleId(id) : null;
+}
+
+/** "Style changed from X to Y." plus removal/addition variants; empty when equal. */
+function styleStaleReason(frozen: string | null, current: string | null): string | null {
+  const frozenStyle = canonicalStyle(frozen);
+  const currentStyle = canonicalStyle(current);
+  if (frozenStyle === currentStyle) return null;
+  if (frozenStyle && currentStyle) {
+    return `Style changed from ${stylePresetLabel(frozenStyle)} to ${stylePresetLabel(currentStyle)}.`;
+  }
+  if (frozenStyle) {
+    return `Style ${stylePresetLabel(frozenStyle)} was removed after these variations were prepared.`;
+  }
+  if (currentStyle) {
+    return `Style ${stylePresetLabel(currentStyle)} was added after these variations were prepared.`;
+  }
+  return null;
+}
+
 function knownInstanceIdsDiffer(
   frozen: string | null | undefined,
   current: string | null | undefined,
@@ -145,6 +174,8 @@ export function preparedExpansionStaleReasons(
   if (current.family !== batch.family) {
     reasons.push(`Model family changed from "${batch.family}" to "${current.family}".`);
   }
+  const styleReason = styleStaleReason(batch.stylePreset, current.stylePreset);
+  if (styleReason) reasons.push(styleReason);
   if (current.requestedCount !== batch.requestedCount) {
     reasons.push(`Batch changed from ${batch.requestedCount} to ${current.requestedCount}.`);
   }

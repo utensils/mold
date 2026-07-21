@@ -32,7 +32,7 @@ import {
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
 import { percent } from "../lib/format";
-import { composeStylePrompt } from "../lib/stylePresets";
+import { composeStyle, styleHint } from "../lib/stylePresets";
 import {
   guidanceValidationError,
   inlineGenerationMediaBytes,
@@ -334,6 +334,7 @@ const preparedStaleReasons = computed(() => {
     model: form.model,
     family: form.family,
     requestedCount: effectiveBatchSize.value,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
@@ -818,6 +819,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
     model: form.model,
     family: form.family,
     requestedCount: count,
+    stylePreset: form.stylePreset || null,
     selectedHostPolicy: selectedHostId.value || null,
   };
 }
@@ -989,9 +991,17 @@ function commitExpandedPrompts(
       expandedPrompt: prompts[0]!,
       model: inputs.model,
       family: inputs.family,
+      stylePreset: inputs.stylePreset,
       selectedHostPolicy: inputs.selectedHostPolicy,
       route: { ...route, target: { ...route.target } },
     };
+    // Bake-and-clear: the rewrite absorbed the style (the server received it
+    // as a directive), so the chip clears here — leaving it lit would apply
+    // the look twice at submit. Prepared batches below KEEP the chip: it is
+    // the frozen-style indicator for the reviewed set (a style change is a
+    // named staleness axis) and their submit path never re-composes it into
+    // the reviewed prompt text.
+    form.stylePreset = "";
     if (replacePrepared) preparedBatch.value = null;
     clearExpansionRecovery(false);
     if (replacePrepared) restoreReplacementFocus(focus, "prompt");
@@ -1040,11 +1050,15 @@ async function expandForCurrentBatch(
   expansionRunning.value = true;
   expansionError.value = "";
   try {
+    // The active chip travels as a natural-language directive the server
+    // weaves into the expander's system message — never the literal suffix.
+    const styleDirective = styleHint(inputs.stylePreset ?? "");
     const response = await expandPrompt(
       inputs.sourcePrompt,
       {
         variations: count,
         ...(inputs.family ? { modelFamily: inputs.family } : {}),
+        ...(styleDirective ? { style: styleDirective } : {}),
       },
       route.target,
     );
@@ -1057,11 +1071,12 @@ async function expandForCurrentBatch(
       current.model !== inputs.model ||
       current.family !== inputs.family ||
       current.requestedCount !== inputs.requestedCount ||
+      current.stylePreset !== inputs.stylePreset ||
       current.selectedHostPolicy !== inputs.selectedHostPolicy ||
       !sameFrozenHost(route, currentHost)
     ) {
       expansionError.value =
-        "The prompt, model, Batch, or host changed while expansion was running. Expand again with the current inputs.";
+        "The prompt, model, style, Batch, or host changed while expansion was running. Expand again with the current inputs.";
       return;
     }
     commitExpandedPrompts(inputs, route, prompts, token, replacePrepared, replacementFocus);
@@ -1077,6 +1092,10 @@ function restoreQuickExpansion(): void {
   if (quickExpansionOriginal.value === null) return;
   submissionGuard.invalidate();
   preparationGuard.invalidate();
+  // Undo re-arms the whole pre-expansion state, including the chip the
+  // bake-and-clear apply removed.
+  const snapshot = quickExpansionSnapshot.value;
+  if (snapshot) form.stylePreset = snapshot.stylePreset ?? "";
   form.prompt = quickExpansionOriginal.value;
   form.originalPrompt = null;
   quickExpansionOriginal.value = null;
@@ -1138,6 +1157,9 @@ function collapsePreparedBatch(removedId: string): void {
   form.batchSize = 1;
   form.prompt = remaining.text;
   form.originalPrompt = batch.sourcePrompt;
+  // Same bake-and-clear rule as a quick apply: the surviving reviewed text
+  // absorbed the frozen style, so keeping the chip would re-apply the look.
+  form.stylePreset = "";
   quickExpansionOriginal.value = batch.sourcePrompt;
   quickExpansionSnapshot.value = null;
   if (restoreFocus) {
@@ -1268,11 +1290,15 @@ async function retryExpansionAfterPull(): Promise<void> {
   expansionRunning.value = true;
   expansionError.value = "";
   try {
+    // The immutable recovery record owns the style: a resumed pull re-requests
+    // with exactly the directive the user saw frozen, not the live chip.
+    const styleDirective = styleHint(recovery.inputs.stylePreset ?? "");
     const response = await expandPrompt(
       recovery.inputs.sourcePrompt,
       {
         variations: recovery.inputs.requestedCount,
         ...(recovery.inputs.family ? { modelFamily: recovery.inputs.family } : {}),
+        ...(styleDirective ? { style: styleDirective } : {}),
       },
       recovery.route.target,
     );
@@ -1417,11 +1443,20 @@ async function generate(): Promise<void> {
     return;
 
   const draft = cloneGenerateForm(form);
-  // The composer style preset is a look modifier composed into the outgoing
-  // prompt at submit — the textarea is never mutated. Reviewed prepared prompts
-  // ship verbatim, so it only applies to the ordinary/quick path (mirrors desktop).
-  if (!preparedSubmission) draft.prompt = composeStylePrompt(draft.prompt, draft.stylePreset);
   const draftCaps = generationCapabilitiesForFamily(draft.family);
+  // The composer style preset is baked into the OUTGOING request at submit —
+  // the textarea and negative field are never mutated. Reviewed prepared
+  // prompts ship verbatim (the style already reached them through the
+  // expansion directive; staleness pins the chip to the frozen style), so the
+  // prompt half only applies to the ordinary path. The preset negative is
+  // separate from the reviewed prompt text and merges for BOTH paths, gated
+  // on the family's negative-prompt support (mirrors desktop).
+  const styled = composeStyle(draft.prompt, draft.stylePreset, {
+    supportsNegativePrompt: draftCaps.supportsNegativePrompt,
+    negative: draft.negativePrompt,
+  });
+  if (!preparedSubmission) draft.prompt = styled.prompt;
+  draft.negativePrompt = styled.negative ?? "";
   const batchSize = preparedSubmission
     ? preparedSubmission.prompts.length
     : draftCaps.forcesBatchSizeOne

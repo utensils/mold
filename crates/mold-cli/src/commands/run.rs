@@ -759,6 +759,7 @@ pub async fn run(
                 prompt: prompt.clone(),
                 model_family,
                 variations,
+                style: None,
             };
 
             crate::output::status!("{} Expanding prompt (server)...", crate::theme::icon_info());

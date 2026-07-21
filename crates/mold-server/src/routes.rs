@@ -940,6 +940,18 @@ fn create_server_expander(
     }
 }
 
+/// Build the per-request expand config: settings-derived knobs plus the
+/// request's optional visual style (bake-and-clear — the style reaches the
+/// expander as a natural-language instruction, never a literal suffix).
+fn expand_config_for_request(
+    settings: &mold_core::ExpandSettings,
+    req: &mold_core::ExpandRequest,
+) -> mold_core::ExpandConfig {
+    let mut config = settings.to_expand_config(&req.model_family, req.variations);
+    config.style = req.style.clone();
+    config
+}
+
 // ── /api/expand ──────────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -966,7 +978,7 @@ async fn expand_prompt(
 
     let config = state.config.read().await;
     let expand_settings = config.expand.clone().with_env_overrides();
-    let expand_config = expand_settings.to_expand_config(&req.model_family, req.variations);
+    let expand_config = expand_config_for_request(&expand_settings, &req);
     let prompt = req.prompt.clone();
     let config_snapshot = config.clone();
     drop(config);
@@ -3910,6 +3922,29 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_config_for_request_threads_style() {
+        let settings = mold_core::expand::ExpandSettings::default();
+        let req = mold_core::ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 2,
+            style: Some("oil painting".to_string()),
+        };
+        let config = expand_config_for_request(&settings, &req);
+        assert_eq!(config.style.as_deref(), Some("oil painting"));
+        assert_eq!(config.model_family, "flux");
+        assert_eq!(config.variations, 2);
+
+        let bare = mold_core::ExpandRequest {
+            prompt: "a cat".to_string(),
+            model_family: "flux".to_string(),
+            variations: 1,
+            style: None,
+        };
+        assert!(expand_config_for_request(&settings, &bare).style.is_none());
+    }
 
     #[test]
     fn local_expand_capability_reports_feature_and_model_facts_separately() {

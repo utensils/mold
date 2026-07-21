@@ -865,6 +865,40 @@ event: progress
 data: {"type":"pull_complete","model":"flux-schnell:q8"}
 ```
 
+## `/api/expand`
+
+Expand a short prompt into one or more detailed generation prompts using the
+configured expansion LLM.
+
+```bash
+curl -X POST http://localhost:7680/api/expand \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a cat",
+    "model_family": "flux",
+    "variations": 3,
+    "style": "gritty film noir"
+  }'
+```
+
+**Request fields:**
+
+| Field          | Type   | Required | Description                                                                                                                                       |
+| -------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`       | string | yes      | Short prompt to expand                                                                                                                            |
+| `model_family` | string | no       | Model family for prompt style (`flux` default; `sdxl`, `sd15`, `sd3`, ...)                                                                        |
+| `variations`   | number | no       | Number of prompt variations to generate (default 1, max 10)                                                                                       |
+| `style`        | string | no       | Visual style to absorb into the expansion (e.g. a style preset label). Passed to the LLM as a natural-language directive, never a literal suffix. |
+
+**Response:**
+
+```json
+{
+  "original": "a cat",
+  "expanded": ["a sleek black cat prowling a rain-slicked alley, ..."]
+}
+```
+
 ## `/api/upscale`
 
 Upscale an image using Real-ESRGAN super-resolution models.
