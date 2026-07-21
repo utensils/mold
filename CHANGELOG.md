@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Repeated source-fit generations now reuse preprocessed images.** Desktop, web, and iPhone keep per-Create-form caches for the expensive Upscale then fit pass and the final canvas fit/mask. Prompt, seed, and generation-parameter iterations no longer rerun or retransmit unchanged source preprocessing; changing dimensions only invalidates the fit layer, while source, upscaler, fit-policy, and mask changes invalidate the layers they affect. Concurrent Batch siblings share an in-flight pass, and processed bytes stay request-local so the editable source remains intact.
+- Keep the desktop Advanced LoRA picker inside its accordion and ensure modal drawers cover floating workbench controls such as Templates.
 
 ## [0.20.2] - 2026-07-21
 
