@@ -1,5 +1,7 @@
 <script lang="ts">
-export const MOBILE_GENERATION_TEMPLATES_STORAGE_KEY = "mold.mobile.generation.templates.v1";
+import { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY } from "./mobileTemplateStorage";
+
+export { MOBILE_GENERATION_TEMPLATES_STORAGE_KEY };
 </script>
 
 <script setup lang="ts">
