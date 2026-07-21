@@ -7121,6 +7121,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn toggle_advanced_flips_disclosure_and_rows() {
         use crate::ui::create_form::CreateRow;
         let mut app = make_settings_test_app();
@@ -8490,6 +8491,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn enter_on_section_expands_and_collapses_others() {
         use crate::ui::create_form::{AdvSection, CreateRow};
         let mut app = make_settings_test_app();
@@ -8637,6 +8639,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn upscale_row_picker_sets_and_clears_generate_param() {
         use crate::ui::create_form::{AdvSection, CreateRow};
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
