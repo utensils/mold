@@ -124,17 +124,17 @@ Start the HTTP inference server.
 mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-size N] [--log-format json|text] [--log-file] [--discord] [--no-mdns]
 ```
 
-| Flag                  | Description                                                                |
-| --------------------- | -------------------------------------------------------------------------- |
-| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                    |
-| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                        |
-| `--models-dir <PATH>` | Override the models directory                                              |
-| `--gpus <SPEC>`       | GPU ordinals (`0,1`) or `all`; defaults to every visible GPU               |
-| `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                 |
-| `--log-format <FMT>`  | `json` or `text`                                                           |
-| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                  |
-| `--discord`           | Start the built-in Discord bot in the same process                         |
-| `--no-mdns`           | Don't advertise this server on the LAN (`mdns` builds; also `MOLD_MDNS=0`) |
+| Flag                  | Description                                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                                       |
+| `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                           |
+| `--models-dir <PATH>` | Override the models directory                                                                 |
+| `--gpus <SPEC>`       | GPU ordinals (`0,1`) or `all`; defaults to every visible GPU                                  |
+| `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                                    |
+| `--log-format <FMT>`  | `json` or `text`                                                                              |
+| `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                     |
+| `--discord`           | Start the built-in Discord bot in the same process                                            |
+| `--no-mdns`           | Disable LAN advertising and server-assisted peer browsing (`mdns` builds; also `MOLD_MDNS=0`) |
 
 `GET /api/status` returns `gpus[]` with per-worker state and
 `queue_depth`/`queue_capacity` for queue health.
@@ -157,8 +157,9 @@ mold server discover [--timeout-secs N] [--json] [--probe]
 
 The table lists NAME, URL, VERSION, AUTH (whether an API key is required), and a
 GPU summary, followed by a `export MOLD_HOST=…` hint for the first result.
-Advertising is on by default when a server is built with the `mdns` feature;
-disable it per-server with `mold serve --no-mdns` or `MOLD_MDNS=0`.
+Advertising and server-assisted browsing are on by default when a server is
+built with the `mdns` feature; disable both per-server with
+`mold serve --no-mdns` or `MOLD_MDNS=0`.
 
 ## `mold mcp`
 

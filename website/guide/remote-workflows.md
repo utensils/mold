@@ -40,13 +40,17 @@ mold server discover
 Add `--probe` for a `/health` latency column, `--json` for machine-readable
 output, or `--timeout-secs N` to browse longer on a busy network. The desktop
 app shows the same list in its **Machines** workspace with a one-click **Add**
-button. The iPhone app's **Machines → Discover nearby** uses Apple's native Bonjour browser
+button. The web app also offers **Machines → Add machine → Local network** when
+the primary server reports DNS-SD browsing support; these results reflect the
+server's LAN and the browser connects to the selected address directly. The
+iPhone app's **Machines → Discover nearby** uses Apple's native Bonjour browser
 for the same service and asks for Local Network permission. It also accepts a
 manual IP address, hostname, HTTPS URL, or Tailscale MagicDNS name.
 
-Advertising is on by default; a server can opt out with `mold serve --no-mdns`
-or `MOLD_MDNS=0` (for example on a shared or untrusted LAN). Loopback-only binds
-(`--bind 127.0.0.1`) are never advertised.
+Advertising and server-assisted browsing are on by default; a server can opt
+out of both with `mold serve --no-mdns` or `MOLD_MDNS=0` (for example on a shared
+or untrusted LAN). Loopback-only binds (`--bind 127.0.0.1`) are never advertised,
+but can still browse peers for the web UI. See the [Machines guide](/guide/machines).
 
 ## iPhone over Tailscale
 
