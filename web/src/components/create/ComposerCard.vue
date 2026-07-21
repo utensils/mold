@@ -144,7 +144,8 @@ watch(
         data-test="composer-undo"
         @click="emit('undo-expand')"
       >
-        ✨ expanded · undo
+        <Icon name="sparkle" :size="12" />
+        expanded · undo
       </button>
       <span class="composer__spacer" />
       <button
@@ -246,6 +247,9 @@ watch(
 }
 
 .composer__undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 0;
   background: transparent;
   color: var(--safelight);

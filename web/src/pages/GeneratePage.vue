@@ -22,11 +22,12 @@ import ImagePickerModal from "../components/ImagePickerModal.vue";
 import MaskEditorModal from "../components/MaskEditorModal.vue";
 import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue";
 import ColdStartGuide from "../components/create/ColdStartGuide.vue";
-import GalleryFeed from "../components/GalleryFeed.vue";
+import RecentGrid from "../components/create/RecentGrid.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import { blobToBase64 } from "../lib/base64";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
+import BadgePill from "@ui/components/BadgePill.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import {
   createChainJob,
@@ -89,6 +90,10 @@ const showExpand = ref(false);
 const showPicker = ref(false);
 const showMask = ref(false);
 const showAdvanced = ref(false);
+// Which advanced section to reveal when the drawer opens. "+ Add LoRA" jumps
+// straight to the LoRA picker; the plain Advanced button leaves it null so the
+// drawer opens on its first available section.
+const advOpenTo = ref<"lora" | null>(null);
 const showTemplates = ref(false);
 const composerError = ref<string | null>(null);
 const preprocessingStatus = ref<string | null>(null);
@@ -257,6 +262,18 @@ const currentFamily = computed(
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(currentFamily.value),
 );
+
+// Chain (Sequence) generation is only meaningful for the video families that
+// stitch multiple clips. For everything else the Sequence tab stays
+// discoverable but explains itself instead of offering a dead Generate button.
+const supportsChain = computed(() => capabilities.value.supportsVideo);
+
+// LoRA stack lives in the left rail as a live summary. The stack stores paths;
+// the display name is the file's basename without its extension.
+function loraLabel(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  return base.replace(/\.(safetensors|ckpt|pt|bin)$/i, "");
+}
 
 const gpuListForPlacement = computed(
   () =>
@@ -806,7 +823,13 @@ async function handleDelete(item: GalleryImage) {
   }
 }
 
+function openAdvanced() {
+  advOpenTo.value = null;
+  showAdvanced.value = true;
+}
+
 function openAdvancedLora() {
+  advOpenTo.value = "lora";
   showAdvanced.value = true;
 }
 
@@ -880,23 +903,60 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="rounded-card border border-edge bg-bench p-4">
+        <div
+          v-if="capabilities.supportsLora"
+          class="rounded-card border border-edge bg-bench p-4"
+          data-test="lora-rail"
+        >
           <div class="flex items-center justify-between">
             <span
               class="font-mono text-[10px] uppercase tracking-[0.1em] text-ink-3"
               >LoRA stack</span
             >
-            <span class="font-mono text-[11px] text-ink-3">{{
-              form.state.value.loras.length
-            }}</span>
+            <BadgePill
+              v-if="form.state.value.loras.length"
+              data-test="lora-count"
+              >{{ form.state.value.loras.length }}</BadgePill
+            >
           </div>
+
+          <ul
+            v-if="form.state.value.loras.length"
+            class="mt-3 flex flex-col gap-1.5"
+          >
+            <li
+              v-for="(lora, i) in form.state.value.loras"
+              :key="`${lora.path}-${i}`"
+              class="flex items-center gap-2 rounded-control border border-edge bg-bath px-2.5 py-1.5"
+              data-test="lora-rail-row"
+            >
+              <span
+                class="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2"
+                >{{ loraLabel(lora.path) }}</span
+              >
+              <span class="shrink-0 font-mono text-[10px] text-safelight"
+                >{{ lora.scale.toFixed(2) }}×</span
+              >
+              <button
+                type="button"
+                class="shrink-0 text-ink-3 hover:text-stop"
+                :aria-label="`Remove ${loraLabel(lora.path)}`"
+                data-test="lora-rail-remove"
+                @click="form.removeLora(i)"
+              >
+                <Icon name="close" :size="13" />
+              </button>
+            </li>
+          </ul>
+
           <button
             type="button"
-            class="mt-3 w-full rounded-control border border-dashed border-ce p-2.5 text-xs text-ink-2 hover:bg-white/5"
+            class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-control border border-dashed border-ce p-2.5 text-xs text-ink-2 transition hover:border-safelight hover:text-rebate"
             data-test="add-lora"
             @click="openAdvancedLora"
           >
-            + Add LoRA
+            <Icon name="plus" :size="13" />
+            {{ form.state.value.loras.length ? "Manage LoRAs" : "Add LoRA" }}
           </button>
         </div>
       </aside>
@@ -941,8 +1001,48 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div
+          v-if="composerMode === 'script' && !supportsChain"
+          class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
+          data-test="chain-unsupported"
+        >
+          <div class="flex items-start gap-3">
+            <span
+              class="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-bath text-ink-3"
+            >
+              <Icon name="chain" :size="17" />
+            </span>
+            <div class="min-w-0">
+              <p class="font-display text-[15px] font-semibold text-rebate">
+                sequences need a video model
+              </p>
+              <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-3">
+                <span class="text-ink-2">{{ form.state.value.model }}</span>
+                renders single prints only. pick an ltx-video or ltx-2 model to
+                chain clips into a sequence.
+              </p>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
+                  data-test="chain-back-to-single"
+                  @click="setComposerMode('single')"
+                >
+                  back to single
+                </button>
+                <router-link
+                  to="/models"
+                  class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
+                >
+                  browse video models →
+                </router-link>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <ScriptComposer
-          v-if="composerMode === 'script'"
+          v-else-if="composerMode === 'script'"
           ref="scriptComposerRef"
           :model="form.state.value.model"
           :width="form.state.value.width"
@@ -1023,17 +1123,7 @@ onBeforeUnmount(() => {
               >{{ galleryEntries.length }} prints</span
             >
           </div>
-          <div class="max-h-[52rem] overflow-y-auto pr-1">
-            <GalleryFeed
-              :entries="galleryEntries"
-              :loading="false"
-              :view="'grid'"
-              :muted="muted"
-              :show-recreate="true"
-              @open="openItem"
-              @recreate="recreateFromGallery"
-            />
-          </div>
+          <RecentGrid :entries="galleryEntries" @open="openItem" />
         </section>
       </main>
 
@@ -1042,7 +1132,7 @@ onBeforeUnmount(() => {
         v-model="form.state.value"
         :family="currentFamily"
         :adv-count="advCount"
-        @open-advanced="showAdvanced = true"
+        @open-advanced="openAdvanced"
       />
     </div>
 
@@ -1052,6 +1142,7 @@ onBeforeUnmount(() => {
       :family="currentFamily"
       :adv-count="advCount"
       :mobile="isPhone"
+      :open-to="advOpenTo"
       :placement-gpus="gpuListForPlacement"
       @close="showAdvanced = false"
       @open-picker="showPicker = true"

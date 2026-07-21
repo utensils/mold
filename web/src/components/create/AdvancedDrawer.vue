@@ -7,7 +7,7 @@
  * (≥640px, 560px), SheetPanel "full" on phones. Reset clears advanced fields
  * only — the prompt, model, shape, resolution, detail and seed survive.
  */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
@@ -50,10 +50,13 @@ const props = withDefaults(
     advCount?: number;
     /** Phone surface → SheetPanel instead of DrawerPanel. */
     mobile?: boolean;
+    /** Section to reveal when the drawer opens (e.g. "lora" from + Add LoRA).
+     * Null → open on the first available section. */
+    openTo?: SectionKey | null;
     /** GPUs for the placement section (empty → section hidden). */
     placementGpus?: { ordinal: number; name: string }[];
   }>(),
-  { advCount: 0, mobile: false, placementGpus: () => [] },
+  { advCount: 0, mobile: false, openTo: null, placementGpus: () => [] },
 );
 
 const emit = defineEmits<{
@@ -73,11 +76,6 @@ const NEG_CHIPS = [
   "oversaturated",
 ];
 
-const openSection = ref<SectionKey | null>("scheduler");
-function toggle(section: SectionKey) {
-  openSection.value = openSection.value === section ? null : section;
-}
-
 const caps = computed(() => generationCapabilitiesForFamily(props.family));
 const formats = computed(() => outputFormatsForFamily(props.family));
 
@@ -85,6 +83,44 @@ const showScheduler = computed(
   () => caps.value.supportsScheduler || caps.value.supportsCfgPlus,
 );
 const showPlacement = computed(() => props.placementGpus.length > 0);
+
+// Sections actually rendered for this family, in template order. Upscale,
+// Output & seed are always present; the rest are capability-gated. Used to
+// pick a sensible default-open section (never a hidden one like Scheduler on
+// a flux model) and to honour `openTo`.
+const visibleSections = computed<SectionKey[]>(() => {
+  const out: SectionKey[] = [];
+  if (showScheduler.value) out.push("scheduler");
+  if (caps.value.supportsNegativePrompt) out.push("negative");
+  if (caps.value.sourceImageMode === "single") out.push("source");
+  if (caps.value.supportsLora) out.push("lora");
+  out.push("upscale", "output");
+  if (caps.value.supportsVideo) out.push("video");
+  if (showPlacement.value) out.push("placement");
+  return out;
+});
+
+const openSection = ref<SectionKey | null>(visibleSections.value[0] ?? null);
+function toggle(section: SectionKey) {
+  openSection.value = openSection.value === section ? null : section;
+}
+
+// When the drawer opens: reveal `openTo` if provided and available, otherwise
+// keep the current section if it's still visible, else fall back to the first
+// available one. Runs immediately so a drawer mounted already-open behaves too.
+watch(
+  () => props.open,
+  (isOpen) => {
+    if (!isOpen) return;
+    const sections = visibleSections.value;
+    if (props.openTo && sections.includes(props.openTo)) {
+      openSection.value = props.openTo;
+    } else if (!openSection.value || !sections.includes(openSection.value)) {
+      openSection.value = sections[0] ?? null;
+    }
+  },
+  { immediate: true },
+);
 
 // The Scheduler type permits parameterized object variants; the drawer only
 // surfaces the named string schedulers.

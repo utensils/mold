@@ -48,6 +48,8 @@ vi.mock("../api", () => ({
   listGallery: vi.fn(async () => [entry]),
   deleteGalleryImage: vi.fn(async () => undefined),
   upscaleStream: vi.fn(async () => undefined),
+  imageUrl: (name: string) => `/api/gallery/image/${name}`,
+  thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
 }));
 
 vi.mock("../composables/useGenerateStream", () => ({
@@ -71,16 +73,13 @@ vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: { value: null } }),
 }));
 
-const GalleryFeedStub = defineComponent({
-  name: "GalleryFeed",
+const RecentGridStub = defineComponent({
+  name: "RecentGrid",
   props: {
     entries: { type: Array, required: true },
-    loading: { type: Boolean, required: true },
-    view: { type: String, required: true },
-    muted: { type: Boolean, required: true },
-    showRecreate: { type: Boolean, default: undefined },
+    limit: { type: Number, default: undefined },
   },
-  template: '<div data-test="gallery-feed">{{ entries.length }}</div>',
+  template: '<div data-test="recent-grid">{{ entries.length }}</div>',
 });
 
 describe("GeneratePage layout and behavior", () => {
@@ -108,7 +107,7 @@ describe("GeneratePage layout and behavior", () => {
   it("keeps the recent gallery visible after refreshes", async () => {
     const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    const feed = wrapper.findComponent(GalleryFeedStub);
+    const feed = wrapper.findComponent(RecentGridStub);
     expect(feed.props("entries")).toEqual([entry]);
   });
 
@@ -193,6 +192,10 @@ describe("GeneratePage layout and behavior", () => {
   });
 
   it("submits Sequence mode through createChainJob instead of the legacy stream", async () => {
+    // Sequence only offers the ScriptComposer for a chain-capable (video)
+    // model; a non-chain model gets the "sequences need a video model" panel.
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
     await flushPromises();
     // Switch to Sequence so the ScriptComposer renders.
@@ -227,6 +230,26 @@ describe("GeneratePage layout and behavior", () => {
       }),
     );
     expect(submitMock).not.toHaveBeenCalled();
+  });
+
+  it("explains Sequence for a non-chain model instead of a dead composer", async () => {
+    useGenerateForm().state.value.modelFamily = "flux2";
+    useGenerateForm().state.value.model = "flux2-klein:q4";
+    const wrapper = mount(GeneratePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((b) => b.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    // The Sequence tab stays reachable, but a non-chain model gets a clear
+    // explanation — not the ScriptComposer with a live-looking Generate button.
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='script-composer']").exists()).toBe(false);
+    // "back to single" returns to the composer.
+    await wrapper.get("[data-test='chain-back-to-single']").trigger("click");
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
+      false,
+    );
   });
 
   it("fans a batch out into variations and queues one print per edited prompt", async () => {
@@ -347,7 +370,7 @@ function pageStubs() {
     },
     MaskEditorModal: { name: "MaskEditorModal", template: "<div />" },
     GenerationTemplatesPanel: { template: "<div />" },
-    GalleryFeed: GalleryFeedStub,
+    RecentGrid: RecentGridStub,
     Lightbox: { template: "<div />" },
   };
 }

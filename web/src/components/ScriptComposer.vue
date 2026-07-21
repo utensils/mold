@@ -51,6 +51,9 @@ function newScript(): ChainScriptToml {
 
 const script = ref<ChainScriptToml>(newScript());
 const limits = ref<ChainLimits | null>(null);
+// Tracks whether the chain-limits probe has resolved for the current model, so
+// the UI can tell "still checking" apart from "resolved: no chain support".
+const limitsLoaded = ref(false);
 const importFileInput = ref<HTMLInputElement | null>(null);
 
 // Stage index whose image picker is open, or null if the modal is closed.
@@ -68,6 +71,7 @@ onMounted(async () => {
     }
   }
   limits.value = await fetchChainLimits(props.model).catch(() => null);
+  limitsLoaded.value = true;
   // Normalise enable_audio against the resolved model on first mount.
   // The persisted draft might carry `enable_audio: true` from a prior
   // session that used an AV-capable model; if the current model isn't
@@ -109,7 +113,9 @@ watch(
   () => props.model,
   async (m) => {
     script.value.chain.model = m;
+    limitsLoaded.value = false;
     limits.value = await fetchChainLimits(m).catch(() => null);
+    limitsLoaded.value = true;
     // Mirror the onMounted default: switching to an AV-capable model
     // turns audio on if the user hasn't explicitly toggled it; switching
     // to a non-AV model clears it so the wire stays clean and the server
@@ -249,7 +255,22 @@ const overCap = computed(
 
 const canAddStage = computed(() => script.value.stage.length < maxStages.value);
 
+// The model resolved to a chain-capable one but the limits probe came back
+// empty (network failure, or a video model that doesn't chain). Distinct from
+// the still-loading state so the status line reads honestly.
+const chainUnavailable = computed(
+  () => limitsLoaded.value && limits.value === null,
+);
+
+const canGenerate = computed(
+  () =>
+    limits.value !== null &&
+    !overCap.value &&
+    script.value.stage.some((s) => s.prompt.trim()),
+);
+
 function submit() {
+  if (!canGenerate.value) return;
   emit("submit", script.value);
 }
 
@@ -329,7 +350,7 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 
     <div
       class="flex items-center justify-between text-xs"
-      :class="overCap ? 'text-red-400' : 'text-ink-3'"
+      :class="overCap ? 'text-stop' : 'text-ink-3'"
       :title="
         overCap
           ? 'Reduce frames or stages — server will reject this script'
@@ -371,16 +392,29 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       Generate audio
     </label>
 
-    <p v-if="limits === null" class="text-center text-sm text-amber-400">
-      This model doesn't support chain generation.
+    <p
+      v-if="!limitsLoaded && limits === null"
+      class="text-center font-mono text-[11px] text-ink-3"
+      data-test="chain-limits-pending"
+    >
+      checking sequence limits…
+    </p>
+    <p
+      v-else-if="chainUnavailable"
+      class="text-center font-mono text-[11px] text-warning"
+      data-test="chain-unavailable"
+    >
+      this model can't chain sequences.
     </p>
     <button
-      class="w-full rounded-xl bg-safelight py-2 text-sm font-semibold text-white hover:bg-safelight disabled:opacity-50"
-      :disabled="
-        limits === null ||
-        overCap ||
-        script.stage.every((s) => !s.prompt.trim())
+      class="w-full rounded-control-lg py-2.5 text-sm font-semibold transition"
+      :class="
+        canGenerate
+          ? 'bg-safelight text-on-accent hover:brightness-110'
+          : 'cursor-not-allowed border border-edge bg-bath text-ink-3'
       "
+      :disabled="!canGenerate"
+      data-test="script-generate"
       @click="submit"
     >
       Generate

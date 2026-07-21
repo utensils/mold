@@ -86,6 +86,40 @@ describe("AdvancedDrawer capability matrix", () => {
   });
 });
 
+describe("AdvancedDrawer default-open section", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  const expanded = (
+    wrapper: ReturnType<typeof factory>,
+    key: string,
+  ): string | undefined =>
+    wrapper
+      .find(`[data-test='section-${key}'] .ms-acc__head`)
+      .attributes("aria-expanded");
+
+  it("opens on the first available section, never a hidden one", () => {
+    // flux hides scheduler/negative, so the drawer must open on Source —
+    // not sit fully collapsed on a scheduler section that isn't rendered.
+    const w = factory("flux");
+    expect(expanded(w, "source")).toBe("true");
+  });
+
+  it("reveals the LoRA picker when openTo is 'lora'", () => {
+    const w = factory("flux", {}, { openTo: "lora" });
+    expect(expanded(w, "lora")).toBe("true");
+    expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
+  });
+
+  it("ignores openTo when that section is not available for the family", () => {
+    // sd3.5 has no LoRA section → openTo is dropped and the first visible
+    // section (Scheduler & sampling, for CFG++) opens instead.
+    const w = factory("sd3.5", {}, { openTo: "lora" });
+    expect(w.find("[data-test='section-lora']").exists()).toBe(false);
+    expect(expanded(w, "scheduler")).toBe("true");
+  });
+});
+
 describe("AdvancedDrawer ControlNet block", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
