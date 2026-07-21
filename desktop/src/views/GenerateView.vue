@@ -1579,7 +1579,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Inspector (fixed 290px) -->
+    <!-- Inspector (persisted, left-edge resizable width) -->
     <InspectorPanel
       :form="form"
       :last-seed="generation.lastSeedUsed"
