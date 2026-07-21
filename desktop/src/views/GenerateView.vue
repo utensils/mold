@@ -59,6 +59,7 @@ import {
   resolutionValidationError,
   stepsValidationError,
 } from "../lib/generateValidation";
+import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "../lib/sourceFit";
 import { domCanvasOps } from "../lib/sourceFitCanvas";
@@ -911,14 +912,16 @@ function appendPromptWord(word: string) {
 
 /** Status line while the source is upscaled/refit ahead of the submit. */
 const preprocessingStatus = ref<string | null>(null);
+/** One last-result cache belongs to this Generate composer instance. */
+const sourceFitCache = new SourceFitPreprocessCache();
 
 /**
  * Apply the source-fit policy to the attached source (and mask) before the
  * request is built: canvas-fit a mismatched source, generate the pad mask
  * for pad-repaint, and for upscale-then-fit run the source through
  * `POST /api/upscale/stream` first. `route` is the ALREADY-RESOLVED
- * generation host so the upscaler model auto-downloads on the same machine
- * the job will run on. Returns false when the submit must abort.
+ * generation host so a cache miss auto-downloads/runs the upscaler on the
+ * same machine the job will run on. Returns false when the submit must abort.
  */
 async function preprocessSourceFit(
   route: HostRoute | null,
@@ -927,9 +930,6 @@ async function preprocessSourceFit(
   const draftCaps = generationCapabilitiesForFamily(draft.family);
   if (!draftCaps.supportsImg2img || draftCaps.sourceImageMode !== "single") return true;
   if (!draft.sourceImage) return true;
-  const originalSource = draft.sourceImage;
-  const originalMask = draft.maskImage;
-  const originalSourceFit = JSON.stringify(draft.sourceFit);
   try {
     const result = await applySourceFitPreprocess(
       {
@@ -944,6 +944,7 @@ async function preprocessSourceFit(
       },
       {
         ops: domCanvasOps,
+        cache: sourceFitCache,
         upscale: (image, model) =>
           upscaleImage({
             model,
@@ -954,22 +955,11 @@ async function preprocessSourceFit(
         onStatus: (message) => (preprocessingStatus.value = message),
       },
     );
+    // Only the frozen request draft receives processed bytes. Keeping the
+    // composer on the user's original source makes repeat submits hit the
+    // content-keyed cache and avoids replacing the editable source/mask.
     draft.sourceImage = result.source;
     draft.maskImage = result.mask;
-    // Keep the visible well in sync only if the user has not moved the live
-    // composer to another model/source while preprocessing was in flight.
-    if (
-      form.model === draft.model &&
-      form.family === draft.family &&
-      form.sourceImage === originalSource &&
-      form.maskImage === originalMask &&
-      JSON.stringify(form.sourceFit) === originalSourceFit &&
-      form.width === draft.width &&
-      form.height === draft.height
-    ) {
-      form.sourceImage = result.source;
-      form.maskImage = result.mask;
-    }
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1047,7 +1037,7 @@ async function generate() {
     // serve — route the batch (sticky pick, Auto = least busy, or Most
     // capable) — model-aware, so hosts that already have the weights win.
     // A pinned host that went away is an error, not a reroute. Resolved
-    // BEFORE source preprocessing so upscale-then-fit hits the same host.
+    // BEFORE source preprocessing so an upscale-then-fit cache miss hits the same host.
     let route: HostRoute | null = preparedSubmission?.route ?? quickSubmission?.route ?? null;
     if (!preparedSubmission && !quickSubmission && routeRequired.value) {
       route = hosts.resolveRoute(

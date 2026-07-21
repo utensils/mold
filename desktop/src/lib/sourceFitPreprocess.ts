@@ -18,6 +18,7 @@
  *      (white padding bands = repaint) or a user mask already exists (it
  *      must track the fitted source).
  */
+import type { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
   maskPaddingRectangles,
   resolveSourceFitTransform,
@@ -81,6 +82,7 @@ export async function applySourceFitPreprocess(
   deps: {
     ops: SourceFitCanvasOps;
     upscale?: UpscaleFn;
+    cache?: SourceFitPreprocessCache;
     onStatus?: (message: string) => void;
   },
 ): Promise<SourceFitResult> {
@@ -88,28 +90,41 @@ export async function applySourceFitPreprocess(
   let changed = false;
   if (!source) return { source, mask, changed };
 
-  // 1. Upscaler preprocessing (upscale-then-fit only).
+  // 1. Upscaler preprocessing (upscale-then-fit only). This cache layer is
+  // dimension-independent, so changing resolution retains the expensive result.
   const policy = input.policy;
   if (policy?.mode === "upscale-then-fit" && policy.upscalerModel && deps.upscale) {
-    deps.onStatus?.(`Preprocessing source with ${policy.upscalerModel}`);
-    source = await deps.upscale(source, policy.upscalerModel);
+    const runUpscale = () => {
+      deps.onStatus?.(`Preprocessing source with ${policy.upscalerModel}`);
+      return deps.upscale!(source!, policy.upscalerModel);
+    };
+    source = deps.cache
+      ? await deps.cache.upscale(source, policy.upscalerModel, runUpscale)
+      : await runUpscale();
     changed = true;
   }
 
-  // 2. Already the requested size — nothing to fit.
-  const size = await deps.ops.imageSize(source);
-  if (size.width === input.target.width && size.height === input.target.height) {
-    return { source, mask, changed };
-  }
-
-  // 3. Canvas fit + mask generation.
+  // 2–3. Cache the size check, canvas fit, and mask generation together.
   const fitPolicy = drawableFitPolicy(policy);
-  const transform = resolveSourceFitTransform(size, input.target, fitPolicy);
-  deps.onStatus?.(`Fitting source to ${input.target.width}×${input.target.height}`);
-  source = await deps.ops.fitImage(source, transform);
-  changed = true;
-  if (fitPolicy.mode === "pad-repaint" || mask) {
-    mask = await deps.ops.buildMask(mask, transform, maskPaddingRectangles(transform));
-  }
-  return { source, mask, changed };
+  const fitSource = source;
+  const fitMask = mask;
+  const runFit = async (): Promise<SourceFitResult> => {
+    const size = await deps.ops.imageSize(fitSource);
+    if (size.width === input.target.width && size.height === input.target.height) {
+      return { source: fitSource, mask: fitMask, changed };
+    }
+
+    const transform = resolveSourceFitTransform(size, input.target, fitPolicy);
+    deps.onStatus?.(`Fitting source to ${input.target.width}×${input.target.height}`);
+    const fittedSource = await deps.ops.fitImage(fitSource, transform);
+    let fittedMask = fitMask;
+    if (fitPolicy.mode === "pad-repaint" || fitMask) {
+      fittedMask = await deps.ops.buildMask(fitMask, transform, maskPaddingRectangles(transform));
+    }
+    return { source: fittedSource, mask: fittedMask, changed: true };
+  };
+
+  return deps.cache
+    ? deps.cache.fit(fitSource, fitMask, fitPolicy, input.target, runFit)
+    : runFit();
 }

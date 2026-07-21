@@ -35,6 +35,7 @@ vi.mock("../lib/api/upscale", () => ({
 
 interface PreprocessDeps {
   upscale?: (image: string, model: string) => Promise<string>;
+  cache?: unknown;
   onStatus?: (message: string) => void;
 }
 const applySourceFitPreprocess = vi.fn();
@@ -170,9 +171,36 @@ describe("GenerateView source-fit submit path", () => {
       policy: form.sourceFit,
       target: { width: 512, height: 512 },
     });
-    // The preprocess result replaced the form's images (visible in the well).
-    expect(form.sourceImage).toBe("FIT");
-    expect(form.maskImage).toBeNull();
+    // Processed bytes belong to the request draft; the editable source stays original.
+    expect(form.sourceImage).toBe("SRC");
+    expect(form.maskImage).toBe("USERMASK");
+  });
+
+  it("reuses one per-composer cache across repeat submits", async () => {
+    setupMultiHost();
+    vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    applySourceFitPreprocess.mockImplementation(async (input: SourceFitInput) => ({
+      source: input.source,
+      mask: input.mask,
+      changed: false,
+    }));
+
+    mount(GenerateView, { shallow: true, attachTo: document.body });
+    await flushPromises();
+    primeForm();
+    useUiStore().generateTick++;
+    await flushPromises();
+    useUiStore().generateTick++;
+    await flushPromises();
+
+    expect(applySourceFitPreprocess).toHaveBeenCalledTimes(2);
+    const firstDeps = applySourceFitPreprocess.mock.calls[0]![1] as PreprocessDeps;
+    const secondDeps = applySourceFitPreprocess.mock.calls[1]![1] as PreprocessDeps;
+    expect(firstDeps.cache).toBeDefined();
+    expect(secondDeps.cache).toBe(firstDeps.cache);
   });
 
   it("submits the tapped form snapshot when preprocessing is still running", async () => {

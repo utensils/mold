@@ -5,6 +5,7 @@ import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
+import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import type {
@@ -1369,6 +1370,8 @@ function revokeObjectUrl(url: string): void {
   objectUrls.delete(url);
 }
 
+const sourceFitCache = new SourceFitPreprocessCache();
+
 async function prepareGenerationRequest(
   target: ApiTarget,
   draft: GenerateForm,
@@ -1387,6 +1390,7 @@ async function prepareGenerationRequest(
       },
       {
         ops: domCanvasOps,
+        cache: sourceFitCache,
         upscale: (image, model) =>
           upscaleImage({
             image,
