@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import ToastShelf from "@ui/components/ToastShelf.vue";
 import DownloadsDrawer from "./components/DownloadsDrawer.vue";
+import AppNav from "./components/shell/AppNav.vue";
+import CommandK from "./components/shell/CommandK.vue";
 import ConfirmDialog from "./components/shell/ConfirmDialog.vue";
 import ResourceTray from "./components/ResourceTray.vue";
 import { dismissToast, runToastAction, useNotifications } from "./lib/toasts";
@@ -35,12 +37,26 @@ function closeDownloads() {
 }
 
 // Exposed to child components via provide/inject-free singleton from useDownloads.
-// We additionally listen for the page-level event "mold:open-downloads" so
-// TopBar can open the drawer without a prop drill when it lives inside a page.
+// We additionally listen for the page-level event "mold:open-downloads" so the
+// nav chrome and ⌘K palette can open the drawer without a prop drill.
 function onOpenEvent() {
   openDownloads();
 }
 window.addEventListener("mold:open-downloads", onOpenEvent);
+
+// ⌘K / Ctrl+K toggles the command palette from anywhere (spec §06). Esc close
+// is handled inside PalettePanel.
+const paletteOpen = ref(false);
+function onKeydown(event: KeyboardEvent) {
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    (event.key === "k" || event.key === "K")
+  ) {
+    event.preventDefault();
+    paletteOpen.value = !paletteOpen.value;
+  }
+}
+window.addEventListener("keydown", onKeydown);
 
 const off = onDownloadComplete(() => {
   // Best-effort: if the Generate page listens, it can refresh its own models
@@ -50,6 +66,7 @@ const off = onDownloadComplete(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("mold:open-downloads", onOpenEvent);
+  window.removeEventListener("keydown", onKeydown);
   off();
   reconciler.stop();
 });
@@ -92,6 +109,7 @@ const notifications = useNotifications();
 
 <template>
   <div class="app-frame">
+    <AppNav />
     <router-view />
     <ToastShelf
       :toasts="notifications.toasts"
@@ -99,6 +117,7 @@ const notifications = useNotifications();
       @action="runToastAction"
     />
     <ConfirmDialog />
+    <CommandK :open="paletteOpen" @close="paletteOpen = false" />
   </div>
   <ResourceTray />
   <DownloadsDrawer

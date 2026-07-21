@@ -315,7 +315,7 @@ describe("GeneratePage layout and visibility", () => {
 
 function pageStubs() {
   return {
-    TopBar: { template: "<header />" },
+    ResourceStrip: { template: "<div />" },
     Composer: {
       name: "Composer",
       props: ["submitError"],
@@ -337,7 +337,6 @@ function pageStubs() {
     },
     LoraPicker: { template: "<div />" },
     ModelPicker: { template: "<div />" },
-    PreferencesModal: { template: "<div />" },
     ExpandModal: { template: "<div />" },
     ImagePickerModal: {
       name: "ImagePickerModal",

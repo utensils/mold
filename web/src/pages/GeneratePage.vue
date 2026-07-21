@@ -7,13 +7,12 @@ import GenerateParamsPanel from "../components/GenerateParamsPanel.vue";
 type GenerateParamsPanelInstance = InstanceType<typeof GenerateParamsPanel>;
 import LoraPicker from "../components/LoraPicker.vue";
 import ModelPicker from "../components/ModelPicker.vue";
-import PreferencesModal from "../components/PreferencesModal.vue";
 import ExpandModal from "../components/ExpandModal.vue";
 import ImagePickerModal from "../components/ImagePickerModal.vue";
 import RunningStrip from "../components/RunningStrip.vue";
+import ResourceStrip from "../components/ResourceStrip.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
-import TopBar from "../components/TopBar.vue";
 import {
   createChainJob,
   deleteGalleryImage,
@@ -51,35 +50,11 @@ import { supportsLora } from "../types";
 import type { ChainScriptToml } from "../lib/chainToml";
 import type { ComposerMode } from "../components/Composer.vue";
 
-type ViewMode = "feed" | "grid";
-
-function loadViewMode(): ViewMode {
-  try {
-    const v = localStorage.getItem("mold.gallery.view");
-    return v === "grid" ? "grid" : "feed";
-  } catch {
-    return "feed";
-  }
-}
 function loadMuted(): boolean {
   try {
     return localStorage.getItem("mold.gallery.muted") !== "false";
   } catch {
     return true;
-  }
-}
-function persistViewMode(v: ViewMode) {
-  try {
-    localStorage.setItem("mold.gallery.view", v);
-  } catch {
-    /* ignore */
-  }
-}
-function persistMuted(v: boolean) {
-  try {
-    localStorage.setItem("mold.gallery.muted", String(v));
-  } catch {
-    /* ignore */
   }
 }
 
@@ -88,10 +63,10 @@ const { status } = useStatusPoll();
 const queue = useQueue();
 const models = ref<ModelInfoExtended[]>([]);
 const galleryEntries = ref<GalleryImage[]>([]);
-const view = ref<ViewMode>(loadViewMode());
+// The Recent shelf renders a fixed grid; mute is inherited from the gallery
+// preference and consumed read-only (no toggle on Create).
 const muted = ref(loadMuted());
 
-const showPreferences = ref(false);
 const showExpand = ref(false);
 const showPicker = ref(false);
 const composerError = ref<string | null>(null);
@@ -273,16 +248,6 @@ const gpuListForPlacement = computed(
       name: `GPU ${g.ordinal}`,
     })) ?? [],
 );
-
-// Placeholder TopBar props — filters/search/mute/refresh/counts are all
-// hidden on /generate by TopBar's `v-if="$route.name === 'gallery'"`, but
-// the props are still declared required on the component.
-const topBarCounts = computed(() => ({
-  total: galleryEntries.value.length,
-  images: galleryEntries.value.length,
-  video: 0,
-  filtered: galleryEntries.value.length,
-}));
 
 const chainDecision = computed(() =>
   decideGenerateRequestRouting(
@@ -622,15 +587,6 @@ async function onQueueLaneChange(id: string, targetGpu: number | null) {
   }
 }
 
-function setView(v: ViewMode) {
-  view.value = v;
-  persistViewMode(v);
-}
-function setMuted(v: boolean) {
-  muted.value = v;
-  persistMuted(v);
-}
-
 const queueBusy = computed(() =>
   stream.jobs.value.some((j) => j.state === "running"),
 );
@@ -662,19 +618,12 @@ onBeforeUnmount(() => {
     data-test="generate-shell"
     class="mx-auto max-w-[2400px] px-3 pb-40 pt-4 sm:px-5 sm:pt-6 lg:px-6 2xl:px-8"
   >
-    <TopBar
-      :filter="'all'"
-      :search="''"
-      :view="view"
-      :muted="muted"
-      :counts="topBarCounts"
-      :loading="false"
-      @update:filter="() => {}"
-      @update:search="() => {}"
-      @update:view="setView"
-      @update:muted="setMuted"
-      @refresh="refreshGallery"
-    />
+    <!-- Narrow-viewport resource chip. Desktop reads GPU telemetry from the
+         app-level ResourceTray; the wide-screen page has room for its own
+         panels. Kept from the former TopBar so mobile keeps a live readout. -->
+    <div class="mb-4 lg:hidden">
+      <ResourceStrip variant="chip" />
+    </div>
 
     <div
       data-test="generate-workspace"
@@ -719,7 +668,6 @@ onBeforeUnmount(() => {
           @submit="onSubmit"
           @submit-script="onSubmitScript"
           @update:mode="setComposerMode"
-          @open-preferences="showPreferences = true"
           @open-expand="showExpand = true"
           @open-expand-stage="(idx: number, p: string) => onExpandStage(idx, p)"
           @open-image-picker="showPicker = true"
@@ -779,10 +727,6 @@ onBeforeUnmount(() => {
       </aside>
     </div>
 
-    <PreferencesModal
-      :open="showPreferences"
-      @close="showPreferences = false"
-    />
     <ExpandModal
       :open="showExpand"
       :prompt="

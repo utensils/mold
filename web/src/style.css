@@ -71,6 +71,15 @@
   border: 1px solid var(--edge);
 }
 
+/* Wordmark gradient (spec §02, prototype [data-brand]): the "mold" wordmark is
+ * always set in display bold with the family gradient clipped to the text. */
+.brand-gradient {
+  background-image: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
 html,
 body,
 #app {

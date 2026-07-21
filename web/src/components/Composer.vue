@@ -37,7 +37,6 @@ const emit = defineEmits<{
   (e: "update:mode", v: ComposerMode): void;
   (e: "submit"): void;
   (e: "submit-script", script: ChainScriptToml): void;
-  (e: "open-preferences"): void;
   (e: "open-expand"): void;
   (e: "open-expand-stage", stageIndex: number, prompt: string): void;
   (e: "open-image-picker"): void;
@@ -232,12 +231,11 @@ defineExpose({ scriptComposerRef });
       </div>
 
       <!-- Global icon toolbar. Always rendered so users find the image
-           picker and preferences in the same place regardless of mode.
-           The per-stage prompt enhancer (✨) and per-stage image pickers
-           in Script mode remain the primary affordances inside each
-           stage; these toolbar buttons exist so users can act on the
-           first stage without scrolling, and so Single/Script feel
-           symmetric. -->
+           picker in the same place regardless of mode. The per-stage prompt
+           enhancer (✨) and per-stage image pickers in Script mode remain the
+           primary affordances inside each stage; this toolbar button exists so
+           users can act on the first stage without scrolling, and so
+           Single/Script feel symmetric. -->
       <div class="ml-auto flex gap-1">
         <button
           type="button"
@@ -251,15 +249,6 @@ defineExpose({ scriptComposerRef });
           @click="onImageButton"
         >
           🖼️
-        </button>
-        <button
-          type="button"
-          class="icon-btn"
-          aria-label="Preferences"
-          title="Preferences"
-          @click="emit('open-preferences')"
-        >
-          ⚙
         </button>
       </div>
     </div>

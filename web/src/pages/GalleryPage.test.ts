@@ -25,6 +25,12 @@ vi.mock("../api", () => ({
   deleteGalleryImage: vi.fn(async () => undefined),
 }));
 
+// The page seeds its search from the global nav's `?q=`. No router is
+// installed in these isolated page mounts, so stub the route.
+vi.mock("vue-router", () => ({
+  useRoute: () => ({ query: {} }),
+}));
+
 const GalleryFeedStub = defineComponent({
   name: "GalleryFeed",
   props: {
@@ -49,7 +55,6 @@ describe("GalleryPage visibility", () => {
     const wrapper = mount(GalleryPage, {
       global: {
         stubs: {
-          TopBar: { template: "<header />" },
           GalleryFeed: GalleryFeedStub,
           DetailDrawer: { template: "<aside />" },
           Transition: false,

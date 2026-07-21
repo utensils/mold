@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { listGallery, deleteGalleryImage } from "../api";
 import { requestConfirm } from "../lib/toasts";
 import type { GalleryImage } from "../types";
 import { mediaKind } from "../types";
 import GalleryFeed from "../components/GalleryFeed.vue";
 import DetailDrawer from "../components/DetailDrawer.vue";
-import TopBar from "../components/TopBar.vue";
 
 type FilterKind = "all" | "images" | "video";
 type ViewMode = "feed" | "grid";
@@ -32,6 +32,19 @@ const errorMessage = ref<string | null>(null);
 const filter = ref<FilterKind>("all");
 const search = ref("");
 const view = ref<ViewMode>(loadViewMode());
+
+// Seed the search from the global nav's `?q=` and keep it in sync when the
+// query param changes (the nav search routes here with `q`). The existing
+// filtering logic below reads `search` unchanged.
+const route = useRoute();
+watch(
+  () => route.query.q,
+  (q) => {
+    const next = typeof q === "string" ? q : "";
+    if (next !== search.value) search.value = next;
+  },
+  { immediate: true },
+);
 
 /*
  * Global audio preference.
@@ -329,22 +342,191 @@ onMounted(async () => {
   <div
     class="relative mx-auto flex min-h-[100svh] max-w-[1800px] flex-col px-4 pb-40 sm:px-6 lg:px-10"
   >
-    <TopBar
-      :filter="filter"
-      :search="search"
-      :view="view"
-      :muted="muted"
-      :counts="counts"
-      :loading="loading"
-      :select-mode="selectMode"
-      :selection-count="selection.size"
-      @update:filter="(f) => (filter = f)"
-      @update:search="(s) => (search = s)"
-      @update:view="setView"
-      @update:muted="setMuted"
-      @update:select-mode="setSelectMode"
-      @refresh="refresh"
-    />
+    <!--
+      Page header. W2 relocates the gallery-only toolbar (view / kind filter /
+      mute / select / refresh) out of the former global TopBar; search now
+      lives in the app nav and seeds this page via `?q=`. The controls keep
+      their prior behaviors and aria-labels — the page gets a full redesign in
+      a later milestone.
+    -->
+    <header class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+      <div class="min-w-0 flex-1">
+        <h1 class="font-display text-2xl font-bold tracking-tight text-ink">
+          Gallery
+        </h1>
+        <p class="mt-1 font-mono text-xs text-ink-3">
+          {{ counts.filtered }} / {{ counts.total }}
+        </p>
+      </div>
+
+      <div class="flex shrink-0 flex-wrap items-center gap-2">
+        <!-- View-mode toggle -->
+        <div
+          class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5"
+          role="group"
+          aria-label="View mode"
+        >
+          <button
+            class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
+            :class="
+              view === 'feed'
+                ? 'bg-brand-500 text-white shadow-sm'
+                : 'text-ink-200 hover:text-white'
+            "
+            :aria-pressed="view === 'feed'"
+            @click="setView('feed')"
+          >
+            Feed
+          </button>
+          <button
+            class="inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition"
+            :class="
+              view === 'grid'
+                ? 'bg-brand-500 text-white shadow-sm'
+                : 'text-ink-200 hover:text-white'
+            "
+            :aria-pressed="view === 'grid'"
+            @click="setView('grid')"
+          >
+            Grid
+          </button>
+        </div>
+
+        <!-- Kind filter -->
+        <nav
+          class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-200"
+        >
+          <button
+            class="rounded-full px-3 py-1.5 transition"
+            :class="
+              filter === 'all'
+                ? 'bg-brand-500 text-white shadow-sm'
+                : 'hover:text-white'
+            "
+            @click="filter = 'all'"
+          >
+            All
+            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
+              counts.total
+            }}</span>
+          </button>
+          <button
+            class="hidden rounded-full px-3 py-1.5 transition sm:inline-flex"
+            :class="
+              filter === 'images'
+                ? 'bg-brand-500 text-white shadow-sm'
+                : 'hover:text-white'
+            "
+            @click="filter = 'images'"
+          >
+            Images
+            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
+              counts.images
+            }}</span>
+          </button>
+          <button
+            class="rounded-full px-3 py-1.5 transition"
+            :class="
+              filter === 'video'
+                ? 'bg-brand-500 text-white shadow-sm'
+                : 'hover:text-white'
+            "
+            @click="filter = 'video'"
+          >
+            Video
+            <span class="ml-1 text-[11px] tabular-nums opacity-70">{{
+              counts.video
+            }}</span>
+          </button>
+        </nav>
+
+        <!-- Sound toggle: the click doubles as the user gesture browsers
+             require before unmuted autoplay is allowed. -->
+        <button
+          class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white"
+          :aria-label="muted ? 'Unmute videos' : 'Mute videos'"
+          :title="muted ? 'Unmute videos' : 'Mute videos'"
+          :aria-pressed="!muted"
+          @click="setMuted(!muted)"
+        >
+          <svg
+            v-if="muted"
+            class="h-4 w-4"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            <path d="m22 9-6 6" />
+            <path d="m16 9 6 6" />
+          </svg>
+          <svg
+            v-else
+            class="h-4 w-4 text-brand-300"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M11 5 6 9H3v6h3l5 4z" />
+            <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+            <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+          </svg>
+        </button>
+
+        <!-- Select mode toggle -->
+        <button
+          class="inline-flex h-10 items-center gap-1.5 rounded-full border border-white/5 px-3 text-[13px] font-medium transition hover:text-white"
+          :class="
+            selectMode ? 'bg-brand-500 text-white' : 'bg-white/5 text-ink-200'
+          "
+          :aria-pressed="selectMode"
+          :title="selectMode ? 'Exit select mode' : 'Select multiple'"
+          @click="setSelectMode(!selectMode)"
+        >
+          <span class="hidden sm:inline">
+            {{ selectMode ? `Selected ${selection.size}` : "Select" }}
+          </span>
+          <span v-if="selectMode && selection.size > 0" class="sm:hidden">
+            {{ selection.size }}
+          </span>
+          <span v-else class="sm:hidden">Select</span>
+        </button>
+
+        <!-- Refresh -->
+        <button
+          class="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/5 bg-white/5 text-ink-200 transition hover:text-white disabled:opacity-60"
+          :disabled="loading"
+          :aria-busy="loading"
+          aria-label="Refresh gallery"
+          @click="refresh"
+        >
+          <svg
+            class="h-4 w-4"
+            :class="{ 'animate-spin': loading }"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
+            <path d="M21 3v5h-5" />
+            <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
+            <path d="M3 21v-5h5" />
+          </svg>
+        </button>
+      </div>
+    </header>
 
     <main class="mt-4 sm:mt-6">
       <div
