@@ -53,6 +53,7 @@ watch(
     historyToken += 1;
     loadingHistory.value = false;
     history.value = [];
+    error.value = "";
     if (historyOpen.value) void loadHistory();
   },
 );

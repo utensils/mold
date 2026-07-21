@@ -69,4 +69,24 @@ describe("MobilePromptTools", () => {
       "prompt from render",
     );
   });
+
+  it("clears a previous host's history error when the target changes", async () => {
+    vi.mocked(fetchHistoryFrom).mockRejectedValueOnce(new Error("Studio is offline"));
+    const form = reactive(newGenerateForm());
+    const wrapper = mount(MobilePromptTools, {
+      props: { form, target, running: false, canUndo: false, blocked: false },
+    });
+
+    await wrapper.get("[data-test='mobile-prompt-recent']").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-test='mobile-prompt-tools-error']").text()).toBe("Studio is offline");
+
+    await wrapper.get("[data-test='mobile-prompt-recent']").trigger("click");
+    await wrapper.setProps({
+      target: { baseUrl: "https://render.tailnet.ts.net", apiKey: "other" },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-prompt-tools-error']").exists()).toBe(false);
+  });
 });
