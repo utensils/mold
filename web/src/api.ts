@@ -159,6 +159,26 @@ export async function updateQueueJobTargetGpu(
   return (await res.json()) as QueueEntry;
 }
 
+/**
+ * Move a queued job to a new zero-based position via `PATCH /api/queue/:id`
+ * with a `position` field. Gated behind `capabilities.queue.can_reorder` —
+ * older servers reject the field, so callers must check the capability first.
+ */
+export async function reorderQueueJob(
+  id: string,
+  position: number,
+  signal?: AbortSignal,
+): Promise<QueueEntry> {
+  const res = await fetch(`${base}/api/queue/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ position }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`PATCH /api/queue/${id} failed: ${res.status}`);
+  return (await res.json()) as QueueEntry;
+}
+
 const chainLimitsCache = new Map<string, { value: ChainLimits; at: number }>();
 const CHAIN_LIMITS_TTL_MS = 30_000;
 
