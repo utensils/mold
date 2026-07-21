@@ -115,6 +115,46 @@ describe("prepared expansion lifecycle", () => {
     ).toEqual(["Studio 4090's connection details changed."]);
   });
 
+  it("marks a changed frozen host instance identity stale", () => {
+    const batch = createPreparedExpansionBatch(
+      inputs,
+      { ...route, instanceId: "server-A" },
+      ["one", "two", "three"],
+      1,
+    );
+
+    expect(
+      preparedExpansionStaleReasons(batch, {
+        ...inputs,
+        readyHostIds: new Set([route.hostId]),
+        hostLabels: new Map([[route.hostId, route.label]]),
+        hostTargets: new Map([
+          [route.hostId, { ...route.target, kind: route.kind, instanceId: "server-B" }],
+        ]),
+      }),
+    ).toEqual(["Studio 4090's connection details changed."]);
+  });
+
+  it("treats late instance identity enrichment as compatible", () => {
+    const batch = createPreparedExpansionBatch(
+      inputs,
+      { ...route, instanceId: null },
+      ["one", "two", "three"],
+      1,
+    );
+
+    expect(
+      preparedExpansionStaleReasons(batch, {
+        ...inputs,
+        readyHostIds: new Set([route.hostId]),
+        hostLabels: new Map([[route.hostId, route.label]]),
+        hostTargets: new Map([
+          [route.hostId, { ...route.target, kind: route.kind, instanceId: "server-A" }],
+        ]),
+      }),
+    ).toEqual([]);
+  });
+
   it("lets only the newest request apply and invalidates a discarded request", () => {
     const guard = new PreparationRequestGuard();
     const first = guard.begin();
@@ -152,5 +192,32 @@ describe("prepared expansion lifecycle", () => {
       "Expanded prompt changed after it was prepared.",
       "Host selection changed from Auto to Most capable.",
     ]);
+  });
+
+  it("keeps a quick expansion fresh when an unknown instance identity becomes known", () => {
+    expect(
+      quickExpansionStaleReasons(
+        {
+          requestToken: 7,
+          originalPrompt: "a lighthouse",
+          expandedPrompt: "a detailed lighthouse",
+          model: inputs.model,
+          family: inputs.family,
+          selectedHostPolicy: null,
+          route: { ...route, instanceId: null },
+        },
+        {
+          expandedPrompt: "a detailed lighthouse",
+          model: inputs.model,
+          family: inputs.family,
+          selectedHostPolicy: null,
+          readyHostIds: new Set([route.hostId]),
+          hostLabels: new Map([[route.hostId, route.label]]),
+          hostTargets: new Map([
+            [route.hostId, { ...route.target, kind: route.kind, instanceId: "server-A" }],
+          ]),
+        },
+      ),
+    ).toEqual([]);
   });
 });

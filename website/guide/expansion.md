@@ -30,11 +30,11 @@ mold run "a sunset" --expand --batch 4
 mold run "a cat" --no-expand
 ```
 
-## Desktop prepared batches
+## Native prepared batches
 
-In the desktop Generate workspace, the Batch control also sets the expansion
-count. Batch 1 keeps the quick **Expand** rewrite and undo, with the host route
-frozen through the next Generate. Batch 2 or greater
+In the desktop and iPhone Generate workspaces, the Batch control also sets the
+expansion count. Batch 1 keeps the quick **Expand** rewrite and undo, with the
+host route frozen through the next Generate or Develop. Batch 2 or greater
 uses **Prepare N variations** and opens an inline review workspace before any
 generation request is queued. Each prompt can be edited or removed; the whole
 set can be regenerated or discarded.
@@ -48,9 +48,21 @@ back to another machine. Generate keeps that recovery inline for both quick and
 prepared expansion: it shows Connecting, Starting, Queued, live percentage,
 bytes, current file, ETA, and an explicit Retry expansion action when Ready.
 Failed or cancelled pulls can be retried on the same host without losing the
-prompt or reviewed set.
+prompt or reviewed set. On iPhone, each pull attempt temporarily leases the
+frozen route, joins compatible Catalog work already in Starting, and releases
+on terminal, stale, or superseded outcomes; Retry reacquires the route from the
+same immutable recovery record. Editing or removing reviewed prompts cancels a
+pending replacement instead of letting it overwrite the newer set.
 Each prepared sibling records a durable batch ID and its one-based position in
-the Gallery details panel.
+the Gallery details panel, together with the source prompt when present.
+
+On iPhone, the concrete route includes the selected host ID, endpoint,
+Keychain-supplied API key, and server instance. The touch workspace uses 44pt
+actions and 16px editors, confirms a two-to-one collapse, guards deferred source
+preprocessing, and restores focus only while the replaced control still owns it.
+Catalog and Generate share one mobile download authority, so an expansion pull
+cannot open a competing stream or drift to another host. When failures and an
+unconfirmed cancellation coexist, the accessible outcome announces both.
 
 ## External Backend
 

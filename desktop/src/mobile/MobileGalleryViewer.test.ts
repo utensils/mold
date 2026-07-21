@@ -265,6 +265,29 @@ describe("MobileGalleryViewer", () => {
     expect(reuse.text()).toBe("Prompt unavailable");
   });
 
+  it("shows prepared sibling position and source prompt with graceful legacy absence", async () => {
+    const prepared = {
+      ...image,
+      metadata: {
+        ...image.metadata,
+        original_prompt: "a lighthouse",
+        batch_id: "batch-1",
+        batch_index: 2,
+        batch_count: 3,
+      },
+    };
+    const view = mountViewer(prepared);
+    await flushPromises();
+    expect(view.get('[data-test="gallery-viewer-batch"]').text()).toBe("Batch 2 of 3");
+    expect(view.get('[data-test="gallery-viewer-original-prompt"]').text()).toContain(
+      "a lighthouse",
+    );
+
+    await view.setProps({ item: image });
+    expect(view.find('[data-test="gallery-viewer-batch"]').exists()).toBe(false);
+    expect(view.find('[data-test="gallery-viewer-original-prompt"]').exists()).toBe(false);
+  });
+
   it("shows an accessible position and previous/next controls", async () => {
     const view = mountViewer(image, { position: 2, total: 4 });
     await flushPromises();

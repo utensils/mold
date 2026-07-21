@@ -1,4 +1,5 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -163,6 +164,7 @@ function mountCatalog(
   return mount(MobileCatalogView, {
     attachTo: document.body,
     props: { hosts, selectedHostId },
+    global: { plugins: [createPinia()] },
   });
 }
 

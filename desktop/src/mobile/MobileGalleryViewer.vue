@@ -72,6 +72,14 @@ const hasNext = computed(
   () => !props.reusing && (props.hasNext ?? galleryPosition.value < galleryTotal.value),
 );
 const showNavigation = computed(() => galleryTotal.value > 1);
+const preparedPosition = computed(() => {
+  const index = props.item.metadata.batch_index;
+  const count = props.item.metadata.batch_count;
+  return props.item.metadata.batch_id && index && count && index >= 1 && index <= count
+    ? `Batch ${index} of ${count}`
+    : "";
+});
+const originalPrompt = computed(() => props.item.metadata.original_prompt?.trim() ?? "");
 
 let restoreFocusElement: HTMLElement | null = null;
 let loadEpoch = 0;
@@ -384,8 +392,13 @@ onBeforeUnmount(() => {
 
     <footer class="gallery-viewer-details">
       <div class="gallery-viewer-prompt">
+        <span v-if="preparedPosition" data-test="gallery-viewer-batch">{{ preparedPosition }}</span>
         <span>Prompt</span>
         <p data-selectable>{{ item.metadata.prompt || "No prompt saved with this print." }}</p>
+        <template v-if="originalPrompt">
+          <span>Source prompt</span>
+          <p data-test="gallery-viewer-original-prompt" data-selectable>{{ originalPrompt }}</p>
+        </template>
         <p v-if="reuseError" class="gallery-viewer-reuse-error" role="alert">
           {{ reuseError }}
         </p>

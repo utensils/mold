@@ -46,7 +46,12 @@ export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs 
   hostLabels: ReadonlyMap<string, string>;
   hostTargets?: ReadonlyMap<
     string,
-    { baseUrl: string; apiKey: string | null; kind: HostRoute["kind"] }
+    {
+      baseUrl: string;
+      apiKey: string | null;
+      kind: HostRoute["kind"];
+      instanceId?: string | null;
+    }
   >;
 }
 
@@ -118,6 +123,13 @@ export function hostSelectionLabel(
   return hostLabels.get(policy) ?? policy;
 }
 
+function knownInstanceIdsDiffer(
+  frozen: string | null | undefined,
+  current: string | null | undefined,
+): boolean {
+  return frozen != null && current != null && frozen !== current;
+}
+
 /** Specific, stable reasons why reviewed work no longer matches the form. */
 export function preparedExpansionStaleReasons(
   batch: PreparedExpansionBatch,
@@ -149,7 +161,8 @@ export function preparedExpansionStaleReasons(
       currentTarget &&
       (currentTarget.baseUrl !== batch.route.target.baseUrl ||
         currentTarget.apiKey !== batch.route.target.apiKey ||
-        currentTarget.kind !== batch.route.kind)
+        currentTarget.kind !== batch.route.kind ||
+        knownInstanceIdsDiffer(batch.route.instanceId, currentTarget.instanceId))
     ) {
       reasons.push(`${batch.route.label}'s connection details changed.`);
     }
@@ -185,7 +198,8 @@ export function quickExpansionStaleReasons(
       target &&
       (target.baseUrl !== snapshot.route.target.baseUrl ||
         target.apiKey !== snapshot.route.target.apiKey ||
-        target.kind !== snapshot.route.kind)
+        target.kind !== snapshot.route.kind ||
+        knownInstanceIdsDiffer(snapshot.route.instanceId, target.instanceId))
     ) {
       reasons.push(`${snapshot.route.label}'s connection details changed.`);
     }
