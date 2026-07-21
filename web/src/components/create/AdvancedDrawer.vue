@@ -18,6 +18,7 @@ import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import LoraPicker from "../LoraPicker.vue";
 import PlacementPanel from "../PlacementPanel.vue";
+import Ltx2VideoControls from "./advanced/Ltx2VideoControls.vue";
 import type {
   DevicePlacement,
   GenerateFormState,
@@ -25,9 +26,11 @@ import type {
   OutputFormat,
   Scheduler,
   SourceFitPolicy,
+  SourceImageState,
 } from "../../types";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { outputFormatsForFamily } from "../../composables/useGenerateForm";
+import { blobToBase64 } from "../../lib/base64";
 
 type SectionKey =
   | "scheduler"
@@ -128,6 +131,42 @@ function setFit(mode: string) {
   patch({ sourceFitPolicy: { mode } as SourceFitPolicy });
 }
 
+// ── ControlNet (guidance image + model + scale) ───────────────────────
+// Gated by capability (only sd15 today). The control image is an inline
+// upload — unlike the primary source dropzone, which routes through the
+// parent's picker modal — so the drawer stays self-contained. Control
+// model + scale surface only once an image is attached, matching the
+// server's request-time gate (`control_model`/`control_scale` are sent
+// only when a control image is present).
+const showControlNet = computed(() => caps.value.supportsControlNet);
+const hasControl = computed(() => props.modelValue.controlImage != null);
+async function readControlImage(
+  event: Event,
+): Promise<SourceImageState | null> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] ?? null;
+  input.value = "";
+  if (!file) return null;
+  return {
+    kind: "upload",
+    filename: file.name,
+    base64: await blobToBase64(file),
+  };
+}
+async function onControlImage(event: Event) {
+  const image = await readControlImage(event);
+  if (image) patch({ controlImage: image });
+}
+function clearControl() {
+  patch({ controlImage: null });
+}
+
+// LTX-2 / LTX-2.3 own the full advanced video suite (pipeline, audio,
+// keyframes, retake, spatial/temporal). `supportsAudio` is true for
+// exactly those families, so it doubles as the suite gate; plain
+// ltx-video keeps just frames/fps/GIF.
+const showLtx2 = computed(() => caps.value.supportsAudio);
+
 // ── Upscale ───────────────────────────────────────────────────────────
 const upscaleOn = computed(() => props.modelValue.upscaleModel.trim() !== "");
 function toggleUpscale(on: boolean) {
@@ -166,10 +205,22 @@ function resetAdvanced() {
     maskImage: null,
     controlImage: null,
     controlModel: "",
+    controlScale: 1.0,
     strength: 0.75,
     sourceFitPolicy: { mode: "pad-repaint" },
     loras: [],
     upscaleModel: "",
+    // Video suite (frames/fps survive as core video params, like resolution).
+    gifPreview: false,
+    audioFile: null,
+    audioFilePath: "",
+    sourceVideo: null,
+    sourceVideoPath: "",
+    keyframes: [],
+    pipeline: null,
+    retakeRange: null,
+    spatialUpscale: null,
+    temporalUpscale: null,
   });
 }
 </script>
@@ -326,6 +377,69 @@ function resetAdvanced() {
             }}
           </button>
         </div>
+
+        <div
+          v-if="showControlNet"
+          class="adv__controlnet"
+          data-test="controlnet-block"
+        >
+          <div class="adv__subhead">ControlNet</div>
+          <label
+            v-if="!hasControl"
+            class="adv__filezone"
+            data-test="control-attach"
+          >
+            <span
+              >Attach a control image or
+              <span class="adv__accent">browse</span></span
+            >
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              class="adv__file-input"
+              @change="onControlImage"
+            />
+          </label>
+          <template v-else>
+            <div class="adv__source-row">
+              <span class="adv__source-name">{{
+                modelValue.controlImage?.filename
+              }}</span>
+              <button
+                type="button"
+                class="adv__remove"
+                data-test="control-remove"
+                @click="clearControl"
+              >
+                Remove
+              </button>
+            </div>
+            <div class="adv__field">
+              <label class="adv__label">Control model</label>
+              <input
+                class="adv__input"
+                data-test="control-model"
+                placeholder="e.g. control_v11p_sd15_canny"
+                :value="modelValue.controlModel"
+                @input="
+                  patch({
+                    controlModel: ($event.target as HTMLInputElement).value,
+                  })
+                "
+              />
+            </div>
+            <SliderRow
+              label="Control scale"
+              data-test="control-scale"
+              :model-value="modelValue.controlScale"
+              :min="0"
+              :max="2"
+              :step="0.05"
+              :value-label="modelValue.controlScale.toFixed(2)"
+              @update:model-value="patch({ controlScale: $event })"
+            />
+          </template>
+        </div>
       </AccordionSection>
 
       <AccordionSection
@@ -462,6 +576,20 @@ function resetAdvanced() {
             "
           />
         </div>
+        <div class="adv__row">
+          <span class="adv__label">GIF preview</span>
+          <SwitchToggle
+            :model-value="modelValue.gifPreview"
+            label="Generate GIF preview"
+            data-test="video-gif-preview"
+            @update:model-value="patch({ gifPreview: $event })"
+          />
+        </div>
+        <Ltx2VideoControls
+          v-if="showLtx2"
+          :model-value="modelValue"
+          @update:model-value="emit('update:modelValue', $event)"
+        />
       </AccordionSection>
 
       <AccordionSection
@@ -628,6 +756,39 @@ function resetAdvanced() {
   font-size: 10.5px;
   color: var(--ink-3);
   margin-top: 6px;
+}
+.adv__controlnet {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--edge);
+}
+.adv__subhead {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 10px;
+}
+.adv__filezone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  border-radius: var(--radius-card);
+  padding: 20px;
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+.adv__file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 .adv__footer {
   display: flex;

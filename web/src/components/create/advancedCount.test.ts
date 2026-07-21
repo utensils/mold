@@ -43,6 +43,18 @@ describe("advancedActiveCount", () => {
     expect(advancedActiveCount(params({ videoNonDefault: true }))).toBe(1);
   });
 
+  it("counts an active ControlNet block once", () => {
+    expect(advancedActiveCount(params({ controlNet: true }))).toBe(1);
+    expect(advancedActiveCount(params({ controlNet: false }))).toBe(0);
+    // Absent (older callers) behaves like off.
+    expect(advancedActiveCount(params())).toBe(0);
+  });
+
+  it("counts the LTX-2 video suite once", () => {
+    expect(advancedActiveCount(params({ videoSuite: true }))).toBe(1);
+    expect(advancedActiveCount(params({ videoSuite: false }))).toBe(0);
+  });
+
   it("sums independent active fields", () => {
     expect(
       advancedActiveCount(
@@ -54,8 +66,10 @@ describe("advancedActiveCount", () => {
           scheduler: "unipc",
           customSize: true,
           videoNonDefault: true,
+          controlNet: true,
+          videoSuite: true,
         }),
       ),
-    ).toBe(8);
+    ).toBe(10);
   });
 });

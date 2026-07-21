@@ -299,6 +299,22 @@ const advCount = computed(() =>
       capabilities.value.supportsVideo &&
       form.state.value.frames != null &&
       form.state.value.frames !== 25,
+    controlNet:
+      capabilities.value.supportsControlNet &&
+      form.state.value.controlImage != null,
+    videoSuite:
+      capabilities.value.supportsVideo &&
+      (form.state.value.gifPreview ||
+        form.state.value.enableAudio === false ||
+        form.state.value.pipeline != null ||
+        form.state.value.audioFile != null ||
+        form.state.value.audioFilePath.trim() !== "" ||
+        form.state.value.sourceVideo != null ||
+        form.state.value.sourceVideoPath.trim() !== "" ||
+        form.state.value.keyframes.length > 0 ||
+        form.state.value.retakeRange != null ||
+        form.state.value.spatialUpscale != null ||
+        form.state.value.temporalUpscale != null),
   }),
 );
 

@@ -86,6 +86,167 @@ describe("AdvancedDrawer capability matrix", () => {
   });
 });
 
+describe("AdvancedDrawer ControlNet block", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  async function openSource(family: string, overrides = {}) {
+    const wrapper = factory(family, overrides);
+    const head = wrapper.find("[data-test='section-source'] .ms-acc__head");
+    if (head.exists()) await head.trigger("click");
+    return wrapper;
+  }
+
+  it("shows the ControlNet block for a controlnet family (sd15)", async () => {
+    const wrapper = await openSource("sd15");
+    expect(wrapper.find("[data-test='controlnet-block']").exists()).toBe(true);
+  });
+
+  it("hides the ControlNet block for flux", async () => {
+    const wrapper = await openSource("flux");
+    expect(wrapper.find("[data-test='controlnet-block']").exists()).toBe(false);
+  });
+
+  it("only surfaces control model + scale once an image is attached", async () => {
+    const bare = await openSource("sd15");
+    expect(bare.find("[data-test='control-attach']").exists()).toBe(true);
+    expect(bare.find("[data-test='control-model']").exists()).toBe(false);
+
+    const withImage = await openSource("sd15", {
+      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+    });
+    expect(withImage.find("[data-test='control-model']").exists()).toBe(true);
+  });
+
+  it("round-trips the control model text field", async () => {
+    const wrapper = await openSource("sd15", {
+      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+    });
+    const input = wrapper.get("[data-test='control-model']");
+    (input.element as HTMLInputElement).value = "control_v11p_sd15_canny";
+    await input.trigger("input");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.controlModel).toBe("control_v11p_sd15_canny");
+  });
+
+  it("round-trips the control scale slider", async () => {
+    const wrapper = await openSource("sd15", {
+      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+    });
+    const range = wrapper.get("[data-test='control-scale'] input");
+    (range.element as HTMLInputElement).value = "1.5";
+    await range.trigger("input");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.controlScale).toBe(1.5);
+  });
+
+  it("removes the control image", async () => {
+    const wrapper = await openSource("sd15", {
+      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+      controlModel: "control_v11p_sd15_canny",
+    });
+    await wrapper.get("[data-test='control-remove']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.controlImage).toBe(null);
+  });
+});
+
+describe("AdvancedDrawer video suite", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  async function openVideo(family: string, overrides = {}) {
+    const wrapper = factory(family, overrides);
+    await wrapper
+      .get("[data-test='section-video'] .ms-acc__head")
+      .trigger("click");
+    return wrapper;
+  }
+
+  it("shows the LTX-2 suite for ltx2 but not for ltx-video", async () => {
+    const ltx2 = await openVideo("ltx2");
+    expect(ltx2.find("[data-test='ltx2-suite']").exists()).toBe(true);
+    const ltxVideo = await openVideo("ltx-video");
+    expect(ltxVideo.find("[data-test='ltx2-suite']").exists()).toBe(false);
+    // The GIF preview toggle is shared by every video family.
+    expect(ltxVideo.find("[data-test='video-gif-preview']").exists()).toBe(
+      true,
+    );
+  });
+
+  it("hides the video suite entirely for flux", () => {
+    expect(sections("flux").video).toBe(false);
+  });
+
+  it("toggles the GIF preview", async () => {
+    const wrapper = await openVideo("ltx2");
+    await wrapper.get("[data-test='video-gif-preview']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.gifPreview).toBe(true);
+  });
+
+  it("round-trips the LTX-2 pipeline select", async () => {
+    const wrapper = await openVideo("ltx2");
+    const select = wrapper.get("[data-test='ltx2-pipeline']");
+    (select.element as HTMLSelectElement).value = "two-stage-hq";
+    await select.trigger("change");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.pipeline).toBe("two-stage-hq");
+  });
+
+  it("toggles LTX-2 audio decode off (null default reads as on)", async () => {
+    const wrapper = await openVideo("ltx2");
+    await wrapper.get("[data-test='ltx2-enable-audio']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.enableAudio).toBe(false);
+  });
+
+  it("edits an existing keyframe's frame", async () => {
+    const wrapper = await openVideo("ltx2", {
+      keyframes: [
+        {
+          frame: 0,
+          image: { kind: "upload", filename: "k.png", base64: "AA" },
+        },
+      ],
+    });
+    const input = wrapper.get("[data-test='ltx2-keyframe-frame']");
+    (input.element as HTMLInputElement).value = "48";
+    await input.trigger("input");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.keyframes[0]?.frame).toBe(48);
+  });
+
+  it("Reset also clears the video suite", async () => {
+    const wrapper = factory("ltx2", {
+      pipeline: "two-stage",
+      gifPreview: true,
+      spatialUpscale: "x2",
+    });
+    await wrapper.get("[data-test='advanced-reset']").trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.pipeline).toBe(null);
+    expect(next.gifPreview).toBe(false);
+    expect(next.spatialUpscale).toBe(null);
+  });
+});
+
 describe("AdvancedDrawer interactions", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
