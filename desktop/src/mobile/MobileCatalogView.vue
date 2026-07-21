@@ -76,6 +76,9 @@ const FOCUSABLE_SELECTOR = [
 const query = ref("");
 const mediaType = ref<MediaType>("all");
 const source = ref<CatalogSource>("all");
+// Remembers the last Discover sub-source so toggling Installed → Discover
+// restores the chosen HuggingFace/Civitai filter instead of resetting to All.
+const lastDiscoverSource = ref<CatalogSource>("all");
 const family = ref("");
 const includeNsfw = ref(false);
 const families = ref<string[]>([]);
@@ -262,6 +265,14 @@ const detailDownloadItems = computed(() =>
   mergedDetail.value ? buildDownloadContents(mergedDetail.value) : [],
 );
 const detailDownloadTotal = computed(() => downloadContentsTotalBytes(detailDownloadItems.value));
+const detailSize = computed(() =>
+  mergedDetail.value ? catalogSizeInfo(mergedDetail.value) : null,
+);
+function detailFootprintLabel(): string {
+  const info = detailSize.value;
+  const bytes = info?.fetchBytes ?? info?.weightsBytes ?? null;
+  return bytes != null ? formatGB(bytes) : "—";
+}
 const detailModel = computed(() => {
   const entry = detailEntry.value;
   const host = entry ? owningHost(entry) : null;
@@ -720,9 +731,18 @@ watch(
   source,
   (next) => {
     if (next === "installed") family.value = "";
+    else lastDiscoverSource.value = next;
   },
   { flush: "sync" },
 );
+
+function showInstalledModels(): void {
+  source.value = "installed";
+}
+
+function showDiscoverModels(): void {
+  if (source.value === "installed") source.value = lastDiscoverSource.value;
+}
 
 watch([query, source, family, includeNsfw], scheduleSearch);
 
@@ -874,6 +894,25 @@ onBeforeUnmount(() => {
         />
       </div>
 
+      <div class="mobile-catalog-segment" role="group" aria-label="Model shelf">
+        <button
+          type="button"
+          :aria-pressed="source === 'installed'"
+          data-test="mobile-catalog-segment-installed"
+          @click="showInstalledModels"
+        >
+          Installed
+        </button>
+        <button
+          type="button"
+          :aria-pressed="source !== 'installed'"
+          data-test="mobile-catalog-segment-discover"
+          @click="showDiscoverModels"
+        >
+          Discover
+        </button>
+      </div>
+
       <div class="mobile-catalog-media" role="group" aria-label="Media type">
         <button
           v-for="option in ['all', 'image', 'video'] as const"
@@ -886,23 +925,20 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="mobile-catalog-sources" role="group" aria-label="Catalog source">
+      <div
+        v-if="source !== 'installed'"
+        class="mobile-catalog-sources"
+        role="group"
+        aria-label="Catalog source"
+      >
         <button
-          v-for="option in ['all', 'hf', 'civitai', 'installed'] as const"
+          v-for="option in ['all', 'hf', 'civitai'] as const"
           :key="option"
           type="button"
           :aria-pressed="source === option"
           @click="source = option"
         >
-          {{
-            option === "all"
-              ? "All"
-              : option === "hf"
-                ? "HuggingFace"
-                : option === "civitai"
-                  ? "Civitai"
-                  : "Installed"
-          }}
+          {{ option === "all" ? "All" : option === "hf" ? "HuggingFace" : "Civitai" }}
         </button>
       </div>
 
@@ -1035,6 +1071,12 @@ onBeforeUnmount(() => {
           </div>
 
           <article class="mobile-catalog-detail-copy">
+            <span
+              v-if="mergedDetail.modality"
+              class="mobile-catalog-detail-badge"
+              data-test="mobile-catalog-detail-badge"
+              >{{ mergedDetail.modality }}</span
+            >
             <div class="mobile-catalog-detail-title">
               <div>
                 <h2>{{ mergedDetail.name }}</h2>
@@ -1043,22 +1085,27 @@ onBeforeUnmount(() => {
               <span v-if="mergedDetail.installed">Installed</span>
             </div>
 
+            <div class="mobile-catalog-detail-tiles" data-test="mobile-catalog-detail-tiles">
+              <div class="mobile-catalog-detail-tile">
+                <span>Checkpoint</span>
+                <strong>{{
+                  detailSize?.weightsBytes != null ? formatGB(detailSize.weightsBytes) : "—"
+                }}</strong>
+              </div>
+              <div class="mobile-catalog-detail-tile">
+                <span>Footprint</span>
+                <strong>{{ detailFootprintLabel() }}</strong>
+              </div>
+            </div>
+
             <dl class="mobile-catalog-detail-meta">
               <div>
                 <dt>Family</dt>
                 <dd>{{ mergedDetail.family }}</dd>
               </div>
-              <div v-if="mergedDetail.modality">
-                <dt>Modality</dt>
-                <dd>{{ mergedDetail.modality }}</dd>
-              </div>
               <div v-if="mergedDetail.file_format">
                 <dt>Format</dt>
                 <dd>{{ mergedDetail.file_format }}</dd>
-              </div>
-              <div v-if="mergedDetail.size_bytes != null">
-                <dt>Weights</dt>
-                <dd>{{ formatGB(mergedDetail.size_bytes) }}</dd>
               </div>
               <div v-if="mergedDetail.license">
                 <dt>License</dt>

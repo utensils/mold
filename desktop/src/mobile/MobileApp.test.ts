@@ -221,6 +221,26 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
   }
 
+  it("composes the chosen style preset into the outgoing prompt without mutating the textarea", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a red fox in snow");
+    await wrapper.get("[data-test='mobile-style-toggle']").trigger("click");
+    await wrapper.get("[data-test='mobile-style-cinematic']").trigger("click");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body.prompt).toBe(
+      "a red fox in snow, cinematic lighting, film grain, shallow depth of field",
+    );
+    // The composition is applied to a draft clone at submit — the live prompt stays the user's words.
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe("a red fox in snow");
+  });
+
   it("shows a useful retry state when the selected host cannot load models", async () => {
     apiJsonTo.mockRejectedValue(new Error("Connection refused"));
 
@@ -2783,5 +2803,55 @@ describe("MobileApp host and catalog coordination", () => {
       .findAll("option")
       .map((option) => option.text());
     expect(options).toContain(pulledModel.name);
+  });
+});
+
+describe("MobileApp machines telemetry", () => {
+  async function openMachines(): Promise<void> {
+    const hostsTab = wrapper!
+      .findAll("button.mobile-tab")
+      .find((button) => button.text() === "Machines");
+    if (!hostsTab) throw new Error("Missing Machines tab");
+    await hostsTab.trigger("click");
+    await flushPromises();
+  }
+
+  it("mirrors VRAM usage and queue depth on an online host card", async () => {
+    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          gpu_info: {
+            name: "RTX 4090",
+            vram_total_mb: 24_000,
+            vram_used_mb: 9_840,
+            backend: "cuda",
+          },
+          queue_depth: 2,
+          queue_capacity: 8,
+        } satisfies ServerStatus);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe("9.8 / 24.0 GB");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 2");
+    expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
+  });
+
+  it("shows dashes and a zero queue when the host omits GPU info", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe("—");
+    expect(telemetry.get(".host-telemetry-queue").text()).toBe("queue 0");
   });
 });

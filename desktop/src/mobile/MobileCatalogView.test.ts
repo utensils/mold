@@ -826,15 +826,71 @@ describe("MobileCatalogView", () => {
     expect(startCatalogDownload).toHaveBeenCalledWith("installed:q8", targets.studio, false);
   });
 
+  it("segmented control swaps shelves and remembers the Discover sub-source", async () => {
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-discover']").attributes("aria-pressed"),
+    ).toBe("true");
+
+    const huggingFaceChip = () =>
+      wrapper!.findAll(".mobile-catalog-sources button").find((b) => b.text() === "HuggingFace")!;
+    await huggingFaceChip().trigger("click");
+    await flushPromises();
+    expect(huggingFaceChip().attributes("aria-pressed")).toBe("true");
+
+    // Installed shelf hides the Discover filters and lists installed models.
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='mobile-catalog-segment-installed']").attributes("aria-pressed"),
+    ).toBe("true");
+    expect(wrapper.find(".mobile-catalog-sources").exists()).toBe(false);
+    expect(wrapper.text()).toContain("installed:q8");
+
+    // Returning to Discover restores HuggingFace, not All.
+    await wrapper.get("[data-test='mobile-catalog-segment-discover']").trigger("click");
+    await flushPromises();
+    expect(huggingFaceChip().attributes("aria-pressed")).toBe("true");
+  });
+
+  it("renders a media badge and Checkpoint/Footprint size tiles in the detail sheet", async () => {
+    fetchCatalogDetail.mockImplementation((id: string) =>
+      Promise.resolve({
+        ...entry("detail"),
+        id,
+        name: "Catalog model",
+        description: "Full detail",
+        modality: "image",
+        size_bytes: 8_000_000_000,
+      }),
+    );
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Catalog model"))!;
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.querySelector("[data-test='mobile-catalog-detail-badge']")?.textContent).toBe(
+      "image",
+    );
+    const tiles = detail.querySelector("[data-test='mobile-catalog-detail-tiles']")!;
+    expect(tiles.textContent).toContain("Checkpoint");
+    expect(tiles.textContent).toContain("Footprint");
+    expect(tiles.textContent).toContain("8.0 GB");
+  });
+
   it("clears a hidden family filter when switching to installed models", async () => {
     wrapper = mountCatalog();
     await flushPromises();
 
     await wrapper.get(".mobile-catalog-filters select").setValue("ltx2");
-    const installedSource = wrapper
-      .findAll(".mobile-catalog-sources button")
-      .find((button) => button.text() === "Installed")!;
-    await installedSource.trigger("click");
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
     await flushPromises();
 
     expect(wrapper.find(".mobile-catalog-filters select").exists()).toBe(false);

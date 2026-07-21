@@ -29,6 +29,8 @@ import {
 } from "../lib/generateForm";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import { percent } from "../lib/format";
+import { composeStylePrompt } from "../lib/stylePresets";
 import {
   guidanceValidationError,
   inlineGenerationMediaBytes,
@@ -83,6 +85,7 @@ import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
+import MobileStyleChips from "./MobileStyleChips.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import {
   loadMobileSettings,
@@ -250,6 +253,41 @@ const hostProbes = new Map<
 >();
 const generation = useGenerationStore();
 const mobileDownloads = useMobileDownloadsStore();
+
+// Ephemeral per-host telemetry from the /api/status probe (VRAM + queue), kept
+// out of the persisted host identity so the Machines cards can mirror the host
+// detail view's live figures. Cleared when a host goes offline.
+interface HostTelemetry {
+  vramUsedMb: number | null;
+  vramTotalMb: number | null;
+  queueDepth: number | null;
+}
+const hostTelemetry = reactive<Record<string, HostTelemetry>>({});
+
+function hostMemLabel(id: string): string {
+  const telemetry = hostTelemetry[id];
+  if (!telemetry || telemetry.vramUsedMb == null || telemetry.vramTotalMb == null) return "—";
+  return `${(telemetry.vramUsedMb / 1000).toFixed(1)} / ${(telemetry.vramTotalMb / 1000).toFixed(1)} GB`;
+}
+
+function hostVramPercent(id: string): number {
+  const telemetry = hostTelemetry[id];
+  if (!telemetry || telemetry.vramUsedMb == null || !telemetry.vramTotalMb) return 0;
+  return percent(telemetry.vramUsedMb, telemetry.vramTotalMb);
+}
+
+function hostQueueLabel(id: string): string {
+  return String(hostTelemetry[id]?.queueDepth ?? 0);
+}
+
+function captureHostTelemetry(hostId: string, status: ServerStatus): void {
+  const gpu = status.gpu_info;
+  hostTelemetry[hostId] = {
+    vramUsedMb: gpu?.vram_used_mb ?? null,
+    vramTotalMb: gpu?.vram_total_mb ?? null,
+    queueDepth: status.queue_depth ?? null,
+  };
+}
 
 const selectedHost = computed(() => hosts.value.find((host) => host.id === selectedHostId.value));
 const hostDetail = computed(() => hosts.value.find((host) => host.id === hostDetailId.value));
@@ -574,6 +612,9 @@ function updateHostStatus(payload: { id: string; status: ServerStatus | null }):
     host.version = payload.status.version;
     host.hostname = payload.status.hostname ?? undefined;
     host.instanceId = payload.status.instance_id ?? host.instanceId;
+    captureHostTelemetry(host.id, payload.status);
+  } else {
+    delete hostTelemetry[host.id];
   }
 }
 
@@ -674,6 +715,7 @@ async function refreshModels(): Promise<boolean> {
     host.version = status.version;
     host.hostname = status.hostname ?? undefined;
     host.instanceId = status.instance_id ?? host.instanceId;
+    captureHostTelemetry(hostId, status);
     expandCapabilities[hostId] = capabilities?.expand;
     // Keep auxiliary entries for the Upscale and ControlNet pickers, while
     // the main Model select uses `generationModels` so those tools can never
@@ -1343,6 +1385,10 @@ async function generate(): Promise<void> {
     return;
 
   const draft = cloneGenerateForm(form);
+  // The composer style preset is a look modifier composed into the outgoing
+  // prompt at submit — the textarea is never mutated. Reviewed prepared prompts
+  // ship verbatim, so it only applies to the ordinary/quick path (mirrors desktop).
+  if (!preparedSubmission) draft.prompt = composeStylePrompt(draft.prompt, draft.stylePreset);
   const draftCaps = generationCapabilitiesForFamily(draft.family);
   const batchSize = preparedSubmission
     ? preparedSubmission.prompts.length
@@ -2125,6 +2171,7 @@ onBeforeUnmount(() => {
               placeholder="Describe the print…"
             />
           </label>
+          <MobileStyleChips v-model="form.stylePreset" />
           <MobilePromptTools
             v-if="selectedTarget"
             :form="form"
@@ -2525,6 +2572,22 @@ onBeforeUnmount(() => {
                 </span>
               </span>
             </button>
+            <div v-if="host.online" class="host-telemetry" data-test="mobile-host-telemetry">
+              <div class="host-telemetry-row">
+                <span class="host-telemetry-mem">{{ hostMemLabel(host.id) }}</span>
+                <span class="host-telemetry-queue">queue {{ hostQueueLabel(host.id) }}</span>
+              </div>
+              <div
+                class="meter host-telemetry-meter"
+                role="meter"
+                :aria-label="`VRAM usage on ${host.name}`"
+                :aria-valuenow="Math.round(hostVramPercent(host.id))"
+                aria-valuemin="0"
+                aria-valuemax="100"
+              >
+                <span :style="{ width: `${hostVramPercent(host.id)}%` }" />
+              </div>
+            </div>
             <div class="row-actions">
               <button
                 class="secondary-button"

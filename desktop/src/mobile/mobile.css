@@ -752,6 +752,81 @@ textarea.control {
   font-variant-numeric: tabular-nums;
 }
 
+.mobile-style {
+  margin: 2px 0 14px;
+}
+
+.mobile-style-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  padding: 2px 0;
+  text-align: left;
+}
+
+.mobile-style-kicker {
+  flex: none;
+  font-family: var(--font-utility);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mobile-style-spacer {
+  flex: 1;
+}
+
+.mobile-style-chevron {
+  flex: none;
+  color: var(--ink-3);
+  transition: transform 160ms ease;
+}
+
+.mobile-style-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.mobile-style-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mobile-style-chip {
+  min-height: 44px;
+  border: 1px solid var(--control-edge);
+  border-radius: 22px;
+  padding: 0 16px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.mobile-style-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
+.mobile-style-chip:not([aria-pressed="true"]):active {
+  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
+  color: var(--rebate);
+}
+
+.mobile-style-head:focus-visible,
+.mobile-style-chip:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
 .mobile-prompt-tools {
   margin: -6px 0 16px;
 }
@@ -2166,8 +2241,44 @@ button:disabled {
 }
 
 .mobile-catalog-sources {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 10px;
+}
+
+.mobile-catalog-segment {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--rebate) 8%, transparent);
+}
+
+.mobile-catalog-segment button {
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 3px);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  line-height: 1.2;
+}
+
+.mobile-catalog-segment button[aria-pressed="true"] {
+  background: var(--bench);
+  color: var(--safelight);
+}
+
+.mobile-catalog-segment button:not([aria-pressed="true"]):active {
+  color: var(--rebate);
+}
+
+.mobile-catalog-segment button:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
 }
 
 .mobile-catalog-media button,
@@ -2510,6 +2621,50 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.mobile-catalog-detail-badge {
+  justify-self: start;
+  margin-bottom: -6px;
+  border: 1px solid color-mix(in srgb, var(--halide) 40%, transparent);
+  border-radius: 20px;
+  padding: 2px 10px;
+  color: var(--halide);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mobile-catalog-detail-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.mobile-catalog-detail-tile {
+  min-width: 0;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--bench);
+}
+
+.mobile-catalog-detail-tile span {
+  display: block;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mobile-catalog-detail-tile strong {
+  display: block;
+  margin-top: 5px;
+  font-family: var(--font-utility);
+  font-size: var(--text-body);
+  font-weight: 600;
+}
+
 .mobile-catalog-detail-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2799,6 +2954,29 @@ button:disabled {
   display: flex;
   gap: 8px;
   margin-top: 10px;
+}
+
+.host-telemetry {
+  margin-top: 12px;
+}
+
+.host-telemetry-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--ink-3);
+  font-family: var(--font-utility);
+  font-size: var(--text-edge-code);
+}
+
+.host-telemetry-mem {
+  color: var(--ink-2);
+}
+
+.host-telemetry-meter {
+  width: 100%;
 }
 
 .mobile-detail {

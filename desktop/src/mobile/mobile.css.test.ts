@@ -131,6 +131,7 @@ describe("mobile safe areas", () => {
     for (const selector of [
       ".mobile-resolution-segment",
       ".mobile-resolution-aspect",
+      ".mobile-catalog-segment button",
       ".mobile-catalog-media button",
       ".mobile-catalog-sources button",
       ".mobile-section-head > button",
@@ -171,7 +172,7 @@ describe("mobile safe areas", () => {
     );
 
     expect(media?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
-    expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    expect(sources?.[1]).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
     expect(containers?.[1]).toMatch(/gap:\s*8px/);
     expect(buttons?.[1]).toMatch(/min-width:\s*0/);
     expect(buttons?.[1]).toMatch(/border:\s*1px solid var\(--control-edge\)/);
