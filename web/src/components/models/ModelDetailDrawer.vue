@@ -196,6 +196,7 @@ const components = computed<ModelComponentStatus[]>(() => {
   if (state.value !== "installed") return [];
   return (d as { components?: ModelComponentStatus[] }).components ?? [];
 });
+const componentStatusAvailable = computed(() => state.value === "installed");
 
 const variants = computed(() =>
   state.value === "catalog"
@@ -463,13 +464,23 @@ function onRetry() {
               :key="`${component.kind}:${component.name}`"
               class="md__chip"
               :data-test="
-                component.present ? 'component-ready' : 'component-missing'
+                !componentStatusAvailable
+                  ? 'component-included'
+                  : component.present
+                    ? 'component-ready'
+                    : 'component-missing'
               "
             >
-              {{ component.name }} ·
-              {{ component.present ? "ready" : "missing" }}
+              {{ component.name }}
+              <template v-if="componentStatusAvailable">
+                · {{ component.present ? "ready" : "missing" }}
+              </template>
               <button
-                v-if="!component.present && component.repair_model"
+                v-if="
+                  componentStatusAvailable &&
+                  !component.present &&
+                  component.repair_model
+                "
                 type="button"
                 class="md__chip-action"
                 data-test="component-repair"
