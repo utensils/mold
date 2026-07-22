@@ -643,6 +643,8 @@ export interface GenerateFormState {
   retakeRange: TimeRange | null;
   spatialUpscale: Ltx2SpatialUpscale | null;
   temporalUpscale: Ltx2TemporalUpscale | null;
+  /** LTX-2 camera preset id or an explicit .safetensors LoRA path. */
+  cameraControl: string | null;
   placement: DevicePlacement | null;
   /** LoRA stack. Stored as an array so the UI can hold multiple
    * selections; serialized as `loras` on the wire. Defaults to an empty

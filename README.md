@@ -90,6 +90,8 @@ pause, resume, cancel-all, queued-job GPU lanes, rename, and forget actions.
 Library merges prints from connected hosts without falling back across host
 boundaries, restores model-aware settings, and exposes the full recorded
 generation metadata with prompt/seed copy and an Upscale handoff to Create.
+Create preflights peak VRAM against the selected machine, exposes LTX-2 camera
+motion presets, and reconnects to the last durable sequence after a reload.
 Keyboard users get trapped focus, reliable Escape dismissal, opener focus
 restoration, and scroll locking across the web app's modal and sheet surfaces.
 Models refreshes Installed as pulls complete, exposes missing component status

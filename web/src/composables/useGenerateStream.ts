@@ -15,6 +15,7 @@ import type {
 } from "../types";
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
+import { StreamSlotPool } from "../lib/streamSlots";
 
 export interface JobProgress {
   stage: string;
@@ -43,7 +44,7 @@ export interface Job {
    * normal single-clip submission. */
   chain: ChainJobMeta | null;
   /** `Date.now()` of the most recent SSE event delivered to this job.
-   * Lets `RunningJobCard` flag a stale stream (no progress for >60 s) so
+   * Lets the activity strip flag a stale stream (no progress for >60 s) so
    * the user can dismiss / retry instead of staring at a frozen card
    * after the underlying connection silently dropped. */
   lastProgressAt: number;
@@ -142,7 +143,7 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
 
 /** Chain progress events come from a separate SSE stream shape than the
  * single-clip path; we fold them into the same `JobProgress` so the
- * `RunningJobCard` UI renders a familiar "Denoising clip K/N · step X/Y"
+ * activity UI renders a familiar "Denoising clip K/N · step X/Y"
  * readout without the per-event UI layer needing to know about chaining. */
 function applyChainProgress(job: Job, evt: ChainProgressEvent) {
   job.lastProgressAt = Date.now();
@@ -196,7 +197,7 @@ function chainStageLabel(
 
 /** Chain complete events carry a `video` payload instead of `image`, no
  * single seed, and separate thumbnail/gif_preview fields. Shape-shift into
- * `SseCompleteEvent` so `CreatePage.openJob` + `RunningJobCard` stay
+ * `SseCompleteEvent` so `CreatePage.openJob` and the activity strip stay
  * unchanged. `seed_used` falls back to the request seed (or 0) — the
  * gallery match will miss but the refresh-on-complete still surfaces the
  * new item. */
@@ -349,7 +350,7 @@ interface PersistedJobs {
 function stripHeavyResult(r: SseCompleteEvent | null): PersistedResult | null {
   if (!r) return null;
   // Discriminated drop — leave every metadata field intact so the
-  // RunningJobCard can still render dimensions/timing on rehydrate.
+  // The activity strip can still render dimensions/timing on rehydrate.
   // The intentionally-omitted ones are exactly the base64 payloads.
   const { image: _i, video_thumbnail: _t, video_gif_preview: _g, ...rest } = r;
   void _i;
@@ -527,7 +528,7 @@ function scheduleAutoRemoveOnDone(id: string) {
 }
 
 /// How long a running job can go without a progress event before
-/// `RunningJobCard` flags it as stale. Calibrated for the slowest
+/// the activity strip flags it as stale. Calibrated for the slowest
 /// realistic path: a fresh model swap on a large quantized engine can
 /// hold the load lock for ~30 s without an SSE event, and offload-mode
 /// transformer-block streaming can be quiet for a similar stretch. 60 s
@@ -536,6 +537,7 @@ function scheduleAutoRemoveOnDone(id: string) {
 /// stream surfaces within a minute instead of leaving the user staring
 /// at a frozen card indefinitely.
 export const STALE_THRESHOLD_MS = 60_000;
+const streamSlots = new StreamSlotPool(4);
 
 export const __testing__ = {
   AUTO_REMOVE_DONE_MS,
@@ -553,7 +555,7 @@ function submitJob(
   const controller = new AbortController();
   const isChain = decision.kind === "chain";
   // Wrap in reactive() so that property mutations during SSE streaming
-  // (stage, step, state, result) trigger RunningJobCard re-renders. The
+  // (stage, step, state, result) trigger activity-strip re-renders. The
   // closure must hold the proxy, not the raw object — mutations through
   // the raw target bypass the Proxy's set trap and skip dep notification.
   const now = Date.now();
@@ -602,52 +604,62 @@ function submitJob(
     job.state = "error";
   };
 
-  if (decision.kind === "chain") {
-    const chainReq = resolveChainRequest(req, decision);
-    generateChainStream(
-      chainReq,
-      {
-        onProgress: (evt) => applyChainProgress(job, evt),
-        onComplete: (evt) => {
-          job.result = chainCompleteToSingle(req, evt);
-          job.state = "done";
-          if (evt.gpu !== null && evt.gpu !== undefined)
-            job.progress.gpu = evt.gpu;
-          fireComplete(job);
-          scheduleAutoRemoveOnDone(id);
+  const startStream = () => {
+    if (decision.kind === "chain") {
+      const chainReq = resolveChainRequest(req, decision);
+      return generateChainStream(
+        chainReq,
+        {
+          onProgress: (evt) => applyChainProgress(job, evt),
+          onComplete: (evt) => {
+            job.result = chainCompleteToSingle(req, evt);
+            job.state = "done";
+            if (evt.gpu !== null && evt.gpu !== undefined)
+              job.progress.gpu = evt.gpu;
+            fireComplete(job);
+            scheduleAutoRemoveOnDone(id);
+          },
+          onError: onErrorCommon,
         },
-        onError: onErrorCommon,
-      },
-      controller.signal,
-      route?.target,
-    );
-  } else if (isPrebuiltChainRequest(req)) {
-    // Caller bug: a stages-based ChainRequestWire was submitted with a
-    // non-chain routing decision. The single-clip endpoint would reject
-    // the unknown `stages` field, so bail early with a clear message
-    // instead of producing an opaque 422/500.
-    job.error =
-      "internal: ChainRequestWire submitted with non-chain routing decision";
-    job.state = "error";
-  } else {
-    generateStream(
-      req,
-      {
-        onProgress: (evt) => applyProgress(job, evt),
-        onComplete: (evt) => {
-          job.result = evt;
-          job.state = "done";
-          if (evt.gpu !== null && evt.gpu !== undefined)
-            job.progress.gpu = evt.gpu;
-          fireComplete(job);
-          scheduleAutoRemoveOnDone(id);
+        controller.signal,
+        route?.target,
+      );
+    } else if (isPrebuiltChainRequest(req)) {
+      // Caller bug: a stages-based ChainRequestWire was submitted with a
+      // non-chain routing decision. The single-clip endpoint would reject
+      // the unknown `stages` field, so bail early with a clear message
+      // instead of producing an opaque 422/500.
+      job.error =
+        "internal: ChainRequestWire submitted with non-chain routing decision";
+      job.state = "error";
+    } else {
+      return generateStream(
+        req,
+        {
+          onProgress: (evt) => applyProgress(job, evt),
+          onComplete: (evt) => {
+            job.result = evt;
+            job.state = "done";
+            if (evt.gpu !== null && evt.gpu !== undefined)
+              job.progress.gpu = evt.gpu;
+            fireComplete(job);
+            scheduleAutoRemoveOnDone(id);
+          },
+          onError: onErrorCommon,
         },
-        onError: onErrorCommon,
-      },
-      controller.signal,
-      route?.target,
-    );
-  }
+        controller.signal,
+        route?.target,
+      );
+    }
+    return Promise.resolve();
+  };
+
+  // Four held-open render streams leave browser connection headroom for queue
+  // reconciliation, gallery refreshes, and model downloads. Waiting jobs keep
+  // their visible Starting state and can be canceled before they acquire a slot.
+  streamSlots.schedule(controller.signal, (release) => {
+    void startStream().finally(release);
+  });
 
   return id;
 }

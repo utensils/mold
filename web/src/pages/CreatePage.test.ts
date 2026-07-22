@@ -61,6 +61,7 @@ const chainJobDetailRef = vi.hoisted(
       value: ChainJobDetail | null;
     },
 );
+const chainJobIdRef = vi.hoisted(() => ({ value: null as string | null }));
 
 vi.mock("../api", () => ({
   createChainJob: createChainJobMock,
@@ -86,10 +87,13 @@ vi.mock("../composables/useGenerateStream", () => ({
 }));
 
 vi.mock("../composables/useChainJobStream", () => ({
-  useChainJobStream: () => ({
-    detail: chainJobDetailRef,
-    connected: { __v_isRef: true, value: true },
-  }),
+  useChainJobStream: (jobId: { value: string | null }) => {
+    chainJobIdRef.value = jobId.value;
+    return {
+      detail: chainJobDetailRef,
+      connected: { __v_isRef: true, value: true },
+    };
+  },
 }));
 
 vi.mock("../composables/useStatusPoll", () => ({
@@ -713,6 +717,13 @@ describe("CreatePage layout and behavior", () => {
     expect(
       wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
     ).toMatchObject({ id: "job-1", state: "queued" });
+  });
+
+  it("reattaches to the last durable chain job after a reload", async () => {
+    localStorage.setItem("mold.create.chain-job", "durable-job-7");
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(chainJobIdRef.value).toBe("durable-job-7");
   });
 });
 

@@ -9,7 +9,7 @@
  * uploads become SourceImage/SourceMediaState just like the source dropzone.
  * The component holds no local copy — it patches the parent form via v-model.
  */
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type {
@@ -51,6 +51,43 @@ const PIPELINE_OPTIONS: Ltx2PipelineMode[] = [
 const pipelineValue = computed(() => props.modelValue.pipeline ?? "");
 function setPipeline(raw: string) {
   patch({ pipeline: (raw || null) as Ltx2PipelineMode | null });
+}
+
+// Camera-control LoRAs published for LTX-2 19B. LTX-2.3 uses a different
+// architecture, so its users get the custom-path escape hatch only.
+const CAMERA_MOTION_PRESETS = [
+  { id: "dolly-in", label: "Dolly in" },
+  { id: "dolly-left", label: "Dolly left" },
+  { id: "dolly-out", label: "Dolly out" },
+  { id: "dolly-right", label: "Dolly right" },
+  { id: "jib-down", label: "Jib down" },
+  { id: "jib-up", label: "Jib up" },
+  { id: "static", label: "Static" },
+] as const;
+const isLtx23Model = computed(() => props.modelValue.model.includes("ltx-2.3"));
+function cameraModeFor(value: string | null): string {
+  if (!value) return "";
+  return CAMERA_MOTION_PRESETS.some((preset) => preset.id === value)
+    ? value
+    : "custom";
+}
+const cameraMode = ref(cameraModeFor(props.modelValue.cameraControl));
+watch(
+  () => props.modelValue.cameraControl,
+  (value) => {
+    if (cameraMode.value === "custom" && cameraModeFor(value) === "custom")
+      return;
+    cameraMode.value = cameraModeFor(value);
+  },
+);
+function setCameraMode(raw: string) {
+  cameraMode.value = raw;
+  if (raw === "custom") {
+    if (cameraModeFor(props.modelValue.cameraControl) !== "custom")
+      patch({ cameraControl: "" });
+    return;
+  }
+  patch({ cameraControl: raw || null });
 }
 
 // ── Spatial / temporal upscale (segmented; "" = native) ───────────────
@@ -181,6 +218,40 @@ function removeKeyframe(index: number) {
           {{ p }}
         </option>
       </select>
+    </div>
+
+    <div class="ltx2__field">
+      <label class="ltx2__label">Camera motion</label>
+      <select
+        class="ltx2__select"
+        data-test="ltx2-camera-motion"
+        :value="cameraMode"
+        @change="setCameraMode(($event.target as HTMLSelectElement).value)"
+      >
+        <option value="">None</option>
+        <option
+          v-for="preset in CAMERA_MOTION_PRESETS"
+          :key="preset.id"
+          :value="preset.id"
+          :disabled="isLtx23Model"
+        >
+          {{ preset.label }}
+        </option>
+        <option value="custom">Custom LoRA path…</option>
+      </select>
+      <input
+        v-if="cameraMode === 'custom'"
+        class="ltx2__input"
+        data-test="ltx2-camera-motion-custom"
+        placeholder="/path/to/lora.safetensors"
+        :value="modelValue.cameraControl ?? ''"
+        @input="
+          patch({ cameraControl: ($event.target as HTMLInputElement).value })
+        "
+      />
+      <p v-if="isLtx23Model" class="ltx2__hint">
+        Presets are for LTX-2 19B; use a custom LoRA path for LTX-2.3.
+      </p>
     </div>
 
     <div class="ltx2__field">

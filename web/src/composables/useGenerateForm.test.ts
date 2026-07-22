@@ -410,6 +410,17 @@ describe("useGenerateForm", () => {
     ]);
   });
 
+  it("serializes an LTX-2 camera preset as the camera-control LoRA alias", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "ltx-2-19b-distilled:fp8";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.cameraControl = "dolly-in";
+    expect(form.toRequest().loras).toContainEqual({
+      path: "camera-control:dolly-in",
+      scale: 1,
+    });
+  });
+
   it("serializes only the first attachment as source_image for non-edit families", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {
@@ -769,6 +780,7 @@ describe("generate form serialization helpers", () => {
       retakeRange: null,
       spatialUpscale: null,
       temporalUpscale: null,
+      cameraControl: null,
       placement: null,
       loras: [],
       enableAudio: null,

@@ -9,6 +9,7 @@ import type {
   ExpandResponseWire,
   GalleryImage,
   GenerateRequestWire,
+  GenerationMemoryEstimate,
   ModelInfoExtended,
   ModelComponentsResponse,
   ServerStatus,
@@ -225,6 +226,25 @@ function targetBase(target?: StreamTarget): string {
 
 function targetHeaders(target?: StreamTarget): Record<string, string> {
   return target?.apiKey ? { "x-api-key": target.apiKey } : {};
+}
+
+/** Advisory VRAM preflight against the machine that will render the print. */
+export async function fetchGenerationEstimate(
+  req: GenerateRequestWire,
+  target?: StreamTarget,
+): Promise<GenerationMemoryEstimate> {
+  const res = await fetch(`${targetBase(target)}/api/generate/estimate`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...targetHeaders(target),
+    },
+    body: JSON.stringify(req),
+  });
+  return requireJson<GenerationMemoryEstimate>(
+    res,
+    "POST /api/generate/estimate",
+  );
 }
 
 export async function generateStream(

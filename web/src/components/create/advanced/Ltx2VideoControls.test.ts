@@ -49,6 +49,41 @@ describe("Ltx2VideoControls", () => {
     expect(lastPatch(wrapper).pipeline).toBe(null);
   });
 
+  it("offers the seven LTX-2 camera presets and writes the selected motion", async () => {
+    const wrapper = factory({ model: "ltx-2-19b-distilled:fp8" });
+    const select = wrapper.get("[data-test='ltx2-camera-motion']");
+    expect(select.findAll("option").map((option) => option.text())).toEqual([
+      "None",
+      "Dolly in",
+      "Dolly left",
+      "Dolly out",
+      "Dolly right",
+      "Jib down",
+      "Jib up",
+      "Static",
+      "Custom LoRA path…",
+    ]);
+    await select.setValue("jib-up");
+    expect(lastPatch(wrapper).cameraControl).toBe("jib-up");
+  });
+
+  it("keeps presets disabled for LTX-2.3 and accepts a custom camera LoRA", async () => {
+    const wrapper = factory({ model: "ltx-2.3-22b-distilled:fp8" });
+    const select = wrapper.get("[data-test='ltx2-camera-motion']");
+    const presets = select.findAll("option").slice(1, 8);
+    expect(
+      presets.every((option) => option.attributes("disabled") !== undefined),
+    ).toBe(true);
+
+    await select.setValue("custom");
+    await wrapper
+      .get("[data-test='ltx2-camera-motion-custom']")
+      .setValue("/models/camera/pan.safetensors");
+    expect(lastPatch(wrapper).cameraControl).toBe(
+      "/models/camera/pan.safetensors",
+    );
+  });
+
   it("maps the spatial segmented control to the upscale field", async () => {
     const wrapper = factory();
     const buttons = wrapper.get("[data-test='ltx2-spatial']").findAll("button");
