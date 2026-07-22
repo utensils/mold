@@ -126,7 +126,7 @@ const FLUX_LORA_FIXTURE: &str = r#"{
             "images": []
         }]
     }],
-    "metadata": { "totalPages": 1 }
+    "metadata": { "totalPages": 37, "totalItems": 37, "currentPage": 1 }
 }"#;
 
 async fn build_state() -> (AppState, MockServer, tempfile::TempDir) {
@@ -205,6 +205,37 @@ async fn live_search_returns_normalized_civitai_rows() {
         entries[0]["page_url"], "https://civitai.com/models/9001?modelVersionId=8001",
         "wire rows carry the model page link"
     );
+}
+
+#[tokio::test]
+async fn live_search_honors_page_size_and_reports_the_upstream_total() {
+    let (state, server, _tmp) = build_state().await;
+    let router = create_router(state);
+
+    let (status, body) = get(
+        router,
+        "/api/catalog/search?source=civitai&page=2&page_size=1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "live search failed: {body}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["page"], 2);
+    assert_eq!(parsed["page_size"], 1);
+    assert_eq!(parsed["entries"].as_array().expect("entries").len(), 1);
+    assert_eq!(
+        parsed["total"], 37,
+        "total must describe the complete filtered feed, not this page"
+    );
+
+    let requests = server.received_requests().await.expect("requests");
+    let request = requests.last().expect("catalog request");
+    let query = request
+        .url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(query.get("page").map(|value| value.as_ref()), Some("2"));
+    assert_eq!(query.get("limit").map(|value| value.as_ref()), Some("1"));
 }
 
 /// `?sort=` must be validated, not silently ignored — silent ignoring is

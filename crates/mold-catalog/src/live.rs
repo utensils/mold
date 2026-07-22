@@ -166,7 +166,7 @@ struct CacheState {
 
 struct CacheValue {
     stored_at: Instant,
-    entries: Vec<CatalogEntry>,
+    result: LiveSearchResult,
 }
 
 impl LiveCache {
@@ -189,12 +189,12 @@ impl LiveCache {
         self.len() == 0
     }
 
-    fn get(&self, key: &LiveSearchOpts) -> Option<Vec<CatalogEntry>> {
+    fn get(&self, key: &LiveSearchOpts) -> Option<LiveSearchResult> {
         let now = Instant::now();
         let mut state = self.inner.lock().expect("cache mutex");
         if let Some(v) = state.map.get(key) {
             if now.duration_since(v.stored_at) <= self.ttl {
-                return Some(v.entries.clone());
+                return Some(v.result.clone());
             }
         }
         // Expired or missing — drop any stale entry so the next pass
@@ -205,7 +205,7 @@ impl LiveCache {
         None
     }
 
-    fn put(&self, key: LiveSearchOpts, entries: Vec<CatalogEntry>) {
+    fn put(&self, key: LiveSearchOpts, result: LiveSearchResult) {
         let mut state = self.inner.lock().expect("cache mutex");
         if state.map.contains_key(&key) {
             state.order.retain(|k| k != &key);
@@ -215,7 +215,7 @@ impl LiveCache {
             key,
             CacheValue {
                 stored_at: Instant::now(),
-                entries,
+                result,
             },
         );
         while state.order.len() > self.max_entries {
@@ -229,41 +229,83 @@ impl LiveCache {
 struct CivitaiResponse {
     #[serde(default)]
     items: Vec<CivitaiItem>,
+    #[serde(default)]
+    metadata: CivitaiMetadata,
 }
 
-/// One-shot live query. Returns a normalized [`CatalogEntry`] vector
-/// suitable for direct serialization into the `/api/catalog` wire
-/// format. Errors are surfaced as [`LiveSearchError`] so the caller
-/// can choose how to render them.
-///
-/// Source routing:
-/// - `Some(Civitai)` → Civitai only
-/// - `Some(Hf)`      → HF only
-/// - `None`          → both (concatenated, Civitai first)
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CivitaiMetadata {
+    #[serde(default, rename = "totalItems")]
+    total_items: usize,
+    #[serde(default, rename = "totalPages")]
+    total_pages: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveSearchResult {
+    pub entries: Vec<CatalogEntry>,
+    /// Complete filtered row count when the upstream exposes it; otherwise a
+    /// conservative lower bound that keeps pagination available.
+    pub total: usize,
+}
+
+/// Backwards-compatible one-shot query for Rust consumers that only need the
+/// rows. The server uses [`search_page`] so it can preserve total-count
+/// metadata on the HTTP wire.
 pub async fn search(
     civitai_base: &str,
     hf_base: &str,
     cache: &LiveCache,
     opts: &LiveSearchOpts,
 ) -> Result<Vec<CatalogEntry>, LiveSearchError> {
+    Ok(search_page(civitai_base, hf_base, cache, opts)
+        .await?
+        .entries)
+}
+
+/// One-shot live query with pagination metadata. Returns normalized
+/// [`CatalogEntry`] rows suitable for direct serialization into the
+/// `/api/catalog/search` wire format.
+///
+/// Source routing:
+/// - `Some(Civitai)` → Civitai only
+/// - `Some(Hf)`      → HF only
+/// - `None`          → both (concatenated, Civitai first)
+pub async fn search_page(
+    civitai_base: &str,
+    hf_base: &str,
+    cache: &LiveCache,
+    opts: &LiveSearchOpts,
+) -> Result<LiveSearchResult, LiveSearchError> {
     if let Some(hit) = cache.get(opts) {
         return Ok(hit);
     }
 
-    let mut entries = Vec::new();
     let local_components = companion_component_entries(opts);
     if matches!(opts.kind, Some(Kind::Clip | Kind::Tokenizer)) {
-        cache.put(opts.clone(), local_components.clone());
-        return Ok(local_components);
+        let result = paginate_local(local_components, opts);
+        cache.put(opts.clone(), result.clone());
+        return Ok(result);
     }
+    let mut entries = Vec::new();
+    let mut total = 0;
+    let source_count =
+        if opts.source.is_none() { 2 } else { 1 } + u32::from(!local_components.is_empty());
+    let mut upstream_opts = opts.clone();
+    upstream_opts.page_size = opts.page_size.div_ceil(source_count);
     if !matches!(opts.source, Some(Source::Hf)) {
-        entries.extend(civitai_search(civitai_base, opts).await?);
+        let page = civitai_search(civitai_base, &upstream_opts).await?;
+        total += page.total;
+        entries.extend(page.entries);
     }
     if !matches!(opts.source, Some(Source::Civitai)) {
         // Authentication errors must surface so the server can retry with its
         // next credential candidate; other combined-search failures stay soft.
-        match hf_search(hf_base, opts).await {
-            Ok(rows) => entries.extend(rows),
+        match hf_search(hf_base, &upstream_opts).await {
+            Ok(page) => {
+                total += page.total;
+                entries.extend(page.entries);
+            }
             Err(
                 e @ LiveSearchError::Upstream {
                     status: 401 | 403, ..
@@ -275,10 +317,27 @@ pub async fn search(
             }
         }
     }
-    entries.extend(local_components);
+    if !local_components.is_empty() {
+        let local_page = paginate_local(local_components, &upstream_opts);
+        total += local_page.total;
+        entries.extend(local_page.entries);
+    }
+    entries.truncate(opts.page_size as usize);
 
-    cache.put(opts.clone(), entries.clone());
-    Ok(entries)
+    let result = LiveSearchResult { entries, total };
+    cache.put(opts.clone(), result.clone());
+    Ok(result)
+}
+
+fn paginate_local(entries: Vec<CatalogEntry>, opts: &LiveSearchOpts) -> LiveSearchResult {
+    let total = entries.len();
+    let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+    let entries = entries
+        .into_iter()
+        .skip(start)
+        .take(opts.page_size as usize)
+        .collect();
+    LiveSearchResult { entries, total }
 }
 
 pub fn companion_entry_for_id(id: &str) -> Option<CatalogEntry> {
@@ -500,7 +559,7 @@ fn kind_tag(kind: Kind) -> &'static str {
 async fn civitai_search(
     base: &str,
     opts: &LiveSearchOpts,
-) -> Result<Vec<CatalogEntry>, LiveSearchError> {
+) -> Result<LiveSearchResult, LiveSearchError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()?;
@@ -515,7 +574,13 @@ async fn civitai_search(
         .map(str::to_string);
     {
         let mut q = url.query_pairs_mut();
-        q.append_pair("limit", &opts.page_size.clamp(1, 100).to_string());
+        let window = opts.page.saturating_mul(opts.page_size).clamp(1, 100);
+        let limit = if trimmed_q.is_some() {
+            window
+        } else {
+            opts.page_size
+        };
+        q.append_pair("limit", &limit.to_string());
         // Civitai rejects `page=` when `query=` is present, returning
         // 400 "Cannot use page param with query search. Use cursor-based
         // pagination." So we omit page when querying — first-page
@@ -586,6 +651,7 @@ async fn civitai_search(
     }
     let parsed: CivitaiResponse = serde_json::from_str(&body)?;
 
+    let metadata = parsed.metadata;
     let mut out = Vec::new();
     for item in parsed.items {
         let nsfw_item = item.nsfw;
@@ -618,7 +684,22 @@ async fn civitai_search(
             out.push(entry);
         }
     }
-    Ok(out)
+    if trimmed_q.is_some() {
+        let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+        out = out
+            .into_iter()
+            .skip(start)
+            .take(opts.page_size as usize)
+            .collect();
+    }
+    let observed_end = ((opts.page - 1) * opts.page_size) as usize + out.len();
+    let total = metadata
+        .total_items
+        .max(observed_end + usize::from(metadata.total_pages > opts.page as usize));
+    Ok(LiveSearchResult {
+        entries: out,
+        total,
+    })
 }
 
 // ── HF live search ──────────────────────────────────────────────────────────
@@ -644,10 +725,7 @@ struct HfSearchHit {
     last_modified: Option<String>,
 }
 
-async fn hf_search(
-    base: &str,
-    opts: &LiveSearchOpts,
-) -> Result<Vec<CatalogEntry>, LiveSearchError> {
+async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult, LiveSearchError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()?;
@@ -657,7 +735,8 @@ async fn hf_search(
     let trimmed_q = opts.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
     {
         let mut q = url.query_pairs_mut();
-        q.append_pair("limit", &opts.page_size.clamp(1, 100).to_string());
+        let window = opts.page.saturating_mul(opts.page_size).clamp(1, 1000);
+        q.append_pair("limit", &window.to_string());
         q.append_pair("sort", opts.sort.hf_value());
         q.append_pair("direction", "-1");
         if let Some(query) = trimmed_q {
@@ -693,6 +772,7 @@ async fn hf_search(
         });
     }
     let hits: Vec<HfSearchHit> = serde_json::from_str(&body)?;
+    let fetched = hits.len();
 
     let mut out = Vec::with_capacity(hits.len());
     for hit in hits {
@@ -716,7 +796,20 @@ async fn hf_search(
         }
         out.push(entry);
     }
-    Ok(out)
+    let filtered = out.len();
+    let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+    let entries = out
+        .into_iter()
+        .skip(start)
+        .take(opts.page_size as usize)
+        .collect::<Vec<_>>();
+    let requested = opts.page.saturating_mul(opts.page_size) as usize;
+    let total = if fetched < requested {
+        filtered
+    } else {
+        start + entries.len() + usize::from(!entries.is_empty())
+    };
+    Ok(LiveSearchResult { entries, total })
 }
 
 /// Build a recipe-less `CatalogEntry` from an HF search hit. The recipe
@@ -1039,6 +1132,8 @@ pub async fn fetch_hf_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn catalog_sort_maps_to_each_upstream_vocabulary() {
@@ -1074,6 +1169,43 @@ mod tests {
     fn catalog_sort_defaults_to_downloads() {
         assert_eq!(CatalogSort::default(), CatalogSort::Downloads);
         assert_eq!(LiveSearchOpts::default().sort, CatalogSort::Downloads);
+    }
+
+    #[tokio::test]
+    async fn hf_search_fetches_a_window_and_returns_the_requested_page() {
+        let server = MockServer::start().await;
+        let hits = (1..=4)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("black-forest-labs/FLUX.1-dev-{index}"),
+                    "tags": ["diffusers", "flux"],
+                    "pipeline_tag": "text-to-image"
+                })
+            })
+            .collect::<Vec<_>>();
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .and(query_param("limit", "4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(hits))
+            .mount(&server)
+            .await;
+
+        let result = hf_search(
+            &server.uri(),
+            &LiveSearchOpts {
+                page: 2,
+                page_size: 2,
+                source: Some(Source::Hf),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("HF page");
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.entries[0].id.0.contains("dev-3"));
+        assert!(result.entries[1].id.0.contains("dev-4"));
+        assert_eq!(result.total, 5, "a full window must advertise another page");
     }
 
     const VERSION_DETAIL_BODY: &str = r#"{

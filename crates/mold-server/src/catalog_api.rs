@@ -744,7 +744,7 @@ pub async fn live_search_catalog(
     drop(cfg);
 
     let search_result = loop {
-        let result = mold_catalog::live::search(
+        let result = mold_catalog::live::search_page(
             state.catalog_live_civitai_base.as_str(),
             "https://huggingface.co",
             &state.catalog_live_cache,
@@ -758,24 +758,24 @@ pub async fn live_search_catalog(
             result => break result,
         }
     };
-    let entries = match search_result {
-        Ok(es) => es,
+    let result = match search_result {
+        Ok(result) => result,
         Err(e) => {
             tracing::warn!(target: "catalog.live", error = %e, "live search failed");
             return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
         }
     };
 
-    let wire: Vec<serde_json::Value> = entries
+    let wire: Vec<serde_json::Value> = result
+        .entries
         .iter()
         .map(|e| live_entry_to_wire(e, &models_dir))
         .collect();
-    let total = wire.len() as i64;
     Json(serde_json::json!({
         "entries": wire,
         "page": opts.page,
         "page_size": opts.page_size,
-        "total": total,
+        "total": result.total,
     }))
     .into_response()
 }

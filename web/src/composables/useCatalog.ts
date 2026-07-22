@@ -70,7 +70,10 @@ const PAGE_SIZE = 48;
 // User-facing filter shape. Pagination (`page`, `page_size`) is internal —
 // keeping it out of the watched ref means `loadMore`'s page bumps don't
 // retrigger the deep watcher and stomp on the appended entries.
-type CatalogFilter = Omit<CatalogListParams, "page" | "page_size">;
+type CatalogFilter = Omit<CatalogListParams, "page" | "page_size"> & {
+  /** Local-only because the server has no modality query parameter. */
+  modality?: "image" | "video";
+};
 
 let singleton: ReturnType<typeof build> | null = null;
 
@@ -107,12 +110,9 @@ function build() {
     () => total.value !== null && entries.value.length < total.value,
   );
 
-  // `modality` is the one filter the server has no parameter for — Axum
-  // drops it, so the Image/Video chips narrowed nothing. Every entry carries
-  // its own `modality` (derived upstream from the family), so it is applied
-  // to the rows we already hold. It is still sent on the request: today the
-  // server ignores it, and the day it grows a `modality` parameter this
-  // becomes a pass-through rather than something to remember to re-wire.
+  // `modality` is the one UI filter the server has no parameter for. Every
+  // entry carries its own derived modality, so it is applied locally and
+  // deliberately stripped from requests by `searchParams`.
   const visibleEntries = computed(() => {
     const m = filter.value.modality;
     if (!m) return entries.value;
@@ -133,16 +133,17 @@ function build() {
 
   let debounceHandle: ReturnType<typeof setTimeout> | null = null;
 
+  function searchParams(requestedPage: number): CatalogListParams {
+    const { modality: _localModality, ...serverFilters } = filter.value;
+    return { ...serverFilters, page: requestedPage, page_size: PAGE_SIZE };
+  }
+
   /** Fetch the page after the current one. Returns false when there was
    * nothing left to fetch, so callers can tell progress from exhaustion. */
   async function fetchNextPage(): Promise<boolean> {
     if (!hasMore.value) return false;
     const next = page.value + 1;
-    const list = await fetchCatalogSearch({
-      ...filter.value,
-      page: next,
-      page_size: PAGE_SIZE,
-    });
+    const list = await fetchCatalogSearch(searchParams(next));
     entries.value = [...entries.value, ...list.entries];
     page.value = next;
     if (typeof list.total === "number") total.value = list.total;
@@ -167,7 +168,7 @@ function build() {
     errorMsg.value = null;
     try {
       const [list, fams] = await Promise.all([
-        fetchCatalogSearch({ ...filter.value, page: 1, page_size: PAGE_SIZE }),
+        fetchCatalogSearch(searchParams(1)),
         fetchCatalogFamilies(),
       ]);
       entries.value = list.entries;

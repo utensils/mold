@@ -843,14 +843,10 @@ export interface CatalogFamiliesResponse {
 
 export interface CatalogListParams {
   family?: string;
-  family_role?: "foundation" | "finetune";
   kind?: CatalogKind;
-  modality?: "image" | "video";
   source?: "hf" | "civitai";
-  sub_family?: string;
   q?: string;
   include_nsfw?: boolean;
-  max_engine_phase?: number;
   /** Server vocabulary (`catalog.sort` capability); "name" was retired —
    *  no upstream supports it and the server rejects it with a 422. */
   sort?: "downloads" | "rating" | "recent";
