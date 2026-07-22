@@ -46,6 +46,17 @@ if [ "$needs_build" -eq 0 ]; then
     exit 0
 fi
 
+# A `web/node_modules` containing its own vite is a leftover from the
+# pre-workspace layout (each package used to install independently).
+# It shadows the repo-root workspace install and makes `vue-tsc` see two
+# incompatible copies of vite/rollup ("Plugin<any> is not assignable to
+# PluginOption"). Bun never hoists vite into web/ under the unified
+# workspace, so its presence is always stale — remove it.
+if [ -d "$web_dir/node_modules/vite" ]; then
+    echo "ensure-web-dist: removing stale $web_dir/node_modules (pre-workspace install)" >&2
+    rm -rf "$web_dir/node_modules"
+fi
+
 if [ ! -d "$repo_root/node_modules" ] \
     || [ ! -f "$workspace_install_stamp" ] \
     || [ "$repo_root/package.json" -nt "$workspace_install_stamp" ] \
