@@ -77,6 +77,11 @@ Use regular img2img families when you need `--strength`-based denoising.
 Use `qwen-image-edit` when you want instruction-following edits against one or
 more reference images.
 
+In Mold Studio's web Create workspace, open **Advanced → Edit images** to attach
+the ordered target and reference images. Ordinary source-image families instead
+show denoise strength plus all five fit policies; SD1.5 also suggests installed
+ControlNet checkpoints while allowing a custom checkpoint name.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video model family. Video
