@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watchEffect } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
+import PodCostMeter from "../machines/PodCostMeter.vue";
+import { runPodForHostUrl } from "../../lib/runpod";
 import { jobProgress, useGenerationStore, type Job } from "../../stores/generation";
+import { useHostsStore } from "../../stores/hosts";
+import { useRunPodStore } from "../../stores/runpod";
 import { useToastStore } from "../../stores/toasts";
 
 /**
@@ -10,6 +14,8 @@ import { useToastStore } from "../../stores/toasts";
  * strip and the canvas never disagree. Hidden when nothing is in flight.
  */
 const generation = useGenerationStore();
+const hosts = useHostsStore();
+const runpod = useRunPodStore();
 const toasts = useToastStore();
 
 const running = computed<Job | null>(
@@ -23,6 +29,19 @@ const show = computed(() => !!running.value || queued.value.length > 0);
 const runningPct = computed(() =>
   running.value ? Math.round(jobProgress(running.value) * 100) : 0,
 );
+const runningHost = computed(() =>
+  running.value?.hostId
+    ? (hosts.all.find((host) => host.id === running.value?.hostId) ?? null)
+    : null,
+);
+const runningPod = computed(() => runPodForHostUrl(runpod.runningPods, runningHost.value?.baseUrl));
+
+watchEffect(() => {
+  const url = runningHost.value?.baseUrl ?? "";
+  if (url.includes(".proxy.runpod.net") && !runpod.loaded && !runpod.loading) {
+    void runpod.load();
+  }
+});
 
 function cancel(job: Job) {
   void generation.cancel(job.clientId).then(() => toasts.push("Cancelled"));
@@ -37,6 +56,13 @@ function cancel(job: Job) {
       <div class="ms-activity__running">
         <div class="ms-activity__line">
           <span class="ms-activity__prompt">{{ running.prompt }}</span>
+          <PodCostMeter
+            v-if="runningPod"
+            data-test="activity-pod-cost"
+            class="ms-activity__cost"
+            :cost-per-hr="runningPod.costPerHr"
+            :uptime-seconds="runningPod.uptimeSeconds"
+          />
           <span class="ms-activity__pct data-mono">{{ runningPct }}%</span>
         </div>
         <ProgressBar :value="runningPct" :height="4" label="Print progress" />
@@ -109,6 +135,10 @@ function cancel(job: Job) {
   font-size: 9.5px;
   color: var(--safelight);
   flex: 0 0 auto;
+}
+.ms-activity__cost {
+  flex: 0 0 auto;
+  font-size: 9.5px;
 }
 .ms-activity__pill {
   flex: 0 0 auto;
