@@ -194,25 +194,29 @@ verifies the frontend/release assets, runs the frontend tests and formatting
 gate, and runs Rust fmt, check, and warning-denied Clippy for the Apple Silicon
 simulator.
 
-`.github/workflows/testflight-ios.yml` is the internal TestFlight pipeline. It
-runs after a successful `iOS` workflow on `main`, or by manual dispatch. The
-workflow:
+`.github/workflows/testflight-ios.yml` is the TestFlight pipeline. It runs after
+a successful `iOS` workflow on `main`, or by manual dispatch. Uploads remain
+eligible for both internal and external testing; never restore Apple's
+`testFlightInternalTestingOnly` export restriction. The workflow:
 
 1. resolves the marketing version from the mobile crate and uses the full Git
    commit count as the default build number;
 2. rebuilds and validates the packaged mobile entry and icon catalog;
 3. creates an unsigned archive, then uses App Store Connect automatic signing
    during export/upload;
-4. waits until App Store Connect reports `processingState == VALID`; and
-5. verifies `brink.james@gmail.com` has access through the `Mold Internal`
-   internal-testing group.
+4. uploads an external-testing-eligible build and waits until App Store Connect
+   reports `processingState == VALID`; and
+5. verifies the baseline internal release path by confirming
+   `brink.james@gmail.com` has access through `Mold Internal`.
 
 Required repository secrets are `APPLE_API_PRIVATE_KEY`, `APPLE_API_KEY`, and
 `APPLE_API_ISSUER`. Never print or persist their values.
 
 `testflight-ios-verify.yml` can resume validation for an exact uploaded bundle
 version without rebuilding it. Upload success alone is not a completed release;
-the finish line is a `VALID` build plus verified internal tester access.
+the automated finish line is a `VALID` build plus verified internal tester
+access. External groups can then select that same build and submit it to Beta
+App Review in App Store Connect.
 
 Release PRs synchronize `apps/mobile/src-tauri/Cargo.toml`, its lockfile, and
 `tauri.conf.json` through `scripts/release/sync-release-pr.sh`. Do not hand-bump

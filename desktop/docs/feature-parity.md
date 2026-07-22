@@ -311,7 +311,7 @@ Views: Generate, Gallery, Models, Queue, Settings, Script (composer). Actions in
 | Models      | Installed/live union, browse-host/target-host separation, model detail/actions, immediate Connecting/Starting/Queued/Pulling status                                                                                        |
 | Settings    | Mold Studio families (Mold/Safelight) × System/Dark/Light, host shortcut, version, remote-only policy, and TestFlight update channel                                                                                       |
 | Interaction | Safe areas, 44pt controls, 16px editable text, no WebView document zoom, no shell rubber band, scoped Library swipe                                                                                                        |
-| Release     | Eligible successful `main` iOS CI → internal TestFlight → App Store Connect `VALID` → tester membership verification                                                                                                       |
+| Release     | Eligible successful `main` iOS CI → internal/external-eligible TestFlight build → App Store Connect `VALID` → baseline internal tester verification; external groups submit the same build to Beta App Review              |
 
 Deliberate initial exclusions are the desktop Chains editor/durable-jobs
 workspace, RunPod provisioning, engine configuration, desktop file/clipboard

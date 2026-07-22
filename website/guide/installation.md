@@ -6,8 +6,8 @@
   [Mold DMG](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg),
   then follow the [Desktop App guide](/guide/desktop).
 - **iPhone:** the current remote-only app is distributed through the project's
-  internal TestFlight group; there is not yet a public App Store or
-  self-enrollment link. See the [iPhone App guide](/guide/iphone) for supported
+  invited internal and external TestFlight groups; there is not yet a public
+  App Store listing. See the [iPhone App guide](/guide/iphone) for supported
   workflows and host setup.
 
 The command-line installation below installs the Mold engine/server used by

@@ -313,7 +313,7 @@ See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM r
   Library, Models, Machines, and Settings workspaces (chains, history, the job
   queue, and RunPod included)
 - **Native iPhone** — remote multi-host generation, library, models, machine
-  telemetry, and appearance settings through internal TestFlight
+  telemetry, and appearance settings through internal or external TestFlight
 
 ## Deployment
 

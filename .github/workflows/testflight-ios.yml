@@ -1,4 +1,4 @@
-name: iOS TestFlight nightly
+name: iOS TestFlight
 
 on:
   workflow_run:
@@ -108,7 +108,7 @@ jobs:
           <key>method</key><string>app-store-connect</string>
           <key>signingStyle</key><string>automatic</string>
           <key>teamID</key><string>$DEVELOPMENT_TEAM</string>
-          <key>testFlightInternalTestingOnly</key><true/>
+          <key>testFlightInternalTestingOnly</key><false/>
           </dict></plist>
           PLIST
           xcodebuild -exportArchive -archivePath "$ARCHIVE_PATH" -exportPath "$RUNNER_TEMP/export" -exportOptionsPlist "$RUNNER_TEMP/export.plist" -allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"

@@ -73,8 +73,9 @@ theme choices remain authoritative.
 `.github/workflows/ios.yml` gates mobile-relevant pull requests and `main`
 changes. A successful eligible `main` run triggers
 `.github/workflows/testflight-ios.yml` (there is no wall-clock cron), which
-builds an internal-only archive, waits for App Store Connect `VALID`, and
-verifies membership in the Mold Internal tester group. See
+uploads an archive eligible for internal and external TestFlight groups, waits
+for App Store Connect `VALID`, and verifies membership in the Mold Internal
+tester group. External groups can submit that build to Beta App Review. See
 `apps/mobile/README.md` for commands, signing inputs, asset guards, and the
 manual verification workflow.
 
