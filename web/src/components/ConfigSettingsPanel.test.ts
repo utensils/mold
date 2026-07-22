@@ -55,6 +55,9 @@ describe("ConfigSettingsPanel", () => {
       wrapper.get('[data-test="reset-models_dir"]').attributes("disabled"),
     ).toBeDefined();
     expect(
+      wrapper.get('[data-test="reset-default_steps"]').attributes("disabled"),
+    ).toBeUndefined();
+    expect(
       wrapper.get('[data-test="config-default_width"]').attributes("disabled"),
     ).toBeDefined();
     expect(wrapper.text()).toContain("MOLD_DEFAULT_WIDTH");
@@ -87,6 +90,22 @@ describe("ConfigSettingsPanel", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/config/default_steps", {
       method: "DELETE",
     });
+  });
+
+  it("does not coerce an empty numeric draft to zero", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+    await wrapper.get('[data-test="config-default_steps"]').setValue("");
+    await wrapper.get('[data-test="save-default_steps"]').trigger("click");
+    await flushPromises();
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          url === "/api/config/default_steps" && init?.method === "PUT",
+      ),
+    ).toBe(false);
   });
 
   it("switches to existing profiles and creates new ones through the same endpoint", async () => {

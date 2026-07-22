@@ -17,7 +17,16 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     statusRef.value = null;
     resetNotifications();
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as typeof fetch;
+    globalThis.fetch = vi.fn(
+      async (input) =>
+        ({
+          ok: true,
+          json: async () =>
+            String(input).endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : { entries: [] },
+        }) as Response,
+    ) as typeof fetch;
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;

@@ -21,24 +21,28 @@ const profiles = ref<string[]>([]);
 const activeProfile = ref("default");
 const profileName = ref("");
 const search = ref("");
-const unavailable = ref(false);
+const unavailableMessage = ref("");
 const drafts = reactive<Record<string, ConfigValue>>({});
 const saving = ref<string | null>(null);
 
 async function load() {
   try {
-    const [config, profileList] = await Promise.all([
-      fetchConfig(),
-      fetchProfiles(),
-    ]);
+    const config = await fetchConfig();
     rows.value = config.filter((row) => !row.key.startsWith("tui."));
+    for (const row of rows.value) drafts[row.key] = row.value;
+    unavailableMessage.value = "";
+  } catch (error) {
+    unavailableMessage.value =
+      error instanceof Error ? error.message : String(error);
+    toast("error", error instanceof Error ? error.message : String(error));
+    return;
+  }
+  try {
+    const profileList = await fetchProfiles();
     profiles.value = profileList.profiles;
     activeProfile.value = profileList.active;
-    for (const row of rows.value) drafts[row.key] = row.value;
-    unavailable.value = false;
-  } catch (error) {
-    unavailable.value = true;
-    toast("error", error instanceof Error ? error.message : String(error));
+  } catch {
+    // Config remains editable when profile listing alone is unavailable.
   }
 }
 
@@ -57,7 +61,16 @@ const grouped = computed(() =>
 
 function typedDraft(row: ConfigRow): ConfigValue {
   const value = drafts[row.key];
-  if (typeof row.value === "number") return Number(value);
+  if (schemaForRow(row).editor === "number") {
+    if (value === "" || value === null) {
+      throw new Error(`${schemaForRow(row).label} requires a number`);
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`${schemaForRow(row).label} requires a valid number`);
+    }
+    return parsed;
+  }
   return value;
 }
 
@@ -129,9 +142,8 @@ onMounted(load);
       />
     </div>
 
-    <CardSurface v-if="unavailable" class="config-card">
-      This engine does not expose configuration controls. Upgrade or reconnect
-      and try again.
+    <CardSurface v-if="unavailableMessage" class="config-card">
+      Configuration is unavailable right now. {{ unavailableMessage }}
     </CardSurface>
 
     <template v-else>
