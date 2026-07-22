@@ -176,6 +176,40 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  it("orders phone Create as prompt, controls, actions, canvas, then recent", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const canvas = wrapper.find("[data-test='result-canvas']").exists()
+      ? wrapper.get("[data-test='result-canvas']").element
+      : wrapper.get("[data-test='cold-start-stub']").element;
+    const markers = [
+      "phone-create-title",
+      "prompt-style-stub",
+      "model-picker-stub",
+      "controls-stub",
+      "composer-submit",
+      "recent-grid",
+    ].map((test) => wrapper.get(`[data-test='${test}']`).element);
+    markers.splice(markers.length - 1, 0, canvas);
+    for (let index = 1; index < markers.length; index += 1) {
+      expect(
+        markers[index - 1]!.compareDocumentPosition(markers[index]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
+  });
+
   it("keeps the recent gallery visible after refreshes", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
@@ -1034,7 +1068,7 @@ function pageStubs() {
     ComposerCard: {
       name: "ComposerCard",
       template:
-        '<div><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
+        '<div><div data-test="prompt-style-stub"/><slot name="mobile-controls"/><button data-test="composer-submit" @click="$emit(\'submit\')">go</button><button data-test="composer-expand" @click="$emit(\'expand\')">expand</button><button data-test="composer-undo" @click="$emit(\'undo-expand\')">undo</button></div>',
       // The page calls these through its template ref on submit / new-print;
       // a stub without them throws an unhandled TypeError mid-run.
       methods: { record: vi.fn(), focus: vi.fn() },
@@ -1045,7 +1079,15 @@ function pageStubs() {
       template:
         '<div data-test="result-canvas" :data-count="(variations||[]).length"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
     },
-    ControlsAside: { name: "ControlsAside", template: "<aside />" },
+    CreateModelPicker: {
+      name: "CreateModelPicker",
+      props: ["models", "model"],
+      template: "<div data-test='model-picker-stub' />",
+    },
+    ControlsAside: {
+      name: "ControlsAside",
+      template: "<aside data-test='controls-stub' />",
+    },
     AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
     ActivityStrip: { name: "ActivityStrip", template: "<div />" },
     ScriptComposer: {

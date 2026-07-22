@@ -35,12 +35,6 @@ export const router = createRouter({
       component: () => import("./views/ModelsView.vue"),
     },
     {
-      path: "/jobs",
-      name: "jobs",
-      meta: { title: "Jobs" },
-      component: () => import("./views/JobsView.vue"),
-    },
-    {
       path: "/machines",
       name: "machines",
       meta: { title: "Machines" },
@@ -74,6 +68,7 @@ export const router = createRouter({
     { path: "/gallery", redirect: (to) => ({ path: "/library", query: to.query }) },
     { path: "/chains", redirect: "/create/chain" },
     { path: "/history", redirect: { path: "/library", query: { panel: "history" } } },
+    { path: "/jobs", redirect: "/machines" },
     { path: "/hosts/:id", redirect: (to) => `/machines/${to.params.id}` },
     { path: "/runpod", redirect: "/machines/runpod" },
   ],

@@ -15,6 +15,13 @@ fn accelerator(key: &str) -> String {
     format!("{modifier}+{key}")
 }
 
+const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 4] = [
+    ("nav:/create", "Create", "1"),
+    ("nav:/library", "Library", "2"),
+    ("nav:/models", "Models", "3"),
+    ("nav:/machines", "Machines", "4"),
+];
+
 fn app_name(is_development: bool) -> &'static str {
     if is_development {
         "mold-dev"
@@ -123,37 +130,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         )
         .build()?;
 
-    let view = SubmenuBuilder::new(app, "View")
-        .item(
-            &MenuItemBuilder::with_id("nav:/generate", "Generate")
-                .accelerator(accelerator("1"))
+    let mut view = SubmenuBuilder::new(app, "View");
+    for (id, label, key) in NAVIGATION_MENU_ITEMS {
+        view = view.item(
+            &MenuItemBuilder::with_id(id, label)
+                .accelerator(accelerator(key))
                 .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("nav:/gallery", "Gallery")
-                .accelerator(accelerator("2"))
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("nav:/chains", "Chains")
-                .accelerator(accelerator("3"))
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("nav:/models", "Models")
-                .accelerator(accelerator("4"))
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("nav:/history", "History")
-                .accelerator(accelerator("5"))
-                .build(app)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id("nav:/jobs", "Jobs")
-                .accelerator(accelerator("6"))
-                .build(app)?,
-        )
+        );
+    }
+    let view = view
         .separator()
         .item(
             &MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")
@@ -245,7 +230,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{about_metadata, accelerator, app_name};
+    use super::{about_metadata, accelerator, app_name, NAVIGATION_MENU_ITEMS};
 
     #[test]
     fn about_metadata_credits_both_core_contributors() {
@@ -275,5 +260,18 @@ mod tests {
     fn development_menu_identity_is_distinct_from_release() {
         assert_eq!(app_name(true), "mold-dev");
         assert_eq!(app_name(false), "Mold");
+    }
+
+    #[test]
+    fn navigation_menu_matches_the_five_workspace_ia() {
+        assert_eq!(
+            NAVIGATION_MENU_ITEMS,
+            [
+                ("nav:/create", "Create", "1"),
+                ("nav:/library", "Library", "2"),
+                ("nav:/models", "Models", "3"),
+                ("nav:/machines", "Machines", "4"),
+            ]
+        );
     }
 }

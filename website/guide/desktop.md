@@ -119,6 +119,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   to datacenters that currently support persistent volumes. While Create is
   developing on a connected running pod, its activity strip shows the same
   live accrued-cost and hourly-rate meter as Machines.
+- **Queues** (inside each machine) — running and waiting jobs, pause/resume,
+  cancellation, and queue capacity live with the host that owns them. The old
+  standalone `/jobs` URL redirects to Machines.
 - **Settings** — a single-column preferences workspace. Appearance
   (the website-aligned Mold palette by default or the original Safelight,
   each with System/Dark/Light; media never inverts), Updates, and About sit up
