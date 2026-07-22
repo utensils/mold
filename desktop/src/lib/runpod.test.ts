@@ -5,6 +5,7 @@ import {
   podGpuName,
   podProxyUrl,
   rankRunPodGpus,
+  runPodForHostUrl,
   runPodRegionLabel,
   type RunPodGpu,
   type RunPodPod,
@@ -43,6 +44,15 @@ describe("RunPod presentation helpers", () => {
 
   it("builds the RunPod HTTP proxy URL used by mold serve", () => {
     expect(podProxyUrl("abc123")).toBe("https://abc123-7680.proxy.runpod.net");
+  });
+
+  it("matches a running pod by proxy hostname across scheme and port differences", () => {
+    const running = { id: "abc123", desiredStatus: "RUNNING" } as RunPodPod;
+    const stopped = { id: "stopped", desiredStatus: "EXITED" } as RunPodPod;
+    expect(runPodForHostUrl([stopped, running], "http://abc123-7680.proxy.runpod.net:80/api")).toBe(
+      running,
+    );
+    expect(runPodForHostUrl([stopped], "https://stopped-7680.proxy.runpod.net")).toBeNull();
   });
 
   it("uses the top-level REST GPU when machine metadata omits it", () => {

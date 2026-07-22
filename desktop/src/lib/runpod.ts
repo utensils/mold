@@ -174,9 +174,9 @@ export function rankRunPodGpus(gpus: RunPodGpu[]): RunPodGpu[] {
 
 export const podProxyUrl = (id: string): string => `https://${id}-7680.proxy.runpod.net`;
 
-function endpointOrigin(value: string): string | null {
+function endpointHostname(value: string): string | null {
   try {
-    return new URL(value).origin.toLowerCase();
+    return new URL(value).hostname.toLowerCase();
   } catch {
     return null;
   }
@@ -188,13 +188,13 @@ export function runPodForHostUrl(
   hostUrl: string | null | undefined,
 ): RunPodPod | null {
   if (!hostUrl) return null;
-  const origin = endpointOrigin(hostUrl);
-  if (!origin) return null;
+  const hostname = endpointHostname(hostUrl);
+  if (!hostname) return null;
   return (
     pods.find(
       (pod) =>
         pod.desiredStatus.toUpperCase() === "RUNNING" &&
-        endpointOrigin(podProxyUrl(pod.id)) === origin,
+        endpointHostname(podProxyUrl(pod.id)) === hostname,
     ) ?? null
   );
 }
