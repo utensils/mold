@@ -302,3 +302,6 @@ such as `/generate` and `/catalog` render Page Not Found:
 - Prompt expansion modal offers live preview + variation picker (requires
   `qwen3-expand` installed on the server).
 - Prompt, model, size, steps, guidance, and batch persist in `localStorage`.
+- Modal and sheet workflows contain keyboard focus, lock background scrolling,
+  close on Escape, and restore focus to the control that opened them. The
+  Templates popover also dismisses on Escape or an outside click.

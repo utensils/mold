@@ -5,14 +5,19 @@
  * Settings — each a NavItem row. Tapping a row navigates and closes. Renders
  * inside the app frame via SheetPanel's absolute overlay.
  */
-import { computed } from "vue";
+import { computed, ref, toRef } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import NavItem from "@ui/components/NavItem.vue";
 import type { IconName } from "@ui/icons";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
-defineProps<{ open: boolean }>();
+const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
+const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const { onKeydown } = useOverlayFocus(toRef(props, "open"), host, () =>
+  emit("close"),
+);
 
 const route = useRoute();
 const router = useRouter();
@@ -73,7 +78,14 @@ function go(dest: Destination) {
 </script>
 
 <template>
-  <SheetPanel :open="open" variant="bottom" title="" @close="emit('close')">
+  <SheetPanel
+    ref="host"
+    :open="open"
+    variant="bottom"
+    title=""
+    @close="emit('close')"
+    @keydown="onKeydown"
+  >
     <nav class="flex flex-col gap-0.5" aria-label="Navigation">
       <NavItem
         v-for="dest in destinations"

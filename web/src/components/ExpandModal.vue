@@ -48,7 +48,7 @@ const previewResults = ref<string[]>([]);
 
 const host = ref<HTMLElement | null>(null);
 const isOpen = computed(() => props.open);
-const { onKeydown } = useOverlayFocus(isOpen, host);
+const { onKeydown } = useOverlayFocus(isOpen, host, () => emit("close"));
 
 const effectiveFamily = computed(
   () => props.expand.familyOverride ?? props.currentModel?.family ?? "flux",

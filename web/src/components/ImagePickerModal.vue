@@ -41,7 +41,7 @@ const fileInput = ref<HTMLInputElement | null>(null);
 
 const host = ref<HTMLElement | null>(null);
 const isOpen = computed(() => props.open);
-const { onKeydown } = useOverlayFocus(isOpen, host);
+const { onKeydown } = useOverlayFocus(isOpen, host, () => emit("close"));
 
 const tabOptions = [
   { value: "upload" as const, label: "Upload" },

@@ -12,6 +12,7 @@ import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { requestConfirm, toast } from "../../lib/toasts";
 import type { CatalogEntryWire, ModelInfoExtended } from "../../types";
 
@@ -52,6 +53,8 @@ const entry = computed<CatalogEntryWire | null>(() =>
 // so a Discover row whose detail fetch is slow or failing never shows a blank
 // panel (spec G4).
 const open = computed(() => state.value !== "closed");
+const host = ref<HTMLElement | null>(null);
+const { onKeydown } = useOverlayFocus(open, host, () => onClose());
 
 // Phone surfaces get the full SheetPanel; everything else the right drawer.
 const isPhone = ref(false);
@@ -342,7 +345,13 @@ function onRetry() {
        shows. Pinning the host to the viewport puts the panel where the user is
        looking, at every scroll offset. Same fix the Create Advanced sheet
        needed. -->
-  <div v-if="open" class="fixed inset-0 z-40" data-test="detail-drawer-host">
+  <div
+    v-if="open"
+    ref="host"
+    class="fixed inset-0 z-40"
+    data-test="detail-drawer-host"
+    @keydown="onKeydown"
+  >
     <component
       :is="panelComponent"
       v-bind="panelProps"

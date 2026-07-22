@@ -26,6 +26,7 @@ import {
   originHost,
   type HostEntry,
 } from "../../lib/hostRegistry";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: []; added: [host: HostEntry] }>();
@@ -46,6 +47,9 @@ const selectedPeer = ref<DiscoveryPeer | null>(null);
 let openSequence = 0;
 let discoveryRefreshInFlight = false;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const isOpen = computed(() => props.open);
+const { onKeydown } = useOverlayFocus(isOpen, host, () => close());
 
 const visiblePeers = computed(() => {
   const storedIds = new Set(listStoredHosts().map((host) => host.id));
@@ -226,12 +230,14 @@ onBeforeUnmount(stopDiscoveryRefresh);
 
 <template>
   <ModalPanel
+    ref="host"
     :open="open"
     :width="480"
     :steps="3"
     :step="step"
     label="Add a machine"
     @close="close"
+    @keydown="onKeydown"
   >
     <!-- Step 1 — type -->
     <template v-if="step === 1">

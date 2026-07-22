@@ -37,6 +37,7 @@ import type {
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 type SectionKey =
   | "scheduler"
@@ -83,6 +84,9 @@ const emit = defineEmits<{
   "open-mask": [];
   "append-prompt": [phrase: string];
 }>();
+const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const overlayOpen = computed(() => props.mobile && props.open);
+const { onKeydown } = useOverlayFocus(overlayOpen, host, () => emit("close"));
 
 const NEG_CHIPS = [
   "blurry",
@@ -324,6 +328,7 @@ function resetAdvanced() {
 
 <template>
   <component
+    ref="host"
     :is="mobile ? SheetPanel : 'section'"
     :class="inline ? 'adv adv--inline' : undefined"
     data-test="advanced-root"
@@ -331,6 +336,7 @@ function resetAdvanced() {
     :variant="mobile ? 'full' : undefined"
     :title="mobile ? 'Advanced' : undefined"
     @close="emit('close')"
+    @keydown="onKeydown"
   >
     <template v-if="mobile" #header>
       <div class="adv__head" data-test="advanced-header">

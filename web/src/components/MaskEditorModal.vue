@@ -29,7 +29,7 @@ const emit = defineEmits<{
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const host = ref<HTMLElement | null>(null);
 const visible = computed(() => props.open && props.sourceImage !== null);
-const { onKeydown } = useOverlayFocus(visible, host);
+const { onKeydown } = useOverlayFocus(visible, host, () => emit("close"));
 
 const modeOptions = [
   { value: "brush" as const, label: "Brush" },

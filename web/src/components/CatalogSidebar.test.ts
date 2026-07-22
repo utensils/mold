@@ -30,13 +30,14 @@ describe("CatalogSidebar", () => {
     expect(w.text()).not.toContain("fine-tunes");
   });
 
-  it("clicking a family row calls setFilter({ family })", async () => {
+  it("renders each family as a keyboard-operable button", async () => {
     const { useCatalog } = await import("../composables/useCatalog");
     const cat = useCatalog();
     const w = mount(CatalogSidebar);
-    const rows = w.findAll("li");
+    const rows = w.findAll("button[data-family]");
     expect(rows.length).toBeGreaterThan(0);
-    await rows[0].trigger("click");
+    expect(rows[0].attributes("data-family")).toBe("flux");
+    await rows[0].trigger("keydown", { key: "Enter" });
     expect(cat.setFilter).toHaveBeenCalledWith({ family: "flux" });
   });
 });

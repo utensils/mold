@@ -100,6 +100,19 @@ describe("CommandK", () => {
     expect(wrapper.emitted("close")).toBeTruthy();
   });
 
+  it("closes on Escape after focus leaves the search input", async () => {
+    const wrapper = await openPalette();
+    const row = wrapper.get("[role='option']");
+    (row.element as HTMLElement).focus();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await nextTick();
+
+    expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
   it("mutates the shared theme refs from theme commands", async () => {
     const wrapper = await openPalette();
     const palette = wrapper.findComponent(PalettePanel);

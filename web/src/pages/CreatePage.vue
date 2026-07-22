@@ -107,11 +107,29 @@ const showAdvanced = ref(false);
 // drawer opens on its first available section.
 const advOpenTo = ref<"lora" | null>(null);
 const showTemplates = ref(false);
+const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
 const preprocessingStatus = ref<string | null>(null);
 const submitStatus = computed(
   () => composerError.value ?? preprocessingStatus.value,
 );
+
+function onTemplatesPointerDown(event: PointerEvent) {
+  if (
+    showTemplates.value &&
+    event.target instanceof Node &&
+    !templatesHost.value?.contains(event.target)
+  ) {
+    showTemplates.value = false;
+  }
+}
+
+function onTemplatesKeydown(event: KeyboardEvent) {
+  if (showTemplates.value && event.key === "Escape") {
+    event.preventDefault();
+    showTemplates.value = false;
+  }
+}
 
 // ── Expand / variations state (spec §03/§06) ──────────────────────────
 // batch = 1 rewrites the prompt in place (undoable); batch > 1 fans out into
@@ -1217,6 +1235,8 @@ onMounted(async () => {
   }
   void refreshHistory();
   window.addEventListener("mold:new-print", onNewPrint);
+  document.addEventListener("pointerdown", onTemplatesPointerDown);
+  document.addEventListener("keydown", onTemplatesKeydown);
   startAutoRefresh();
 });
 
@@ -1224,6 +1244,8 @@ onBeforeUnmount(() => {
   stopAutoRefresh();
   phoneQuery?.removeEventListener?.("change", syncPhone);
   window.removeEventListener("mold:new-print", onNewPrint);
+  document.removeEventListener("pointerdown", onTemplatesPointerDown);
+  document.removeEventListener("keydown", onTemplatesKeydown);
   queue.stop();
 });
 </script>
@@ -1257,7 +1279,7 @@ onBeforeUnmount(() => {
             @update:model-value="setComposerMode"
           />
           <div class="flex-1" />
-          <div class="relative">
+          <div ref="templatesHost" class="relative">
             <button
               type="button"
               class="flex items-center gap-1.5 rounded-control border border-ce px-3 py-1.5 text-xs text-ink-2 hover:bg-white/5"
