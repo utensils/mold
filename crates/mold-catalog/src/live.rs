@@ -331,13 +331,18 @@ pub async fn search_page(
 
 fn paginate_local(entries: Vec<CatalogEntry>, opts: &LiveSearchOpts) -> LiveSearchResult {
     let total = entries.len();
-    let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+    let start = page_offset(opts);
     let entries = entries
         .into_iter()
         .skip(start)
         .take(opts.page_size as usize)
         .collect();
     LiveSearchResult { entries, total }
+}
+
+fn page_offset(opts: &LiveSearchOpts) -> usize {
+    let offset = u64::from(opts.page.saturating_sub(1)).saturating_mul(u64::from(opts.page_size));
+    usize::try_from(offset).unwrap_or(usize::MAX)
 }
 
 pub fn companion_entry_for_id(id: &str) -> Option<CatalogEntry> {
@@ -685,17 +690,17 @@ async fn civitai_search(
         }
     }
     if trimmed_q.is_some() {
-        let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+        let start = page_offset(opts);
         out = out
             .into_iter()
             .skip(start)
             .take(opts.page_size as usize)
             .collect();
     }
-    let observed_end = ((opts.page - 1) * opts.page_size) as usize + out.len();
+    let observed_end = page_offset(opts).saturating_add(out.len());
     let total = metadata
         .total_items
-        .max(observed_end + usize::from(metadata.total_pages > opts.page as usize));
+        .max(observed_end.saturating_add(usize::from(metadata.total_pages > opts.page as usize)));
     Ok(LiveSearchResult {
         entries: out,
         total,
@@ -797,7 +802,7 @@ async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult
         out.push(entry);
     }
     let filtered = out.len();
-    let start = (opts.page.saturating_sub(1) * opts.page_size) as usize;
+    let start = page_offset(opts);
     let entries = out
         .into_iter()
         .skip(start)
@@ -807,7 +812,9 @@ async fn hf_search(base: &str, opts: &LiveSearchOpts) -> Result<LiveSearchResult
     let total = if fetched < requested {
         filtered
     } else {
-        start + entries.len() + usize::from(!entries.is_empty())
+        start
+            .saturating_add(entries.len())
+            .saturating_add(usize::from(!entries.is_empty()))
     };
     Ok(LiveSearchResult { entries, total })
 }
@@ -1169,6 +1176,29 @@ mod tests {
     fn catalog_sort_defaults_to_downloads() {
         assert_eq!(CatalogSort::default(), CatalogSort::Downloads);
         assert_eq!(LiveSearchOpts::default().sort, CatalogSort::Downloads);
+    }
+
+    #[test]
+    fn page_offset_is_safe_for_zero_and_maximum_caller_values() {
+        assert_eq!(page_offset(&LiveSearchOpts::default()), 0);
+        assert_eq!(
+            page_offset(&LiveSearchOpts {
+                page: 0,
+                page_size: u32::MAX,
+                ..Default::default()
+            }),
+            0
+        );
+
+        let expected = u64::from(u32::MAX - 1).saturating_mul(u64::from(u32::MAX));
+        assert_eq!(
+            page_offset(&LiveSearchOpts {
+                page: u32::MAX,
+                page_size: u32::MAX,
+                ..Default::default()
+            }),
+            usize::try_from(expected).unwrap_or(usize::MAX)
+        );
     }
 
     #[tokio::test]
