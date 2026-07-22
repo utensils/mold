@@ -72,7 +72,8 @@ pushed screen opened from the header.
   System, Dark, or Light appearance. Fresh installs start with Safelight +
   System; valid saved choices remain authoritative. Settings also links to host
   management and shows the app version, remote-only processing policy, and
-  TestFlight update channel.
+  TestFlight update channel. About opens the public privacy policy at
+  `https://utensils.io/mold/privacy` through the native external-browser opener.
 
 The app shell suppresses WebKit focus/double-tap page zoom and rubber-band
 overscroll. The Library viewer keeps its scoped horizontal swipe gesture.

@@ -168,7 +168,8 @@ cover:
 - **Appearance:** System, Dark, or Light
 - **Remote hosts:** saved-host count and a shortcut to manage them
 - **About:** app version, remote-only processing, TestFlight updates, and equal
-  project-owner credit for core contributors James Brink and Jeffrey Dilley
+  project-owner credit for core contributors James Brink and Jeffrey Dilley,
+  plus an external link to the [Mold privacy policy](/privacy)
 
 Fresh installs start with the Safelight color family and System appearance.
 Existing users keep any valid Mold or Safelight choice they already saved.

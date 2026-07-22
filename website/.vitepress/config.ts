@@ -37,6 +37,7 @@ export default defineConfig({
       { text: 'Models', link: '/models/' },
       { text: 'API', link: '/api/' },
       { text: 'Deploy', link: '/deployment/' },
+      { text: 'Privacy', link: '/privacy' },
       { text: 'GitHub', link: 'https://github.com/utensils/mold' },
     ],
 

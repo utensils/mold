@@ -454,6 +454,24 @@ button {
   text-align: right;
 }
 
+.mobile-settings-link {
+  min-height: 44px;
+  margin: -8px -11px -8px 0;
+  padding: 8px 11px;
+  border: 0;
+  background: transparent;
+  color: var(--halide);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.mobile-settings-link:focus-visible {
+  border-radius: var(--radius-control);
+  outline: 2px solid var(--safelight);
+  outline-offset: -2px;
+}
+
 .section-title {
   margin: 6px 0 0;
   font-family: var(--font-display);
