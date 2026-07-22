@@ -294,6 +294,11 @@ such as `/generate` and `/catalog` render Page Not Found:
   surfaces HTTP 503 / `Retry-After` cleanly when `--queue-size` is reached.
 - img2img works via upload or the From Gallery picker; video-family models are
   grouped with a 🎬 badge and frames are clamped to 8n+1 automatically.
+- Library's print viewer keeps media bound to its owning host, restores the
+  saved model family on **Reuse settings**, and shows the recorded steps,
+  guidance, scheduler, LoRAs, prompts, file details, and copyable prompt/seed.
+  **Upscale...** returns the print to Create with the installed default
+  upscaler selected.
 - Prompt expansion modal offers live preview + variation picker (requires
   `qwen3-expand` installed on the server).
 - Prompt, model, size, steps, guidance, and batch persist in `localStorage`.

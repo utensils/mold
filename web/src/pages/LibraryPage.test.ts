@@ -14,9 +14,10 @@ import {
 } from "../composables/useGenerateForm";
 import type { GalleryImage } from "../types";
 
-const { listGalleryMock, deleteMock } = vi.hoisted(() => ({
+const { listGalleryMock, deleteMock, fetchModelsMock } = vi.hoisted(() => ({
   listGalleryMock: vi.fn(),
   deleteMock: vi.fn(),
+  fetchModelsMock: vi.fn(),
 }));
 const { hostDeleteMock, fetchBlobMock } = vi.hoisted(() => ({
   hostDeleteMock: vi.fn(),
@@ -29,6 +30,7 @@ const { pushMock, replaceMock } = vi.hoisted(() => ({
 
 vi.mock("../api", () => ({
   listGallery: listGalleryMock,
+  fetchModels: fetchModelsMock,
   deleteGalleryImage: deleteMock,
   imageUrl: (f: string) => `/api/gallery/image/${f}`,
   thumbnailUrl: (f: string) => `/api/gallery/thumbnail/${f}`,
@@ -168,6 +170,24 @@ describe("LibraryPage", () => {
     resetNotifications();
     formTesting.resetForTest();
     listGalleryMock.mockReset().mockResolvedValue([cat, dog]);
+    fetchModelsMock.mockReset().mockResolvedValue([
+      {
+        name: "flux-dev:fp16",
+        family: "flux",
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+      },
+      {
+        name: "sdxl:fp16",
+        family: "sdxl",
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 30,
+        default_guidance: 7.5,
+      },
+    ]);
     deleteMock.mockReset().mockResolvedValue(undefined);
     hostDeleteMock.mockReset().mockResolvedValue(undefined);
     fetchBlobMock.mockReset().mockResolvedValue(new Blob(["bytes"]));
@@ -234,6 +254,17 @@ describe("LibraryPage", () => {
 
     expect(useGenerateForm().state.value.prompt).toBe("a wandering cat");
     expect(pushMock).toHaveBeenCalledWith({ name: "create" });
+  });
+
+  it("reuse restores the selected model's family defaults", async () => {
+    const wrapper = await mounted();
+    await wrapper.find("[data-test='grid-open-last']").trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.find("[data-test='lb-reuse']").trigger("click");
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.model).toBe("sdxl:fp16");
+    expect(useGenerateForm().state.value.modelFamily).toBe("sdxl");
   });
 
   it("single delete removes optimistically and commits only after the window", async () => {

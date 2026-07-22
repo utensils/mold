@@ -14,7 +14,7 @@ import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
-import { deleteGalleryImage } from "../api";
+import { deleteGalleryImage, fetchModels } from "../api";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
 import { requestConfirm, toast, undoableAction } from "../lib/toasts";
@@ -34,7 +34,7 @@ import {
   originHost,
 } from "../lib/hostRegistry";
 import { hostDeleteGalleryImage } from "../components/machines/hostClient";
-import type { GalleryImage } from "../types";
+import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import GalleryGrid from "../components/gallery/GalleryGrid.vue";
 import GalleryFeed from "../components/GalleryFeed.vue";
@@ -57,6 +57,7 @@ function loadViewMode(): ViewMode {
 }
 
 const entries = ref<HostGalleryImage[]>([]);
+const models = ref<ModelInfoExtended[]>([]);
 // Hosts whose /api/gallery failed this refresh (surfaced, not hidden), and
 // how many non-origin hosts were attempted (drives the honest count line).
 const unreachableHostIds = ref<string[]>([]);
@@ -420,6 +421,7 @@ function onReuse(item: GalleryImage) {
   // Existing recreate flow — restore serialized knobs, then land on Create.
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
+    models: models.value,
   });
   closeLightbox();
   void router.push({ name: "create" });
@@ -528,7 +530,11 @@ onBeforeUnmount(() => {
 });
 
 onMounted(async () => {
-  await refresh();
+  const [, listing] = await Promise.all([
+    refresh(),
+    fetchModels().catch(() => [] as ModelInfoExtended[]),
+  ]);
+  models.value = listing;
 });
 </script>
 

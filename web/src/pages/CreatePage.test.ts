@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent, nextTick } from "vue";
+import { defineComponent, nextTick, type Component } from "vue";
 import CreatePage from "./CreatePage.vue";
 import {
   useGenerateForm,
@@ -172,6 +172,54 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
     const feed = wrapper.findComponent(RecentGridStub);
     expect(feed.props("entries")).toEqual([entry]);
+  });
+
+  it("configures an upscaler when the lightbox Upscale action is chosen", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "real-esrgan-x4plus:fp16",
+        family: "real-esrgan",
+        size_gb: 0.1,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 1,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "Upscaler",
+      },
+    ]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["image"]),
+    })) as never;
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.RecentGrid = defineComponent({
+      props: ["entries"],
+      template:
+        '<button data-test="open-recent" @click="$emit(\'open\', entries[0])">open</button>',
+    });
+    stubs.Lightbox = defineComponent({
+      props: ["item"],
+      template:
+        '<button v-if="item" data-test="lightbox-upscale" @click="$emit(\'upscale\', item)">upscale</button>',
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+    await wrapper.get('[data-test="open-recent"]').trigger("click");
+    await wrapper.get('[data-test="lightbox-upscale"]').trigger("click");
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.imageAttachments[0]?.filename).toBe(
+      entry.filename,
+    );
+    expect(useGenerateForm().state.value.upscaleModel).toBe(
+      "real-esrgan-x4plus:fp16",
+    );
+    globalThis.fetch = originalFetch;
   });
 
   it("guides a first pull when no models are installed (cold start)", async () => {

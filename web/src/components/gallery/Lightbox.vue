@@ -70,7 +70,8 @@ const hostEntry = computed(() => {
 });
 const hostLabel = computed(() => {
   const item = props.item as { hostLabel?: string } | null;
-  return item?.hostLabel ?? hostEntry.value?.name ?? "local";
+  const hostId = (props.item as { hostId?: string } | null)?.hostId;
+  return item?.hostLabel ?? hostEntry.value?.name ?? hostId ?? "local";
 });
 
 const mediaSrc = ref("");
@@ -89,6 +90,14 @@ function resolveMedia() {
     return;
   }
   const host = hostEntry.value;
+  const hostId = (item as { hostId?: string }).hostId;
+  if (hostId && !host) {
+    mediaSrc.value = "";
+    posterSrc.value = "";
+    streamBlocked.value = true;
+    streamMessage.value = `${hostLabel.value} isn't connected anymore.`;
+    return;
+  }
   if (!host) {
     mediaSrc.value = imageUrl(item.filename);
     posterSrc.value = thumbnailUrl(item.filename);
@@ -136,6 +145,58 @@ const dimensions = computed(() =>
   props.item ? formatResolution(props.item.metadata) : "",
 );
 const seed = computed(() => props.item?.metadata.seed ?? null);
+const steps = computed(() => props.item?.metadata.steps ?? null);
+const guidance = computed(() => props.item?.metadata.guidance ?? null);
+const scheduler = computed(() => {
+  const value = props.item?.metadata.scheduler;
+  if (!value) return "—";
+  if (typeof value === "string") return value;
+  return Object.keys(value)[0] ?? "—";
+});
+const negativePrompt = computed(
+  () => props.item?.metadata.negative_prompt?.trim() ?? "",
+);
+const originalPrompt = computed(
+  () => props.item?.metadata.original_prompt?.trim() ?? "",
+);
+const loraLabel = computed(() => {
+  const metadata = props.item?.metadata;
+  const stack = metadata?.loras?.length
+    ? metadata.loras
+    : metadata?.lora
+      ? [{ path: metadata.lora, scale: metadata.lora_scale ?? 1 }]
+      : [];
+  return stack.map((lora) => `${lora.path} · ${lora.scale}`).join(", ");
+});
+const formatLabel = computed(() =>
+  (
+    props.item?.format ??
+    props.item?.metadata.output_format ??
+    "—"
+  ).toUpperCase(),
+);
+const sizeLabel = computed(() => {
+  const bytes = props.item?.size_bytes;
+  if (bytes == null) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+});
+const timestampLabel = computed(() => {
+  const timestamp = props.item?.timestamp;
+  if (!timestamp) return "—";
+  return new Date(timestamp * 1000).toLocaleString();
+});
+
+async function copyText(value: string) {
+  if (!value || typeof navigator === "undefined" || !navigator.clipboard)
+    return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    // Clipboard access can be denied outside a secure browser context.
+  }
+}
 
 // ── Responsive layout ──────────────────────────────────────────────────────
 // Resolve the breakpoint at setup so the correct layout renders on the first
@@ -324,7 +385,16 @@ function onDelete() {
             </button>
           </div>
 
-          <p v-if="prompt" class="lb__prompt">{{ prompt }}</p>
+          <div v-if="prompt" class="lb__prompt-wrap">
+            <p class="lb__prompt">{{ prompt }}</p>
+            <button
+              data-test="copy-prompt"
+              class="lb__copy"
+              @click="copyText(prompt)"
+            >
+              Copy prompt
+            </button>
+          </div>
           <p v-else class="lb__prompt lb__prompt--empty">No prompt recorded.</p>
 
           <div class="lb__rows">
@@ -332,7 +402,16 @@ function onDelete() {
               <span class="lb__rowk">Model</span><span>{{ modelLabel }}</span>
             </div>
             <div class="lb__row">
-              <span class="lb__rowk">Seed</span><span>{{ seed ?? "—" }}</span>
+              <span class="lb__rowk">Seed</span
+              ><button
+                v-if="seed != null"
+                data-test="copy-seed"
+                class="lb__rowcopy"
+                @click="copyText(String(seed))"
+              >
+                {{ seed }}
+              </button>
+              <span v-else>—</span>
             </div>
             <div class="lb__row">
               <span class="lb__rowk">Dimensions</span
@@ -340,6 +419,36 @@ function onDelete() {
             </div>
             <div class="lb__row">
               <span class="lb__rowk">Host</span><span>{{ hostLabel }}</span>
+            </div>
+            <div class="lb__row">
+              <span class="lb__rowk">Steps</span><span>{{ steps ?? "—" }}</span>
+            </div>
+            <div class="lb__row">
+              <span class="lb__rowk">Guidance</span
+              ><span>{{ guidance ?? "—" }}</span>
+            </div>
+            <div class="lb__row">
+              <span class="lb__rowk">Scheduler</span
+              ><span>{{ scheduler }}</span>
+            </div>
+            <div v-if="loraLabel" class="lb__row">
+              <span class="lb__rowk">LoRA</span><span>{{ loraLabel }}</span>
+            </div>
+            <div v-if="negativePrompt" class="lb__row lb__row--long">
+              <span class="lb__rowk">Negative</span
+              ><span>{{ negativePrompt }}</span>
+            </div>
+            <div v-if="originalPrompt" class="lb__row lb__row--long">
+              <span class="lb__rowk">Original</span
+              ><span>{{ originalPrompt }}</span>
+            </div>
+            <div class="lb__row">
+              <span class="lb__rowk">File</span
+              ><span>{{ formatLabel }} · {{ sizeLabel }}</span>
+            </div>
+            <div class="lb__row">
+              <span class="lb__rowk">Created</span
+              ><span>{{ timestampLabel }}</span>
             </div>
           </div>
 
@@ -510,13 +619,42 @@ function onDelete() {
         </div>
 
         <div class="lb__sheet">
-          <p v-if="prompt" class="lb__prompt">{{ prompt }}</p>
+          <div v-if="prompt" class="lb__prompt-wrap">
+            <p class="lb__prompt">{{ prompt }}</p>
+            <button
+              data-test="copy-prompt"
+              class="lb__copy"
+              @click="copyText(prompt)"
+            >
+              Copy prompt
+            </button>
+          </div>
           <div class="lb__chips">
             <span class="lb__chip">{{ modelLabel }}</span>
             <span class="lb__chip">seed {{ seed ?? "—" }}</span>
+            <button
+              v-if="seed != null"
+              data-test="copy-seed"
+              class="lb__chip"
+              @click="copyText(String(seed))"
+            >
+              Copy seed
+            </button>
             <span v-if="dimensions" class="lb__chip">{{ dimensions }}</span>
             <span class="lb__chip">{{ hostLabel }}</span>
+            <span class="lb__chip">{{ steps ?? "—" }} steps</span>
+            <span class="lb__chip">CFG {{ guidance ?? "—" }}</span>
+            <span class="lb__chip">{{ formatLabel }}</span>
           </div>
+          <p v-if="originalPrompt" class="lb__mobile-meta">
+            <b>Original:</b> {{ originalPrompt }}
+          </p>
+          <p v-if="negativePrompt" class="lb__mobile-meta">
+            <b>Negative:</b> {{ negativePrompt }}
+          </p>
+          <p v-if="loraLabel" class="lb__mobile-meta">
+            <b>LoRA:</b> {{ loraLabel }}
+          </p>
           <button class="lb__reuse" @click="onReuse">
             <svg
               viewBox="0 0 24 24"
@@ -672,6 +810,8 @@ function onDelete() {
   padding: 24px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .lb__phead {
@@ -780,6 +920,33 @@ function onDelete() {
   margin: 0 0 20px;
   white-space: pre-wrap;
 }
+.lb__prompt-wrap {
+  margin-bottom: 20px;
+}
+.lb__prompt-wrap .lb__prompt {
+  margin-bottom: 7px;
+}
+.lb__copy,
+.lb__rowcopy {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--safelight);
+  font: inherit;
+  cursor: pointer;
+}
+.lb__copy {
+  font-family: var(--f-mono);
+  font-size: 10.5px;
+}
+.lb__rowcopy {
+  text-align: right;
+}
+.lb__copy:focus-visible,
+.lb__rowcopy:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
 .lb__prompt--empty {
   color: var(--ink-3);
   font-style: italic;
@@ -804,6 +971,11 @@ function onDelete() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.lb__row--long span:last-child {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 .lb__rowk {
   color: var(--ink-3);
@@ -936,6 +1108,15 @@ function onDelete() {
 .lb__sheet .lb__prompt {
   font-size: 14px;
   margin-bottom: 13px;
+}
+.lb__sheet .lb__prompt-wrap {
+  margin-bottom: 13px;
+}
+.lb__mobile-meta {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.4;
 }
 .lb__chips {
   display: flex;
