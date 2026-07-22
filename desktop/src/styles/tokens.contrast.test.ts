@@ -9,17 +9,20 @@ const css = readFileSync("../ui/tokens.css", "utf8");
 
 type Palette = Record<string, string>;
 
-function block(selector: string): string {
+function block(selector: string, nth = 1): string {
   const marker = `${selector} {`;
-  const start = css.indexOf(marker);
-  if (start < 0) throw new Error(`Missing CSS block: ${selector}`);
+  let start = -1;
+  for (let i = 0; i < nth; i++) {
+    start = css.indexOf(marker, start + 1);
+    if (start < 0) throw new Error(`Missing CSS block: ${selector} (occurrence ${nth})`);
+  }
   const bodyStart = start + marker.length;
   return css.slice(bodyStart, css.indexOf("}", bodyStart));
 }
 
-function declarations(selector: string): Palette {
+function declarations(selector: string, nth = 1): Palette {
   return Object.fromEntries(
-    [...block(selector).matchAll(/--([\w-]+):\s*([^;]+);/g)].map((match) => [
+    [...block(selector, nth).matchAll(/--([\w-]+):\s*([^;]+);/g)].map((match) => [
       match[1]!,
       match[2]!.trim(),
     ]),
@@ -78,16 +81,20 @@ function token(theme: Palette, name: string): string {
   return value;
 }
 
+// System-light palettes live in `@media (prefers-color-scheme: light)` blocks
+// whose selectors are plain `:root` / `:root[data-theme-family="mold"]` (the
+// design-tool token compiler can't read :not() scopes), so they are the SECOND
+// occurrence of those selectors; ui/tokens.test.ts pins that source order.
 const base = declarations(":root");
 const themes = {
   "Safelight dark": base,
-  "Safelight system light": { ...base, ...declarations(':root:not([data-theme="dark"])') },
+  "Safelight system light": { ...base, ...declarations(":root", 2) },
   "Safelight light": { ...base, ...declarations(':root[data-theme="light"]') },
   "Mold dark": { ...base, ...declarations(':root[data-theme-family="mold"]') },
   "Mold system light": {
     ...base,
     ...declarations(':root[data-theme-family="mold"]'),
-    ...declarations(':root[data-theme-family="mold"]:not([data-theme="dark"])'),
+    ...declarations(':root[data-theme-family="mold"]', 2),
   },
   "Mold light": {
     ...base,

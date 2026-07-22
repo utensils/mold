@@ -12,6 +12,16 @@
  * halide is cool/informational (models, telemetry, links). Selection derives
  * one set (--sel-*) from the accent — never a new hue. No component may
  * hard-code hex; a new theme is added by extending this file only.
+ *
+ * Scope structure: every block is a plain attribute scope — the light media
+ * blocks use bare :root / :root[data-theme-family="mold"], and explicit
+ * [data-theme="dark"] blocks (specificity over the media block) restore the
+ * dark palette when dark is forced under a light system preference. Design
+ * tokenizers only register properties under plain scopes, so no :not()
+ * selectors here. The resulting cross-scope duplication is guarded by
+ * ui/tokens.test.ts — palettes must stay mirrored between their system-follow
+ * and forced blocks. Trailing "@kind" comments type the tokens whose kind
+ * can't be inferred from the value.
  */
 
 :root {
@@ -27,7 +37,12 @@
   --warning: #f5a623;
   --stop: #e5715a;
   --on-accent: #1a1206;
-  --grad: linear-gradient(96deg, #f0b429, #f0743f 55%, #d96b8f);
+  --grad: linear-gradient(
+    96deg,
+    #f0b429,
+    #f0743f 55%,
+    #d96b8f
+  ); /* @kind color */
   --card-hi: rgba(255, 244, 230, 0.05);
 
   /* ── Derived (recompute automatically per palette) ─────────────── */
@@ -46,9 +61,9 @@
   --on-media: #f5efff;
 
   /* ── Type ──────────────────────────────────────────────────────── */
-  --f-display: "Bricolage Grotesque", system-ui, sans-serif;
-  --f-body: "Schibsted Grotesk", system-ui, sans-serif;
-  --f-mono: "Martian Mono", ui-monospace, monospace;
+  --f-display: "Bricolage Grotesque", system-ui, sans-serif; /* @kind font */
+  --f-body: "Schibsted Grotesk", system-ui, sans-serif; /* @kind font */
+  --f-mono: "Martian Mono", ui-monospace, monospace; /* @kind font */
 
   /* ── Radius: controls 6–10 · cards 12–16 · pills/chips 20 ─────── */
   --radius-control-sm: 6px;
@@ -59,17 +74,17 @@
   --radius-pill: 20px;
 
   /* ── Motion (spec §09) ─────────────────────────────────────────── */
-  --dur-quick: 120ms;
-  --dur-base: 180ms;
-  --dur-slow: 240ms;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-quick: 120ms; /* @kind other */
+  --dur-base: 180ms; /* @kind other */
+  --dur-slow: 240ms; /* @kind other */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1); /* @kind other */
 
   color-scheme: dark;
 }
 
-/* ── Safelight · Light ("lights on") ─────────────────────────────── */
+/* ── Safelight · Light ("lights on", following the system) ───────── */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
+  :root {
     --desk: #e6dcc7;
     --bath: #f7f1e6;
     --bench: #fffdf8;
@@ -86,6 +101,26 @@
     color-scheme: light;
   }
 }
+
+/* ── Safelight · forced Dark (undoes the light media block above) ── */
+:root[data-theme="dark"] {
+  --desk: #0a0805;
+  --bath: #171210;
+  --bench: #241c15;
+  --surface: #332619;
+  --rebate: #f1e8da;
+  --halide: #8fb4c4;
+  --safelight: #f79433;
+  --success: #8fd39a;
+  --stop: #e5715a;
+  --on-accent: #1a1206;
+  --grad: linear-gradient(96deg, #f0b429, #f0743f 55%, #d96b8f);
+  --card-hi: rgba(255, 244, 230, 0.05);
+  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
+  color-scheme: dark;
+}
+
+/* ── Safelight · forced Light ────────────────────────────────────── */
 :root[data-theme="light"] {
   --desk: #e6dcc7;
   --bath: #f7f1e6;
@@ -121,9 +156,9 @@
   color-scheme: dark;
 }
 
-/* ── Mold · Light ────────────────────────────────────────────────── */
+/* ── Mold · Light (following the system) ─────────────────────────── */
 @media (prefers-color-scheme: light) {
-  :root[data-theme-family="mold"]:not([data-theme="dark"]) {
+  :root[data-theme-family="mold"] {
     --desk: #e5e0f1;
     --bath: #f6f4fb;
     --bench: #ffffff;
@@ -140,6 +175,26 @@
     color-scheme: light;
   }
 }
+
+/* ── Mold · forced Dark (undoes the light media block above) ─────── */
+:root[data-theme-family="mold"][data-theme="dark"] {
+  --desk: #08060f;
+  --bath: #14111f;
+  --bench: #221c34;
+  --surface: #2e2743;
+  --rebate: #f3effb;
+  --halide: #5cd0ff;
+  --safelight: #e879f9;
+  --success: #6ee7a5;
+  --stop: #fb7185;
+  --on-accent: #150f1e;
+  --grad: linear-gradient(96deg, #89dceb, #89b4fa 45%, #cba6f7);
+  --card-hi: rgba(255, 255, 255, 0.055);
+  --ce: color-mix(in srgb, var(--rebate) 30%, transparent);
+  color-scheme: dark;
+}
+
+/* ── Mold · forced Light ─────────────────────────────────────────── */
 :root[data-theme-family="mold"][data-theme="light"] {
   --desk: #e5e0f1;
   --bath: #f6f4fb;
