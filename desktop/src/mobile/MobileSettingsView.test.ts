@@ -1,9 +1,13 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
 const { openExternalMock } = vi.hoisted(() => ({ openExternalMock: vi.fn() }));
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
+
+beforeEach(() => {
+  openExternalMock.mockClear();
+});
 
 describe("MobileSettingsView", () => {
   it("offers accessible theme choices and emits immediate updates", async () => {
@@ -56,6 +60,7 @@ describe("MobileSettingsView", () => {
 
     await wrapper.get("[data-test='mobile-privacy-policy']").trigger("click");
 
+    expect(openExternalMock).toHaveBeenCalledOnce();
     expect(openExternalMock).toHaveBeenCalledWith("https://utensils.io/mold/privacy");
   });
 });
