@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import { settleConfirm, useNotifications } from "../../lib/toasts";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 /*
  * App-level dialog for destructive actions and small decisions (spec §08
@@ -15,6 +16,9 @@ const typed = ref("");
 const textValue = ref("");
 
 const confirm = computed(() => notifications.confirm);
+const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const open = computed(() => confirm.value !== null);
+const { onKeydown } = useOverlayFocus(open, host, () => cancel());
 
 watch(confirm, (request) => {
   typed.value = "";
@@ -44,10 +48,12 @@ function accept() {
 <template>
   <ModalPanel
     v-if="confirm"
+    ref="host"
     :open="true"
     :width="420"
     :label="confirm.title"
     @close="cancel"
+    @keydown="onKeydown"
   >
     <div class="confirm">
       <div class="confirm__title">{{ confirm.title }}</div>

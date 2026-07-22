@@ -5,7 +5,7 @@
  * lazily each time the palette opens). App owns the open/toggle keybinding;
  * this component owns the query and the filtered item list.
  */
-import { computed, ref, watch } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import PalettePanel from "@ui/components/PalettePanel.vue";
 import {
@@ -18,6 +18,7 @@ import {
 import { fetchModels } from "../../api";
 import { useGenerateForm } from "../../composables/useGenerateForm";
 import type { ModelInfoExtended } from "../../types";
+import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -27,6 +28,10 @@ const form = useGenerateForm();
 
 const query = ref("");
 const models = ref<ModelInfoExtended[]>([]);
+const host = ref<HTMLElement | { $el?: unknown } | null>(null);
+const { onKeydown } = useOverlayFocus(toRef(props, "open"), host, () =>
+  emit("close"),
+);
 
 const ctx: CommandContext = {
   go: (path) => {
@@ -84,6 +89,7 @@ watch(
 
 <template>
   <PalettePanel
+    ref="host"
     :open="open"
     :query="query"
     :items="items"
@@ -91,5 +97,6 @@ watch(
     @close="emit('close')"
     @update:query="query = $event"
     @run="run"
+    @keydown="onKeydown"
   />
 </template>

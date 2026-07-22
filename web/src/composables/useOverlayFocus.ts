@@ -8,7 +8,9 @@
  * element that opened the overlay — is:
  *
  *   1. trap Tab / Shift+Tab inside the panel while it is open, and
- *   2. return focus to the opener when it closes.
+ *   2. return focus to the opener when it closes,
+ *   3. lock background scrolling, and
+ *   4. keep Escape working if focus is moved outside the panel.
  *
  * This composable supplies both, so an overlay only has to bind `onKeydown`
  * to the element that wraps its panel. Keep it here rather than in `ui/`: the
@@ -16,6 +18,28 @@
  * focus-restoration rules.
  */
 import { onBeforeUnmount, watch, type Ref } from "vue";
+
+let bodyScrollLocks = 0;
+let previousBodyOverflow = "";
+const overlayFocusStack: symbol[] = [];
+
+function lockBodyScroll() {
+  if (typeof document === "undefined") return;
+  if (bodyScrollLocks === 0) {
+    previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  bodyScrollLocks += 1;
+}
+
+function unlockBodyScroll() {
+  if (typeof document === "undefined" || bodyScrollLocks === 0) return;
+  bodyScrollLocks -= 1;
+  if (bodyScrollLocks === 0) {
+    document.body.style.overflow = previousBodyOverflow;
+    previousBodyOverflow = "";
+  }
+}
 
 /**
  * Tabbable descendants. `[tabindex="-1"]` is excluded on every branch so the
@@ -38,15 +62,25 @@ export function focusableWithin(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
 }
 
+type OverlayContainer = HTMLElement | { $el?: unknown } | null;
+
+function rootElement(value: OverlayContainer): HTMLElement | null {
+  if (value instanceof HTMLElement) return value;
+  return value?.$el instanceof HTMLElement ? value.$el : null;
+}
+
 /**
  * @param open       reactive open flag for the overlay
  * @param container  the element wrapping the panel; the trap's boundary
  */
 export function useOverlayFocus(
   open: Ref<boolean>,
-  container: Ref<HTMLElement | null>,
+  container: Ref<OverlayContainer>,
+  close?: () => void,
 ) {
   let opener: HTMLElement | null = null;
+  let engaged = false;
+  const stackToken = Symbol("overlay-focus");
 
   function restore() {
     const target = opener;
@@ -56,27 +90,10 @@ export function useOverlayFocus(
     if (target && target.isConnected) target.focus();
   }
 
-  watch(
-    open,
-    (isOpen, wasOpen) => {
-      if (isOpen && !wasOpen) {
-        const active = document.activeElement;
-        opener = active instanceof HTMLElement ? active : null;
-      } else if (!isOpen && wasOpen) {
-        restore();
-      }
-    },
-    { immediate: true },
-  );
-
-  onBeforeUnmount(() => {
-    if (open.value) restore();
-  });
-
   /** Bind to the overlay host: `@keydown="onKeydown"`. */
   function onKeydown(event: KeyboardEvent) {
-    if (event.key !== "Tab") return;
-    const root = container.value;
+    if (event.defaultPrevented || event.key !== "Tab") return;
+    const root = rootElement(container.value);
     if (!root) return;
 
     const items = focusableWithin(root);
@@ -106,6 +123,61 @@ export function useOverlayFocus(
       first.focus();
     }
   }
+
+  function onDocumentKeydown(event: KeyboardEvent) {
+    if (
+      !open.value ||
+      overlayFocusStack[overlayFocusStack.length - 1] !== stackToken
+    )
+      return;
+    if (event.key === "Escape" && close) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      close();
+      return;
+    }
+    const root = rootElement(container.value);
+    if (event.key === "Tab" && root && !root.contains(event.target as Node)) {
+      onKeydown(event);
+    }
+  }
+
+  function engage() {
+    if (engaged || typeof document === "undefined") return;
+    engaged = true;
+    lockBodyScroll();
+    overlayFocusStack.push(stackToken);
+    document.addEventListener("keydown", onDocumentKeydown, true);
+  }
+
+  function disengage() {
+    if (!engaged || typeof document === "undefined") return;
+    engaged = false;
+    document.removeEventListener("keydown", onDocumentKeydown, true);
+    const index = overlayFocusStack.lastIndexOf(stackToken);
+    if (index >= 0) overlayFocusStack.splice(index, 1);
+    unlockBodyScroll();
+  }
+
+  watch(
+    open,
+    (isOpen, wasOpen) => {
+      if (isOpen && !wasOpen) {
+        const active = document.activeElement;
+        opener = active instanceof HTMLElement ? active : null;
+        engage();
+      } else if (!isOpen && wasOpen) {
+        disengage();
+        restore();
+      }
+    },
+    { immediate: true },
+  );
+
+  onBeforeUnmount(() => {
+    disengage();
+    if (open.value) restore();
+  });
 
   return { onKeydown };
 }

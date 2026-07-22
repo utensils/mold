@@ -13,8 +13,11 @@ const Overlay = defineComponent({
   setup(props) {
     const host = ref<HTMLElement | null>(null);
     const open = ref(props.open);
-    const { onKeydown } = useOverlayFocus(open, host);
-    return { host, onKeydown, open };
+    const closed = ref(0);
+    const { onKeydown } = useOverlayFocus(open, host, () => {
+      closed.value += 1;
+    });
+    return { host, onKeydown, open, closed };
   },
   render() {
     if (!this.open) return null;
@@ -46,6 +49,53 @@ describe("focusableWithin", () => {
 });
 
 describe("useOverlayFocus", () => {
+  it("locks body scrolling while open and restores the prior value", async () => {
+    document.body.style.overflow = "clip";
+    const w = mount(Overlay, { props: { open: false } });
+
+    w.vm.open = true;
+    await w.vm.$nextTick();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    w.vm.open = false;
+    await w.vm.$nextTick();
+    expect(document.body.style.overflow).toBe("clip");
+    document.body.style.overflow = "";
+    w.unmount();
+  });
+
+  it("closes on Escape even when focus escaped the overlay", async () => {
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    const w = mount(Overlay, {
+      props: { open: true },
+      attachTo: document.body,
+    });
+    outside.focus();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(w.vm.closed).toBe(1);
+    outside.remove();
+    w.unmount();
+  });
+
+  it("lets only the top stacked overlay handle Escape", () => {
+    const lower = mount(Overlay, { props: { open: true } });
+    const upper = mount(Overlay, { props: { open: true } });
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(lower.vm.closed).toBe(0);
+    expect(upper.vm.closed).toBe(1);
+    upper.unmount();
+    lower.unmount();
+  });
+
   it("cycles Tab and Shift+Tab across the panel's edges", () => {
     const w = mount(Overlay, {
       props: { open: true },

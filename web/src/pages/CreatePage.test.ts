@@ -174,6 +174,33 @@ describe("CreatePage layout and behavior", () => {
     expect(feed.props("entries")).toEqual([entry]);
   });
 
+  it("dismisses the Templates popover with Escape and outside click", async () => {
+    const wrapper = mount(CreatePage, {
+      attachTo: document.body,
+      global: { stubs: pageStubs() },
+    });
+
+    await wrapper.get("[data-test='templates-toggle']").trigger("click");
+    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(true);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await nextTick();
+    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+      false,
+    );
+
+    await wrapper.get("[data-test='templates-toggle']").trigger("click");
+    document.body.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true }),
+    );
+    await nextTick();
+    expect(wrapper.find("[data-test='templates-popover']").exists()).toBe(
+      false,
+    );
+    wrapper.unmount();
+  });
+
   it("configures an upscaler when the lightbox Upscale action is chosen", async () => {
     hostModelsMock.mockResolvedValue([
       {
