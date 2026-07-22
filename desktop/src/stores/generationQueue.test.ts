@@ -7,7 +7,7 @@ import { flushPromises } from "@vue/test-utils";
 const openStreams: Array<{
   onEvent: (event: string, data: string) => void;
   signal: AbortSignal;
-  onClose?: (error: Error | null) => void;
+  onClose: ((error: Error | null) => void) | undefined;
   resolve: () => void;
 }> = [];
 
