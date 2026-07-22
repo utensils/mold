@@ -49,6 +49,7 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     workStarted: true,
     hostId: null,
     hostLabel: null,
+    target: null,
     serverId: "srv-1",
     ...overrides,
   };
@@ -144,6 +145,48 @@ describe("startQueueReconciler (live polling)", () => {
     expect(jobs.value[0].state).toBe("running");
     expect(jobs.value[1].state).toBe("error");
 
+    handle.stop();
+    vi.useRealTimers();
+  });
+
+  it("polls each job's routed host and reconciles only against that host", async () => {
+    vi.useFakeTimers();
+    const studio = { baseUrl: "http://studio:7680", apiKey: "sk-studio" };
+    vi.mocked(fetchQueue).mockImplementation(async (target) => ({
+      entries:
+        target?.baseUrl === studio.baseUrl
+          ? [
+              {
+                id: "remote-keep",
+                model: "flux-dev:fp16",
+                state: "running",
+                started_at_unix_ms: 0,
+                position: 0,
+              },
+            ]
+          : [],
+    }));
+    const remote = makeJob({
+      id: "remote-client",
+      serverId: "remote-keep",
+      hostId: "studio",
+      target: studio,
+      lastProgressAt: 0,
+    });
+    const originZombie = makeJob({
+      id: "origin-client",
+      serverId: "origin-gone",
+      lastProgressAt: 0,
+    });
+    const jobs = ref([remote, originZombie]);
+    const handle = startQueueReconciler(jobs, { intervalMs: 1_000 });
+
+    await vi.advanceTimersByTimeAsync(RECONCILE_GRACE_MS + 2_100);
+
+    expect(fetchQueue).toHaveBeenCalledWith(studio);
+    expect(fetchQueue).toHaveBeenCalledWith(undefined);
+    expect(remote.state).toBe("running");
+    expect(originZombie.state).toBe("error");
     handle.stop();
     vi.useRealTimers();
   });

@@ -13,7 +13,7 @@ import ProgressRing from "@ui/components/ProgressRing.vue";
 
 const props = withDefaults(
   defineProps<{
-    mode: "empty" | "generating" | "result" | "variations";
+    mode: "empty" | "generating" | "result" | "error" | "variations";
     /** generating — 0–100. */
     progress?: number;
     /** generating — stage line, e.g. "Developing 12 / 28". */
@@ -21,6 +21,8 @@ const props = withDefaults(
     /** result — image URL and prebuilt mono caption. */
     resultSrc?: string;
     resultCaption?: string;
+    /** error — server or transport failure copy. */
+    error?: string;
     /** variations — the editable prompt list. */
     variations?: string[];
   }>(),
@@ -70,6 +72,20 @@ function editVariation(index: number, value: string) {
       <img class="canvas__img" :src="resultSrc" alt="Generated print" />
       <div class="canvas__caption" data-test="canvas-caption">
         {{ resultCaption }}
+      </div>
+    </div>
+
+    <div
+      v-else-if="mode === 'error'"
+      class="canvas__error"
+      data-test="canvas-error"
+    >
+      <div class="canvas__error-mark" aria-hidden="true">!</div>
+      <div>
+        <div class="canvas__error-title">Generation failed</div>
+        <div class="canvas__error-copy">
+          {{ error || "Unknown generation error" }}
+        </div>
       </div>
     </div>
 
@@ -182,6 +198,39 @@ function editVariation(index: number, value: string) {
   font-family: var(--f-mono);
   font-size: 10.5px;
   color: var(--ink-3);
+}
+
+.canvas__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 520px;
+  color: var(--stop);
+}
+
+.canvas__error-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-family: var(--f-mono);
+  font-weight: 700;
+}
+
+.canvas__error-title {
+  font-family: var(--f-display);
+  font-weight: 600;
+}
+
+.canvas__error-copy {
+  margin-top: 4px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
 }
 
 .canvas__variations {

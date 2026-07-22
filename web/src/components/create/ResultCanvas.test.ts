@@ -36,6 +36,15 @@ describe("ResultCanvas", () => {
     );
   });
 
+  it("renders a generation error instead of silently returning to empty", () => {
+    const wrapper = mount(ResultCanvas, {
+      props: { mode: "error", error: "CUDA out of memory" },
+    });
+    expect(wrapper.get("[data-test='canvas-error']").text()).toContain(
+      "CUDA out of memory",
+    );
+  });
+
   it("renders editable variations and emits edits, use, discard and queue", async () => {
     const wrapper = mount(ResultCanvas, {
       props: { mode: "variations", variations: ["one", "two"] },

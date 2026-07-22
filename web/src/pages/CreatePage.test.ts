@@ -45,6 +45,15 @@ const upscaleStreamMock = vi.hoisted(() =>
 const createChainJobMock = vi.hoisted(() =>
   vi.fn(async () => ({ job_id: "job-1" })),
 );
+const expandPromptMock = vi.hoisted(() =>
+  vi.fn(async (request: { variations: number }) => ({
+    original: "a lighthouse",
+    expanded: ["north light", "storm light", "harbor light"].slice(
+      0,
+      request.variations,
+    ),
+  })),
+);
 const chainJobDetailRef = vi.hoisted(
   () =>
     ({ __v_isRef: true, value: null as ChainJobDetail | null }) as {
@@ -55,6 +64,7 @@ const chainJobDetailRef = vi.hoisted(
 
 vi.mock("../api", () => ({
   createChainJob: createChainJobMock,
+  expandPrompt: expandPromptMock,
   fetchModels: vi.fn(async () => []),
   fetchQueue: vi.fn(async () => ({ entries: [] })),
   listGallery: vi.fn(async () => [entry]),
@@ -130,6 +140,16 @@ describe("CreatePage layout and behavior", () => {
     upscaleStreamMock.mockResolvedValue(undefined);
     createChainJobMock.mockClear();
     createChainJobMock.mockResolvedValue({ job_id: "job-1" });
+    expandPromptMock.mockClear();
+    expandPromptMock.mockImplementation(
+      async (request: { variations: number }) => ({
+        original: "a lighthouse",
+        expanded: ["north light", "storm light", "harbor light"].slice(
+          0,
+          request.variations,
+        ),
+      }),
+    );
     chainJobDetailRef.value = null;
     hostStatusMock.mockClear();
     hostModelsMock.mockClear();
@@ -329,7 +349,7 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
-  it("fans a batch out into variations and queues one print per edited prompt", async () => {
+  it("prepares a batch on the server and queues provenance on every sibling", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "flux-dev:q4";
@@ -338,22 +358,62 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.batchSize = 3;
     await nextTick();
 
-    // Expand fans out into 3 client-side variations instead of submitting.
     await wrapper.get("[data-test='composer-expand']").trigger("click");
-    await nextTick();
+    await flushPromises();
     expect(submitMock).not.toHaveBeenCalled();
+    expect(expandPromptMock).toHaveBeenCalledWith(
+      {
+        prompt: "a lighthouse",
+        model_family: "flux",
+        variations: 3,
+      },
+      undefined,
+      undefined,
+    );
     expect(
       wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
-    ).toHaveLength(3);
+    ).toEqual(["north light", "storm light", "harbor light"]);
 
     // Queue submits one single print per variation.
     await wrapper.get("[data-test='queue-variations']").trigger("click");
     await flushPromises();
     expect(submitMock).toHaveBeenCalledTimes(3);
-    for (const call of submitMock.mock.calls) {
+    const batchIds = new Set<string>();
+    for (const [index, call] of submitMock.mock.calls.entries()) {
       expect(call[0].batch_size).toBe(1);
-      expect(call[0].prompt).toContain("a lighthouse");
+      expect(call[0].prompt).toBe(
+        ["north light", "storm light", "harbor light"][index],
+      );
+      expect(call[0].original_prompt).toBe("a lighthouse");
+      expect(call[0].batch_index).toBe(index + 1);
+      expect(call[0].batch_count).toBe(3);
+      batchIds.add(call[0].batch_id);
     }
+    expect(batchIds.size).toBe(1);
+  });
+
+  it("preserves reviewed variations as stale when the model changes", async () => {
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    form.state.value.batchSize = 3;
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    await flushPromises();
+
+    form.state.value.model = "sdxl-base:fp16";
+    form.state.value.modelFamily = "sdxl";
+    await nextTick();
+    await wrapper.get("[data-test='queue-variations']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("Model changed");
+    expect(
+      wrapper.getComponent({ name: "ResultCanvas" }).props("variations"),
+    ).toHaveLength(3);
   });
 
   it("sends the active style as a directive on the main-prompt expand", async () => {
@@ -430,6 +490,53 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.prompt).toBe("a lighthouse");
     expect(form.state.value.stylePreset).toBe("cinematic");
     expect(form.state.value.negativePrompt).toBe("text");
+  });
+
+  it("freezes a quick expansion to its host and sends original-prompt provenance", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "sk-studio",
+    });
+    localStorage.setItem("mold.web.generateTarget.v1", studio.id);
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        description: "Flux Dev Q4",
+        size_gb: 4,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+        is_loaded: false,
+        hf_repo: "example/flux",
+        downloaded: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await nextTick();
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0].original_prompt).toBe("a lighthouse");
+    expect(submitMock.mock.calls[0]?.[2]).toEqual({
+      hostId: studio.id,
+      label: "Studio",
+      target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
+    });
   });
 
   it("keeps a stage expansion out of the composer's prompt and style", async () => {
@@ -870,6 +977,7 @@ function pageStubs() {
         "currentModel",
         "queueBusy",
         "styleDirective",
+        "target",
       ],
       template: "<div />",
     },

@@ -54,39 +54,48 @@ const active = computed(() => running.value.length + queued.value.length > 0);
   <div v-if="active" class="activity" data-test="activity-strip">
     <div class="activity__kicker">Activity</div>
 
-    <button
-      v-for="job in running"
-      :key="job.id"
-      type="button"
-      class="activity__running"
-      :data-test="`activity-running-${job.id}`"
-      @click="emit('open', job)"
-    >
-      <span class="activity__thumb ms-shimmer" aria-hidden="true" />
-      <span class="activity__body">
-        <span class="activity__prompt">
-          <span
-            v-if="hostBadge(job)"
-            class="activity__host"
-            :data-test="`activity-host-${job.id}`"
-            >{{ hostBadge(job) }}</span
-          >
-          {{ promptFor(job) }}
-        </span>
-        <ProgressBar
-          :value="percentFor(job) ?? 0"
-          tone="accent"
-          :height="3"
-          :label="`${promptFor(job)} progress`"
-        />
-      </span>
-      <span v-if="percentFor(job) !== null" class="activity__pct"
-        >{{ percentFor(job) }}%</span
+    <div v-for="job in running" :key="job.id" class="activity__running">
+      <button
+        type="button"
+        class="activity__open"
+        :data-test="`activity-running-${job.id}`"
+        @click="emit('open', job)"
       >
-      <span v-else class="activity__pct activity__pct--stage">{{
-        job.progress.stage
-      }}</span>
-    </button>
+        <span class="activity__thumb ms-shimmer" aria-hidden="true" />
+        <span class="activity__body">
+          <span class="activity__prompt">
+            <span
+              v-if="hostBadge(job)"
+              class="activity__host"
+              :data-test="`activity-host-${job.id}`"
+              >{{ hostBadge(job) }}</span
+            >
+            {{ promptFor(job) }}
+          </span>
+          <ProgressBar
+            :value="percentFor(job) ?? 0"
+            tone="accent"
+            :height="3"
+            :label="`${promptFor(job)} progress`"
+          />
+        </span>
+        <span v-if="percentFor(job) !== null" class="activity__pct"
+          >{{ percentFor(job) }}%</span
+        >
+        <span v-else class="activity__pct activity__pct--stage">{{
+          job.progress.stage
+        }}</span>
+      </button>
+      <button
+        type="button"
+        class="activity__cancel activity__cancel--running"
+        :aria-label="`Cancel ${promptFor(job)}`"
+        :data-test="`activity-cancel-${job.id}`"
+        @click="emit('cancel', job.id)"
+      >
+        <Icon name="close" :size="14" />
+      </button>
+    </div>
 
     <div v-if="queued.length" class="activity__queued">
       <span
@@ -137,12 +146,23 @@ const active = computed(() => running.value.length + queued.value.length > 0);
 .activity__running {
   display: flex;
   align-items: center;
-  gap: 11px;
   width: 100%;
   border: 1px solid var(--edge);
   background: var(--bench);
   border-radius: var(--radius-control);
+  padding: 0;
+}
+
+.activity__open {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
   padding: 9px 12px;
+  color: inherit;
   text-align: left;
   cursor: pointer;
 }
@@ -233,5 +253,11 @@ const active = computed(() => running.value.length + queued.value.length > 0);
 
 .activity__cancel:hover {
   color: var(--stop);
+}
+
+.activity__cancel--running {
+  min-width: 44px;
+  min-height: 44px;
+  border-left: 1px solid var(--edge);
 }
 </style>

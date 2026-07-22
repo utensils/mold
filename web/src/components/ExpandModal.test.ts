@@ -61,6 +61,23 @@ describe("ExpandModal", () => {
     });
   });
 
+  it("previews on the exact selected generation host", async () => {
+    const target = { baseUrl: "http://studio:7680", apiKey: "sk-studio" };
+    const wrapper = factory({ target });
+    await wrapper.get("[data-test='expand-preview']").trigger("click");
+    await flushPromises();
+
+    expect(expandPromptMock).toHaveBeenCalledWith(
+      {
+        prompt: "a lighthouse",
+        model_family: "flux",
+        variations: 1,
+      },
+      undefined,
+      target,
+    );
+  });
+
   describe("overlay contract", () => {
     function dialog(): HTMLElement {
       const el = document.body.querySelector<HTMLElement>("[role=dialog]");

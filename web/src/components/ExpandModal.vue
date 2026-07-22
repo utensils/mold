@@ -13,6 +13,7 @@ import ModalPanel from "@ui/components/ModalPanel.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { expandPrompt } from "../api";
+import type { StreamTarget } from "../api";
 import { useOverlayFocus } from "../composables/useOverlayFocus";
 import type { ExpandFormState, ModelInfoExtended } from "../types";
 
@@ -32,6 +33,8 @@ const props = defineProps<{
    * text — and never appended to the prompt itself.
    */
   styleDirective?: string | null;
+  /** Exact generation route. Expansion must use the same host as the print. */
+  target?: StreamTarget;
 }>();
 const emit = defineEmits<{
   (e: "update:expand", v: ExpandFormState): void;
@@ -70,12 +73,15 @@ async function preview() {
   previewError.value = null;
   try {
     const style = props.styleDirective?.trim();
-    const res = await expandPrompt({
+    const request = {
       prompt: props.prompt,
       model_family: effectiveFamily.value,
       variations: props.expand.variations,
       ...(style ? { style } : {}),
-    });
+    };
+    const res = props.target
+      ? await expandPrompt(request, undefined, props.target)
+      : await expandPrompt(request);
     previewResults.value = res.expanded;
   } catch (e) {
     previewError.value = e instanceof Error ? e.message : String(e);

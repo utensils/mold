@@ -166,6 +166,8 @@ export interface GenerateRequestWire {
   cfg_plus?: boolean | null;
   scheduler?: Scheduler | null;
   source_image?: string | null; // base64 (no data-URI prefix)
+  /** Upload/gallery label recorded as provenance only when source_image exists. */
+  source_image_name?: string | null;
   /** Qwen-Image-Edit attachments in order: first image is the target,
    * subsequent images are references. Mutually exclusive with
    * `source_image`. */

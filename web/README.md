@@ -60,7 +60,9 @@ router; the SPA fallback handles everything else and reuses
   through `GET /api/discovery/peers`; the browser feature-detects this via
   `discovery.can_browse`, test-connects each selection directly, and dedupes by
   stable instance UUID. Older servers keep Local network disabled without a
-  probe.
+  probe. Create snapshots the chosen route for generation, preprocessing,
+  expansion, cancellation, and queue reconciliation; prepared expansion
+  batches keep their reviewed prompts and provenance together on that machine.
 - **Feed ↔ Grid toggle** in the header, persisted in `localStorage`.
   **Feed** (default) is a Tumblr-style single-column stream — full-bleed
   edge-to-edge cards on mobile, constrained reading width on desktop,

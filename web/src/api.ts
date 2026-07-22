@@ -104,10 +104,34 @@ export async function fetchStatus(signal?: AbortSignal): Promise<ServerStatus> {
  * `serverId` no longer appears in the registry (zombie from a dropped SSE
  * stream). Throws on transport failure so the caller can back off; the
  * empty-listing case (`{entries: []}`) is a successful response. */
-export async function fetchQueue(signal?: AbortSignal): Promise<QueueListing> {
-  const res = await fetch(`${base}/api/queue`, { signal });
+export async function fetchQueue(
+  target?: StreamTarget,
+  signal?: AbortSignal,
+): Promise<QueueListing> {
+  const headers = targetHeaders(target);
+  const res = await fetch(`${targetBase(target)}/api/queue`, {
+    ...(Object.keys(headers).length ? { headers } : {}),
+    signal,
+  });
   if (!res.ok) throw new Error(`GET /api/queue failed: ${res.status}`);
   return (await res.json()) as QueueListing;
+}
+
+/** Cancel a queued or running generation on the exact host that owns it. */
+export async function cancelQueueJob(
+  id: string,
+  target?: StreamTarget,
+): Promise<void> {
+  const res = await fetch(
+    `${targetBase(target)}/api/queue/${encodeURIComponent(id)}`,
+    { method: "DELETE", headers: targetHeaders(target) },
+  );
+  if (!res.ok && res.status !== 404) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(
+      `Cancel failed (${res.status})${detail ? `: ${detail}` : ""}`,
+    );
+  }
 }
 
 export async function updateQueueJobTargetGpu(
@@ -164,10 +188,11 @@ export async function fetchChainLimits(model: string): Promise<ChainLimits> {
 export async function expandPrompt(
   req: ExpandRequestWire,
   signal?: AbortSignal,
+  target?: StreamTarget,
 ): Promise<ExpandResponseWire> {
-  const res = await fetch(`${base}/api/expand`, {
+  const res = await fetch(`${targetBase(target)}/api/expand`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...targetHeaders(target) },
     body: JSON.stringify(req),
     signal,
   });
@@ -232,15 +257,17 @@ export async function upscaleStream(
   req: UpscaleRequestWire,
   handlers: UpscaleStreamHandlers,
   signal?: AbortSignal,
+  target?: StreamTarget,
 ): Promise<void> {
   await postSseJsonStream<
     UpscaleRequestWire,
     SseProgressEvent,
     SseUpscaleCompleteEvent
   >({
-    url: `${base}/api/upscale/stream`,
+    url: `${targetBase(target)}/api/upscale/stream`,
     body: req,
     signal,
+    headers: targetHeaders(target),
     handlers,
     silentCloseMessage: "upscale stream closed before completion",
   });

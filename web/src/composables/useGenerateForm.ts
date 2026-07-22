@@ -560,6 +560,9 @@ export function useGenerateForm(): UseGenerateForm {
             }
           : {
               source_image: attachments[0]?.base64 ?? null,
+              source_image_name: attachments[0]?.base64
+                ? attachments[0].filename
+                : undefined,
               strength: s.strength,
               mask_image: s.maskImage?.base64 ?? undefined,
               control_image: capabilities.supportsControlNet

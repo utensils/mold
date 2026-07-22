@@ -1,5 +1,10 @@
 import { onUnmounted, reactive, ref, watch, type Ref } from "vue";
-import { generateChainStream, generateStream } from "../api";
+import {
+  cancelQueueJob,
+  generateChainStream,
+  generateStream,
+  type StreamTarget,
+} from "../api";
 import type {
   ChainProgressEvent,
   ChainRequestWire,
@@ -55,6 +60,9 @@ export interface Job {
    * the machine that actually rendered it. */
   hostId: string | null;
   hostLabel: string | null;
+  /** Exact in-memory route used by cancel and reconciliation. Deliberately not
+   * persisted because it may contain a host API key. */
+  target: StreamTarget | null;
   /** Server-assigned UUID, captured from the first `queued` SSE event.
    * `null` until the required queued event arrives. The reconciliation poller
    * only sweeps cards whose `serverId` is known. */
@@ -282,7 +290,7 @@ export interface UseGenerateStream {
     decision?: ChainRoutingDecision,
     route?: HostRoute | null,
   ) => string;
-  cancel: (id: string) => void;
+  cancel: (id: string) => Promise<void>;
   clearDone: () => void;
   /** Remove a specific job from the list (used to dismiss persisted cards). */
   remove: (id: string) => void;
@@ -401,6 +409,7 @@ function loadPersistedJobs(raw: string | null): Job[] {
         workStarted: p.workStarted,
         hostId: p.hostId,
         hostLabel: p.hostLabel,
+        target: null,
         serverId: p.serverId,
       };
     });
@@ -570,6 +579,7 @@ function submitJob(
     workStarted: false,
     hostId: route?.hostId ?? null,
     hostLabel: route?.label ?? null,
+    target: route?.target ?? null,
     serverId: null,
   }) as Job;
   jobs.value = [job, ...jobs.value];
@@ -642,11 +652,18 @@ function submitJob(
   return id;
 }
 
-function cancelJob(id: string) {
+async function cancelJob(id: string): Promise<void> {
   const job = jobs.value.find((j) => j.id === id);
   if (!job) return;
   job.controller.abort();
   job.state = "canceled";
+  if (!job.serverId) return;
+  try {
+    await cancelQueueJob(job.serverId, job.target ?? undefined);
+  } catch (error) {
+    job.state = "error";
+    job.error = error instanceof Error ? error.message : String(error);
+  }
 }
 
 function clearDoneJobs() {
