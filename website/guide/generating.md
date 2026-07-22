@@ -5,6 +5,9 @@ machine before you submit. Video models expose their supported camera-motion
 controls under Advanced, and a durable sequence remains attached after a page
 reload so its server-side progress does not disappear from the workspace.
 
+On phone-sized web views, Create keeps every interactive target at least 44px
+high and editable fields at a zoom-safe 16px.
+
 ## Basic Usage
 
 ```bash

@@ -43,6 +43,10 @@ const emit = defineEmits<{
     payload: { item: GalleryImage; shift: boolean; meta: boolean },
   ): void;
   (e: "drag-select", payload: { keys: string[] }): void;
+  (
+    e: "context-menu",
+    payload: { item: GalleryImage; x: number; y: number },
+  ): void;
 }>();
 
 // ── Chunked rendering ──────────────────────────────────────────────────────
@@ -172,6 +176,10 @@ function onSelectClick(entry: GalleryImage, evt: MouseEvent) {
   });
 }
 
+function onContextMenu(entry: GalleryImage, event: MouseEvent) {
+  emit("context-menu", { item: entry, x: event.clientX, y: event.clientY });
+}
+
 // ── Marquee / drag selection ───────────────────────────────────────────────
 const gridRoot = ref<HTMLElement | null>(null);
 const dragBox = ref<{ x: number; y: number; w: number; h: number } | null>(
@@ -282,6 +290,7 @@ onBeforeUnmount(() => {
           :data-filename="entry.filename"
           :data-print-key="keyOf(entry)"
           :data-selected="selection.has(keyOf(entry)) ? 'true' : 'false'"
+          @contextmenu.prevent="onContextMenu(entry, $event)"
         >
           <MediaTile
             :src="tileSrc(entry)"

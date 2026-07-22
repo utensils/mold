@@ -1,5 +1,9 @@
 # Machines
 
+The web shell keeps engine reachability visible from every workspace. Library
+also exposes machine chips so a merged multi-host print feed can be narrowed to
+one origin without changing or forgetting the active generation target.
+
 The **Machines** workspace in the web app keeps this server and the remote Mold
 hosts your browser can reach in one place. Each card reports availability,
 resources, models-disk usage, and queue depth; selecting a card opens that

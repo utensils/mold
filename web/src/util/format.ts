@@ -1,5 +1,11 @@
 import type { OutputMetadata } from "../types";
 
+/** Decimal gigabytes, matching server and storage-vendor reporting. */
+export function formatGB(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+}
+
 /** Short relative time like "3m", "2h", "4d", "3w", or a date for older items. */
 export function formatRelativeTime(unixSeconds: number): string {
   if (!unixSeconds) return "";

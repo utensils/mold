@@ -102,6 +102,22 @@ describe("GalleryGrid", () => {
     expect((open![0]![0] as GalleryImage).filename).toBe("recent.png");
   });
 
+  it("opens a tile context menu with the host-tagged print", async () => {
+    const remote = { ...image, hostId: "studio", hostLabel: "Studio" };
+    const wrapper = mount(GalleryGrid, {
+      props: { entries: [remote], loading: false },
+    });
+    await wrapper.get(".gg__cell").trigger("contextmenu", {
+      clientX: 120,
+      clientY: 80,
+    });
+    expect(wrapper.emitted("context-menu")?.[0]?.[0]).toMatchObject({
+      item: remote,
+      x: 120,
+      y: 80,
+    });
+  });
+
   it("toggles selection (with shift) via the hit layer in select mode", async () => {
     const wrapper = mount(GalleryGrid, {
       props: {

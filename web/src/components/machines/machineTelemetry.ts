@@ -6,12 +6,13 @@
  * renders as an em dash per spec §08 G4 rather than a fabricated zero.
  */
 import type { ResourceSnapshot, ServerStatus } from "../../types";
+import { formatGB } from "../../util/format";
 
 export const DASH = "—";
 
 /** GB, one decimal, from a byte count. */
 export function formatGb(bytes: number): string {
-  return (bytes / 1_000_000_000).toFixed(1);
+  return formatGB(bytes).replace(" GB", "");
 }
 
 /** Compact uptime, e.g. "3d 4h", "4h 12m", "12m", "45s". */

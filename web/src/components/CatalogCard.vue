@@ -8,6 +8,7 @@
 import { computed, ref } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import type { CatalogEntryWire } from "../types";
+import { formatGB } from "../util/format";
 
 const props = defineProps<{ entry: CatalogEntryWire }>();
 const emit = defineEmits<{ open: []; pull: [] }>();
@@ -79,11 +80,6 @@ const family = computed(() => {
   const label = f.replaceAll("-", " ").toUpperCase() || "MODEL";
   return { mark: label.slice(0, 3), label, tone: "neutral" };
 });
-
-function formatGB(bytes: number | null): string {
-  if (!bytes) return "—";
-  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
-}
 
 // engine_phase > 5 marks a catalog package mold can't run yet.
 const supported = computed(() => props.entry.engine_phase <= 5);

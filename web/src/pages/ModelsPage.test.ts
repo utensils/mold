@@ -37,6 +37,9 @@ let mock: {
 vi.mock("../composables/useCatalog", () => ({
   useCatalog: () => mock,
 }));
+vi.mock("vue-router", () => ({
+  useRoute: () => ({ query: {} }),
+}));
 
 const mountPage = () =>
   mount(ModelsPage, {

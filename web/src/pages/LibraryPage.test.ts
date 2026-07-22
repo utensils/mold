@@ -117,10 +117,11 @@ const GalleryGridStub = defineComponent({
     selection: { type: Object, default: undefined },
     fresh: { type: Object, default: undefined },
   },
-  emits: ["open", "toggle-select", "drag-select"],
+  emits: ["open", "toggle-select", "drag-select", "context-menu"],
   template: `<div data-test="grid">
     <button data-test="grid-open" @click="$emit('open', entries[0])">open</button>
     <button data-test="grid-open-last" @click="$emit('open', entries[entries.length - 1])">open last</button>
+    <button data-test="grid-context" @click="$emit('context-menu', { item: entries[0], x: 24, y: 32 })">context</button>
     <span data-test="grid-count">{{ entries.length }}</span>
     <span data-test="grid-keys">{{ entries.map((e) => e.hostId + '|' + e.filename).join(',') }}</span>
   </div>`,
@@ -210,6 +211,75 @@ describe("LibraryPage", () => {
   it("renders every print in the grid by default", async () => {
     const wrapper = await mounted();
     expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
+  });
+
+  it("filters prints by their owning host", async () => {
+    listGalleryMock.mockResolvedValue([
+      cat,
+      { ...dog, hostId: "studio", hostLabel: "Studio" },
+    ]);
+    const wrapper = await mounted();
+    const studio = wrapper
+      .findAll("[data-test='gallery-host-filter']")
+      .find((button) => button.text() === "Studio");
+    expect(studio).toBeTruthy();
+    await studio!.trigger("click");
+    expect(wrapper.get("[data-test='grid-count']").text()).toBe("1");
+    expect(wrapper.get("[data-test='grid-keys']").text()).toContain(
+      "studio|dog.png",
+    );
+  });
+
+  it("opens a print action menu from a tile context click", async () => {
+    const wrapper = await mounted();
+    await wrapper.get("[data-test='grid-context']").trigger("click");
+    expect(wrapper.get("[data-test='gallery-context-menu']").text()).toContain(
+      "Reuse settings",
+    );
+    expect(wrapper.get("[data-test='gallery-context-menu']").text()).toContain(
+      "Use as source",
+    );
+  });
+
+  it("refreshes the gallery while the page remains visible", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    expect(listGalleryMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("does not start its refresh timer after unmounting during initial load", async () => {
+    vi.useFakeTimers();
+    let resolveGallery!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveGallery = resolve)),
+    );
+    const wrapper = mountPage();
+    wrapper.unmount();
+    resolveGallery([cat, dog]);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overlap periodic gallery refreshes", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    let resolveRefresh!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveRefresh = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    resolveRefresh([cat, dog]);
+    await flushPromises();
+    wrapper.unmount();
   });
 
   it("narrows the grid as the user searches", async () => {

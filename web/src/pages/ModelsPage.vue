@@ -6,7 +6,8 @@
  * Discover keeps the full live-catalog behaviour (filters, infinite scroll)
  * restyled as pull cards. Both open the shared model detail drawer.
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
@@ -20,6 +21,14 @@ import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
 
 const cat = useCatalog();
+const route = useRoute();
+watch(
+  () => route.query.tab,
+  (tab) => {
+    if (tab === "installed" || tab === "discover") cat.setTab(tab);
+  },
+  { immediate: true },
+);
 
 const tabOptions: SegmentOption<ModelsTab>[] = [
   { value: "installed", label: "Installed" },
