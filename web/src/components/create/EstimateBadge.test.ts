@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimateBadge from "./EstimateBadge.vue";
 
@@ -64,5 +64,45 @@ describe("EstimateBadge", () => {
     });
     await vi.advanceTimersByTimeAsync(600);
     expect(wrapper.text()).toContain("VRAM · estimate unavailable");
+  });
+
+  it("ignores an in-flight estimate as soon as the request changes", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    estimateMock
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveFirst = resolve)),
+      )
+      .mockResolvedValueOnce({
+        model: "sdxl:fp16",
+        peak_memory_bytes: 6_000_000_000,
+        available_memory_bytes: 8_000_000_000,
+        activation_memory_bytes: 1,
+        load_strategy: "resident",
+        fits_available_memory: true,
+      });
+    const request = {
+      prompt: "a cat",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      output_format: "png" as const,
+    };
+    const wrapper = mount(EstimateBadge, { props: { request } });
+    await vi.advanceTimersByTimeAsync(600);
+    await wrapper.setProps({ request: { ...request, model: "sdxl:fp16" } });
+    resolveFirst({
+      model: "flux-dev:q4",
+      peak_memory_bytes: 9_000_000_000,
+      available_memory_bytes: 8_000_000_000,
+      activation_memory_bytes: 1,
+      load_strategy: "resident",
+      fits_available_memory: false,
+    });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("won't fit");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(wrapper.text()).toContain("est. 6.0 GB of 8.0 GB");
   });
 });

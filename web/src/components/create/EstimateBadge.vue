@@ -61,9 +61,10 @@ async function run(request: GenerateRequestWire) {
 watch(
   () => [props.request, props.target] as const,
   ([request]) => {
+    ++token;
     if (timer) clearTimeout(timer);
+    visible.value = false;
     if (!request?.model) {
-      visible.value = false;
       return;
     }
     timer = setTimeout(() => void run(request), 600);

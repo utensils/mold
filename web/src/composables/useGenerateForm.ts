@@ -522,7 +522,7 @@ export function useGenerateForm(): UseGenerateForm {
       // path + scale travel to the server. We send `loras` (plural) so
       // multi-LoRA stacks reach the FLUX engine; older single-LoRA
       // clients still set `lora`, which the server coalesces.
-      const loras = s.loras.map((l) => ({ path: l.path, scale: l.scale }));
+      let loras = s.loras.map((l) => ({ path: l.path, scale: l.scale }));
       const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
       const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
       const attachments = s.imageAttachments ?? [];
@@ -536,6 +536,7 @@ export function useGenerateForm(): UseGenerateForm {
       const ltx2 = family === "ltx2" || family === "ltx-2";
       const cameraControl = s.cameraControl?.trim();
       if (ltx2 && cameraControl) {
+        loras = loras.slice(0, MAX_LORA_STACK - 1);
         loras.push({
           path: cameraControl.endsWith(".safetensors")
             ? cameraControl
