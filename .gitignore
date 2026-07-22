@@ -72,3 +72,10 @@ uat-*
 *.mp4
 *.zip
 .superpowers/
+
+# design-sync (claude.ai/design) — staged scripts, build output, machine state
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules

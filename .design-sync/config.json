@@ -1,0 +1,12 @@
+{
+  "projectId": "3a486f26-d6b6-42eb-8f25-90364a83d8a5",
+  "shape": "package",
+  "pkg": "@mold/ui",
+  "globalName": "MoldStudio",
+  "entry": "ui/icons.ts",
+  "cssEntry": "tokens.css",
+  "extraEntries": ["./theme.ts", "../.design-sync/ds-css.ts"],
+  "extraFonts": ["fonts/fonts.css"],
+  "guidelinesGlob": ["../.design-sync/guidelines/*.md"],
+  "readmeHeader": ".design-sync/conventions.md"
+}
