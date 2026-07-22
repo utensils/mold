@@ -27,6 +27,19 @@
   (installed in `.ds-sync`). Render check trivially passes (0 previews).
 - `[DTS_REACT]` warn on build is expected and harmless here (zero components,
   no .d.ts emitted).
+- **Claude Design compiler feedback (2026-07-21) drove a tokens.css
+  restructure**: its token registry only reads custom properties under plain
+  attribute scopes, so the light media blocks' `:root:not([data-theme="dark"])`
+  selectors were replaced with bare `:root` / `:root[data-theme-family="mold"]`
+  plus explicit forced-dark blocks (`[data-theme="dark"]`), and 8 tokens got
+  trailing `/* @kind ... */` comments (`--grad` color; `--f-*` font;
+  `--dur-*`/`--ease` other). Behavior verified identical across 36
+  states × 41 computed values (playwright matrix) and guarded by
+  `ui/tokens.test.ts` (mirror invariants + cascade order + annotations).
+  If the compiler still flags props inside `@media (prefers-color-scheme:
+  light)` after this, the remaining option is attribute-only theming (theme.ts
+  stamps the resolved appearance) — a cross-surface product refactor; get
+  explicit sign-off first.
 
 ## Known render warns
 
@@ -37,6 +50,9 @@
 - **Token/kit drift is the main risk**: any edit to `ui/tokens.css`,
   `ui/kit.css`, `ui/fonts/fonts.css`, `ui/icons.ts`, or `ui/theme.ts` needs a
   re-sync; nothing here regenerates automatically.
+- `ui/tokens.css` must keep its design-tool constraints: no `:not()` scopes,
+  and `@kind` annotations on non-inferable tokens — `ui/tokens.test.ts`
+  enforces both, so keep it green rather than deleting it.
 - The guidelines file (`.design-sync/guidelines/mold-studio-guidelines.md`)
   and `conventions.md` are **hand-distilled from the spec at v0.12** — when
   `docs/design/mold-studio-spec.html` bumps, re-validate both against the new
