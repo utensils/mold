@@ -92,6 +92,9 @@ boundaries, restores model-aware settings, and exposes the full recorded
 generation metadata with prompt/seed copy and an Upscale handoff to Create.
 Keyboard users get trapped focus, reliable Escape dismissal, opener focus
 restoration, and scroll locking across the web app's modal and sheet surfaces.
+Models refreshes Installed as pulls complete, exposes missing component status
+with exact Repair actions, and explains that loaded models must be unloaded
+before deletion.
 
 ## Desktop app
 

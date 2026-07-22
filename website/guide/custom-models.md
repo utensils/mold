@@ -80,6 +80,10 @@ The web, desktop, and iPhone Models surfaces search Hugging Face and Civitai
 live. Open **Models** (the Discover segment), choose a family and LoRA kind
 where available, then use **Install** on the web or **Pull** in a native app.
 Once installed, it appears in compatible Create LoRA pickers on that host.
+The web Installed shelf refreshes when the pull finishes. Model details mark
+each runtime component ready or missing; when the server supplies a repair
+target, **Repair** queues that exact component rather than reinstalling an
+ambiguous repository. Unload a model before deleting its on-disk files.
 
 The same flow is available over the server API:
 
