@@ -5,8 +5,8 @@ does not run AI models itself: generation, model storage, downloads, queueing,
 and gallery files stay on one or more remote Mold hosts while the app provides
 an iPhone-native control surface.
 
-Mold requires iOS 17 or later. The current build is distributed through the
-project's internal TestFlight group; there is not yet a public App Store
+Mold requires iOS 17 or later. The current build is distributed to invited
+internal and external TestFlight groups; there is not yet a public App Store
 listing.
 
 ## Connect a host

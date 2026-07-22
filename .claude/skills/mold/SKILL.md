@@ -922,9 +922,11 @@ to Safelight + System while retaining valid saved choices, and synchronizes
 UIKit's appearance/status bar. Preserve safe areas, 44pt controls, 16px editable text,
 disabled document zoom and overscroll bounce, plus the Library's scoped swipe.
 The TestFlight workflow runs after eligible successful iOS `main` CI (no cron),
-waits for App Store Connect `VALID`, and verifies the `Mold Internal` tester
-membership. See `apps/mobile/README.md` for the complete developer and release
-contract.
+uploads a build eligible for internal groups and external Beta App Review,
+waits for App Store Connect `VALID`, and verifies the baseline `Mold Internal`
+tester membership. Never set Apple's `testFlightInternalTestingOnly` export
+option to true. See `apps/mobile/README.md` for the complete developer and
+release contract.
 
 Devshell commands (run inside `nix develop`):
 

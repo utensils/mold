@@ -24,6 +24,7 @@ on:
         "scripts/ios.sh",
         "scripts/generate-ios-icons.sh",
         "scripts/tests/ios-release-assets.sh",
+        "scripts/tests/ios-testflight-distribution.sh",
         "scripts/ios-sim.sh",
         "scripts/tests/ios-sim-pick.sh",
         "scripts/ensure-testflight-tester.rb",
@@ -54,6 +55,7 @@ on:
         "scripts/ios.sh",
         "scripts/generate-ios-icons.sh",
         "scripts/tests/ios-release-assets.sh",
+        "scripts/tests/ios-testflight-distribution.sh",
         "scripts/ios-sim.sh",
         "scripts/tests/ios-sim-pick.sh",
         "scripts/ensure-testflight-tester.rb",
@@ -80,6 +82,7 @@ jobs:
       - run: bun install --frozen-lockfile
         working-directory: .
       - run: ../scripts/tests/ios-release-assets.sh
+      - run: ../scripts/tests/ios-testflight-distribution.sh
       - run: ../scripts/tests/ios-sim-pick.sh
       - run: bun run test
       - run: bun run fmt:check
