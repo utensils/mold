@@ -85,6 +85,8 @@ and remembered remotes together. On builds with mDNS support, **Add machine →
 Local network** asks the primary server for DNS-SD peers, then the browser tests
 and connects to the selected peer directly; API keys remain per-host headers and
 stable instance UUIDs prevent duplicate rows. See the [Machines guide](https://utensils.io/mold/guide/machines).
+On phones, Create follows the compact production order: prompt and style,
+model and core controls, Generate, canvas, then recent prints.
 Host detail aggregates all GPUs plus CPU/system RAM and owns capability-gated
 pause, resume, cancel-all, queued-job GPU lanes, rename, and forget actions.
 Library merges prints from connected hosts without falling back across host
@@ -112,6 +114,8 @@ Mold also has a native desktop app for macOS and Linux. It brings the Create,
 Library, Models, Machines, and Settings workspaces into one interface — chains
 live inside Create, history inside Library, and the job queue and RunPod inside
 Machines — and can use this device alongside multiple remote Mold hosts. The
+retired `/jobs` URL redirects to Machines; queue controls remain on their owning
+machine, and only the five documented workspace shortcuts are active. The
 Models workspace splits into Installed and Discover segments, keeps image/video
 filters and pinned downloads in Discover, and lets you choose which host
 receives a download. Its Installed segment merges every connected host with host

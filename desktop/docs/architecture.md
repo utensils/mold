@@ -295,7 +295,7 @@ desktop/
 │   │   ├── capabilities.ts                  # ported from web/src/lib/generateCapabilities.ts
 │   │   └── ipc.ts                           # invoke() wrappers for all Tauri commands
 │   ├── stores/  connection.ts generation.ts queue.ts composer.ts settings.ts
-│   ├── views/   GenerateView.vue LibraryView.vue JobsView.vue ModelsView.vue MachinesView.vue SettingsView.vue
+│   ├── views/   GenerateView.vue LibraryView.vue ModelsView.vue MachinesView.vue SettingsView.vue
 │   └── components/
 │       ├── shell/   TitleBar.vue NavRail.vue Inspector.vue StatusPopover.vue
 │       ├── generate/ ParamPanel.vue LoraStack.vue SourceImageWell.vue ExpandSheet.vue EstimateBadge.vue VideoParams.vue PlacementPanel.vue

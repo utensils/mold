@@ -30,8 +30,10 @@ describe("router — five-destination IA", () => {
     expect(router.resolve("/machines/hal9000-7680").name).toBe("host-detail");
   });
 
-  it("still serves the standalone Jobs route (absorbed into Machines nav)", () => {
-    expect(router.resolve("/jobs").name).toBe("jobs");
+  it("retires standalone Jobs into Machines", async () => {
+    await router.push("/jobs");
+    expect(router.currentRoute.value.path).toBe("/machines");
+    expect(router.currentRoute.value.name).toBe("machines");
   });
 });
 

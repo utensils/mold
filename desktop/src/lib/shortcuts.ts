@@ -5,19 +5,13 @@
 
 import { CURRENT_PLATFORM, type DesktopPlatform } from "./platform";
 
-// The five destinations map to ⌘1–⌘4 plus ⌘, for Settings. ⌘5 and ⌘6 stay as
-// hidden, unadvertised aliases for one release so the old Gallery/Machines
-// muscle memory still lands somewhere sensible (they resolve through the
-// router's redirects otherwise).
+// The five destinations map to ⌘1–⌘4 plus ⌘, for Settings.
 export const NAV_ROUTES: Readonly<Record<string, string>> = {
   "1": "/create",
   "2": "/library",
   "3": "/models",
   "4": "/machines",
   ",": "/settings",
-  // Transitional aliases — no visible hint in the rail.
-  "5": "/library",
-  "6": "/machines",
 };
 
 export type ShellAction =

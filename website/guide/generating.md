@@ -90,6 +90,10 @@ the ordered target and reference images. Ordinary source-image families instead
 show denoise strength plus all five fit policies; SD1.5 also suggests installed
 ControlNet checkpoints while allowing a custom checkpoint name.
 
+On a phone, Create follows one vertical workflow: prompt and style, model and
+core controls, Generate, the developing/result canvas, then recent prints.
+Advanced options remain in the mobile sheet so the primary flow stays compact.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video model family. Video

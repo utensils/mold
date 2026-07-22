@@ -26,9 +26,9 @@ describe("resolveShellShortcut", () => {
     expect(resolveMacShortcut(key(","))).toEqual({ kind: "navigate", route: "/settings" });
   });
 
-  it("keeps ⌘5 and ⌘6 as hidden transitional aliases to Library and Machines", () => {
-    expect(resolveMacShortcut(key("5"))).toEqual({ kind: "navigate", route: "/library" });
-    expect(resolveMacShortcut(key("6"))).toEqual({ kind: "navigate", route: "/machines" });
+  it("does not retain the retired ⌘5 and ⌘6 aliases", () => {
+    expect(resolveMacShortcut(key("5"))).toBeNull();
+    expect(resolveMacShortcut(key("6"))).toBeNull();
   });
 
   it("maps ⌘\\ to sidebar toggle and ⌘K to the command palette", () => {
@@ -81,7 +81,7 @@ describe("resolveShellShortcut", () => {
     expect(resolveShellShortcut(key("k"), "unknown")).toBeNull();
   });
 
-  it("resolves to the five destinations (⌘5/⌘6 alias onto two of them)", () => {
+  it("resolves to exactly the five destinations", () => {
     expect(new Set(Object.values(NAV_ROUTES))).toEqual(
       new Set(["/create", "/library", "/models", "/machines", "/settings"]),
     );

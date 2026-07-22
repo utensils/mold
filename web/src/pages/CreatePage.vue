@@ -250,8 +250,11 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
 }
 
 // Phone surface → the Advanced sheet instead of the side drawer.
-const isPhone = ref(false);
-let phoneQuery: MediaQueryList | null = null;
+let phoneQuery: MediaQueryList | null =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 639px)")
+    : null;
+const isPhone = ref(phoneQuery?.matches ?? false);
 function syncPhone() {
   isPhone.value = phoneQuery?.matches ?? false;
 }
@@ -1267,9 +1270,7 @@ function openAdvanced() {
 }
 
 onMounted(async () => {
-  if (typeof window.matchMedia === "function") {
-    phoneQuery = window.matchMedia("(max-width: 639px)");
-    syncPhone();
+  if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
   // Models arrive from the host-routing poll (every machine, not just this
@@ -1308,6 +1309,13 @@ onBeforeUnmount(() => {
     >
       <!-- Center: activity + composer + canvas + recent -->
       <main class="flex min-w-0 flex-col gap-4">
+        <h1
+          v-if="isPhone"
+          class="font-display text-2xl font-bold tracking-tight text-ink"
+          data-test="phone-create-title"
+        >
+          Create
+        </h1>
         <ActivityStrip
           :jobs="stream.jobs.value"
           @cancel="stream.cancel"
@@ -1421,7 +1429,27 @@ onBeforeUnmount(() => {
             @submit="onSubmit"
             @expand="onExpand"
             @undo-expand="undoExpand"
-          />
+          >
+            <template v-if="isPhone" #mobile-controls>
+              <div
+                class="mt-3 flex flex-col gap-3"
+                data-test="phone-create-controls"
+              >
+                <CreateModelPicker
+                  :models="installedModels"
+                  :model="form.state.value.model"
+                  @select="selectModel"
+                />
+                <ControlsAside
+                  v-model="form.state.value"
+                  :family="currentFamily"
+                  :adv-count="advCount"
+                  :mobile="true"
+                  @open-advanced="openAdvanced"
+                />
+              </div>
+            </template>
+          </ComposerCard>
           <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
 
           <div
@@ -1487,7 +1515,7 @@ onBeforeUnmount(() => {
       <!-- Right: controls region — model + basics + inline Advanced (spec §06
            v0.12 surface split). On phones the Advanced column collapses into
            the Advanced sheet, opened from the button inside ControlsAside. -->
-      <div class="flex min-w-0 flex-col gap-4">
+      <div v-if="!isPhone" class="flex min-w-0 flex-col gap-4">
         <CreateModelPicker
           :models="installedModels"
           :model="form.state.value.model"
@@ -1497,12 +1525,11 @@ onBeforeUnmount(() => {
           v-model="form.state.value"
           :family="currentFamily"
           :adv-count="advCount"
-          :mobile="isPhone"
+          :mobile="false"
           @open-advanced="openAdvanced"
         />
         <!-- Tablet+ : inline, always-visible Advanced column. -->
         <AdvancedDrawer
-          v-if="!isPhone"
           :mobile="false"
           v-model="form.state.value"
           :family="currentFamily"

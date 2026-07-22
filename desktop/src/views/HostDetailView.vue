@@ -626,9 +626,6 @@ async function forget() {
                   {{ queueDepth ?? "—"
                   }}<template v-if="queueCapacity">/{{ queueCapacity }}</template>
                 </span>
-                <RouterLink to="/jobs" class="text-caption text-ink-3 hover:text-ink">
-                  Jobs →
-                </RouterLink>
               </div>
               <HostQueuePanel
                 :host="host"
