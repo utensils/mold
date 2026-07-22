@@ -21,6 +21,7 @@ import { onBeforeUnmount, watch, type Ref } from "vue";
 
 let bodyScrollLocks = 0;
 let previousBodyOverflow = "";
+const overlayFocusStack: symbol[] = [];
 
 function lockBodyScroll() {
   if (typeof document === "undefined") return;
@@ -79,6 +80,7 @@ export function useOverlayFocus(
 ) {
   let opener: HTMLElement | null = null;
   let engaged = false;
+  const stackToken = Symbol("overlay-focus");
 
   function restore() {
     const target = opener;
@@ -123,10 +125,14 @@ export function useOverlayFocus(
   }
 
   function onDocumentKeydown(event: KeyboardEvent) {
-    if (!open.value) return;
+    if (
+      !open.value ||
+      overlayFocusStack[overlayFocusStack.length - 1] !== stackToken
+    )
+      return;
     if (event.key === "Escape" && close) {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       close();
       return;
     }
@@ -140,6 +146,7 @@ export function useOverlayFocus(
     if (engaged || typeof document === "undefined") return;
     engaged = true;
     lockBodyScroll();
+    overlayFocusStack.push(stackToken);
     document.addEventListener("keydown", onDocumentKeydown, true);
   }
 
@@ -147,6 +154,8 @@ export function useOverlayFocus(
     if (!engaged || typeof document === "undefined") return;
     engaged = false;
     document.removeEventListener("keydown", onDocumentKeydown, true);
+    const index = overlayFocusStack.lastIndexOf(stackToken);
+    if (index >= 0) overlayFocusStack.splice(index, 1);
     unlockBodyScroll();
   }
 

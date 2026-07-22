@@ -40,8 +40,6 @@ function clearFamily() {
           :data-family="row.family"
           :aria-pressed="cat.filter.value.family === row.family"
           @click="cat.setFilter({ family: row.family })"
-          @keydown.enter.prevent="cat.setFilter({ family: row.family })"
-          @keydown.space.prevent="cat.setFilter({ family: row.family })"
         >
           {{ row.family }}
         </button>

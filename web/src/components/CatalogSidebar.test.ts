@@ -36,8 +36,9 @@ describe("CatalogSidebar", () => {
     const w = mount(CatalogSidebar);
     const rows = w.findAll("button[data-family]");
     expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].element.tagName).toBe("BUTTON");
     expect(rows[0].attributes("data-family")).toBe("flux");
-    await rows[0].trigger("keydown", { key: "Enter" });
+    await rows[0].trigger("click");
     expect(cat.setFilter).toHaveBeenCalledWith({ family: "flux" });
   });
 });

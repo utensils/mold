@@ -82,6 +82,20 @@ describe("useOverlayFocus", () => {
     w.unmount();
   });
 
+  it("lets only the top stacked overlay handle Escape", () => {
+    const lower = mount(Overlay, { props: { open: true } });
+    const upper = mount(Overlay, { props: { open: true } });
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(lower.vm.closed).toBe(0);
+    expect(upper.vm.closed).toBe(1);
+    upper.unmount();
+    lower.unmount();
+  });
+
   it("cycles Tab and Shift+Tab across the panel's edges", () => {
     const w = mount(Overlay, {
       props: { open: true },
