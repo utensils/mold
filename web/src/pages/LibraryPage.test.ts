@@ -251,6 +251,37 @@ describe("LibraryPage", () => {
     wrapper.unmount();
   });
 
+  it("does not start its refresh timer after unmounting during initial load", async () => {
+    vi.useFakeTimers();
+    let resolveGallery!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveGallery = resolve)),
+    );
+    const wrapper = mountPage();
+    wrapper.unmount();
+    resolveGallery([cat, dog]);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overlap periodic gallery refreshes", async () => {
+    vi.useFakeTimers();
+    const wrapper = mountPage();
+    await flushPromises();
+    let resolveRefresh!: (entries: GalleryImage[]) => void;
+    listGalleryMock.mockReturnValueOnce(
+      new Promise((resolve) => (resolveRefresh = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listGalleryMock).toHaveBeenCalledTimes(2);
+    resolveRefresh([cat, dog]);
+    await flushPromises();
+    wrapper.unmount();
+  });
+
   it("narrows the grid as the user searches", async () => {
     const wrapper = await mounted();
     await wrapper.find("[data-test='gallery-search']").setValue("dog");

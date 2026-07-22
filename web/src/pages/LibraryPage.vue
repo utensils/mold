@@ -394,7 +394,8 @@ const emptyKind = computed<null | "none" | "search" | "video" | "images">(
   },
 );
 
-async function refresh() {
+let refreshInFlight: Promise<void> | null = null;
+async function performRefresh() {
   loading.value = true;
   errorMessage.value = null;
   try {
@@ -416,6 +417,16 @@ async function refresh() {
   } finally {
     loading.value = false;
   }
+}
+
+function refresh(): Promise<void> {
+  if (refreshInFlight) return refreshInFlight;
+  const operation = performRefresh();
+  refreshInFlight = operation;
+  void operation.finally(() => {
+    if (refreshInFlight === operation) refreshInFlight = null;
+  });
+  return operation;
 }
 
 // Honest count line: "all hosts" only when remotes are actually connected,
@@ -609,17 +620,20 @@ onBeforeUnmount(() => {
 });
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+let disposed = false;
 onMounted(async () => {
   const [, listing] = await Promise.all([
     refresh(),
     fetchModels().catch(() => [] as ModelInfoExtended[]),
   ]);
+  if (disposed) return;
   models.value = listing;
   refreshTimer = setInterval(() => {
     if (!document.hidden) void refresh();
   }, 10_000);
 });
 onBeforeUnmount(() => {
+  disposed = true;
   if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>
