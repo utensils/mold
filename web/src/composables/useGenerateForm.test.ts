@@ -426,6 +426,25 @@ describe("useGenerateForm", () => {
     expect(wire.edit_images).toBeUndefined();
   });
 
+  it("prunes source and video fields that are irrelevant to the selected family", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "sdxl:fp16",
+      modelFamily: "sdxl",
+      imageAttachments: [],
+      strength: 0.42,
+      frames: 97,
+      fps: 30,
+      gifPreview: true,
+    });
+
+    const wire = form.toRequest();
+    expect(wire.strength).toBeUndefined();
+    expect(wire.frames).toBeUndefined();
+    expect(wire.fps).toBeUndefined();
+    expect(wire.gif_preview).toBeUndefined();
+  });
+
   it("serializes backend-supported advanced generation knobs", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {

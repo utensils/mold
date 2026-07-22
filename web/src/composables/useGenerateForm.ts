@@ -563,7 +563,7 @@ export function useGenerateForm(): UseGenerateForm {
               source_image_name: attachments[0]?.base64
                 ? attachments[0].filename
                 : undefined,
-              strength: s.strength,
+              strength: attachments[0]?.base64 ? s.strength : undefined,
               mask_image: s.maskImage?.base64 ?? undefined,
               control_image: capabilities.supportsControlNet
                 ? (s.controlImage?.base64 ?? undefined)
@@ -574,10 +574,11 @@ export function useGenerateForm(): UseGenerateForm {
                 s.controlImage && controlModel ? s.controlScale : undefined,
             }),
         expand: s.expand.enabled || undefined,
-        frames: s.frames,
-        fps: s.fps,
+        frames: capabilities.supportsVideo ? s.frames : undefined,
+        fps: capabilities.supportsVideo ? s.fps : undefined,
         upscale_model: upscaleModel || undefined,
-        gif_preview: s.gifPreview || undefined,
+        gif_preview:
+          capabilities.supportsVideo && s.gifPreview ? true : undefined,
         placement: s.placement ?? undefined,
         loras,
         enable_audio: s.enableAudio ?? undefined,

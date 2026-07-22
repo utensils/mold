@@ -28,6 +28,7 @@ import type {
   DevicePlacement,
   GenerateFormState,
   LoraSelection,
+  ModelInfoExtended,
   OutputFormat,
   Scheduler,
   SourceFitPolicy,
@@ -61,6 +62,8 @@ const props = withDefaults(
     openTo?: SectionKey | null;
     /** GPUs for the placement section (empty → section hidden). */
     placementGpus?: { ordinal: number; name: string }[];
+    /** Installed models on the selected generation route. */
+    models?: ModelInfoExtended[];
   }>(),
   {
     open: false,
@@ -68,6 +71,7 @@ const props = withDefaults(
     mobile: false,
     openTo: null,
     placementGpus: () => [],
+    models: () => [],
   },
 );
 
@@ -114,7 +118,7 @@ const visibleSections = computed<SectionKey[]>(() => {
   const out: SectionKey[] = [];
   if (showScheduler.value) out.push("scheduler");
   if (caps.value.supportsNegativePrompt) out.push("negative");
-  if (caps.value.sourceImageMode === "single") out.push("source");
+  out.push("source");
   if (caps.value.supportsLora) out.push("lora");
   out.push("output");
   if (caps.value.supportsVideo) out.push("video");
@@ -191,11 +195,24 @@ const fitOptions = [
   { value: "pad-fit", label: "Contain" },
   { value: "crop-fill", label: "Cover" },
   { value: "pad-repaint", label: "Pad + repaint" },
+  { value: "lanczos-resize", label: "Lanczos" },
+  { value: "upscale-then-fit", label: "Upscale + fit" },
 ] as const;
 const fitMode = computed(
   () => props.modelValue.sourceFitPolicy?.mode ?? "pad-repaint",
 );
 function setFit(mode: string) {
+  if (mode === "upscale-then-fit") {
+    patch({
+      sourceFitPolicy: {
+        mode,
+        upscalerModel:
+          props.modelValue.upscaleModel || "real-esrgan-x4plus:fp16",
+        fit: { mode: "crop-fill" },
+      },
+    });
+    return;
+  }
   patch({ sourceFitPolicy: { mode } as SourceFitPolicy });
 }
 
@@ -208,6 +225,11 @@ function setFit(mode: string) {
 // only when a control image is present).
 const showControlNet = computed(() => caps.value.supportsControlNet);
 const hasControl = computed(() => props.modelValue.controlImage != null);
+const controlModels = computed(() =>
+  props.models.filter(
+    (model) => model.downloaded && model.family === "controlnet",
+  ),
+);
 async function readControlImage(
   event: Event,
 ): Promise<SourceImageState | null> {
@@ -404,13 +426,18 @@ function resetAdvanced() {
       </AccordionSection>
 
       <AccordionSection
-        v-if="caps.sourceImageMode === 'single'"
         icon="image"
-        title="Source image"
+        :title="
+          caps.sourceImageMode === 'qwen-edit' ? 'Edit images' : 'Source image'
+        "
         :summary="
           hasSource
-            ? `1 image · denoise ${modelValue.strength.toFixed(2)}`
-            : 'Image-to-image & inpainting'
+            ? caps.sourceImageMode === 'qwen-edit'
+              ? `${modelValue.imageAttachments.length} attached`
+              : `1 image · denoise ${modelValue.strength.toFixed(2)}`
+            : caps.sourceImageMode === 'qwen-edit'
+              ? 'Target and reference images'
+              : 'Image-to-image & inpainting'
         "
         :open="openSection === 'source'"
         data-test="section-source"
@@ -423,7 +450,11 @@ function resetAdvanced() {
           data-test="source-attach"
           @click="emit('open-picker')"
         >
-          Drop an image or <span class="adv__accent">browse</span>
+          {{
+            caps.sourceImageMode === "qwen-edit"
+              ? "Attach images or "
+              : "Drop an image or "
+          }}<span class="adv__accent">browse</span>
         </button>
         <div v-else>
           <div class="adv__source-row">
@@ -440,6 +471,7 @@ function resetAdvanced() {
             </button>
           </div>
           <SliderRow
+            v-if="caps.sourceImageMode === 'single'"
             label="Denoise strength"
             :model-value="modelValue.strength"
             :min="0"
@@ -448,7 +480,7 @@ function resetAdvanced() {
             :value-label="modelValue.strength.toFixed(2)"
             @update:model-value="patch({ strength: $event })"
           />
-          <div class="adv__field">
+          <div v-if="caps.sourceImageMode === 'single'" class="adv__field">
             <label class="adv__label">Fit to canvas</label>
             <SegmentedControl
               :model-value="fitMode"
@@ -511,6 +543,7 @@ function resetAdvanced() {
               <input
                 class="adv__input"
                 data-test="control-model"
+                list="installed-controlnet-models"
                 placeholder="e.g. control_v11p_sd15_canny"
                 :value="modelValue.controlModel"
                 @input="
@@ -519,6 +552,13 @@ function resetAdvanced() {
                   })
                 "
               />
+              <datalist id="installed-controlnet-models">
+                <option
+                  v-for="model in controlModels"
+                  :key="model.name"
+                  :value="model.name"
+                />
+              </datalist>
             </div>
             <SliderRow
               label="Control scale"

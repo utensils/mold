@@ -4,6 +4,7 @@ import ControlsAside from "./ControlsAside.vue";
 import ShapePicker from "@ui/components/ShapePicker.vue";
 import ResolutionSelector from "@ui/components/ResolutionSelector.vue";
 import Stepper from "@ui/components/Stepper.vue";
+import SliderRow from "@ui/components/SliderRow.vue";
 import { dimsForMp } from "@ui/lib/resolution";
 import {
   useGenerateForm,
@@ -61,6 +62,14 @@ describe("ControlsAside", () => {
     expect(wrapper.getComponent(ResolutionSelector).props("modelValue")).toBe(
       1,
     );
+  });
+
+  it("keeps the full SDXL guidance range reachable", () => {
+    const wrapper = factory({}, "sdxl");
+    const strength = wrapper
+      .findAllComponents(SliderRow)
+      .find((row) => row.props("label") === "Prompt strength");
+    expect(strength?.props("max")).toBe(20);
   });
 
   it("applies the projected dims when a shape is picked", async () => {

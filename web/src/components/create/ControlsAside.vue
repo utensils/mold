@@ -153,7 +153,7 @@ function setSeed(value: number) {
         label="Prompt strength"
         :model-value="modelValue.guidance"
         :min="0"
-        :max="12"
+        :max="20"
         :step="0.5"
         :value-label="modelValue.guidance.toFixed(1)"
         @update:model-value="patch({ guidance: $event })"

@@ -1419,6 +1419,7 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :open-to="advOpenTo"
           :placement-gpus="gpuListForPlacement"
+          :models="models"
           @open-picker="showPicker = true"
           @clear-source="onClearSource"
           @open-mask="showMask = true"
@@ -1439,6 +1440,7 @@ onBeforeUnmount(() => {
         :adv-count="advCount"
         :open-to="advOpenTo"
         :placement-gpus="gpuListForPlacement"
+        :models="models"
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @clear-source="onClearSource"
@@ -1467,6 +1469,10 @@ onBeforeUnmount(() => {
     />
     <ImagePickerModal
       :open="showPicker"
+      :title="
+        currentFamily === 'qwen-image-edit' ? 'Edit images' : 'Source image'
+      "
+      :multiple="currentFamily === 'qwen-image-edit'"
       @pick="onPickSource"
       @close="showPicker = false"
     />

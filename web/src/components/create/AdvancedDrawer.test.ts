@@ -52,7 +52,6 @@ function factory(
     global: {
       stubs: {
         LoraPicker: { template: "<div data-test='lora-picker-stub' />" },
-        PlacementPanel: { template: "<div data-test='placement-stub' />" },
         RouterLink: { template: "<a><slot /></a>" },
       },
     },
@@ -97,8 +96,11 @@ describe("AdvancedDrawer capability matrix", () => {
     expect(s.output).toBe(true);
   });
 
-  it("qwen-image-edit hides the single-image source section", () => {
-    expect(sections("qwen-image-edit").source).toBe(false);
+  it("qwen-image-edit exposes its required edit-image attachment section", async () => {
+    const wrapper = factory("qwen-image-edit");
+    expect(sections("qwen-image-edit").source).toBe(true);
+    expect(wrapper.find("[data-test='source-attach']").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Edit images");
   });
 
   it("ltx2 exposes the video section", () => {
@@ -118,6 +120,42 @@ describe("AdvancedDrawer capability matrix", () => {
       sections("flux", { placementGpus: [{ ordinal: 0, name: "GPU 0" }] })
         .placement,
     ).toBe(true);
+  });
+
+  it("renders the real placement child with the selected placement", async () => {
+    const placement = { text_encoders: { kind: "cpu" as const } };
+    const wrapper = factory(
+      "flux",
+      { placement },
+      { placementGpus: [{ ordinal: 0, name: "GPU 0" }] },
+    );
+    await wrapper
+      .get("[data-test='section-placement'] .ms-acc__head")
+      .trigger("click");
+    expect(
+      wrapper.getComponent({ name: "PlacementPanel" }).props("modelValue"),
+    ).toEqual(placement);
+  });
+
+  it("offers all five source-fit policies", async () => {
+    const wrapper = factory("sdxl", {
+      imageAttachments: [
+        { kind: "upload", filename: "source.png", base64: "AA" },
+      ],
+    });
+    await wrapper
+      .get("[data-test='section-source'] .ms-acc__head")
+      .trigger("click");
+    const labels = wrapper
+      .findAll("[aria-label='Fit to canvas'] button")
+      .map((button) => button.text());
+    expect(labels).toEqual([
+      "Contain",
+      "Cover",
+      "Pad + repaint",
+      "Lanczos",
+      "Upscale + fit",
+    ]);
   });
 });
 
@@ -198,6 +236,27 @@ describe("AdvancedDrawer ControlNet block", () => {
       GenerateFormState,
     ];
     expect(next.controlModel).toBe("control_v11p_sd15_canny");
+  });
+
+  it("suggests installed ControlNet models while retaining custom input", async () => {
+    const wrapper = await openSource("sd15", {
+      controlImage: { kind: "upload", filename: "canny.png", base64: "AA" },
+    });
+    await wrapper.setProps({
+      models: [
+        {
+          ...UPSCALERS[0],
+          name: "controlnet-canny-sd15:fp16",
+          family: "controlnet",
+        },
+      ],
+    });
+    expect(wrapper.get("[data-test='control-model']").attributes("list")).toBe(
+      "installed-controlnet-models",
+    );
+    expect(
+      wrapper.get("#installed-controlnet-models option").attributes("value"),
+    ).toBe("controlnet-canny-sd15:fp16");
   });
 
   it("round-trips the control scale slider", async () => {
