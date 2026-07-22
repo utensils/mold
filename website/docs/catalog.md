@@ -67,7 +67,7 @@ Examples:
 
 ```bash
 # Search installable FLUX LoRAs from Civitai
-curl "http://localhost:7680/api/catalog/search?q=cinematic&family=flux&kind=lora&source=civitai"
+curl "http://localhost:7680/api/catalog/search?q=cinematic&family=flux&kind=lora&source=civitai&page=1&page_size=48"
 
 # Show installed FLUX LoRAs
 curl "http://localhost:7680/api/catalog/installed?kind=lora&family=flux"
@@ -85,6 +85,13 @@ entry's human-facing model page — `https://huggingface.co/{repo}` for Hugging
 Face entries, `https://civitai.com/models/{modelId}?modelVersionId={versionId}`
 for Civitai entries. It is additive (older clients can ignore it) and may be
 `null` when the upstream response doesn't carry enough context to compose it.
+
+Catalog search accepts exactly `q`, `family`, `kind`, `source`, `include_nsfw`,
+`sort`, `page`, and `page_size`. The response's `entries` are bounded by
+`page_size`; `page` identifies the returned window and `total` describes the
+complete filtered feed (or a conservative lower bound when an upstream does
+not publish an exact count). Modality is derived on every returned entry, so
+clients can apply Image/Video filtering without sending an unsupported query.
 
 ## Tokens
 

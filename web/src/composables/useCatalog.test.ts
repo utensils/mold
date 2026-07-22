@@ -338,6 +338,7 @@ describe("useCatalog modality filter", () => {
     expect(url).toContain("kind=lora");
     expect(url).toContain("source=civitai");
     expect(url).toContain("include_nsfw=false");
+    expect(url).not.toContain("modality=");
     expect(cat.visibleEntries.value.map((e) => e.id)).toEqual(["hf:row-1"]);
   });
 
