@@ -284,6 +284,28 @@ const detailModel = computed(() => {
     : null;
 });
 
+/** Runnable manifest siblings (`base:tag`) become exact pull targets. */
+const detailVariants = computed(() => {
+  const entry = detailEntry.value;
+  if (!entry) return [];
+  const base = entry.name.split(":")[0]!;
+  if (base === entry.name) return [];
+  const siblings = manifestEntries.value.filter(
+    (candidate) => candidate.name.split(":")[0] === base,
+  );
+  return siblings.length > 1 ? siblings : [];
+});
+
+function variantLabel(entry: MobileCatalogEntry): string {
+  const base = entry.name.split(":")[0]!;
+  return entry.name.slice(base.length + 1) || entry.name;
+}
+
+function selectDetailVariant(entry: MobileCatalogEntry): void {
+  if (entry.id === detailEntry.value?.id) return;
+  void openDetail(entry);
+}
+
 function announce(message: string, isError = false): void {
   announcement.value = message;
   announcementIsError.value = isError;
@@ -1096,6 +1118,30 @@ onBeforeUnmount(() => {
               </div>
               <span v-if="mergedDetail.installed">Installed</span>
             </div>
+
+            <section
+              v-if="detailVariants.length"
+              class="mobile-catalog-variants"
+              data-test="mobile-catalog-variants"
+              aria-label="Model variants"
+            >
+              <h3>Variants</h3>
+              <div>
+                <button
+                  v-for="variant in detailVariants"
+                  :key="variant.id"
+                  type="button"
+                  data-test="variant-chip"
+                  :aria-pressed="variant.id === detailEntry.id"
+                  @click="selectDetailVariant(variant)"
+                >
+                  {{ variantLabel(variant) }}
+                  <span v-if="variant.size_bytes != null"
+                    >· {{ formatGB(variant.size_bytes) }}</span
+                  >
+                </button>
+              </div>
+            </section>
 
             <div class="mobile-catalog-detail-tiles" data-test="mobile-catalog-detail-tiles">
               <div class="mobile-catalog-detail-tile">

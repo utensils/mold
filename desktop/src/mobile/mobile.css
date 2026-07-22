@@ -2694,6 +2694,38 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.mobile-catalog-variants h3 {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: var(--text-caption);
+}
+
+.mobile-catalog-variants > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mobile-catalog-variants button {
+  min-height: 44px;
+  border: 1px solid var(--edge);
+  border-radius: 22px;
+  padding: 0 14px;
+  background: var(--bench);
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+}
+
+.mobile-catalog-variants button[aria-pressed="true"] {
+  border-color: var(--safelight);
+  color: var(--rebate);
+  background: color-mix(in srgb, var(--safelight) 12%, var(--bench));
+}
+
+.mobile-catalog-variants button span {
+  color: var(--ink-3);
+}
+
 .mobile-catalog-detail-tiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

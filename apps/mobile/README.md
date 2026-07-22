@@ -62,7 +62,8 @@ pushed screen opened from the header.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family filters, exposes model details and
   components, and routes pull/load/unload/remove actions to the owning or
-  selected host. Pull actions progress through `Connecting...`, `Starting...`,
+  selected host. Detail-sheet variant chips select an exact manifest
+  `base:tag` target before pulling. Pull actions progress through `Connecting...`, `Starting...`,
   `Queued`, and `Pulling N%`; active downloads can be cancelled.
 - **Machines** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and
   Tailscale MagicDNS. Host detail shows telemetry, models-disk usage, queue,
