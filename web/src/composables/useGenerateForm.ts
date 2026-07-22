@@ -108,6 +108,7 @@ function defaultForm(): GenerateFormState {
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    cameraControl: null,
     placement: null,
     loras: [],
     enableAudio: null,
@@ -196,6 +197,10 @@ function modelDefaultsPatch(
     next.retakeRange = null;
     next.spatialUpscale = null;
     next.temporalUpscale = null;
+    next.cameraControl = null;
+  } else if (model.name.includes("ltx-2.3")) {
+    const camera = next.cameraControl?.trim();
+    if (camera && !camera.endsWith(".safetensors")) next.cameraControl = null;
   }
   if (capabilities.sourceImageMode === "qwen-edit") {
     next.batchSize = 1;
@@ -517,9 +522,7 @@ export function useGenerateForm(): UseGenerateForm {
       // path + scale travel to the server. We send `loras` (plural) so
       // multi-LoRA stacks reach the FLUX engine; older single-LoRA
       // clients still set `lora`, which the server coalesces.
-      const loras = s.loras.length
-        ? s.loras.map((l) => ({ path: l.path, scale: l.scale }))
-        : undefined;
+      let loras = s.loras.map((l) => ({ path: l.path, scale: l.scale }));
       const capabilities = generationCapabilitiesForFamily(selectedFamily(s));
       const qwenEdit = capabilities.sourceImageMode === "qwen-edit";
       const attachments = s.imageAttachments ?? [];
@@ -531,6 +534,16 @@ export function useGenerateForm(): UseGenerateForm {
       const sourceVideoPath = s.sourceVideoPath.trim();
       const family = selectedFamily(s);
       const ltx2 = family === "ltx2" || family === "ltx-2";
+      const cameraControl = s.cameraControl?.trim();
+      if (ltx2 && cameraControl) {
+        loras = loras.slice(0, MAX_LORA_STACK - 1);
+        loras.push({
+          path: cameraControl.endsWith(".safetensors")
+            ? cameraControl
+            : `camera-control:${cameraControl}`,
+          scale: 1,
+        });
+      }
       // The style preset is baked into the OUTGOING request — prompt template
       // plus the preset's curated negative, merged after the user's own
       // fragments and only for families that accept a negative prompt. Neither
@@ -580,7 +593,7 @@ export function useGenerateForm(): UseGenerateForm {
         gif_preview:
           capabilities.supportsVideo && s.gifPreview ? true : undefined,
         placement: s.placement ?? undefined,
-        loras,
+        loras: loras.length ? loras : undefined,
         enable_audio: s.enableAudio ?? undefined,
         ...(ltx2
           ? {

@@ -49,6 +49,7 @@ function makeForm(
     retakeRange: null,
     spatialUpscale: null,
     temporalUpscale: null,
+    cameraControl: null,
     placement: null,
     loras: [],
     enableAudio: null,

@@ -14,6 +14,7 @@ import ControlsAside from "../components/create/ControlsAside.vue";
 import CreateModelPicker from "../components/create/CreateModelPicker.vue";
 import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
+import EstimateBadge from "../components/create/EstimateBadge.vue";
 import { advancedActiveCount } from "../components/create/advancedCount";
 import { projectResolution } from "../components/create/resolutionProjection";
 import ScriptComposer from "../components/ScriptComposer.vue";
@@ -327,9 +328,25 @@ const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
 const stream = useGenerateStream();
-const submittedChainJobId = ref<string | null>(null);
+const CHAIN_JOB_STORAGE_KEY = "mold.create.chain-job";
+function loadSubmittedChainJobId(): string | null {
+  try {
+    return localStorage.getItem(CHAIN_JOB_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+const submittedChainJobId = ref<string | null>(loadSubmittedChainJobId());
 const submittedChainJob = useChainJobStream(submittedChainJobId);
 const submittedChainJobDetail = submittedChainJob.detail;
+watch(submittedChainJobId, (id) => {
+  try {
+    if (id) localStorage.setItem(CHAIN_JOB_STORAGE_KEY, id);
+    else localStorage.removeItem(CHAIN_JOB_STORAGE_KEY);
+  } catch {
+    // Storage is advisory; the durable server job keeps running regardless.
+  }
+});
 
 async function refreshGallery() {
   try {
@@ -421,6 +438,27 @@ const chainDecision = computed(() =>
     },
     currentModel.value?.family ?? null,
   ),
+);
+
+// Keep the preflight small: source/control media do not change the model's
+// static peak estimate enough to justify serializing their base64 payloads on
+// every form edit.
+const estimateRequest = computed<GenerateRequestWire | null>(() => {
+  if (!form.state.value.model) return null;
+  const request = { ...form.toRequest() };
+  delete request.source_image;
+  delete request.mask_image;
+  delete request.control_image;
+  delete request.edit_images;
+  delete request.source_video;
+  delete request.audio_file;
+  delete request.keyframes;
+  return request;
+});
+const estimateTarget = computed(() =>
+  routing.multiHost.value
+    ? (routing.resolve(form.state.value.model || null)?.target ?? null)
+    : null,
 );
 
 // ── Installed generation models for the left rail ─────────────────────
@@ -1375,6 +1413,7 @@ onBeforeUnmount(() => {
             @expand="onExpand"
             @undo-expand="undoExpand"
           />
+          <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
 
           <div
             v-if="submitStatus"

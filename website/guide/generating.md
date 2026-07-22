@@ -1,5 +1,10 @@
 # Generating Images
 
+The web Create composer shows an advisory peak-VRAM estimate for the selected
+machine before you submit. Video models expose their supported camera-motion
+controls under Advanced, and a durable sequence remains attached after a page
+reload so its server-side progress does not disappear from the workspace.
+
 ## Basic Usage
 
 ```bash
