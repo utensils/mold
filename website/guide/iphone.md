@@ -167,7 +167,8 @@ cover:
 - **Color family:** the Mold Studio theme families, Mold or Safelight
 - **Appearance:** System, Dark, or Light
 - **Remote hosts:** saved-host count and a shortcut to manage them
-- **About:** app version, remote-only processing, and TestFlight updates
+- **About:** app version, remote-only processing, TestFlight updates, and equal
+  project-owner credit for core contributors James Brink and Jeffrey Dilley
 
 Fresh installs start with the Safelight color family and System appearance.
 Existing users keep any valid Mold or Safelight choice they already saved.

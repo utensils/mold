@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Project attribution now consistently credits both core contributors and equal owners.** Desktop, web, and iPhone About surfaces; native package metadata; Rust crate authors; website and README ownership copy; and AUR maintainer headers now name James Brink and Jeffrey Dilley, matching the MIT license.
+
 - **TestFlight uploads now support external testers.** The iOS export no longer marks every IPA as internal-only, so the same validated build can stay in `Mold Internal` and be selected by an external group for Beta App Review; the iOS CI gate prevents that restriction from returning.
 
 - **The TUI Create form dropped its Mode and Host rows** — routing is owned by the Machines workspace's sticky generation target (`mold tui --local` still pins the local engine), and the host-input popup is superseded by the Machines connect flow. The **Info sub-panel and Recent strip are retired**: telemetry lives in Machines and the chrome host chip, the model description moved under the Model row, and the Timeline's `✓ Saved <file>` lines absorb Recent. **Unload model** left Create (Models owns `u`), the old always-visible Negative panel (and its `tui.negative_collapsed` flag) gave way to the accordion's inline editor, and Width/Height merged into the Size row (per-model saved dimensions still round-trip unchanged).

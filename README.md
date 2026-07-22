@@ -8,6 +8,10 @@
 
 Generate images and short video clips on your own GPU. No cloud, no Python, no fuss.
 
+Mold is equally owned and maintained by its core contributors,
+[James Brink](https://jamesbrink.online/) and
+[Jeffrey Dilley](mailto:jeff.dilley@gmail.com).
+
 **[Documentation](https://utensils.io/mold/)** | **[Getting Started](https://utensils.io/mold/guide/)** | **[Models](https://utensils.io/mold/models/)** | **[API](https://utensils.io/mold/api/)**
 
 ```bash

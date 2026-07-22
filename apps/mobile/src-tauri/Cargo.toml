@@ -4,7 +4,10 @@ version = "0.20.2"
 edition = "2024"
 license = "MIT"
 description = "Mold iOS companion for remote generation and gallery access"
-authors = ["James Brink <brink.james@gmail.com>"]
+authors = [
+    "James Brink <brink.james@gmail.com>",
+    "Jeffrey Dilley <jeff.dilley@gmail.com>",
+]
 
 [workspace]
 

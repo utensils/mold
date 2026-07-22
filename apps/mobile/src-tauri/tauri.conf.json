@@ -27,7 +27,8 @@
     "icon": [
       "../../../desktop/src-tauri/icons/icon.png"
     ],
-    "publisher": "James Brink",
+    "publisher": "James Brink and Jeffrey Dilley",
+    "copyright": "Copyright \u00a9 2026 James Brink and Jeffrey Dilley. MIT License.",
     "category": "GraphicsAndDesign",
     "shortDescription": "Generate with remote Mold hosts from iPhone.",
     "longDescription": "Mold for iPhone connects to remote Mold engines over your LAN or Tailscale for generation, gallery, model catalog, host monitoring, and appearance settings.",

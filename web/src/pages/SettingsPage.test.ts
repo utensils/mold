@@ -38,6 +38,8 @@ describe("SettingsPage", () => {
     expect(wrapper.get("h1").text()).toBe("Settings");
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("9.9.9");
     expect(wrapper.text()).toContain("local + your hosts");
+    expect(wrapper.text()).toContain("James Brink");
+    expect(wrapper.text()).toContain("Jeffrey Dilley");
   });
 
   it("falls back to an em dash when the server version is unknown", () => {

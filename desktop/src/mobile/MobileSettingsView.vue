@@ -129,6 +129,10 @@ const appearances: Array<{ value: Theme; label: string; description: string }> =
           <dt>Updates</dt>
           <dd>TestFlight</dd>
         </div>
+        <div>
+          <dt>Core contributors</dt>
+          <dd>James Brink · Jeffrey Dilley<br />Equal project owners</dd>
+        </div>
       </dl>
     </section>
   </div>

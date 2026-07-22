@@ -16,6 +16,8 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("Change the chrome without changing the color of your prints");
     expect(wrapper.text()).toContain("2 hosts saved");
     expect(wrapper.text()).toContain("0.18.0");
+    expect(wrapper.text()).toContain("James Brink");
+    expect(wrapper.text()).toContain("Jeffrey Dilley");
 
     await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
     await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);

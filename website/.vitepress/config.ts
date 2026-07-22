@@ -130,7 +130,7 @@ export default defineConfig({
     footer: {
       message: 'Released under the MIT License.',
       copyright:
-        'Copyright <a href="https://jamesbrink.online/">James Brink</a>',
+        'Copyright <a href="https://jamesbrink.online/">James Brink</a> and <a href="mailto:jeff.dilley@gmail.com">Jeffrey Dilley</a>',
     },
 
     editLink: {
