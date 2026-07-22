@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `mold tui` / `mold serve` builds no longer fail with a vite `Plugin<any> is not assignable to PluginOption` type explosion on checkouts that predate the unified frontend workspace: `scripts/ensure-web-dist.sh` now removes a leftover per-package `web/node_modules` (detected by it containing its own vite copy) before building, so TypeScript resolves exactly one vite/rollup toolchain from the repo-root workspace.
+
 - **Metadata-DB access is now safe under concurrent processes.** Connections set a 5-second SQLite busy timeout (previously an instant `SQLITE_BUSY` that most read paths swallowed as "no value"), and schema migrations now run under an immediate transaction that re-reads `user_version` inside the write lock. Before this, `mold tui` racing its auto-spawned `mold serve` over a fresh or not-yet-migrated `mold.db` could double-apply an `ALTER TABLE` — corrupting the file so every later open failed with "duplicate column" — or intermittently read settings back empty.
 
 - **The web Library grid no longer changes size as lazy thumbnails load while scrolling.** Responsive tracks now ignore media intrinsic widths, and every print carries the same host badge plus hover/focus model and seed edge label as desktop Library.
