@@ -2,6 +2,7 @@ import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/clie
 import { describeTransportError, isTransportFailure } from "../lib/api/errors";
 import type {
   ChainJobDetail,
+  ChainJobListing,
   CompleteEvent,
   GalleryImage,
   OutputFormat,
@@ -34,6 +35,8 @@ const DEFAULT_POLL_INTERVAL_MS = 4_000;
  *  the exact moment reconciliation exists for — so a dead query is retried
  *  (bounded) instead of settling a possibly-finished print as failed. */
 const MAX_TRANSPORT_RETRIES = 3;
+const PRE_ID_CLOCK_SKEW_MS = 1_000;
+const PRE_ID_JOIN_WINDOW_MS = 5_000;
 
 /** Minimal `GET /api/queue` row — declared locally so the remote-only phone
  * never imports a desktop store to borrow the shape. */
@@ -42,6 +45,7 @@ interface RecoveryQueueEntry {
   model?: string;
   state: "queued" | "running";
   seed_pinned?: boolean | null;
+  started_at_unix_ms?: number;
   metadata?: OutputMetadata | null;
 }
 
@@ -170,6 +174,7 @@ function settleFailure(job: Job, message: string): void {
   job.stage = null;
   job.error = message;
   job.status = "error";
+  job.interrupted = false;
 }
 
 function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationRecoveryOptions): void {
@@ -178,6 +183,7 @@ function settleCompleted(job: Job, complete: CompleteEvent, opts: GenerationReco
   job.stage = null;
   job.error = null;
   job.status = "complete";
+  job.interrupted = false;
   opts.refreshResultUrl(job.clientId);
 }
 
@@ -190,14 +196,38 @@ function findQueueEntry(
   // request carried — mirrors the cancel path's pre-ID snapshot semantics.
   const seed = Number(job.visualSeed);
   if (!Number.isSafeInteger(seed)) return null;
+  const earliest = job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS;
+  const latest = job.submittedAtUnixMs + PRE_ID_JOIN_WINDOW_MS;
   return (
-    entries.find(
-      (entry) =>
-        entry.seed_pinned !== false &&
-        entry.metadata?.seed === seed &&
-        (entry.metadata.model === job.model || entry.model === job.model) &&
-        (!entry.metadata.prompt || !job.prompt || entry.metadata.prompt === job.prompt),
-    ) ?? null
+    entries
+      .filter(
+        (entry) =>
+          typeof entry.started_at_unix_ms === "number" &&
+          entry.started_at_unix_ms >= earliest &&
+          entry.started_at_unix_ms <= latest &&
+          entry.seed_pinned !== false &&
+          entry.metadata?.seed === seed &&
+          (entry.metadata.model === job.model || entry.model === job.model) &&
+          (!entry.metadata.prompt || !job.prompt || entry.metadata.prompt === job.prompt),
+      )
+      .sort((a, b) => a.started_at_unix_ms! - b.started_at_unix_ms!)[0] ?? null
+  );
+}
+
+async function findPreIdChain(job: Job, opts: GenerationRecoveryOptions): Promise<string | null> {
+  const listing = await apiJsonTo<ChainJobListing>(opts.target, "/api/chain-jobs");
+  const earliest = job.submittedAtUnixMs - PRE_ID_CLOCK_SKEW_MS;
+  const latest = job.submittedAtUnixMs + PRE_ID_JOIN_WINDOW_MS;
+  return (
+    listing.jobs
+      .filter(
+        (candidate) =>
+          candidate.model === job.model &&
+          (candidate.state === "queued" || candidate.state === "running") &&
+          candidate.created_at_unix_ms >= earliest &&
+          candidate.created_at_unix_ms <= latest,
+      )
+      .sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms)[0]?.id ?? null
   );
 }
 
@@ -238,6 +268,17 @@ async function reconcileJob(job: Job, opts: GenerationRecoveryOptions): Promise<
   // settled or abandoned (external settle / unmount).
   async function reconcileJobOnce(): Promise<void> {
     while (isActive() && !settledExternally(job)) {
+      if (opts.chain && !job.id) {
+        job.id = (await findPreIdChain(job, opts)) ?? "";
+        transportRetries = 0;
+        if (!job.id) {
+          const prints = await apiJsonTo<GalleryImage[]>(opts.target, "/api/gallery");
+          const match = matchGalleryPrint(job, prints);
+          if (match) settleCompleted(job, galleryCompletion(match), opts);
+          else settleFailure(job, interruptedCopy);
+          return;
+        }
+      }
       if (opts.chain && job.id) {
         const detail = await apiJsonTo<ChainJobDetail>(
           opts.target,
@@ -342,13 +383,14 @@ export function reconcileInterruptedGenerationJobs(
   opts: GenerationRecoveryOptions,
 ): Promise<void> {
   const interrupted = jobs.filter(
-    (job) => job.status === "error" && isInterruptedGenerationError(job.error),
+    (job) => job.status === "error" && (job.interrupted || isInterruptedGenerationError(job.error)),
   );
   if (interrupted.length === 0) return Promise.resolve();
   for (const job of interrupted) {
     // Reclaim the job as live before any awaits: the raw transport error must
     // never render, and a re-attached job belongs back in the queue rail.
     job.error = null;
+    job.interrupted = false;
     job.status = "loading";
     job.stage = `Reconnecting to ${opts.hostLabel}`;
   }

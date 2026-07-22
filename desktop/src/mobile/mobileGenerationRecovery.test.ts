@@ -142,6 +142,19 @@ describe("galleryCompletion", () => {
 });
 
 describe("reconcileInterruptedGenerationJobs", () => {
+  it("reconciles a structured interruption even when the transport copy is localized", async () => {
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      if (path === "/api/gallery") return Promise.resolve([galleryPrint]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ error: "La conexión de red se perdió.", interrupted: true });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(job.status).toBe("complete");
+  });
+
   it("settles a job that finished server-side as a rendered completion", async () => {
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/queue") return Promise.resolve({ entries: [] });
@@ -226,6 +239,7 @@ describe("reconcileInterruptedGenerationJobs", () => {
               model: "ltx2:q8",
               state: "queued",
               position: 1,
+              started_at_unix_ms: job.submittedAtUnixMs + 100,
               metadata: galleryPrint.metadata,
             },
           ],
@@ -238,6 +252,41 @@ describe("reconcileInterruptedGenerationJobs", () => {
 
     expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mine", { method: "DELETE" });
     expect(job.status).toBe("error");
+  });
+
+  it("does not delete a compatible pre-ID duplicate submitted after the interrupted job", async () => {
+    const submittedAtUnixMs = 1_700_000_000_000;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [
+            {
+              id: "mine",
+              model: "ltx2:q8",
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 100,
+              metadata: galleryPrint.metadata,
+            },
+            {
+              id: "later-duplicate",
+              model: "ltx2:q8",
+              state: "queued",
+              started_at_unix_ms: submittedAtUnixMs + 10_000,
+              metadata: galleryPrint.metadata,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", submittedAtUnixMs });
+
+    await reconcileInterruptedGenerationJobs([job], options());
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/queue/mine", { method: "DELETE" });
+    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/queue/later-duplicate", {
+      method: "DELETE",
+    });
   });
 
   it("humanizes a reconciliation query that itself cannot reach the host", async () => {
@@ -351,6 +400,46 @@ describe("reconcileInterruptedGenerationJobs", () => {
     expect(job.result?.filename).toBe("stitched clip.mp4");
     expect(job.result?.format).toBe("mp4");
     expect(opts.refreshResultUrl).toHaveBeenCalledWith(7);
+  });
+
+  it("finds an id-less durable chain created with the interrupted submission", async () => {
+    const submittedAtUnixMs = 1_700_000_000_000;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/chain-jobs") {
+        return Promise.resolve({
+          jobs: [
+            {
+              id: "chain-later",
+              state: "running",
+              model: "ltx2:q8",
+              created_at_unix_ms: submittedAtUnixMs + 10_000,
+            },
+            {
+              id: "chain-mine",
+              state: "running",
+              model: "ltx2:q8",
+              created_at_unix_ms: submittedAtUnixMs + 100,
+            },
+          ],
+        });
+      }
+      if (path === "/api/chain-jobs/chain-mine") {
+        return Promise.resolve({
+          id: "chain-mine",
+          state: "completed",
+          finalizes: [{ output: "recovered.mp4", at_unix_ms: 1, stage_seeds: [] }],
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected path ${path}`));
+    });
+    const job = makeJob({ id: "", submittedAtUnixMs });
+
+    await reconcileInterruptedGenerationJobs([job], options({ chain: true }));
+
+    expect(job.id).toBe("chain-mine");
+    expect(job.status).toBe("complete");
+    expect(job.result?.filename).toBe("recovered.mp4");
   });
 
   it("surfaces a chain failure with the host's own error copy", async () => {

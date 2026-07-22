@@ -99,6 +99,12 @@ reviewed prompt together with any separate unconfirmed-cancellation warning
 while successful prints remain. Library shows the sibling
 position and source prompt when those optional metadata fields are present.
 
+iOS suspension marks interrupted generation streams structurally instead of
+depending on localized WebKit error text. On resume, pre-ID queue and durable
+chain joins are bounded to the original submission window, so a later
+fixed-seed duplicate cannot be mistaken for the interrupted print or cancelled
+as its zombie. Background failure notifications wait for this reconciliation.
+
 The initial mobile scope does not include a local engine, the desktop Chains
 editor and durable-jobs workspace, RunPod provisioning, desktop engine
 settings, or desktop self-update channels.

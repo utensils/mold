@@ -5,6 +5,7 @@ import { sseStream } from "../lib/api/sse";
 import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
+import { describeTransportError } from "../lib/api/errors";
 import { useAppPrefsStore } from "./appPrefs";
 import { useGalleryStore } from "./gallery";
 import { useHostsStore } from "./hosts";
@@ -418,8 +419,8 @@ export const useGenerationStore = defineStore("generation", {
         // Background notification (the view toasts in the foreground).
         const failed = jobs.find((s) => s.status === "error");
         if (jobs.some((s) => s.status === "complete")) notifyGenerated(req.prompt);
-        else if (failed?.error && !isCancelledError(failed.error)) {
-          notifyGenerationFailed(failed.error);
+        else if (failed?.error && !failed.interrupted && !isCancelledError(failed.error)) {
+          notifyGenerationFailed(describeTransportError(failed.error, failed.hostLabel));
         }
         // Consumers such as the iPhone UI promote the returned result in
         // their own promise callback. Defer housekeeping until that callback
@@ -799,6 +800,7 @@ export const useGenerationStore = defineStore("generation", {
           if (err && !abort.signal.aborted && !jobHasSettled(job)) {
             job.status = "error";
             job.error = err.message;
+            job.interrupted = true;
           }
         },
       }).catch((error: unknown) => {
@@ -806,6 +808,7 @@ export const useGenerationStore = defineStore("generation", {
       });
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         job.status = "error";
+        job.interrupted = true;
         job.error = streamError
           ? streamError instanceof Error
             ? streamError.message

@@ -360,7 +360,10 @@ describe("generation queueing", () => {
     expect(jobs[0]).toMatchObject({
       status: "error",
       error: "The generation stream closed before completion.",
+      interrupted: true,
     });
+    const { notifyGenerationFailed } = await import("../lib/notify");
+    expect(vi.mocked(notifyGenerationFailed)).not.toHaveBeenCalled();
   });
 
   it("prune drops the oldest finished jobs and keeps live ones", () => {
