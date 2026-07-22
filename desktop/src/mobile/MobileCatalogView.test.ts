@@ -227,6 +227,69 @@ afterEach(() => {
 });
 
 describe("MobileCatalogView", () => {
+  it("repoints the detail pull to the selected manifest variant", async () => {
+    searchCatalog.mockResolvedValue(searchResponse([]));
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse([
+            model("flux-dev:q4", "flux", false, { size_gb: 6 }),
+            model("flux-dev:q8", "flux", false, { size_gb: 12 }),
+          ]),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const q4 = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("flux-dev:q4"))!;
+    await q4.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const chips = [...document.querySelectorAll<HTMLButtonElement>("[data-test='variant-chip']")];
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      expect.stringContaining("q4"),
+      expect.stringContaining("q8"),
+    ]);
+    chips[1]!.click();
+    await flushPromises();
+    document.querySelector<HTMLButtonElement>(".mobile-catalog-detail-action button")!.click();
+    await flushPromises();
+
+    expect(startCatalogDownload).toHaveBeenCalledWith("flux-dev:q8", targets.studio, false);
+  });
+
+  it("keeps installed siblings in the variant choices", async () => {
+    searchCatalog.mockResolvedValue(searchResponse([]));
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) => {
+      if (path === "/api/models") {
+        return Promise.resolve(
+          jsonResponse([
+            model("flux-dev:q4", "flux", true, { size_gb: 6 }),
+            model("flux-dev:q8", "flux", false, { size_gb: 12 }),
+          ]),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const q8 = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("flux-dev:q8"))!;
+    await q8.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const labels = [
+      ...document.querySelectorAll<HTMLButtonElement>("[data-test='variant-chip']"),
+    ].map((chip) => chip.textContent);
+    expect(labels).toEqual([expect.stringContaining("q4"), expect.stringContaining("q8")]);
+  });
+
   it("searches the selected remote host and merges installed models with host labels", async () => {
     searchCatalog.mockResolvedValue(
       searchResponse([

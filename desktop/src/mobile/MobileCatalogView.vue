@@ -159,6 +159,27 @@ const installedEntries = computed<MobileCatalogEntry[]>(() => {
 
 const installedNames = computed(() => new Set(installedEntries.value.map((entry) => entry.name)));
 
+function manifestModelToEntry(model: ModelEntry): MobileCatalogEntry {
+  const weights = Math.round(model.size_gb * 1_000_000_000);
+  const fetch = model.remaining_download_bytes ?? weights;
+  const shared = Math.max(0, fetch - weights);
+  return {
+    id: model.name,
+    source: "hf",
+    source_id: model.hf_repo || null,
+    name: model.name,
+    family: model.family,
+    kind: "checkpoint",
+    nsfw: false,
+    installed: false,
+    size_bytes: weights,
+    thumbnail_url: null,
+    page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
+    companion_details:
+      shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
+  };
+}
+
 /** Curated `/api/models` variants are safe pull targets and must beat an aggregate HF repo row. */
 const manifestEntries = computed<MobileCatalogEntry[]>(() => {
   const q = query.value.trim().toLowerCase();
@@ -167,26 +188,7 @@ const manifestEntries = computed<MobileCatalogEntry[]>(() => {
     .filter((model) => !installedNames.value.has(model.name))
     .filter((model) => !q || model.name.toLowerCase().includes(q))
     .filter((model) => !family.value || model.family === family.value)
-    .map((model) => {
-      const weights = Math.round(model.size_gb * 1_000_000_000);
-      const fetch = model.remaining_download_bytes ?? weights;
-      const shared = Math.max(0, fetch - weights);
-      return {
-        id: model.name,
-        source: "hf",
-        source_id: model.hf_repo || null,
-        name: model.name,
-        family: model.family,
-        kind: "checkpoint",
-        nsfw: false,
-        installed: false,
-        size_bytes: weights,
-        thumbnail_url: null,
-        page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
-        companion_details:
-          shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
-      } satisfies MobileCatalogEntry;
-    });
+    .map(manifestModelToEntry);
 });
 
 function sourceMatches(entry: CatalogEntry): boolean {
@@ -283,6 +285,32 @@ const detailModel = computed(() => {
       ) ?? null)
     : null;
 });
+
+/** Runnable manifest siblings (`base:tag`) become exact pull targets. */
+const detailVariants = computed(() => {
+  const entry = detailEntry.value;
+  if (!entry) return [];
+  const base = entry.name.split(":")[0]!;
+  if (base === entry.name) return [];
+  const siblings = (modelsByHost.value[props.selectedHostId] ?? [])
+    .filter((model) => !isUtilityModel(model) && model.name.split(":")[0] === base)
+    .map(
+      (model) =>
+        installedEntries.value.find((installed) => installed.name === model.name) ??
+        manifestModelToEntry(model),
+    );
+  return siblings.length > 1 ? siblings : [];
+});
+
+function variantLabel(entry: MobileCatalogEntry): string {
+  const base = entry.name.split(":")[0]!;
+  return entry.name.slice(base.length + 1) || entry.name;
+}
+
+function selectDetailVariant(entry: MobileCatalogEntry): void {
+  if (entry.id === detailEntry.value?.id) return;
+  void openDetail(entry);
+}
 
 function announce(message: string, isError = false): void {
   announcement.value = message;
@@ -1096,6 +1124,30 @@ onBeforeUnmount(() => {
               </div>
               <span v-if="mergedDetail.installed">Installed</span>
             </div>
+
+            <section
+              v-if="detailVariants.length"
+              class="mobile-catalog-variants"
+              data-test="mobile-catalog-variants"
+              aria-label="Model variants"
+            >
+              <h3>Variants</h3>
+              <div>
+                <button
+                  v-for="variant in detailVariants"
+                  :key="variant.id"
+                  type="button"
+                  data-test="variant-chip"
+                  :aria-pressed="variant.id === detailEntry.id"
+                  @click="selectDetailVariant(variant)"
+                >
+                  {{ variantLabel(variant) }}
+                  <span v-if="variant.size_bytes != null"
+                    >· {{ formatGB(variant.size_bytes) }}</span
+                  >
+                </button>
+              </div>
+            </section>
 
             <div class="mobile-catalog-detail-tiles" data-test="mobile-catalog-detail-tiles">
               <div class="mobile-catalog-detail-tile">

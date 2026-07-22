@@ -128,7 +128,9 @@ entire video into phone memory.
 Models combines installed models with live Hugging Face and Civitai results.
 You can search, filter All/Images/Video, filter by source or family, inspect
 download contents and installed components, and include NSFW entries
-explicitly.
+explicitly. When a manifest model has multiple quantizations, its detail sheet
+shows variant chips with checkpoint sizes; the selected chip is the exact model
+the Pull action downloads.
 
 The host selector controls where Models browses. Pulling a model can target a
 different ready host without changing the host selected in Create. With more
