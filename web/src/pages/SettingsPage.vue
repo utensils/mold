@@ -8,6 +8,7 @@
  */
 import { computed, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
 import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
@@ -256,6 +257,8 @@ const version = computed(() => status.value?.version ?? "—");
       </p>
     </CardSurface>
 
+    <ConfigSettingsPanel />
+
     <p class="kicker">About</p>
     <CardSurface class="settings__card settings__card--list" :padded="false">
       <div class="about-row">
@@ -280,7 +283,7 @@ const version = computed(() => status.value?.version ?? "—");
 
 <style scoped>
 .settings {
-  max-width: 600px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 24px 20px 96px;
 }

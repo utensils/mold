@@ -20,6 +20,12 @@ Upgrading from an earlier release runs a one-shot import of the
 preference slices of `config.toml` into the DB on first launch — your
 existing values carry over.
 
+The web app's **Settings → All settings** panel exposes this same effective
+configuration surface. It provides typed editors for known keys, keeps unknown
+future keys visible under Advanced, labels each value's DB/file/environment
+provenance, prevents writes that an environment variable would override, and
+supports per-key reset plus profile creation and switching.
+
 ## Managing Config from the CLI
 
 `mold config` routes writes to the right surface based on the key
