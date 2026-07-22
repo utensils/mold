@@ -14,7 +14,11 @@ import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 import { requestConfirm, toast } from "../../lib/toasts";
-import type { CatalogEntryWire, ModelInfoExtended } from "../../types";
+import type {
+  CatalogEntryWire,
+  ModelComponentStatus,
+  ModelInfoExtended,
+} from "../../types";
 
 const cat = useCatalog();
 
@@ -180,14 +184,17 @@ const footprintBytes = computed<number | null>(() => {
   return total > 0 ? total : (e.size_bytes ?? null);
 });
 
-const components = computed<string[]>(() => {
+const components = computed<ModelComponentStatus[]>(() => {
   const e = entry.value;
-  if (e) return (e.companion_details ?? []).map((c) => c.name);
+  if (e)
+    return (e.companion_details ?? []).map((component) => ({
+      kind: component.kind,
+      name: component.name,
+      present: e.installed,
+    }));
   const d = cat.detail.value;
   if (state.value !== "installed") return [];
-  return ((d as { components?: { name: string }[] }).components ?? []).map(
-    (c) => c.name,
-  );
+  return (d as { components?: ModelComponentStatus[] }).components ?? [];
 });
 
 const variants = computed(() =>
@@ -271,6 +278,16 @@ async function handlePull() {
   const target = isRepair.value ? e.id : (selectedVariantId.value ?? e.id);
   await cat.startDownload(target);
   cat.closeDetail();
+}
+
+async function handleComponentRepair(component: ModelComponentStatus) {
+  if (!component.repair_model) return;
+  try {
+    await cat.startDownload(component.repair_model);
+    toast("success", `repairing ${component.name}`);
+  } catch (e: unknown) {
+    toast("error", e instanceof Error ? e.message : "repair failed");
+  }
 }
 
 // ── Installed model actions ────────────────────────────────────────────
@@ -441,9 +458,26 @@ function onRetry() {
         <template v-if="components.length">
           <div class="md__kicker">Components</div>
           <div class="md__chips" data-test="components">
-            <span v-for="c in components" :key="c" class="md__chip">{{
-              c
-            }}</span>
+            <span
+              v-for="component in components"
+              :key="`${component.kind}:${component.name}`"
+              class="md__chip"
+              :data-test="
+                component.present ? 'component-ready' : 'component-missing'
+              "
+            >
+              {{ component.name }} ·
+              {{ component.present ? "ready" : "missing" }}
+              <button
+                v-if="!component.present && component.repair_model"
+                type="button"
+                class="md__chip-action"
+                data-test="component-repair"
+                @click="handleComponentRepair(component)"
+              >
+                Repair
+              </button>
+            </span>
           </div>
         </template>
 
@@ -692,6 +726,15 @@ function onRetry() {
   border-radius: var(--radius-pill);
   font-size: 12px;
   font-family: var(--f-mono);
+}
+
+.md__chip-action {
+  margin-left: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--safelight);
+  font: inherit;
+  cursor: pointer;
 }
 
 .md__variant {

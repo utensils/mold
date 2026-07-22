@@ -435,6 +435,27 @@ describe("ModelDetailDrawer", () => {
       expect(chips.text()).toContain("flux-vae");
     });
 
+    it("labels missing components and repairs the exact advertised target", async () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel(),
+        components: [
+          {
+            kind: "text-encoder",
+            name: "t5xxl",
+            present: false,
+            repair_model: "t5xxl:fp16",
+          },
+        ],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=component-missing]").text()).toContain(
+        "missing",
+      );
+      await w.get("[data-test=component-repair]").trigger("click");
+      expect(mockStartDownload).toHaveBeenCalledWith("t5xxl:fp16");
+    });
+
     it("Load calls loadInstalled with the model name", async () => {
       mockDetail.value = {
         kind: "installed",

@@ -596,8 +596,18 @@ export async function deleteModel(model: string): Promise<ModelRemovalResult> {
   const res = await fetch(`${base}/api/models/${encodeURIComponent(model)}`, {
     method: "DELETE",
   });
-  if (!res.ok)
-    throw new Error(`DELETE /api/models/${model} failed: ${res.status}`);
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as {
+      code?: string;
+      error?: string;
+    } | null;
+    if (body?.code === "MODEL_LOADED") {
+      throw new Error(`Unload ${model} before deleting it.`);
+    }
+    throw new Error(
+      body?.error ?? `DELETE /api/models/${model} failed: ${res.status}`,
+    );
+  }
   return (await res.json()) as ModelRemovalResult;
 }
 

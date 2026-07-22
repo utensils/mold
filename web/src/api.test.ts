@@ -5,6 +5,7 @@ import {
   chainJobStagePreviewUrl,
   createChainJob,
   deleteChainJob,
+  deleteModel,
   fetchQueue,
   gcChainJobs,
   generateStream,
@@ -368,6 +369,27 @@ describe("upscaleStream", () => {
         url: "http://studio:7680/api/upscale/stream",
         headers: { "x-api-key": "sk-studio" },
       }),
+    );
+  });
+});
+
+describe("model lifecycle api helpers", () => {
+  it("turns MODEL_LOADED into an actionable delete error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            code: "MODEL_LOADED",
+            error: "model is currently loaded; unload it first",
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(deleteModel("flux-dev:q8")).rejects.toThrow(
+      "Unload flux-dev:q8 before deleting it.",
     );
   });
 });

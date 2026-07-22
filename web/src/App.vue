@@ -13,7 +13,7 @@ import {
   onDownloadComplete,
   useDownloads,
 } from "./composables/useDownloads";
-import { fetchModels } from "./api";
+import { useCatalog } from "./composables/useCatalog";
 import { useGenerateStream } from "./composables/useGenerateStream";
 import { startQueueReconciler } from "./composables/useQueueReconciler";
 import { installNotifications } from "./lib/notifications";
@@ -59,8 +59,9 @@ function onKeydown(event: KeyboardEvent) {
 window.addEventListener("keydown", onKeydown);
 
 const off = onDownloadComplete(() => {
-  // Refresh the model picker once a pull lands so the new model appears.
-  void fetchModels().catch(() => undefined);
+  // Refresh the shared Installed shelf once a pull lands. Merely fetching and
+  // discarding `/api/models` leaves the singleton's rendered rows stale.
+  void useCatalog().refreshInstalled();
 });
 
 // Cross-workspace notifications (spec §08 G11): generation-done / pull /
