@@ -159,6 +159,27 @@ const installedEntries = computed<MobileCatalogEntry[]>(() => {
 
 const installedNames = computed(() => new Set(installedEntries.value.map((entry) => entry.name)));
 
+function manifestModelToEntry(model: ModelEntry): MobileCatalogEntry {
+  const weights = Math.round(model.size_gb * 1_000_000_000);
+  const fetch = model.remaining_download_bytes ?? weights;
+  const shared = Math.max(0, fetch - weights);
+  return {
+    id: model.name,
+    source: "hf",
+    source_id: model.hf_repo || null,
+    name: model.name,
+    family: model.family,
+    kind: "checkpoint",
+    nsfw: false,
+    installed: false,
+    size_bytes: weights,
+    thumbnail_url: null,
+    page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
+    companion_details:
+      shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
+  };
+}
+
 /** Curated `/api/models` variants are safe pull targets and must beat an aggregate HF repo row. */
 const manifestEntries = computed<MobileCatalogEntry[]>(() => {
   const q = query.value.trim().toLowerCase();
@@ -167,26 +188,7 @@ const manifestEntries = computed<MobileCatalogEntry[]>(() => {
     .filter((model) => !installedNames.value.has(model.name))
     .filter((model) => !q || model.name.toLowerCase().includes(q))
     .filter((model) => !family.value || model.family === family.value)
-    .map((model) => {
-      const weights = Math.round(model.size_gb * 1_000_000_000);
-      const fetch = model.remaining_download_bytes ?? weights;
-      const shared = Math.max(0, fetch - weights);
-      return {
-        id: model.name,
-        source: "hf",
-        source_id: model.hf_repo || null,
-        name: model.name,
-        family: model.family,
-        kind: "checkpoint",
-        nsfw: false,
-        installed: false,
-        size_bytes: weights,
-        thumbnail_url: null,
-        page_url: model.hf_repo ? `https://huggingface.co/${model.hf_repo}` : null,
-        companion_details:
-          shared > 0 ? [{ name: "shared runtime components", size_bytes: shared }] : [],
-      } satisfies MobileCatalogEntry;
-    });
+    .map(manifestModelToEntry);
 });
 
 function sourceMatches(entry: CatalogEntry): boolean {
@@ -290,9 +292,13 @@ const detailVariants = computed(() => {
   if (!entry) return [];
   const base = entry.name.split(":")[0]!;
   if (base === entry.name) return [];
-  const siblings = manifestEntries.value.filter(
-    (candidate) => candidate.name.split(":")[0] === base,
-  );
+  const siblings = (modelsByHost.value[props.selectedHostId] ?? [])
+    .filter((model) => !isUtilityModel(model) && model.name.split(":")[0] === base)
+    .map(
+      (model) =>
+        installedEntries.value.find((installed) => installed.name === model.name) ??
+        manifestModelToEntry(model),
+    );
   return siblings.length > 1 ? siblings : [];
 });
 
