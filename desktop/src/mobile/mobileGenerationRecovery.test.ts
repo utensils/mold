@@ -412,7 +412,7 @@ describe("reconcileInterruptedGenerationJobs", () => {
               id: "chain-later",
               state: "running",
               model: "ltx2:q8",
-              created_at_unix_ms: submittedAtUnixMs + 10_000,
+              created_at_unix_ms: submittedAtUnixMs + 200,
             },
             {
               id: "chain-mine",

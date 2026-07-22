@@ -7,6 +7,7 @@ import { flushPromises } from "@vue/test-utils";
 const openStreams: Array<{
   onEvent: (event: string, data: string) => void;
   signal: AbortSignal;
+  onClose?: (error: Error | null) => void;
   resolve: () => void;
 }> = [];
 
@@ -14,10 +15,19 @@ vi.mock("../lib/api/sse", () => ({
   sseStream: vi.fn(
     (
       _path: string,
-      opts: { onEvent: (event: string, data: string) => void; signal: AbortSignal },
+      opts: {
+        onEvent: (event: string, data: string) => void;
+        signal: AbortSignal;
+        onClose?: (error: Error | null) => void;
+      },
     ) =>
       new Promise<void>((resolve) => {
-        openStreams.push({ onEvent: opts.onEvent, signal: opts.signal, resolve });
+        openStreams.push({
+          onEvent: opts.onEvent,
+          signal: opts.signal,
+          onClose: opts.onClose,
+          resolve,
+        });
       }),
   ),
 }));
@@ -364,6 +374,21 @@ describe("generation queueing", () => {
     });
     const { notifyGenerationFailed } = await import("../lib/notify");
     expect(vi.mocked(notifyGenerationFailed)).not.toHaveBeenCalled();
+  });
+
+  it("does not classify an HTTP rejection as a resumable transport interruption", async () => {
+    const store = useGenerationStore();
+    const { jobs, settled } = store.submitBatch({ ...req }, 1);
+    await flushPromises();
+    openStreams[0]!.onClose?.(new Error("SSE request failed with HTTP 401"));
+    openStreams[0]!.resolve();
+    await settled;
+
+    expect(jobs[0]).toMatchObject({
+      status: "error",
+      error: "SSE request failed with HTTP 401",
+      interrupted: false,
+    });
   });
 
   it("prune drops the oldest finished jobs and keeps live ones", () => {

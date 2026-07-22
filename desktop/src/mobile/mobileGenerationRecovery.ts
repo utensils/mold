@@ -227,7 +227,7 @@ async function findPreIdChain(job: Job, opts: GenerationRecoveryOptions): Promis
           candidate.created_at_unix_ms >= earliest &&
           candidate.created_at_unix_ms <= latest,
       )
-      .sort((a, b) => b.created_at_unix_ms - a.created_at_unix_ms)[0]?.id ?? null
+      .sort((a, b) => a.created_at_unix_ms - b.created_at_unix_ms)[0]?.id ?? null
   );
 }
 

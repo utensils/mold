@@ -800,7 +800,11 @@ export const useGenerationStore = defineStore("generation", {
           if (err && !abort.signal.aborted && !jobHasSettled(job)) {
             job.status = "error";
             job.error = err.message;
-            job.interrupted = true;
+            // fetch-event-source reports network/transport loss as TypeError.
+            // HTTP/auth failures are deterministic and must remain final —
+            // suppressing their notification and retrying on foreground would
+            // only hide the actual server response.
+            job.interrupted = err instanceof TypeError;
           }
         },
       }).catch((error: unknown) => {
@@ -808,7 +812,7 @@ export const useGenerationStore = defineStore("generation", {
       });
       if (!abort.signal.aborted && !jobHasSettled(job)) {
         job.status = "error";
-        job.interrupted = true;
+        job.interrupted = streamError === null || streamError instanceof TypeError;
         job.error = streamError
           ? streamError instanceof Error
             ? streamError.message
