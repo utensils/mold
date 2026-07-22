@@ -95,6 +95,10 @@ restoration, and scroll locking across the web app's modal and sheet surfaces.
 Models refreshes Installed as pulls complete, exposes missing component status
 with exact Repair actions, and explains that loaded models must be unloaded
 before deletion.
+Settings exposes the serving engine's complete configuration and profile
+surface with search, per-key provenance, environment-override locks, typed
+editors, and individual reset controls; prompt-expansion preferences are
+available there alongside appearance and browser-local catalog tokens.
 
 ## Desktop app
 
