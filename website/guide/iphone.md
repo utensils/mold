@@ -102,6 +102,12 @@ prompt, plus any separate unconfirmed-cancellation caveat, while keeping
 successful prints. Library shows **Batch N of M** and the source prompt when
 that provenance is present; prints from older servers remain unchanged.
 
+When iOS suspends the app, interrupted generation streams carry a structured
+recovery marker rather than relying on localized WebKit error text. On resume,
+Mold checks the frozen host and bounds any pre-ID queue or durable-chain join
+to the original submission window, so a later fixed-seed duplicate is never
+cancelled or reported as the interrupted print.
+
 ## Library
 
 Library merges prints from every saved host, newest first. Unavailable hosts

@@ -38,6 +38,10 @@ export interface Job {
   /** Total clips reported by the chain stream. */
   chainStageCount: number | null;
   error: string | null;
+  /** Structured transport-close marker used by iOS resume reconciliation. */
+  interrupted: boolean;
+  /** Client submission time used to avoid joining a later fixed-seed duplicate. */
+  submittedAtUnixMs: number;
   /** Object URL of the decoded result. */
   resultUrl: string | null;
   /** Object URL of the latest live latent preview (small PNG, upscaled by CSS). */
@@ -85,6 +89,8 @@ export function newJob(req: GenerateRequest): Job {
     chainStageIndex: null,
     chainStageCount: null,
     error: null,
+    interrupted: false,
+    submittedAtUnixMs: Date.now(),
     resultUrl: null,
     previewUrl: null,
     result: null,
