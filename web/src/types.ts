@@ -102,13 +102,18 @@ export function mediaKind(
 
 // Mirror of `mold_core::GalleryCapabilities`.
 export interface GalleryCapabilities {
-  can_delete: boolean;
+  can_delete?: boolean;
 }
 
 // Mirror of `mold_core::ServerCapabilities`.
 export interface ServerCapabilities {
-  gallery: GalleryCapabilities;
+  gallery?: GalleryCapabilities;
   discovery?: { can_browse: boolean };
+  queue?: {
+    can_pause?: boolean;
+    can_cancel_all?: boolean;
+    can_reorder?: boolean;
+  };
 }
 
 export function inferFormatFromName(filename: string): OutputFormat | null {
@@ -258,6 +263,14 @@ export interface ServerStatus {
   gpus?: GpuWorkerStatus[] | null;
   queue_depth?: number | null;
   queue_capacity?: number | null;
+  instance_id?: string | null;
+  models_disk?: HostDiskUsage | null;
+  queue_paused?: boolean | null;
+}
+
+export interface HostDiskUsage {
+  total_bytes: number;
+  free_bytes: number;
 }
 
 // ── /api/queue (L3 reconciliation) ─────────────────────────────────────────

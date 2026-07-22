@@ -16,36 +16,14 @@ import type {
   ModelInfoExtended,
   QueueListing,
   ResourceSnapshot,
+  ServerCapabilities,
   ServerStatus,
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
 import { parseCurrentServerStatus } from "@studio/api/client";
 
-/** Total/free bytes of the filesystem backing a host's models dir. */
-export interface HostDiskUsage {
-  total_bytes: number;
-  free_bytes: number;
-}
-
-/** Current `/api/status` shape required by the web client. */
-export interface HostStatus extends ServerStatus {
-  instance_id?: string | null;
-  models_disk?: HostDiskUsage | null;
-  queue_paused?: boolean | null;
-}
-
-export interface HostQueueCapabilities {
-  can_pause?: boolean;
-  can_cancel_all?: boolean;
-  can_reorder?: boolean;
-}
-
-/** Subset of `/api/capabilities` the Machines workspace reads. */
-export interface HostCapabilities {
-  gallery?: { can_delete?: boolean };
-  queue?: HostQueueCapabilities;
-  discovery?: { can_browse?: boolean };
-}
+export type HostStatus = ServerStatus;
+export type HostCapabilities = ServerCapabilities;
 
 /** Server-assisted DNS-SD result. Addresses are returned for direct browser
  * connections; the primary server does not proxy peer traffic. */
@@ -176,6 +154,18 @@ export async function hostCapabilities(
 
 export function cancelQueueJob(host: HostEntry, id: string): Promise<void> {
   return send(host, `/api/queue/${encodeURIComponent(id)}`, "DELETE");
+}
+
+export function pauseHostQueue(host: HostEntry): Promise<void> {
+  return send(host, "/api/queue/pause", "POST");
+}
+
+export function resumeHostQueue(host: HostEntry): Promise<void> {
+  return send(host, "/api/queue/resume", "POST");
+}
+
+export function cancelAllHostQueue(host: HostEntry): Promise<void> {
+  return send(host, "/api/queue", "DELETE");
 }
 
 export function setQueueJobLane(

@@ -6,6 +6,9 @@ import {
   hostDownloads,
   hostStatus,
   moveQueueJob,
+  pauseHostQueue,
+  resumeHostQueue,
+  cancelAllHostQueue,
   setQueueJobLane,
 } from "./hostClient";
 import type { HostEntry } from "../../lib/hostRegistry";
@@ -97,6 +100,21 @@ describe("hostClient auth + requests", () => {
   it("treats a 404 cancel as already gone", async () => {
     fetchMock.mockResolvedValueOnce(ok({}, 404));
     await expect(cancelQueueJob(remote, "job1")).resolves.toBeUndefined();
+  });
+
+  it("routes queue-wide controls to the selected host", async () => {
+    fetchMock.mockResolvedValue(ok({}, 200));
+    await pauseHostQueue(remote);
+    await resumeHostQueue(remote);
+    await cancelAllHostQueue(remote);
+
+    expect(
+      fetchMock.mock.calls.map(([url, init]) => [url, init.method]),
+    ).toEqual([
+      ["http://192.168.1.20:7680/api/queue/pause", "POST"],
+      ["http://192.168.1.20:7680/api/queue/resume", "POST"],
+      ["http://192.168.1.20:7680/api/queue", "DELETE"],
+    ]);
   });
 
   it("falls back to controls-off capabilities when unreachable", async () => {

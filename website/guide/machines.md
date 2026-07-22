@@ -5,6 +5,14 @@ hosts your browser can reach in one place. Each card reports availability,
 resources, models-disk usage, and queue depth; selecting a card opens that
 host's detail view.
 
+Host detail aggregates telemetry across every GPU and shows CPU, system RAM,
+models-disk storage, downloads, installed models, and the live queue. Current
+servers expose capability-gated **Pause/Resume** and confirmed **Cancel all**
+actions; GPU lane selection is available only while a job is still queued.
+Saved remotes can be renamed or forgotten from the same page. Forgetting also
+removes that host's saved API key and returns a pinned generation target to the
+serving origin.
+
 ## Add a machine
 
 Choose **+ Add machine** and use either path:
