@@ -54,6 +54,8 @@ Per-view consumer IDs and synchronous unmount invalidation keep late
 expansion, preprocessing, pull, and retry callbacks from acting on a remount.
 Capability discovery is advisory
 per host and never participates in fallback routing.
+Desktop Settings → About opens the public Mold privacy policy through the native
+external-browser opener, matching the iPhone disclosure.
 Library merges every saved remote host, streams full-size media through a
 short-lived path-scoped ticket, plays videos with native seeking, swipes between
 prints, and exposes explicit Use as prompt / Use as source actions. Host detail

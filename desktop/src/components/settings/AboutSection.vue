@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import SettingRow from "./SettingRow.vue";
 import { apiJson } from "../../lib/api/client";
 import { ipc, inTauri } from "../../lib/ipc";
+import { openExternal } from "../../lib/openExternal";
 import { useConnectionStore } from "../../stores/connection";
 import { useToastStore } from "../../stores/toasts";
 import type { ServerStatus } from "../../lib/api/types";
@@ -11,6 +12,7 @@ const conn = useConnectionStore();
 const toasts = useToastStore();
 const engine = ref<ServerStatus | null>(null);
 const appVersion = ref<string | null>(null);
+const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
 onMounted(async () => {
   try {
@@ -38,6 +40,10 @@ async function copyDiagnostics() {
   await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
   toasts.push("Diagnostics copied");
 }
+
+function openPrivacyPolicy(): void {
+  void openExternal(PRIVACY_POLICY_URL);
+}
 </script>
 
 <template>
@@ -53,8 +59,18 @@ async function copyDiagnostics() {
     <SettingRow label="Processing" help="Where generations run.">
       <span class="data-mono text-body text-ink-3">Local + your hosts</span>
     </SettingRow>
-    <SettingRow label="Core contributors" help="Equal project owners.">
+    <SettingRow label="Core contributors">
       <span class="text-right text-body text-ink-2">James Brink · Jeffrey Dilley</span>
+    </SettingRow>
+    <SettingRow label="Privacy" help="How Mold handles app and server data.">
+      <button
+        type="button"
+        data-test="desktop-privacy-policy"
+        class="border-edge h-7 rounded-control border px-2.5 text-body text-ink-2 hover:text-ink"
+        @click="openPrivacyPolicy"
+      >
+        Privacy policy
+      </button>
     </SettingRow>
     <SettingRow label="Logs" help="Engine and app logs live in ~/.mold/logs.">
       <button

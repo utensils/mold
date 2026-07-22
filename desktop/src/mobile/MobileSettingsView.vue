@@ -151,7 +151,7 @@ function openPrivacyPolicy(): void {
         </div>
         <div>
           <dt>Core contributors</dt>
-          <dd>James Brink · Jeffrey Dilley<br />Equal project owners</dd>
+          <dd>James Brink · Jeffrey Dilley</dd>
         </div>
       </dl>
     </section>

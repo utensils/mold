@@ -271,7 +271,7 @@ const version = computed(() => status.value?.version ?? "—");
         </span>
       </div>
       <div class="about-row about-row--last">
-        <span class="about-row__key">Core contributors · equal owners</span>
+        <span class="about-row__key">Core contributors</span>
         <span class="about-row__val">James Brink · Jeffrey Dilley</span>
       </div>
     </CardSurface>

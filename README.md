@@ -107,6 +107,8 @@ independently of This Mac's startup; unreachable hosts stay visible and retry.
 Chain authoring inside Create also uses the all-host video-model union and keeps
 creation, progress, previews, and durable job actions routed to the selected
 model's host.
+Desktop Settings → About links to the public
+[Mold privacy policy](https://utensils.io/mold/privacy), matching the iPhone app.
 
 Desktop prompt expansion follows the visible Batch count. Batch 1 is a quick
 rewrite with undo; larger batches prepare exactly N editable variations for
