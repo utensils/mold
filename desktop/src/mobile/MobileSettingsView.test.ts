@@ -25,6 +25,7 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("0.18.0");
     expect(wrapper.text()).toContain("James Brink");
     expect(wrapper.text()).toContain("Jeffrey Dilley");
+    expect(wrapper.text()).not.toMatch(/equal (project )?owners/i);
 
     await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
     await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);

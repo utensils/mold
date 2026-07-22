@@ -32,9 +32,7 @@ fn about_metadata(app_name: &str) -> AboutMetadata<'static> {
         license: Some("MIT License".into()),
         website: Some("https://github.com/utensils/mold".into()),
         website_label: Some("Mold on GitHub".into()),
-        credits: Some(
-            "Core contributors and equal project owners:\nJames Brink\nJeffrey Dilley".into(),
-        ),
+        credits: Some("Core contributors:\nJames Brink\nJeffrey Dilley".into()),
         ..Default::default()
     }
 }
@@ -257,8 +255,10 @@ mod tests {
             about.authors,
             Some(vec!["James Brink".into(), "Jeffrey Dilley".into()])
         );
-        assert!(about.credits.as_deref().unwrap().contains("James Brink"));
-        assert!(about.credits.as_deref().unwrap().contains("Jeffrey Dilley"));
+        assert_eq!(
+            about.credits.as_deref(),
+            Some("Core contributors:\nJames Brink\nJeffrey Dilley")
+        );
     }
 
     #[test]

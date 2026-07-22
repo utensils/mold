@@ -9,10 +9,10 @@ allowed-tools: Bash, Read, Glob, Grep
 
 Generate images and video from text prompts using FLUX, SD1.5, SDXL, SD3.5, Z-Image, Flux.2 Klein, Qwen-Image, LTX Video, LTX-2 / LTX-2.3, and Wuerstchen diffusion models running on local GPU hardware.
 
-The iPhone app's public privacy policy is sourced at `website/privacy.md`,
-published at `https://utensils.io/mold/privacy`, and linked from its Settings →
-About surface. Keep the page and app link aligned when mobile data practices
-change.
+The native apps' public privacy policy is sourced at `website/privacy.md`,
+published at `https://utensils.io/mold/privacy`, and linked from the desktop and
+iPhone Settings → About surfaces. Keep the page and app links aligned when data
+practices change.
 
 ## Quick Reference
 

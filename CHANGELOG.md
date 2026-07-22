@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Mold Remote now publishes and links its privacy policy.** The website has a dedicated policy covering on-device storage, Keychain credentials, user-selected Mold server traffic, third-party model catalogs, TestFlight, and deletion choices; iPhone Settings → About opens it in the external browser for an App Store-compliant in-app disclosure.
+- **Mold Remote now publishes and links its privacy policy.** The website has a dedicated policy covering on-device storage, Keychain credentials, user-selected Mold server traffic, third-party model catalogs, TestFlight, and deletion choices; iPhone and desktop Settings → About open it in the external browser for an App Store-compliant in-app disclosure and cross-platform parity.
 
-- **Project attribution now consistently credits both core contributors and equal owners.** Desktop, web, and iPhone About surfaces; native package metadata; Rust crate authors; website and README ownership copy; and AUR maintainer headers now name James Brink and Jeffrey Dilley, matching the MIT license.
+- **Project attribution now consistently credits both core contributors.** Desktop, web, and iPhone About surfaces; native package metadata; Rust crate authors; website and README ownership copy; and AUR maintainer headers now name James Brink and Jeffrey Dilley, matching the MIT license.
 
 - **TestFlight uploads now support external testers.** The iOS export no longer marks every IPA as internal-only, so the same validated build can stay in `Mold Internal` and be selected by an external group for Beta App Review; the iOS CI gate prevents that restriction from returning.
 
