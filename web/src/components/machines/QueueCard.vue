@@ -18,16 +18,27 @@ const props = withDefaults(
     entries: QueueEntry[];
     gpuCount: number;
     canReorder?: boolean;
+    canPause?: boolean;
+    canCancelAll?: boolean;
+    paused?: boolean;
     /** Stale data (host offline) — dim and disable controls. */
     dimmed?: boolean;
   }>(),
-  { canReorder: false, dimmed: false },
+  {
+    canReorder: false,
+    canPause: false,
+    canCancelAll: false,
+    paused: false,
+    dimmed: false,
+  },
 );
 
 const emit = defineEmits<{
   cancel: [id: string];
   setLane: [id: string, gpu: number | null];
   move: [id: string, position: number];
+  togglePause: [];
+  cancelAll: [];
 }>();
 
 const queuedIds = computed(() =>
@@ -64,6 +75,36 @@ function queuedIndexOf(id: string): number {
     <div class="qc" :data-dimmed="dimmed ? 'true' : undefined">
       <div class="qc__label">Queue</div>
 
+      <div
+        v-if="canPause || (canCancelAll && queuedIds.length > 0) || paused"
+        class="qc__controls"
+      >
+        <BadgePill v-if="paused" tone="accent" outline data-test="paused-chip">
+          paused
+        </BadgePill>
+        <span class="qc__spacer" />
+        <button
+          v-if="canPause"
+          type="button"
+          class="qc__control"
+          data-test="pause-toggle"
+          :disabled="dimmed"
+          @click="emit('togglePause')"
+        >
+          {{ paused ? "Resume" : "Pause" }}
+        </button>
+        <button
+          v-if="canCancelAll && queuedIds.length > 0"
+          type="button"
+          class="qc__control qc__control--danger"
+          data-test="cancel-all"
+          :disabled="dimmed"
+          @click="emit('cancelAll')"
+        >
+          Cancel all
+        </button>
+      </div>
+
       <p v-if="entries.length === 0" class="qc__empty" data-test="queue-empty">
         Nothing queued.
       </p>
@@ -87,7 +128,7 @@ function queuedIndexOf(id: string): number {
             v-if="gpuCount > 1"
             class="qc__lane"
             data-test="queue-lane"
-            :disabled="dimmed"
+            :disabled="dimmed || entry.state !== 'queued'"
             :value="laneValue(entry)"
             :aria-label="`GPU lane for ${entry.model}`"
             @change="onLane(entry, $event)"
@@ -156,6 +197,31 @@ function queuedIndexOf(id: string): number {
   text-transform: uppercase;
   color: var(--ink-3);
   margin-bottom: 12px;
+}
+
+.qc__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 10px;
+}
+
+.qc__spacer {
+  flex: 1;
+}
+
+.qc__control {
+  min-height: 36px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.qc__control--danger {
+  color: var(--stop);
 }
 
 .qc__empty {

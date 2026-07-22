@@ -39,6 +39,30 @@ function mountCard() {
 }
 
 describe("QueueCard reorder index", () => {
+  it("exposes advertised queue controls and disables lane changes for running jobs", async () => {
+    const wrapper = mount(QueueCard, {
+      props: {
+        entries: listing(),
+        gpuCount: 2,
+        canReorder: true,
+        canPause: true,
+        canCancelAll: true,
+        paused: false,
+      },
+    });
+    expect(wrapper.get("[data-test='pause-toggle']").text()).toBe("Pause");
+    await wrapper.get("[data-test='pause-toggle']").trigger("click");
+    await wrapper.get("[data-test='cancel-all']").trigger("click");
+    expect(wrapper.emitted("togglePause")).toHaveLength(1);
+    expect(wrapper.emitted("cancelAll")).toHaveLength(1);
+    expect(
+      wrapper.findAll("[data-test='queue-lane']")[0]!.attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.findAll("[data-test='queue-lane']")[1]!.attributes("disabled"),
+    ).toBeUndefined();
+  });
+
   it("moves the last queued job up to queued index 0, not its listing position", async () => {
     const wrapper = mountCard();
     // Only the two queued rows expose reorder buttons: index 0 = A, 1 = B.

@@ -7,7 +7,7 @@
  * last-good data dimmed behind a retry banner (G4).
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -16,11 +16,14 @@ import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
 import {
   cancelQueueJob,
+  cancelAllHostQueue,
   hostCapabilities,
   hostDownloads,
   hostModels,
   hostQueue,
   moveQueueJob,
+  pauseHostQueue,
+  resumeHostQueue,
   setQueueJobLane,
   useHostPoll,
   type HostCapabilities,
@@ -30,16 +33,20 @@ import {
   ORIGIN_HOST_ID,
   getGenerateTargetId,
   getHost,
+  removeHost,
   setGenerateTargetId,
+  updateHost,
 } from "../lib/hostRegistry";
 import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
-import { toast } from "../lib/toasts";
+import { requestConfirm, requestText, toast } from "../lib/toasts";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
 
 const route = useRoute();
+const router = useRouter();
 const hostId = String(route.params.id);
 const host = getHost(hostId);
 const isOrigin = hostId === ORIGIN_HOST_ID;
+const hostName = ref(host?.name ?? "");
 
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
@@ -69,6 +76,7 @@ const gpuCount = computed(() => {
 });
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId);
+const paused = computed(() => poll?.status.value?.queue_paused === true);
 
 const address = computed(() => {
   if (!host) return "";
@@ -156,6 +164,63 @@ async function onMove(id: string, position: number) {
   }
 }
 
+async function onTogglePause() {
+  if (!host) return;
+  try {
+    if (paused.value) await resumeHostQueue(host);
+    else await pauseHostQueue(host);
+    await poll?.refresh();
+  } catch (e) {
+    toast(
+      "error",
+      `Couldn't ${paused.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
+    );
+  }
+}
+
+async function onCancelAll() {
+  if (!host) return;
+  const accepted = await requestConfirm({
+    title: "Cancel all queued jobs?",
+    body: `Running work on ${hostName.value} will continue.`,
+    confirmLabel: "Cancel queued jobs",
+    danger: true,
+  });
+  if (!accepted) return;
+  try {
+    await cancelAllHostQueue(host);
+    await reloadQueue();
+  } catch (e) {
+    toast("error", `Couldn't cancel queued jobs: ${errMsg(e)}`);
+  }
+}
+
+async function renameMachine() {
+  if (!host || isOrigin) return;
+  const next = await requestText({
+    title: "Rename machine",
+    label: "Machine name",
+    initial: hostName.value,
+  });
+  const name = next?.trim();
+  if (!name) return;
+  if (updateHost(hostId, { name })) hostName.value = name;
+}
+
+async function forgetMachine() {
+  if (!host || isOrigin) return;
+  const accepted = await requestConfirm({
+    title: "Forget this machine?",
+    body: `${hostName.value} and its saved API key will be removed from this browser.`,
+    confirmLabel: "Forget machine",
+    danger: true,
+  });
+  if (!accepted) return;
+  removeHost(hostId);
+  if (isTarget.value) setGenerateTargetId(ORIGIN_HOST_ID);
+  await router.push("/machines");
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -199,7 +264,7 @@ onBeforeUnmount(() => {
       <div class="md-head">
         <StatusDot :state="dotState" />
         <span class="md-name" data-test="machine-detail-title">
-          {{ host.name }}
+          {{ hostName }}
         </span>
         <span class="md-addr">{{ address }}</span>
         <div class="md-spacer" />
@@ -211,6 +276,24 @@ onBeforeUnmount(() => {
           @click="toggleTarget"
         >
           {{ isTarget ? "Generation target" : "Set as generation target" }}
+        </button>
+        <button
+          v-if="!isOrigin"
+          type="button"
+          class="md-action"
+          data-test="detail-rename"
+          @click="renameMachine"
+        >
+          Rename
+        </button>
+        <button
+          v-if="!isOrigin"
+          type="button"
+          class="md-action md-action--danger"
+          data-test="detail-forget"
+          @click="forgetMachine"
+        >
+          Forget
         </button>
       </div>
 
@@ -256,11 +339,27 @@ onBeforeUnmount(() => {
             label="Memory"
           />
 
+          <div class="md-metric md-metric--mt">
+            <span>System RAM {{ telemetry.ramLabel }}</span>
+            <span class="md-halide" data-test="telemetry-ram">
+              {{
+                telemetry.ramPct != null
+                  ? `${Math.round(telemetry.ramPct)}%`
+                  : "—"
+              }}
+            </span>
+          </div>
+          <ProgressBar
+            :value="telemetry.ramPct ?? 0"
+            tone="info"
+            label="System RAM"
+          />
+
           <div class="md-tiles">
             <div class="md-tile">
-              <div class="md-tile__k">Temp</div>
-              <div class="md-tile__v" data-test="telemetry-temp">
-                {{ telemetry.temp }}
+              <div class="md-tile__k">CPU</div>
+              <div class="md-tile__v" data-test="telemetry-cpu">
+                {{ telemetry.cpuLabel }}
               </div>
             </div>
             <div class="md-tile">
@@ -320,10 +419,15 @@ onBeforeUnmount(() => {
           :entries="queue"
           :gpu-count="gpuCount"
           :can-reorder="canReorder"
+          :can-pause="caps?.queue?.can_pause === true"
+          :can-cancel-all="caps?.queue?.can_cancel_all === true"
+          :paused="paused"
           :dimmed="offline"
           @cancel="onCancel"
           @set-lane="onSetLane"
           @move="onMove"
+          @toggle-pause="onTogglePause"
+          @cancel-all="onCancelAll"
         />
       </div>
 
@@ -413,6 +517,21 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.md-action {
+  min-height: 36px;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 0 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.md-action--danger {
+  color: var(--stop);
 }
 
 .md-target[data-on="true"] {

@@ -85,6 +85,8 @@ and remembered remotes together. On builds with mDNS support, **Add machine →
 Local network** asks the primary server for DNS-SD peers, then the browser tests
 and connects to the selected peer directly; API keys remain per-host headers and
 stable instance UUIDs prevent duplicate rows. See the [Machines guide](https://utensils.io/mold/guide/machines).
+Host detail aggregates all GPUs plus CPU/system RAM and owns capability-gated
+pause, resume, cancel-all, queued-job GPU lanes, rename, and forget actions.
 Library merges prints from connected hosts without falling back across host
 boundaries, restores model-aware settings, and exposes the full recorded
 generation metadata with prompt/seed copy and an Upscale handoff to Create.

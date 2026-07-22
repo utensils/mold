@@ -11,7 +11,7 @@ import type {
   QueueEntry,
   ResourceSnapshot,
 } from "../types";
-import { addHost } from "../lib/hostRegistry";
+import { addHost, getHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
 
 // Mutable fixtures the hostClient mock reads at call time.
@@ -33,11 +33,24 @@ let downloadsListing: DownloadsListingWire;
 const cancelQueueJob = vi.fn().mockResolvedValue(undefined);
 const setQueueJobLane = vi.fn().mockResolvedValue(undefined);
 const moveQueueJob = vi.fn().mockResolvedValue(undefined);
+const pauseHostQueue = vi.fn().mockResolvedValue(undefined);
+const resumeHostQueue = vi.fn().mockResolvedValue(undefined);
+const cancelAllHostQueue = vi.fn().mockResolvedValue(undefined);
+const routerPush = vi.fn().mockResolvedValue(undefined);
+const requestConfirm = vi.hoisted(() => vi.fn(async () => true));
+const requestText = vi.hoisted(() => vi.fn(async () => "Render box"));
+
+vi.mock("../lib/toasts", () => ({
+  toast: vi.fn(),
+  requestConfirm,
+  requestText,
+}));
 
 const routeHolder = { id: "origin" };
 
 vi.mock("vue-router", () => ({
   useRoute: () => ({ params: { id: routeHolder.id } }),
+  useRouter: () => ({ push: routerPush }),
   RouterLink: {
     name: "RouterLink",
     props: ["to"],
@@ -56,6 +69,9 @@ vi.mock("../components/machines/hostClient", () => ({
   cancelQueueJob: (...a: unknown[]) => cancelQueueJob(...a),
   setQueueJobLane: (...a: unknown[]) => setQueueJobLane(...a),
   moveQueueJob: (...a: unknown[]) => moveQueueJob(...a),
+  pauseHostQueue: (...a: unknown[]) => pauseHostQueue(...a),
+  resumeHostQueue: (...a: unknown[]) => resumeHostQueue(...a),
+  cancelAllHostQueue: (...a: unknown[]) => cancelAllHostQueue(...a),
 }));
 
 function makeStatus(over: Partial<HostStatus> = {}): HostStatus {
@@ -83,7 +99,13 @@ function makeResources(over: Partial<ResourceSnapshot> = {}): ResourceSnapshot {
   return {
     hostname: "studio",
     timestamp: 0,
-    system_ram: { total: 0, used: 0, used_by_mold: 0, used_by_other: 0 },
+    system_ram: {
+      total: 64_000_000_000,
+      used: 16_000_000_000,
+      used_by_mold: 8_000_000_000,
+      used_by_other: 8_000_000_000,
+    },
+    cpu: { cores: 16, usage_percent: 32 },
     gpus: [
       {
         ordinal: 0,
@@ -129,6 +151,12 @@ beforeEach(() => {
   cancelQueueJob.mockClear();
   setQueueJobLane.mockClear();
   moveQueueJob.mockClear();
+  pauseHostQueue.mockClear();
+  resumeHostQueue.mockClear();
+  cancelAllHostQueue.mockClear();
+  routerPush.mockClear();
+  requestConfirm.mockReset().mockResolvedValue(true);
+  requestText.mockReset().mockResolvedValue("Render box");
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     resources: ref<ResourceSnapshot | null>(makeResources()),
@@ -155,6 +183,8 @@ describe("HostDetailPage — telemetry", () => {
     );
     expect(w.get('[data-test="telemetry-load"]').text()).toBe("55%");
     expect(w.get('[data-test="telemetry-mem"]').text()).toBe("50%");
+    expect(w.get('[data-test="telemetry-cpu"]').text()).toBe("32%");
+    expect(w.get('[data-test="telemetry-ram"]').text()).toBe("25%");
     expect(w.get('[data-test="telemetry-queue"]').text()).toBe("2");
     expect(w.get('[data-test="telemetry-uptime"]').text()).toBe("1h 12m");
     expect(w.get('[data-test="telemetry-storage"]').text()).toContain(
@@ -174,7 +204,8 @@ describe("HostDetailPage — telemetry", () => {
     expect(w.get('[data-test="telemetry-gpu"]').text()).toBe("—");
     expect(w.get('[data-test="telemetry-load"]').text()).toBe("—");
     expect(w.get('[data-test="telemetry-mem"]').text()).toBe("—");
-    expect(w.get('[data-test="telemetry-temp"]').text()).toBe("—");
+    expect(w.get('[data-test="telemetry-cpu"]').text()).toBe("—");
+    expect(w.get('[data-test="telemetry-ram"]').text()).toBe("—");
     expect(w.get('[data-test="telemetry-queue"]').text()).toBe("—");
   });
 
@@ -186,6 +217,26 @@ describe("HostDetailPage — telemetry", () => {
 });
 
 describe("HostDetailPage — queue", () => {
+  it("wires advertised pause and cancel-all controls to the viewed host", async () => {
+    caps = {
+      queue: { can_pause: true, can_cancel_all: true, can_reorder: false },
+    };
+    queueEntries = [queued("a", 0)];
+    const w = await mountDetail();
+
+    await w.get('[data-test="pause-toggle"]').trigger("click");
+    await flushPromises();
+    expect(pauseHostQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+    );
+
+    await w.get('[data-test="cancel-all"]').trigger("click");
+    await flushPromises();
+    expect(cancelAllHostQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ id: routeHolder.id }),
+    );
+  });
+
   it("hides reorder controls when the host lacks can_reorder", async () => {
     caps = { queue: { can_reorder: false } };
     queueEntries = [queued("a", 0), queued("b", 1)];
@@ -249,6 +300,23 @@ describe("HostDetailPage — queue", () => {
     });
     const w = await mountDetail();
     expect(w.find('[data-test="queue-lane"]').exists()).toBe(true);
+  });
+});
+
+describe("HostDetailPage — saved host actions", () => {
+  it("renames and forgets a remote machine", async () => {
+    const w = await mountDetail();
+    await w.get('[data-test="detail-rename"]').trigger("click");
+    await flushPromises();
+    expect(w.get('[data-test="machine-detail-title"]').text()).toBe(
+      "Render box",
+    );
+    expect(getHost(routeHolder.id)?.name).toBe("Render box");
+
+    await w.get('[data-test="detail-forget"]').trigger("click");
+    await flushPromises();
+    expect(getHost(routeHolder.id)).toBeNull();
+    expect(routerPush).toHaveBeenCalledWith("/machines");
   });
 });
 

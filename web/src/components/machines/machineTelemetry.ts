@@ -5,8 +5,7 @@
  * expose (notably GPU temperature, which the resource aggregator omits)
  * renders as an em dash per spec §08 G4 rather than a fabricated zero.
  */
-import type { ResourceSnapshot } from "../../types";
-import type { HostStatus } from "./hostClient";
+import type { ResourceSnapshot, ServerStatus } from "../../types";
 
 export const DASH = "—";
 
@@ -34,7 +33,10 @@ export interface TelemetryView {
   loadLabel: string;
   memPct: number | null;
   memLabel: string;
-  temp: string;
+  cpuPct: number | null;
+  cpuLabel: string;
+  ramPct: number | null;
+  ramLabel: string;
   queue: string;
   uptime: string;
   storageLabel: string | null;
@@ -46,34 +48,54 @@ function pct(used: number, total: number): number | null {
 }
 
 export function deriveTelemetry(
-  status: HostStatus | null,
+  status: ServerStatus | null,
   resources: ResourceSnapshot | null,
 ): TelemetryView {
-  const rGpu = resources?.gpus?.[0] ?? null;
-  const sGpu = status?.gpus?.[0] ?? null;
+  const rGpus = resources?.gpus ?? [];
+  const sGpus = status?.gpus ?? [];
   const info = status?.gpu_info ?? null;
 
   // GPU name + backend line.
-  const name = rGpu?.name ?? sGpu?.name ?? info?.name ?? null;
-  const backend = rGpu?.backend ?? null;
-  const gpuLine = name ? (backend ? `${name} · ${backend}` : name) : DASH;
+  const gpuLine = rGpus.length
+    ? rGpus
+        .map((gpu) =>
+          rGpus.length > 1
+            ? `GPU ${gpu.ordinal}: ${gpu.name} · ${gpu.backend}`
+            : `${gpu.name} · ${gpu.backend}`,
+        )
+        .join(" | ")
+    : sGpus.length
+      ? sGpus
+          .map((gpu) =>
+            sGpus.length > 1 ? `GPU ${gpu.ordinal}: ${gpu.name}` : gpu.name,
+          )
+          .join(" | ")
+      : (info?.name ?? DASH);
 
   // GPU load (utilization is null on Metal / nvidia-smi fallback).
-  const loadPct =
-    rGpu?.gpu_utilization != null
-      ? Math.min(100, Math.max(0, rGpu.gpu_utilization))
-      : null;
+  const loads = rGpus
+    .map((gpu) => gpu.gpu_utilization)
+    .filter((value): value is number => value != null);
+  const loadPct = loads.length
+    ? Math.min(
+        100,
+        Math.max(
+          0,
+          loads.reduce((sum, value) => sum + value, 0) / loads.length,
+        ),
+      )
+    : null;
   const loadLabel = loadPct != null ? `${Math.round(loadPct)}%` : DASH;
 
   // VRAM — resources (bytes) → status.gpus (bytes) → gpu_info (MB).
   let memUsed: number | null = null;
   let memTotal: number | null = null;
-  if (rGpu) {
-    memUsed = rGpu.vram_used;
-    memTotal = rGpu.vram_total;
-  } else if (sGpu) {
-    memUsed = sGpu.vram_used_bytes;
-    memTotal = sGpu.vram_total_bytes;
+  if (rGpus.length) {
+    memUsed = rGpus.reduce((sum, gpu) => sum + gpu.vram_used, 0);
+    memTotal = rGpus.reduce((sum, gpu) => sum + gpu.vram_total, 0);
+  } else if (sGpus.length) {
+    memUsed = sGpus.reduce((sum, gpu) => sum + gpu.vram_used_bytes, 0);
+    memTotal = sGpus.reduce((sum, gpu) => sum + gpu.vram_total_bytes, 0);
   } else if (info) {
     memUsed = info.vram_used_mb * 1_000_000;
     memTotal = info.vram_total_mb * 1_000_000;
@@ -96,13 +118,24 @@ export function deriveTelemetry(
     ? `${formatGb(disk.free_bytes)} GB free of ${formatGb(disk.total_bytes)} GB`
     : null;
 
+  const cpuPct = resources?.cpu?.usage_percent ?? null;
+  const cpuLabel = cpuPct != null ? `${Math.round(cpuPct)}%` : DASH;
+  const ram = resources?.system_ram;
+  const ramPct = ram ? pct(ram.used, ram.total) : null;
+  const ramLabel = ram
+    ? `${formatGb(ram.used)} / ${formatGb(ram.total)} GB`
+    : DASH;
+
   return {
     gpuLine,
     loadPct,
     loadLabel,
     memPct,
     memLabel,
-    temp: DASH,
+    cpuPct,
+    cpuLabel,
+    ramPct,
+    ramLabel,
     queue,
     uptime,
     storageLabel,
