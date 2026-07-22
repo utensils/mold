@@ -390,6 +390,7 @@ describe("useGenerateForm", () => {
     const wire = form.toRequest();
 
     expect(wire.source_image).toBe("SOURCE");
+    expect(wire.source_image_name).toBe("source.png");
     expect(wire.mask_image).toBe("MASK");
     expect(wire.edit_images).toBeUndefined();
   });

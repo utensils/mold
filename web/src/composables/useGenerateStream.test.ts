@@ -16,6 +16,7 @@ import type {
   GenerateStreamHandlers,
   StreamTarget,
 } from "../api";
+import { cancelQueueJob } from "../api";
 import type { HostRoute } from "../lib/hostRouting";
 
 function persistedPayload(jobs: unknown[]): string {
@@ -34,6 +35,7 @@ let lastSingleTarget: StreamTarget | undefined;
 let lastChainTarget: StreamTarget | undefined;
 
 vi.mock("../api", () => ({
+  cancelQueueJob: vi.fn().mockResolvedValue(undefined),
   generateStream: vi.fn(
     (
       _req: GenerateRequestWire,
@@ -572,6 +574,28 @@ describe("useGenerateStream host routing", () => {
     const job = stream.jobs.value.find((j) => j.id === id);
     expect(job?.hostId).toBe("studio");
     expect(job?.hostLabel).toBe("Studio");
+  });
+
+  it("cancels the server job on the exact routed host", async () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(
+      singleGen({ frames: 1 }),
+      { kind: "single" },
+      studioRoute,
+    );
+    lastSingleHandlers?.onProgress({
+      type: "queued",
+      id: "server-job-7",
+      position: 0,
+    });
+
+    await stream.cancel(id);
+
+    expect(cancelQueueJob).toHaveBeenCalledWith(
+      "server-job-7",
+      studioRoute.target,
+    );
+    expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("canceled");
   });
 
   it("leaves an unrouted job unattributed rather than guessing", () => {

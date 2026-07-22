@@ -63,6 +63,14 @@ describe("ActivityStrip", () => {
     expect((wrapper.emitted("open")?.[0]?.[0] as Job).id).toBe(job.id);
   });
 
+  it("lets the user cancel a running job without opening it", async () => {
+    const job = makeJob();
+    const wrapper = mount(ActivityStrip, { props: { jobs: [job] } });
+    await wrapper.get("[data-test='activity-cancel-job-1']").trigger("click");
+    expect(wrapper.emitted("cancel")?.[0]).toEqual(["job-1"]);
+    expect(wrapper.emitted("open")).toBeUndefined();
+  });
+
   it("shows queued jobs as cancelable pills", async () => {
     const queued = makeJob({ id: "job-2", workStarted: false });
     const wrapper = mount(ActivityStrip, { props: { jobs: [queued] } });

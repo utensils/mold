@@ -78,16 +78,26 @@ export function startQueueReconciler(
       schedule(intervalMs);
       return;
     }
-    try {
-      const listing = await fetchQueue();
-      consecutiveFailures = 0;
-      const known = new Set(listing.entries.map((e) => e.id));
-      reconcileRound(jobs.value, known, Date.now());
-    } catch {
-      // Server unreachable or 5xx. Don't dead-letter — could be a blip;
-      // the per-job SSE error path is the real source of truth for "this
-      // job died." Back off exponentially up to RECONCILE_BACKOFF_MAX_MS.
+    const groups = new Map<string, { target: Job["target"]; jobs: Job[] }>();
+    for (const job of candidates) {
+      const key = job.hostId ?? "__origin__";
+      const group = groups.get(key) ?? { target: job.target, jobs: [] };
+      group.jobs.push(job);
+      groups.set(key, group);
+    }
+    const results = await Promise.allSettled(
+      [...groups.values()].map(async (group) => {
+        const listing = await fetchQueue(group.target ?? undefined);
+        const known = new Set(listing.entries.map((e) => e.id));
+        reconcileRound(group.jobs, known, Date.now());
+      }),
+    );
+    if (results.some((result) => result.status === "rejected")) {
+      // A host is unreachable or returned 5xx. Never use another host's empty
+      // queue to dead-letter its jobs; back off and try that exact route later.
       consecutiveFailures += 1;
+    } else {
+      consecutiveFailures = 0;
     }
     const backoff = Math.min(
       intervalMs * Math.pow(2, consecutiveFailures),

@@ -356,6 +356,20 @@ describe("upscaleStream", () => {
     expect(err.status).toBe(503);
     expect(err.retryAfter).toBe(1.5);
   });
+
+  it("routes preprocessing to the selected host with its API key", async () => {
+    installDriver(() => undefined);
+    await upscaleStream(upscaleRequest(), upscaleHandlers(), undefined, {
+      baseUrl: "http://studio:7680",
+      apiKey: "sk-studio",
+    });
+    expect(streamSse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "http://studio:7680/api/upscale/stream",
+        headers: { "x-api-key": "sk-studio" },
+      }),
+    );
+  });
 });
 
 describe("chain job api helpers", () => {

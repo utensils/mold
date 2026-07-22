@@ -33,6 +33,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
   createChainJob,
   deleteGalleryImage,
+  expandPrompt,
   fetchPromptHistory,
   imageUrl,
   listGallery,
@@ -41,14 +42,9 @@ import {
 import {
   applyMetadataToForm,
   isQwenImageEditFamily,
-  promptWithStyle,
   useGenerateForm,
 } from "../composables/useGenerateForm";
-import {
-  angleForIndex,
-  mergeStyleNegative,
-  styleHint,
-} from "../lib/stylePresets";
+import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import { useGenerateStream, type Job } from "../composables/useGenerateStream";
 import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
@@ -68,6 +64,7 @@ import type {
   ChainStageWire,
   ExpandFormState,
   GalleryImage,
+  GenerateRequestWire,
   ModelInfoExtended,
   SourceFitPolicy,
   SourceImageState,
@@ -132,6 +129,103 @@ const prevStyle = ref<{
 } | null>(null);
 const expanded = computed(() => prevPrompt.value !== null);
 const variations = ref<string[]>([]);
+const expandRoute = ref<HostRoute | null>(null);
+interface QuickPreparedExpansion {
+  expandedPrompt: string;
+  originalPrompt: string;
+  model: string;
+  family: string;
+  selectedHostPolicy: string;
+  route: HostRoute | null;
+}
+const quickPrepared = ref<QuickPreparedExpansion | null>(null);
+interface PreparedWebBatch {
+  batchId: string;
+  sourcePrompt: string;
+  model: string;
+  family: string;
+  requestedCount: number;
+  selectedHostPolicy: string;
+  baseRequest: GenerateRequestWire;
+  decision: Exclude<
+    ReturnType<typeof decideGenerateRequestRouting>,
+    { kind: "reject" }
+  >;
+  route: HostRoute | null;
+}
+const preparedBatch = ref<PreparedWebBatch | null>(null);
+
+function cloneRoute(route: HostRoute | null): HostRoute | null {
+  return route ? { ...route, target: { ...route.target } } : null;
+}
+
+function sameRoute(
+  frozen: HostRoute | null,
+  current: HostRoute | null,
+): boolean {
+  if (!frozen || !current) return frozen === current;
+  return (
+    frozen.hostId === current.hostId &&
+    frozen.target.baseUrl === current.target.baseUrl &&
+    frozen.target.apiKey === current.target.apiKey
+  );
+}
+
+function preparedStaleReasons(batch: PreparedWebBatch): string[] {
+  const reasons: string[] = [];
+  if (form.state.value.prompt.trim() !== batch.sourcePrompt)
+    reasons.push("Source prompt changed after these variations were prepared.");
+  if (form.state.value.model !== batch.model)
+    reasons.push(
+      `Model changed from "${batch.model}" to "${form.state.value.model}".`,
+    );
+  if (currentFamily.value !== batch.family)
+    reasons.push(
+      `Model family changed from "${batch.family}" to "${currentFamily.value}".`,
+    );
+  if (form.state.value.batchSize !== batch.requestedCount)
+    reasons.push(
+      `Batch changed from ${batch.requestedCount} to ${form.state.value.batchSize}.`,
+    );
+  if (routing.targetId.value !== batch.selectedHostPolicy)
+    reasons.push(
+      "The Run on selection changed after these variations were prepared.",
+    );
+  const currentRoute = routing.multiHost.value
+    ? routing.resolve(batch.model)
+    : null;
+  if (!sameRoute(batch.route, currentRoute))
+    reasons.push(
+      `${batch.route?.label ?? "This server"} is no longer the prepared generation route.`,
+    );
+  return reasons;
+}
+
+function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
+  const reasons: string[] = [];
+  if (form.state.value.prompt.trim() !== snapshot.expandedPrompt)
+    reasons.push("Expanded prompt changed after it was prepared.");
+  if (form.state.value.model !== snapshot.model)
+    reasons.push(
+      `Model changed from "${snapshot.model}" to "${form.state.value.model}".`,
+    );
+  if (currentFamily.value !== snapshot.family)
+    reasons.push(
+      `Model family changed from "${snapshot.family}" to "${currentFamily.value}".`,
+    );
+  if (routing.targetId.value !== snapshot.selectedHostPolicy)
+    reasons.push(
+      "The Run on selection changed after this prompt was expanded.",
+    );
+  const currentRoute = routing.multiHost.value
+    ? routing.resolve(snapshot.model)
+    : null;
+  if (!sameRoute(snapshot.route, currentRoute))
+    reasons.push(
+      `${snapshot.route?.label ?? "This server"} is no longer the prepared generation route.`,
+    );
+  return reasons;
+}
 
 // Phone surface → the Advanced sheet instead of the side drawer.
 const isPhone = ref(false);
@@ -360,6 +454,8 @@ function onNewPrint() {
   form.state.value.maskImage = null;
   form.state.value.controlImage = null;
   variations.value = [];
+  preparedBatch.value = null;
+  quickPrepared.value = null;
   prevPrompt.value = null;
   prevStyle.value = null;
   composerError.value = null;
@@ -440,14 +536,24 @@ const latestDone = computed(() => {
   return best;
 });
 
-const canvasMode = computed<"empty" | "generating" | "result" | "variations">(
-  () => {
-    if (variations.value.length) return "variations";
-    if (runningJob.value) return "generating";
-    if (latestDone.value) return "result";
-    return "empty";
-  },
+const latestError = computed(() =>
+  stream.jobs.value.find((j) => j.state === "error"),
 );
+
+const canvasMode = computed<
+  "empty" | "generating" | "result" | "error" | "variations"
+>(() => {
+  if (variations.value.length) return "variations";
+  if (runningJob.value) return "generating";
+  if (
+    latestError.value &&
+    (!latestDone.value ||
+      latestError.value.startedAt > latestDone.value.startedAt)
+  )
+    return "error";
+  if (latestDone.value) return "result";
+  return "empty";
+});
 
 const genProgress = computed(() =>
   runningJob.value ? (percentFor(runningJob.value) ?? 0) : 0,
@@ -490,9 +596,9 @@ type PreparedStillSource = {
 const sourceFitCache = new SourceFitPreprocessCache();
 
 /** Prepare request-only source bytes while preserving the user's editable source. */
-async function prepareStillSourceToRequest(): Promise<
-  PreparedStillSource | false
-> {
+async function prepareStillSourceToRequest(
+  route: HostRoute | null,
+): Promise<PreparedStillSource | false> {
   let source = form.state.value.imageAttachments[0] ?? null;
   const mask = form.state.value.maskImage;
   if (!source) return { source, mask };
@@ -528,6 +634,8 @@ async function prepareStillSourceToRequest(): Promise<
                       : `Source preprocessing failed: ${err.message}`;
                 },
               },
+              undefined,
+              route?.target,
             );
             if (output === null)
               throw new Error("Source preprocessing did not return an image");
@@ -686,7 +794,15 @@ async function onSubmit() {
   // reasons: an unreachable pinned machine is the real complaint (its model
   // list is empty, so a model check first would blame the model instead), and
   // an upscale cache miss has to land on the same machine as the render.
-  const route = resolveSubmitRoute();
+  const quick = quickPrepared.value;
+  if (quick) {
+    const stale = quickStaleReasons(quick);
+    if (stale.length) {
+      composerError.value = `${stale.join(" ")} Undo or expand again before generating.`;
+      return;
+    }
+  }
+  const route = quick ? cloneRoute(quick.route) : resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
   const decision = chainDecision.value;
@@ -694,15 +810,17 @@ async function onSubmit() {
     toast("error", decision.reason);
     return;
   }
-  const preparedSource = await prepareStillSourceToRequest();
+  const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
   const req = form.toRequest();
+  if (quick) req.original_prompt = quick.originalPrompt;
   if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
   }
   stream.submit(req, decision, route);
+  quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
   if (
@@ -756,22 +874,74 @@ async function onSubmitScript(script: ChainScriptToml) {
 }
 
 // ── Expand (spec §03/§06) ─────────────────────────────────────────────
-function onExpand() {
+function validateExpandedPrompts(
+  prompts: readonly string[],
+  expected: number,
+): string[] {
+  const normalized = prompts.map((prompt) => prompt.trim());
+  if (normalized.length !== expected || normalized.some((prompt) => !prompt)) {
+    throw new Error(`Expected exactly ${expected} non-empty expanded prompts.`);
+  }
+  return normalized;
+}
+
+async function onExpand() {
   if (form.state.value.batchSize > 1) {
-    // Fan out into editable variations, reviewed in the canvas before queue.
-    const baseExpanded =
-      promptWithStyle(form.state.value).trim() || "a quiet landscape";
-    variations.value = Array.from(
-      { length: form.state.value.batchSize },
-      (_, i) => `${baseExpanded}, ${angleForIndex(i)}`,
-    );
+    const route = resolveSubmitRoute();
+    if (route === false || !validateSubmit()) return;
+    const decision = chainDecision.value;
+    if (decision.kind === "reject") {
+      toast("error", decision.reason);
+      return;
+    }
+    const sourcePrompt = form.state.value.prompt.trim();
+    const count = form.state.value.batchSize;
+    const family = currentFamily.value;
+    const model = form.state.value.model;
+    const selectedHostPolicy = routing.targetId.value;
+    const baseRequest = form.toRequest();
+    const style = styleHint(form.state.value.stylePreset ?? "");
+    composerError.value = null;
+    try {
+      const response = await expandPrompt(
+        {
+          prompt: sourcePrompt,
+          model_family: family,
+          variations: count,
+          ...(style ? { style } : {}),
+        },
+        undefined,
+        route?.target,
+      );
+      variations.value = validateExpandedPrompts(response.expanded, count);
+      preparedBatch.value = {
+        batchId: crypto.randomUUID(),
+        sourcePrompt,
+        model,
+        family,
+        requestedCount: count,
+        selectedHostPolicy,
+        baseRequest,
+        decision,
+        route: cloneRoute(route),
+      };
+    } catch (error) {
+      composerError.value =
+        error instanceof Error ? error.message : String(error);
+    }
     return;
   }
   // batch = 1: server enrichment via the Expand modal, applied in place.
+  const route = resolveSubmitRoute();
+  if (route === false) return;
+  expandRoute.value = cloneRoute(route);
   showExpand.value = true;
 }
 
 function onExpandStage(stageIndex: number, prompt: string) {
+  const route = resolveSubmitRoute();
+  if (route === false) return;
+  expandRoute.value = cloneRoute(route);
   expandStageIndex.value = stageIndex;
   expandStagePrompt.value = prompt;
   showExpand.value = true;
@@ -801,6 +971,14 @@ function applyExpandedPrompt(v: string) {
     return;
   }
   prevPrompt.value = form.state.value.prompt;
+  quickPrepared.value = {
+    expandedPrompt: v,
+    originalPrompt: form.state.value.prompt.trim(),
+    model: form.state.value.model,
+    family: currentFamily.value,
+    selectedHostPolicy: routing.targetId.value,
+    route: cloneRoute(expandRoute.value),
+  };
   form.state.value.prompt = v;
   // Same bake-and-clear as the desktop app: the rewrite absorbed the look, so
   // leaving the chip lit would apply it twice at submit.
@@ -822,6 +1000,7 @@ function undoExpand() {
   }
   prevPrompt.value = null;
   prevStyle.value = null;
+  quickPrepared.value = null;
 }
 
 // ── Variations review (batch > 1) ─────────────────────────────────────
@@ -833,32 +1012,52 @@ function useVariation(index: number) {
   // and the preset's curated negative comes with it.
   bakeStyleAndClear();
   variations.value = [];
+  preparedBatch.value = null;
 }
 
 function discardVariations() {
   variations.value = [];
+  preparedBatch.value = null;
 }
 
 async function queueVariations() {
-  // One route for the whole review set — siblings of a batch belong together
-  // on one machine.
-  const route = resolveSubmitRoute();
-  if (route === false) return;
-  if (!validateSubmit()) return;
-  const decision = chainDecision.value;
-  if (decision.kind === "reject") {
-    toast("error", decision.reason);
+  const prepared = preparedBatch.value;
+  if (!prepared) {
+    composerError.value =
+      "These variations are no longer prepared. Expand again.";
     return;
   }
-  const list = variations.value.slice();
+  const stale = preparedStaleReasons(prepared);
+  if (stale.length) {
+    composerError.value = stale.join(" ");
+    return;
+  }
+  const list = variations.value.map((prompt) => prompt.trim());
+  if (list.some((prompt) => !prompt)) {
+    composerError.value =
+      "Every prepared variation needs a prompt before queueing.";
+    return;
+  }
   variations.value = [];
-  const base = form.toRequest();
-  for (const prompt of list) {
+  preparedBatch.value = null;
+  for (const [index, prompt] of list.entries()) {
     // Each variation already carries the style extras, so it is the final
     // prompt — override the base request's prompt rather than re-appending.
     // Each is one print; the batch size drove the variation count, not the
     // per-job image count.
-    stream.submit({ ...base, prompt, batch_size: 1 }, decision, route);
+    stream.submit(
+      {
+        ...prepared.baseRequest,
+        prompt,
+        batch_size: 1,
+        original_prompt: prepared.sourcePrompt,
+        batch_id: prepared.batchId,
+        batch_index: index + 1,
+        batch_count: list.length,
+      },
+      prepared.decision,
+      prepared.route,
+    );
   }
 }
 
@@ -1166,6 +1365,7 @@ onBeforeUnmount(() => {
             :stage="genStage"
             :result-src="resultSrc"
             :result-caption="resultCaption"
+            :error="latestError?.error ?? undefined"
             :variations="variations"
             @update:variations="variations = $event"
             @use-variation="useVariation"
@@ -1256,11 +1456,13 @@ onBeforeUnmount(() => {
       :current-model="currentModel"
       :queue-busy="!!runningJob"
       :style-directive="expandStyleDirective"
+      :target="expandRoute?.target"
       @update:expand="(v: ExpandFormState) => (form.state.value.expand = v)"
       @apply-prompt="applyExpandedPrompt"
       @close="
         showExpand = false;
         expandStageIndex = null;
+        expandRoute = null;
       "
     />
     <ImagePickerModal
