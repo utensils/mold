@@ -116,7 +116,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   endpoint. Production network volumes accept 10–3999 GB; the form and native
   validation enforce that live bound before launch. Region selectors show both
   the geographic location and RunPod ID, while the volume form limits choices
-  to datacenters that currently support persistent volumes.
+  to datacenters that currently support persistent volumes. While Create is
+  developing on a connected running pod, its activity strip shows the same
+  live accrued-cost and hourly-rate meter as Machines.
 - **Settings** — a single-column preferences workspace. Appearance
   (the website-aligned Mold palette by default or the original Safelight,
   each with System/Dark/Light; media never inverts), Updates, and About sit up

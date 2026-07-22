@@ -174,6 +174,31 @@ export function rankRunPodGpus(gpus: RunPodGpu[]): RunPodGpu[] {
 
 export const podProxyUrl = (id: string): string => `https://${id}-7680.proxy.runpod.net`;
 
+function endpointOrigin(value: string): string | null {
+  try {
+    return new URL(value).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Match a routed Mold host to the running RunPod proxy that owns it. */
+export function runPodForHostUrl(
+  pods: readonly RunPodPod[],
+  hostUrl: string | null | undefined,
+): RunPodPod | null {
+  if (!hostUrl) return null;
+  const origin = endpointOrigin(hostUrl);
+  if (!origin) return null;
+  return (
+    pods.find(
+      (pod) =>
+        pod.desiredStatus.toUpperCase() === "RUNNING" &&
+        endpointOrigin(podProxyUrl(pod.id)) === origin,
+    ) ?? null
+  );
+}
+
 export const podGpuName = (pod: RunPodPod): string =>
   pod.gpu?.displayName ??
   pod.machine?.gpuDisplayName ??

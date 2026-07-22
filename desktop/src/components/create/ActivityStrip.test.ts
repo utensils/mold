@@ -3,6 +3,8 @@ import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import ActivityStrip from "./ActivityStrip.vue";
 import { useGenerationStore } from "../../stores/generation";
+import { useHostsStore } from "../../stores/hosts";
+import { useRunPodStore } from "../../stores/runpod";
 import type { Job } from "../../stores/generation";
 
 beforeEach(() => setActivePinia(createPinia()));
@@ -42,5 +44,42 @@ describe("ActivityStrip", () => {
     expect(pill.text()).toContain("queued one");
     await pill.get("button").trigger("click");
     expect(cancel).toHaveBeenCalledWith(7);
+  });
+
+  it("shows accrued RunPod cost for a job routed to a live pod", () => {
+    const generation = useGenerationStore();
+    generation.jobs = [
+      {
+        ...baseJob(),
+        status: "denoising",
+        hostId: "pod-host",
+        step: 1,
+      },
+    ];
+    useHostsStore().extras = [
+      {
+        id: "pod-host",
+        label: "RunPod",
+        url: "https://abc123-7680.proxy.runpod.net",
+        apiKey: null,
+        status: "ready",
+        error: null,
+        instanceId: null,
+      },
+    ];
+    const runpod = useRunPodStore();
+    runpod.loaded = true;
+    runpod.overview.pods = [
+      {
+        id: "abc123",
+        desiredStatus: "RUNNING",
+        costPerHr: 1.2,
+        uptimeSeconds: 3600,
+      } as never,
+    ];
+
+    const wrapper = mount(ActivityStrip);
+
+    expect(wrapper.get('[data-test="activity-pod-cost"]').text()).toContain("≈$1.20");
   });
 });
