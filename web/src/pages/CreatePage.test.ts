@@ -186,6 +186,12 @@ describe("CreatePage layout and behavior", () => {
       })),
     );
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    expect(wrapper.find("[data-test='phone-create-title']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='phone-create-controls']").exists()).toBe(
+      true,
+    );
     await flushPromises();
     const canvas = wrapper.find("[data-test='result-canvas']").exists()
       ? wrapper.get("[data-test='result-canvas']").element

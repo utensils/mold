@@ -250,8 +250,11 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
 }
 
 // Phone surface → the Advanced sheet instead of the side drawer.
-const isPhone = ref(false);
-let phoneQuery: MediaQueryList | null = null;
+let phoneQuery: MediaQueryList | null =
+  typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(max-width: 639px)")
+    : null;
+const isPhone = ref(phoneQuery?.matches ?? false);
 function syncPhone() {
   isPhone.value = phoneQuery?.matches ?? false;
 }
@@ -1267,9 +1270,7 @@ function openAdvanced() {
 }
 
 onMounted(async () => {
-  if (typeof window.matchMedia === "function") {
-    phoneQuery = window.matchMedia("(max-width: 639px)");
-    syncPhone();
+  if (phoneQuery) {
     phoneQuery.addEventListener?.("change", syncPhone);
   }
   // Models arrive from the host-routing poll (every machine, not just this
