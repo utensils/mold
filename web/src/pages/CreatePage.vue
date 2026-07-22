@@ -25,6 +25,7 @@ import GenerationTemplatesPanel from "../components/GenerationTemplatesPanel.vue
 import ColdStartGuide from "../components/create/ColdStartGuide.vue";
 import RecentGrid from "../components/create/RecentGrid.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
+import { defaultUpscaler } from "../components/create/advanced/upscalers";
 import { blobToBase64 } from "../lib/base64";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -1142,7 +1143,7 @@ function onLightboxReuse(item: GalleryImage) {
   closeDrawer();
 }
 
-async function onLightboxUseSource(item: GalleryImage) {
+async function attachLightboxSource(item: GalleryImage): Promise<boolean> {
   try {
     const res = await fetch(imageUrl(item.filename));
     if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
@@ -1150,10 +1151,29 @@ async function onLightboxUseSource(item: GalleryImage) {
     form.state.value.imageAttachments = [
       { kind: "gallery", filename: item.filename, base64 },
     ];
-    closeDrawer();
+    return true;
   } catch (err) {
     toast("error", err instanceof Error ? err.message : String(err));
+    return false;
   }
+}
+
+async function onLightboxUseSource(item: GalleryImage) {
+  if (!(await attachLightboxSource(item))) return;
+  closeDrawer();
+}
+
+async function onLightboxUpscale(item: GalleryImage) {
+  if (!(await attachLightboxSource(item))) return;
+  form.state.value.upscaleModel ||= defaultUpscaler(models.value);
+  closeDrawer();
+  openAdvanced();
+  toast(
+    "info",
+    form.state.value.upscaleModel
+      ? "Added as source with Upscale after generate enabled."
+      : "Added as source — install or choose an upscaler in Advanced.",
+  );
 }
 function stepDrawer(delta: number) {
   if (selectedIndex.value < 0) return;
@@ -1498,7 +1518,7 @@ onBeforeUnmount(() => {
       @next="stepDrawer(1)"
       @reuse="onLightboxReuse"
       @use-source="onLightboxUseSource"
-      @upscale="onLightboxUseSource"
+      @upscale="onLightboxUpscale"
       @delete="handleDelete"
     />
   </div>

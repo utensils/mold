@@ -64,6 +64,42 @@ describe("Lightbox (desktop two-pane)", () => {
     expect(text).toContain("Download");
   });
 
+  it("renders complete generation metadata and copies prompt and seed", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    const wrapper = mountWide({
+      item: {
+        ...item,
+        size_bytes: 1_572_864,
+        format: "webp",
+        metadata: {
+          ...item.metadata,
+          original_prompt: "a lighthouse",
+          negative_prompt: "fog",
+          scheduler: "euler-ancestral",
+          loras: [{ path: "cinematic.safetensors", scale: 0.75 }],
+        },
+      },
+    });
+    const text = wrapper.text();
+    expect(text).toContain("20");
+    expect(text).toContain("3.5");
+    expect(text).toContain("euler-ancestral");
+    expect(text).toContain("cinematic.safetensors · 0.75");
+    expect(text).toContain("fog");
+    expect(text).toContain("a lighthouse");
+    expect(text).toContain("1.5 MiB");
+    expect(text).toContain("WEBP");
+
+    await wrapper.get('[data-test="copy-prompt"]').trigger("click");
+    await wrapper.get('[data-test="copy-seed"]').trigger("click");
+    expect(writeText).toHaveBeenNthCalledWith(1, "a lighthouse at dusk");
+    expect(writeText).toHaveBeenNthCalledWith(2, "4242");
+  });
+
   it("navigates with arrow keys and closes on Escape", async () => {
     const wrapper = mountWide();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
@@ -225,6 +261,19 @@ describe("Lightbox multi-host media", () => {
     });
     await flushPromises();
     expect(wrapper.text()).toContain("studio");
+  });
+
+  it("does not fall back to the origin when the owning host is gone", async () => {
+    mockFetch(() => {
+      throw new Error("must not fetch the origin");
+    });
+    const wrapper = mountWide({
+      item: { ...item, hostId: "forgotten", hostLabel: "old studio" },
+    });
+    await flushPromises();
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.text()).toContain("old studio isn't connected anymore");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("shows the can't-stream state for video on a ticket-less host", async () => {
