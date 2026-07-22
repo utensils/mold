@@ -17,6 +17,11 @@ import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { ChainJobDetail, GalleryImage } from "../types";
 
+vi.mock("vue-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-router")>()),
+  useRoute: () => ({ query: {} }),
+}));
+
 const entry: GalleryImage = {
   filename: "generate-visible.png",
   timestamp: 1_700_000_000,

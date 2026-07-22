@@ -115,3 +115,20 @@ body {
   opacity: 0;
   transform: translateY(1vh) scale(0.99);
 }
+
+/* iPhone/mobile-web interaction floor. The controls keep their compact visual
+ * treatment, but their hit boxes honor Apple's 44pt guidance and editable
+ * fields never trigger Safari's focus zoom. */
+@media (max-width: 639px) {
+  [data-test="generate-shell"] button,
+  [data-test="generate-shell"] [role="button"],
+  [data-test="generate-shell"] input[type="range"] {
+    min-height: 44px;
+  }
+
+  [data-test="generate-shell"] input,
+  [data-test="generate-shell"] textarea,
+  [data-test="generate-shell"] select {
+    font-size: max(16px, 1em);
+  }
+}

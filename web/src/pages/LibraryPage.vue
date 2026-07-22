@@ -67,6 +67,7 @@ const errorMessage = ref<string | null>(null);
 const filter = ref<FilterKind>("all");
 const search = ref("");
 const view = ref<ViewMode>(loadViewMode());
+const hostFilter = ref("all");
 
 const form = useGenerateForm();
 const route = useRoute();
@@ -84,6 +85,14 @@ watch(
   (q) => {
     const next = typeof q === "string" ? q : "";
     if (next !== search.value) search.value = next;
+  },
+  { immediate: true },
+);
+watch(
+  () => route.query.type,
+  (type) => {
+    if (type === "images" || type === "video" || type === "all")
+      filter.value = type;
   },
   { immediate: true },
 );
@@ -323,13 +332,39 @@ async function deleteAllFiltered() {
 }
 
 // ── Filtering ────────────────────────────────────────────────────────────────
+const hostOptions = computed(() => {
+  const options = new Map<string, string>();
+  for (const entry of entries.value) {
+    const id = entry.hostId ?? ORIGIN_HOST_ID;
+    options.set(id, entry.hostLabel ?? getHost(id)?.name ?? id);
+  }
+  return Array.from(options, ([id, label]) => ({ id, label }));
+});
+
+const hostFiltered = computed(() =>
+  hostFilter.value === "all"
+    ? entries.value
+    : entries.value.filter(
+        (entry) => (entry.hostId ?? ORIGIN_HOST_ID) === hostFilter.value,
+      ),
+);
+
 const kindFiltered = computed(() => {
-  if (filter.value === "all") return entries.value;
-  return entries.value.filter((e) => {
+  if (filter.value === "all") return hostFiltered.value;
+  return hostFiltered.value.filter((e) => {
     const k = mediaKind(e.format, e.filename);
     if (filter.value === "video") return k === "video" || k === "animated";
     return k === "image";
   });
+});
+
+watch(hostOptions, (options) => {
+  if (
+    hostFilter.value !== "all" &&
+    !options.some((option) => option.id === hostFilter.value)
+  ) {
+    hostFilter.value = "all";
+  }
 });
 
 const filtered = computed(() => {
@@ -514,6 +549,46 @@ function setView(next: ViewMode) {
   }
 }
 
+// ── Tile context menu ───────────────────────────────────────────────────────
+const contextMenu = ref<{
+  item: GalleryImage;
+  x: number;
+  y: number;
+} | null>(null);
+function openContextMenu(payload: {
+  item: GalleryImage;
+  x: number;
+  y: number;
+}) {
+  contextMenu.value = payload;
+}
+function closeContextMenu() {
+  contextMenu.value = null;
+}
+function contextReuse() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) onReuse(item);
+}
+async function contextSource() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) await onUseAsSource(item);
+}
+async function contextDelete() {
+  const item = contextMenu.value?.item;
+  closeContextMenu();
+  if (item) await onLightboxDelete(item);
+}
+function onDocumentPointerDown(event: PointerEvent) {
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("[data-test='gallery-context-menu']"))
+    closeContextMenu();
+}
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") closeContextMenu();
+}
+
 // ── Back-to-top FAB ──────────────────────────────────────────────────────────
 const showBackToTop = ref(false);
 function onScroll() {
@@ -524,17 +599,28 @@ function scrollToTop() {
 }
 onMounted(() => {
   window.addEventListener("scroll", onScroll, { passive: true });
+  document.addEventListener("pointerdown", onDocumentPointerDown);
+  document.addEventListener("keydown", onDocumentKeydown);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("scroll", onScroll);
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
 });
 
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
 onMounted(async () => {
   const [, listing] = await Promise.all([
     refresh(),
     fetchModels().catch(() => [] as ModelInfoExtended[]),
   ]);
   models.value = listing;
+  refreshTimer = setInterval(() => {
+    if (!document.hidden) void refresh();
+  }, 10_000);
+});
+onBeforeUnmount(() => {
+  if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>
 
@@ -558,6 +644,28 @@ onMounted(async () => {
         label="Filter prints"
         @update:model-value="setFilter"
       />
+
+      <div
+        v-if="hostOptions.length > 1"
+        class="gal__hosts"
+        role="group"
+        aria-label="Filter by machine"
+      >
+        <button
+          v-for="option in [
+            { id: 'all', label: 'All machines' },
+            ...hostOptions,
+          ]"
+          :key="option.id"
+          type="button"
+          class="gal__host-chip"
+          :data-on="hostFilter === option.id ? 'true' : undefined"
+          data-test="gallery-host-filter"
+          @click="hostFilter = option.id"
+        >
+          {{ option.label }}
+        </button>
+      </div>
 
       <label class="gal__search">
         <Icon name="search" :size="15" />
@@ -728,6 +836,7 @@ onMounted(async () => {
           @open="openItem"
           @toggle-select="toggleSelect"
           @drag-select="onDragSelect"
+          @context-menu="openContextMenu"
         />
 
         <GalleryFeed
@@ -744,6 +853,39 @@ onMounted(async () => {
         />
       </template>
     </main>
+
+    <div
+      v-if="contextMenu"
+      class="gal__context"
+      data-test="gallery-context-menu"
+      role="menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+    >
+      <button
+        type="button"
+        role="menuitem"
+        @click="
+          openItem(contextMenu.item);
+          closeContextMenu();
+        "
+      >
+        Open
+      </button>
+      <button type="button" role="menuitem" @click="contextReuse">
+        Reuse settings
+      </button>
+      <button type="button" role="menuitem" @click="contextSource">
+        Use as source
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="gal__context-danger"
+        @click="contextDelete"
+      >
+        Delete
+      </button>
+    </div>
 
     <!-- Selection action bar (bulk delete). -->
     <Transition name="fade">
@@ -873,6 +1015,56 @@ onMounted(async () => {
 
 .gal__filter {
   flex: 0 0 auto;
+}
+.gal__hosts {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.gal__host-chip {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-pill);
+  background: var(--bath);
+  color: var(--ink-2);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gal__host-chip[data-on="true"] {
+  border-color: var(--safelight);
+  color: var(--rebate);
+  background: var(--sel-bg);
+}
+
+.gal__context {
+  position: fixed;
+  z-index: 70;
+  display: grid;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid var(--ce);
+  border-radius: var(--radius-control-lg);
+  background: var(--bench);
+  box-shadow: var(--shadow-popover);
+}
+.gal__context button {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--rebate);
+  text-align: left;
+  cursor: pointer;
+}
+.gal__context button:hover {
+  background: var(--sel-bg);
+}
+.gal__context-danger {
+  color: var(--stop) !important;
 }
 
 .gal__search {

@@ -19,10 +19,12 @@ import {
   useNotificationSignals,
 } from "../../lib/notifications";
 import type { IconName } from "@ui/icons";
+import { useStatusPoll } from "../../composables/useStatusPoll";
 
 const route = useRoute();
 const router = useRouter();
 const downloads = useDownloads();
+const { error: engineError } = useStatusPoll();
 
 // Cross-workspace badge signals (spec §08 G11): a fresh-prints accent dot on
 // the Library pill (cleared on entering the Library) and a stop-tinted dot on
@@ -118,6 +120,15 @@ const menuOpen = ref(false);
 
 <template>
   <header class="app-nav">
+    <div
+      v-if="engineError"
+      class="engine-offline"
+      data-test="global-engine-status"
+      role="status"
+      title="The serving Mold engine is unreachable"
+    >
+      <span aria-hidden="true">●</span> Engine offline
+    </div>
     <!-- Wide bar (≥640px) -->
     <div class="bar bar--wide">
       <router-link to="/create" class="brand" aria-label="mold home">
@@ -243,6 +254,19 @@ const menuOpen = ref(false);
   position: relative;
   z-index: 30;
   flex: 0 0 auto;
+}
+.engine-offline {
+  position: absolute;
+  z-index: 2;
+  top: 100%;
+  right: 14px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
+  border-radius: 0 0 var(--radius-control) var(--radius-control);
+  background: var(--bench);
+  color: var(--stop);
+  font-family: var(--f-mono);
+  font-size: 10px;
 }
 
 .bar {
@@ -465,9 +489,9 @@ const menuOpen = ref(false);
 /* ── Compact icon buttons ──────────────────────────────────────────── */
 .icon-btn {
   position: relative;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   border-radius: 50%;
   border: 0;
   background: color-mix(in srgb, var(--rebate) 8%, transparent);

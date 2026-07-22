@@ -19,6 +19,7 @@ import type {
   ModelComponentStatus,
   ModelInfoExtended,
 } from "../../types";
+import { formatGB } from "../../util/format";
 
 const cat = useCatalog();
 
@@ -81,11 +82,6 @@ const panelComponent = computed(() =>
 const panelProps = computed(() =>
   isPhone.value ? { variant: "full" as const } : { width: 452 },
 );
-
-function formatGB(bytes: number | null | undefined): string {
-  if (!bytes) return "—";
-  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
-}
 
 /** Compact counts for metadata rows: 999 → "999", 12_300 → "12.3k". */
 function formatCount(count: number): string {

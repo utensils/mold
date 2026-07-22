@@ -25,6 +25,7 @@ vi.mock("../components/machines/hostClient", () => ({
 
 vi.mock("vue-router", () => ({
   useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ query: {} }),
 }));
 
 function makeStatus(over: Partial<HostStatus> = {}): HostStatus {

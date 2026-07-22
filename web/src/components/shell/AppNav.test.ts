@@ -27,6 +27,10 @@ vi.mock("../../composables/useDownloads", () => ({
 }));
 
 const notifState = vi.hoisted(() => ({ fresh: 0, offline: false }));
+const statusState = vi.hoisted(() => ({ error: null as string | null }));
+vi.mock("../../composables/useStatusPoll", () => ({
+  useStatusPoll: () => ({ error: { value: statusState.error } }),
+}));
 const markGalleryVisitedMock = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/notifications", () => ({
   useNotificationSignals: () => ({
@@ -54,6 +58,7 @@ describe("AppNav", () => {
     dlState.queued = [];
     notifState.fresh = 0;
     notifState.offline = false;
+    statusState.error = null;
     markGalleryVisitedMock.mockClear();
     pushMock.mockClear();
   });
@@ -144,6 +149,15 @@ describe("AppNav", () => {
     const dot = wrapper.find('[data-test="nav-dot-machines"]');
     expect(dot.exists()).toBe(true);
     expect(dot.classes()).toContain("seg-dot--stop");
+  });
+
+  it("shows a global engine-offline status outside Create", () => {
+    routeState.name = "library";
+    statusState.error = "connection refused";
+    const wrapper = mountNav();
+    expect(wrapper.get("[data-test='global-engine-status']").text()).toContain(
+      "Engine offline",
+    );
   });
 
   it("clears fresh prints when the library route is entered", () => {

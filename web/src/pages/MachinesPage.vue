@@ -7,8 +7,8 @@
  * With no remotes the origin card plus the add card stand in for an empty
  * state (G4).
  */
-import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Icon from "@ui/components/Icon.vue";
 import HostCard from "../components/machines/HostCard.vue";
@@ -17,8 +17,16 @@ import { ORIGIN_HOST_ID, listHosts, type HostEntry } from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
 
 const router = useRouter();
+const route = useRoute();
 const hosts = ref<HostEntry[]>(listHosts());
 const connectOpen = ref(false);
+watch(
+  () => route.query.add,
+  (add) => {
+    if (add === "1") connectOpen.value = true;
+  },
+  { immediate: true },
+);
 
 function refreshHosts() {
   hosts.value = listHosts();

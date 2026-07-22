@@ -8,14 +8,10 @@
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
+import { formatGB } from "../../util/format";
 
 const props = defineProps<{ model: ModelInfoExtended }>();
 const emit = defineEmits<{ open: [] }>();
-
-function formatGB(gb: number): string {
-  if (!gb) return "—";
-  return `${gb.toFixed(1)} GB`;
-}
 </script>
 
 <template>
@@ -41,7 +37,8 @@ function formatGB(gb: number): string {
         </BadgePill>
       </span>
       <span class="row__meta">
-        {{ props.model.family }} · {{ formatGB(props.model.size_gb) }}
+        {{ props.model.family }} ·
+        {{ formatGB(props.model.size_gb * 1_000_000_000) }}
       </span>
     </span>
     <Icon name="chevron-right" :size="16" class="row__chevron" />

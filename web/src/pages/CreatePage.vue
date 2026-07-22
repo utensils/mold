@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import { requestChoice, toast } from "../lib/toasts";
+import { useRoute } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
 import ControlsAside from "../components/create/ControlsAside.vue";
@@ -84,6 +85,7 @@ function loadMuted(): boolean {
 }
 
 const form = useGenerateForm();
+const pageRoute = useRoute();
 const { status } = useStatusPoll();
 const queue = useQueue();
 const routing = useHostRouting();
@@ -311,6 +313,13 @@ function setComposerMode(v: ComposerMode) {
     /* ignore */
   }
 }
+watch(
+  () => pageRoute.query.mode,
+  (mode) => {
+    if (mode === "sequence") setComposerMode("script");
+  },
+  { immediate: true },
+);
 
 const expandStageIndex = ref<number | null>(null);
 const expandStagePrompt = ref("");
