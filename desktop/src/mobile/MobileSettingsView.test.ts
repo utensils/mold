@@ -1,6 +1,9 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import MobileSettingsView from "./MobileSettingsView.vue";
+
+const { openExternalMock } = vi.hoisted(() => ({ openExternalMock: vi.fn() }));
+vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 
 describe("MobileSettingsView", () => {
   it("offers accessible theme choices and emits immediate updates", async () => {
@@ -40,5 +43,19 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("No hosts saved");
     await wrapper.get(".mobile-settings-manage").trigger("click");
     expect(wrapper.emitted("manage-hosts")).toHaveLength(1);
+  });
+
+  it("opens the public privacy policy from About", async () => {
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: { theme: "system", themeFamily: "safelight" },
+        hostCount: 1,
+        appVersion: "0.20.2",
+      },
+    });
+
+    await wrapper.get("[data-test='mobile-privacy-policy']").trigger("click");
+
+    expect(openExternalMock).toHaveBeenCalledWith("https://utensils.io/mold/privacy");
   });
 });

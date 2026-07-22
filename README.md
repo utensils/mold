@@ -170,7 +170,9 @@ playback controls, and a still can become the next generation's source image.
 Settings offers Mold or Safelight color families in System, Dark, or Light
 appearance and keeps native iOS chrome in sync. The app prevents input-focus and
 double-tap page zoom, removes rubber-band overscroll, and preserves the
-gallery's horizontal swipe gesture. Internal TestFlight builds are produced
+gallery's horizontal swipe gesture. Settings links to the public
+[Mold privacy policy](https://utensils.io/mold/privacy), which describes local
+storage and user-selected remote-server traffic. Internal TestFlight builds are produced
 after mobile-relevant `main` changes pass iOS CI; release checks verify Tauri's
 embedded `index.html`, the opaque Mold-branded Apple icon catalog, App Store
 Connect `VALID` processing, and internal tester access.

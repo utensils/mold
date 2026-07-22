@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
 import type { MobileSettings } from "./settings";
+
+const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
 defineProps<{
   settings: MobileSettings;
@@ -27,6 +30,10 @@ const appearances: Array<{ value: Theme; label: string; description: string }> =
   { value: "dark", label: "Dark", description: "Lights off" },
   { value: "light", label: "Light", description: "Lights on" },
 ];
+
+function openPrivacyPolicy(): void {
+  void openExternal(PRIVACY_POLICY_URL);
+}
 </script>
 
 <template>
@@ -128,6 +135,19 @@ const appearances: Array<{ value: Theme; label: string; description: string }> =
         <div>
           <dt>Updates</dt>
           <dd>TestFlight</dd>
+        </div>
+        <div>
+          <dt>Privacy</dt>
+          <dd>
+            <button
+              class="mobile-settings-link"
+              data-test="mobile-privacy-policy"
+              type="button"
+              @click="openPrivacyPolicy"
+            >
+              Privacy policy
+            </button>
+          </dd>
         </div>
         <div>
           <dt>Core contributors</dt>
