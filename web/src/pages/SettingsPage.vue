@@ -264,11 +264,15 @@ const version = computed(() => status.value?.version ?? "—");
           version
         }}</span>
       </div>
-      <div class="about-row about-row--last">
+      <div class="about-row">
         <span class="about-row__key">Processing</span>
         <span class="about-row__val about-row__val--muted">
           local + your hosts
         </span>
+      </div>
+      <div class="about-row about-row--last">
+        <span class="about-row__key">Core contributors · equal owners</span>
+        <span class="about-row__val">James Brink · Jeffrey Dilley</span>
       </div>
     </CardSurface>
   </div>

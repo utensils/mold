@@ -23,6 +23,22 @@ fn app_name(is_development: bool) -> &'static str {
     }
 }
 
+fn about_metadata(app_name: &str) -> AboutMetadata<'static> {
+    AboutMetadata {
+        name: Some(app_name.into()),
+        authors: Some(vec!["James Brink".into(), "Jeffrey Dilley".into()]),
+        comments: Some("Local AI image and video generation.".into()),
+        copyright: Some("Copyright © 2026 James Brink and Jeffrey Dilley".into()),
+        license: Some("MIT License".into()),
+        website: Some("https://github.com/utensils/mold".into()),
+        website_label: Some("Mold on GitHub".into()),
+        credits: Some(
+            "Core contributors and equal project owners:\nJames Brink\nJeffrey Dilley".into(),
+        ),
+        ..Default::default()
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn set_process_name(is_development: bool) {
     if is_development {
@@ -38,11 +54,7 @@ pub fn set_process_name(_is_development: bool) {}
 pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Result<Menu<R>> {
     let app_name = app_name(is_development);
     let about_label = format!("About {app_name}");
-    let about = AboutMetadata {
-        name: Some(app_name.into()),
-        comments: Some("Local AI image and video generation.".into()),
-        ..Default::default()
-    };
+    let about = about_metadata(app_name);
 
     let app_menu = SubmenuBuilder::new(app, app_name)
         .item(&PredefinedMenuItem::about(
@@ -235,7 +247,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{accelerator, app_name};
+    use super::{about_metadata, accelerator, app_name};
+
+    #[test]
+    fn about_metadata_credits_both_core_contributors() {
+        let about = about_metadata("Mold");
+
+        assert_eq!(
+            about.authors,
+            Some(vec!["James Brink".into(), "Jeffrey Dilley".into()])
+        );
+        assert!(about.credits.as_deref().unwrap().contains("James Brink"));
+        assert!(about.credits.as_deref().unwrap().contains("Jeffrey Dilley"));
+    }
 
     #[test]
     fn uses_the_platform_primary_modifier() {

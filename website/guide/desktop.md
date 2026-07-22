@@ -130,6 +130,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
   create), and Advanced — every remaining `/api/config` row with its provenance
   tag (⌂ db / ⛁ file / ⚿ env); environment-overridden rows are locked with the
   variable that owns them.
+  About credits core contributors and equal project owners James Brink and
+  Jeffrey Dilley in both the Settings workspace and the native app menu.
 - **Command palette** — **Cmd/Ctrl+K** for navigation, actions, model search, and
   prompt-history search in one field.
 - **Native desktop integration** — platform menus and shortcuts, Linux native

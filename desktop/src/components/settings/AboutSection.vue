@@ -53,6 +53,9 @@ async function copyDiagnostics() {
     <SettingRow label="Processing" help="Where generations run.">
       <span class="data-mono text-body text-ink-3">Local + your hosts</span>
     </SettingRow>
+    <SettingRow label="Core contributors" help="Equal project owners.">
+      <span class="text-right text-body text-ink-2">James Brink · Jeffrey Dilley</span>
+    </SettingRow>
     <SettingRow label="Logs" help="Engine and app logs live in ~/.mold/logs.">
       <button
         type="button"

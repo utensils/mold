@@ -1,5 +1,8 @@
 # Mold for iPhone
 
+Mold is equally owned and maintained by core contributors James Brink and
+Jeffrey Dilley.
+
 Mold for iPhone is a remote-only Tauri 2 client. It never links or embeds the
 GPU inference stack; a saved Mold server owns the models, queue, downloads,
 generation work, and gallery media.
