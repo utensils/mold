@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
-import BadgePill from "@ui/components/BadgePill.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
   applyModelDefaults,
@@ -42,7 +40,6 @@ import ImagePickerModal from "../generate/ImagePickerModal.vue";
 
 const props = withDefaults(
   defineProps<{
-    open: boolean;
     form: GenerateForm;
     /** The picked model, used by Reset to restore its defaults. */
     selectedModel?: ModelEntry | null;
@@ -51,7 +48,7 @@ const props = withDefaults(
   { selectedModel: null, upscalers: () => [] },
 );
 
-const emit = defineEmits<{ close: []; "append-word": [word: string] }>();
+const emit = defineEmits<{ "append-word": [word: string] }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
@@ -245,18 +242,15 @@ function reset() {
 </script>
 
 <template>
-  <DrawerPanel :open="open" :width="560" title="Advanced" @close="emit('close')">
-    <template #header>
-      <div class="ms-adv__head">
-        <div>
-          <div class="ms-adv__title">Advanced</div>
-          <div class="ms-adv__subtitle">Fine controls, tucked away until you need them</div>
-        </div>
-        <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-active"
-          >{{ advancedCount }} active</BadgePill
-        >
-      </div>
-    </template>
+  <section class="ms-adv" data-test="inline-advanced">
+    <div class="ms-adv__toolbar">
+      <span class="ms-adv__summary">
+        {{ advancedCount > 0 ? `${advancedCount} active` : "Fine controls" }}
+      </span>
+      <button type="button" class="ms-adv__reset" data-test="advanced-reset" @click="reset">
+        Reset
+      </button>
+    </div>
 
     <div class="ms-adv__list">
       <!-- 1 · Scheduler & sampling -->
@@ -705,38 +699,25 @@ function reset() {
         </template>
       </AccordionSection>
     </div>
-
-    <template #footer>
-      <div class="ms-adv__footer">
-        <button type="button" class="ms-adv__reset" data-test="advanced-reset" @click="reset">
-          Reset
-        </button>
-        <div class="ms-adv__spacer" />
-        <button type="button" class="ms-adv__done" data-test="advanced-done" @click="emit('close')">
-          Done
-        </button>
-      </div>
-    </template>
-  </DrawerPanel>
+  </section>
 </template>
 
 <style scoped>
-.ms-adv__head {
+.ms-adv {
+  padding-top: 10px;
+}
+.ms-adv__toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex: 1;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
 }
-.ms-adv__title {
-  font-family: var(--f-display);
-  font-size: 16px;
-  font-weight: 700;
-}
-.ms-adv__subtitle {
+.ms-adv__summary {
   font-family: var(--f-mono);
   font-size: 9.5px;
   color: var(--ink-3);
-  margin-top: 1px;
+  letter-spacing: 0.04em;
 }
 .ms-adv__list {
   display: flex;
@@ -924,33 +905,18 @@ function reset() {
   border: 0;
   cursor: pointer;
 }
-.ms-adv__footer {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-}
-.ms-adv__spacer {
-  flex: 1;
-}
 .ms-adv__reset {
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
-  padding: 11px 16px;
-  border-radius: 10px;
-  font-size: 13px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
-.ms-adv__done {
-  border: 0;
-  background: var(--safelight);
-  color: var(--on-accent);
-  padding: 11px 26px;
-  border-radius: 10px;
-  font-size: 13.5px;
-  font-weight: 700;
-  cursor: pointer;
+.ms-adv__reset:hover {
+  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  color: var(--rebate);
 }
 </style>

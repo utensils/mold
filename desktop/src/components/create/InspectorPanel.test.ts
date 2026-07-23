@@ -157,13 +157,23 @@ describe("InspectorPanel — seed mode", () => {
 });
 
 describe("InspectorPanel — advanced", () => {
-  it("opens the drawer and badges the active advanced count", async () => {
+  it("keeps the simplified inspector by default and expands Advanced inline", async () => {
     const form = formFor("sdxl");
     form.negativePrompt = "blurry";
     const wrapper = mount(InspectorPanel, { props: { form } });
     expect(wrapper.findComponent(BadgePill).text()).toContain("1 on");
+    expect(wrapper.get('[data-test="open-advanced"]').attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
+
     await wrapper.get('[data-test="open-advanced"]').trigger("click");
-    expect(wrapper.emitted("open-advanced")).toHaveLength(1);
+
+    expect(wrapper.get('[data-test="open-advanced"]').attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="seed-mode-random"]').exists()).toBe(true);
+
+    await wrapper.get('[data-test="open-advanced"]').trigger("click");
+    expect(wrapper.get('[data-test="open-advanced"]').attributes("aria-expanded")).toBe("false");
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
   });
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import viewSource from "./GenerateView.vue?raw";
 import inspectorSource from "../components/create/InspectorPanel.vue?raw";
+import advancedSource from "../components/create/AdvancedSettings.vue?raw";
 
 function tagFor(source: string, testId: string): string {
   return source.match(new RegExp(`<[^>]*data-test="${testId}"[^>]*>`, "s"))?.[0] ?? "";
@@ -26,6 +27,12 @@ describe("GenerateView layout", () => {
     expect(classesFor(inspectorSource, "model-option-name")).toContain("break-all");
     expect(classesFor(inspectorSource, "model-availability")).toContain("whitespace-normal");
     expect(classesFor(inspectorSource, "model-availability")).toContain("break-all");
+  });
+
+  it("keeps Advanced in the settings inspector instead of mounting an overlay drawer", () => {
+    expect(viewSource).not.toContain("<AdvancedDrawer");
+    expect(inspectorSource).toContain("<AdvancedSettings");
+    expect(advancedSource).toContain('data-test="inline-advanced"');
   });
 
   it("renders an instructive brand blank-canvas placeholder before the first print", () => {

@@ -31,6 +31,7 @@ import { useHostsStore } from "../../stores/hosts";
 import { useAppPrefsStore } from "../../stores/appPrefs";
 import { dragWidth } from "../../lib/panelResize";
 import SourceGlyph from "../generate/SourceGlyph.vue";
+import AdvancedSettings from "./AdvancedSettings.vue";
 import { formatGB } from "../../lib/format";
 import PanelResizeHandle from "../shell/PanelResizeHandle.vue";
 
@@ -43,7 +44,7 @@ const props = withDefaults(
   { lastSeed: null },
 );
 
-const emit = defineEmits<{ "open-advanced": [] }>();
+const emit = defineEmits<{ "append-word": [word: string] }>();
 
 const formStore = useGenerateFormStore();
 const models = useModelStore();
@@ -77,6 +78,7 @@ function onInspectorReset() {
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
+const advancedExpanded = ref(false);
 
 // ── Model picker (moved verbatim from the previous inspector) ────────────────
 const pickerEl = ref<HTMLDivElement | null>(null);
@@ -417,14 +419,29 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
         type="button"
         class="ms-advanced"
         data-test="open-advanced"
-        @click="emit('open-advanced')"
+        :aria-expanded="advancedExpanded"
+        aria-controls="desktop-inline-advanced"
+        @click="advancedExpanded = !advancedExpanded"
       >
-        <Icon name="sliders" :size="14" />
-        Advanced
-        <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-count"
-          >{{ advancedCount }} on</BadgePill
-        >
+        <span class="ms-advanced__label">
+          <Icon name="sliders" :size="14" />
+          Advanced
+        </span>
+        <span class="ms-advanced__meta">
+          <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-count"
+            >{{ advancedCount }} on</BadgePill
+          >
+          <Icon :name="advancedExpanded ? 'chevron-up' : 'chevron-down'" :size="15" />
+        </span>
       </button>
+      <AdvancedSettings
+        v-if="advancedExpanded"
+        id="desktop-inline-advanced"
+        :form="form"
+        :selected-model="selectedModel"
+        :upscalers="models.upscalers"
+        @append-word="emit('append-word', $event)"
+      />
     </div>
   </aside>
 </template>
@@ -620,11 +637,28 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
   font-size: 12px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 8px;
   cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    border-color var(--dur-quick) var(--ease);
 }
 .ms-advanced:hover {
   background: color-mix(in srgb, var(--rebate) 6%, transparent);
+}
+.ms-advanced[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--safelight) 45%, var(--ce));
+  background: color-mix(in srgb, var(--safelight) 7%, transparent);
+  color: var(--rebate);
+}
+.ms-advanced__label,
+.ms-advanced__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ms-advanced__meta {
+  color: var(--ink-3);
 }
 </style>
