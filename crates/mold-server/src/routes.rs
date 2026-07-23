@@ -2791,17 +2791,18 @@ async fn capabilities_chain_limits(
         (manifest.family.clone(), quant)
     } else {
         // Installed live-catalog models retain opaque `cv:` / `hf:` ids and
-        // therefore cannot be found in the built-in manifest. Their local
-        // sidecar/config still provides the authoritative runtime family.
-        let config = state.config.read().await;
-        let family = config
-            .resolved_model_config(&raw_model)
-            .family
-            .unwrap_or_default();
-        if family.is_empty() {
+        // therefore cannot be found in the built-in manifest. Resolve them
+        // through the same installed-sidecar inventory as `/api/models`;
+        // config lookup alone deliberately does not synthesize catalog
+        // metadata and would incorrectly return 404 for runnable installs.
+        let Some(entry) = model_manager::list_models(&state)
+            .await
+            .into_iter()
+            .find(|entry| entry.downloaded && entry.info.name == raw_model)
+        else {
             return (StatusCode::NOT_FOUND, "unknown model\n").into_response();
-        }
-        (family, String::new())
+        };
+        (entry.info.family, String::new())
     };
 
     if crate::chain_limits::family_cap(&family).is_none() {

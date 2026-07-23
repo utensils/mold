@@ -5689,15 +5689,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_chain_limits_accepts_configured_catalog_ltx2_model() {
-        let mut config = mold_core::Config::default();
-        config.models.insert(
-            "cv:3143864".into(),
-            mold_core::config::ModelConfig {
-                family: Some("ltx2".into()),
-                ..Default::default()
+    async fn capabilities_chain_limits_accepts_installed_catalog_ltx2_sidecar() {
+        let models_dir = tempfile::tempdir().unwrap();
+        let install_dir = models_dir.path().join("cv-3143864");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("model.safetensors"), []).unwrap();
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &mold_catalog::sidecar::CatalogSidecar {
+                schema: 1,
+                id: "cv:3143864".into(),
+                source: "civitai".into(),
+                source_id: "3143864".into(),
+                name: "LTX 2.3 INT4 ConvRot".into(),
+                author: None,
+                family: "ltx2".into(),
+                family_role: "finetune".into(),
+                sub_family: Some("v2.3".into()),
+                kind: "checkpoint".into(),
+                modality: "video".into(),
+                thumbnail_url: None,
+                size_bytes: Some(0),
+                supported: true,
+                trained_words: vec![],
+                primary_filename_rel: "model.safetensors".into(),
+                written_at: 0,
             },
-        );
+        )
+        .unwrap();
+        let config = mold_core::Config {
+            models_dir: models_dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let state = AppState::empty(
             config,
