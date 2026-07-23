@@ -39,9 +39,9 @@ class FakeIntersectionObserver {
   disconnect() {
     this.targets = [];
   }
-  intersect() {
+  intersect(isIntersecting = true) {
     this.callback(
-      this.targets.map((target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry),
+      this.targets.map((target) => ({ isIntersecting, target }) as IntersectionObserverEntry),
       this as unknown as IntersectionObserver,
     );
   }
@@ -50,6 +50,11 @@ class FakeIntersectionObserver {
 /** Fires "sentinel scrolled into view" on every live observer. */
 function scrollToSentinel() {
   for (const observer of FakeIntersectionObserver.instances) observer.intersect();
+}
+
+/** Fires "sentinel left the viewport" on every live observer. */
+function scrollPastSentinel() {
+  for (const observer of FakeIntersectionObserver.instances) observer.intersect(false);
 }
 
 function entry(name: string, family: string): CatalogEntry {
@@ -274,6 +279,8 @@ describe("CatalogTab media filter under pagination", () => {
     scrollToSentinel();
     // Re-firing while the page is already loading must not double-fetch.
     scrollToSentinel();
+    // The new rows pushed the sentinel out of view before the page settled.
+    scrollPastSentinel();
     await flushPromises();
 
     const pages = searchCatalog.mock.calls.map((c) => (c[0] as CatalogSearchParams).page);
@@ -282,6 +289,76 @@ describe("CatalogTab media filter under pagination", () => {
 
     // No manual pagination button remains.
     expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(false);
+  });
+
+  it("keeps fetching (bounded) while the sentinel stays visible after a page lands", async () => {
+    // A page whose rows get swallowed by dedup/filtering adds no height, so
+    // the observer never re-fires — the chain watcher must keep digging, but
+    // only up to the auto-fetch bound. With no leave event the sentinel stays
+    // "visible" forever here, so the bound is what terminates the chain.
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: PAGE_SIZE,
+        total: 10_000,
+      }),
+    );
+    await mountTab("all");
+
+    scrollToSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as CatalogSearchParams).page);
+    // Initial load, the intersection's page, then at most MAX_AUTO_PAGES
+    // chained follow-ups.
+    expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it("never hides a different live model that shares an installed model's title", async () => {
+    // Same human title, different catalog ids — the installed row's title
+    // must not act as a dedup key that suppresses the unrelated model. The
+    // exact same version is already collapsed by id.
+    searchCatalog.mockResolvedValue({
+      entries: [
+        { ...entry("Juggernaut XL", "sdxl"), id: "cv:111" },
+        { ...entry("Juggernaut XL", "sdxl"), id: "cv:222" },
+      ],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 2,
+    });
+    setActivePinia(createPinia());
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "cv:111",
+            family: "sdxl",
+            size_gb: 6.9,
+            is_loaded: false,
+            hf_repo: "",
+            default_steps: 25,
+            default_guidance: 7,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            display_name: "Juggernaut XL",
+            hostIds: ["local"],
+          },
+        ],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='catalog-card']");
+    // The installed cv:111 (collapsed with its live copy by id) plus the
+    // unrelated cv:222 that happens to share the title.
+    expect(cards.length).toBe(2);
   });
 
   it("keys the empty state on the filtered list, not the raw page", async () => {

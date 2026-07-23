@@ -156,14 +156,10 @@ const combinedEntries = computed(() => {
   );
   const byId = new Map<string, CatalogEntry & { hostIds?: string[] }>();
   // Installed rows win the dedup — a live-catalog copy of an installed
-  // model must not appear untagged next to it. Catalog installs are named
-  // by their opaque id, so their human title joins the set too — that is
-  // the name the live feed knows them by.
-  const installedByName = new Set(
-    installedCatalogEntries.value.flatMap((entry) =>
-      entry.display_name ? [entry.name, entry.display_name] : [entry.name],
-    ),
-  );
+  // model must not appear untagged next to it. Names only: a human title
+  // is not unique enough to be a dedup key (two models can share one),
+  // and the exact same catalog version already collapses by id below.
+  const installedByName = new Set(installedCatalogEntries.value.map((entry) => entry.name));
   for (const entry of [
     ...installedCatalogEntries.value,
     ...manifestEntries.value,
@@ -276,19 +272,39 @@ function loadMore() {
  *  old Load more button read as a dead end and (worse) looked broken
  *  whenever upstream paging returned duplicate rows the dedup swallowed. */
 const sentinel = ref<HTMLElement | null>(null);
+const sentinelVisible = ref(false);
+/** Fetches chained since the last real intersection event — bounded like
+ *  the media-filter auto-fetch so a dedup-swallowed page can't loop. */
+let chainedFetches = 0;
 let observer: IntersectionObserver | null = null;
 
 watch(sentinel, (el) => {
   observer?.disconnect();
   observer = null;
+  sentinelVisible.value = false;
   if (!el) return;
   observer = new IntersectionObserver(
     (hits) => {
-      if (hits.some((hit) => hit.isIntersecting)) loadMore();
+      for (const hit of hits) sentinelVisible.value = hit.isIntersecting;
+      if (sentinelVisible.value) {
+        chainedFetches = 0;
+        loadMore();
+      }
     },
     { rootMargin: "600px 0px" },
   );
   observer.observe(el);
+});
+
+// A page that lands without pushing the sentinel out of view (dedup or the
+// media filter swallowed its rows) emits no new intersection event, so the
+// observer alone would stall. Chain the next fetch while the sentinel is
+// still visible, up to the auto-fetch bound.
+watch(loading, (isLoading) => {
+  if (isLoading || !sentinelVisible.value || !hasMore.value) return;
+  if (chainedFetches >= MAX_AUTO_PAGES) return;
+  chainedFetches += 1;
+  loadMore();
 });
 
 onBeforeUnmount(() => {

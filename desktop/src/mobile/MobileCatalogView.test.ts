@@ -147,9 +147,9 @@ class FakeIntersectionObserver {
   disconnect() {
     this.targets = [];
   }
-  intersect() {
+  intersect(isIntersecting = true) {
     this.callback(
-      this.targets.map((target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry),
+      this.targets.map((target) => ({ isIntersecting, target }) as IntersectionObserverEntry),
       this as unknown as IntersectionObserver,
     );
   }
@@ -158,6 +158,11 @@ class FakeIntersectionObserver {
 /** Fires "sentinel scrolled into view" on every live observer. */
 function scrollToSentinel() {
   for (const observer of FakeIntersectionObserver.instances) observer.intersect();
+}
+
+/** Fires "sentinel left the viewport" on every live observer. */
+function scrollPastSentinel() {
+  for (const observer of FakeIntersectionObserver.instances) observer.intersect(false);
 }
 
 function jsonResponse<T>(value: T): Response {
@@ -279,11 +284,38 @@ describe("MobileCatalogView", () => {
     scrollToSentinel();
     // Re-firing while the page is already loading must not double-fetch.
     scrollToSentinel();
+    // The new rows pushed the sentinel out of view before the page settled.
+    scrollPastSentinel();
     await flushPromises();
 
     const pages = searchCatalog.mock.calls.map((c) => (c[0] as { page?: number }).page);
     expect(pages).toEqual([1, 2]);
     expect(wrapper.text()).toContain("catalog-2-0");
+  });
+
+  it("keeps fetching (bounded) while the sentinel stays visible after a page lands", async () => {
+    // Height-less pages (dedup/filter-swallowed) emit no new intersection —
+    // the chain watcher keeps digging up to the auto-fetch bound.
+    const fullPage = (page: number) =>
+      Array.from({ length: 24 }, (_, i) => entry(`catalog-${page}-${i}`));
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: fullPage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: 24,
+        total: 10_000,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    scrollToSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as { page?: number }).page);
+    // Initial load, the intersection's page, then at most MAX_AUTO_PAGES
+    // chained follow-ups.
+    expect(pages).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   it("repoints the detail pull to the selected manifest variant", async () => {
