@@ -381,12 +381,18 @@ async fn page_param_omitted_when_query_present() {
         .unwrap();
 }
 
+/// Civitai ignores `page=` on browse (no-query) requests too — the
+/// endpoint is cursor-paginated and any page value returns the same
+/// first window, which made every "Load more" page identical. Pin that
+/// the builder never sends `page=` and instead widens `limit=` to the
+/// full `page × page_size` window it slices locally.
 #[tokio::test]
-async fn page_param_present_when_query_absent() {
+async fn page_param_never_sent_and_limit_covers_the_window() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/models"))
-        .and(query_param("page", "2"))
+        .and(wiremock::matchers::query_param_is_missing("page"))
+        .and(query_param("limit", "40"))
         .and(wiremock::matchers::query_param_is_missing("query"))
         .respond_with(ResponseTemplate::new(200).set_body_string(ONE_FLUX_LORA))
         .expect(1)

@@ -235,10 +235,10 @@ struct CivitaiResponse {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct CivitaiMetadata {
+    /// Absent on cursor-mode responses; 0 then, and the window heuristic
+    /// in [`civitai_search`] supplies the observed floor instead.
     #[serde(default, rename = "totalItems")]
     total_items: usize,
-    #[serde(default, rename = "totalPages")]
-    total_pages: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -579,21 +579,15 @@ async fn civitai_search(
         .map(str::to_string);
     {
         let mut q = url.query_pairs_mut();
+        // Civitai's `/api/v1/models` is cursor-paginated: `page=` is
+        // ignored (every value returns the same first window) and is
+        // rejected outright when `query=` is present. So we never send
+        // it — instead fetch one `page × page_size` window via `limit=`
+        // and slice locally, same as `hf_search`. Depth is capped by
+        // Civitai's limit ceiling of 100; deep cursor pagination is a
+        // follow-up.
         let window = opts.page.saturating_mul(opts.page_size).clamp(1, 100);
-        let limit = if trimmed_q.is_some() {
-            window
-        } else {
-            opts.page_size
-        };
-        q.append_pair("limit", &limit.to_string());
-        // Civitai rejects `page=` when `query=` is present, returning
-        // 400 "Cannot use page param with query search. Use cursor-based
-        // pagination." So we omit page when querying — first-page
-        // results are all the LoRA picker / search box surface; deep
-        // cursor pagination is a follow-up.
-        if trimmed_q.is_none() {
-            q.append_pair("page", &opts.page.max(1).to_string());
-        }
+        q.append_pair("limit", &window.to_string());
         q.append_pair("sort", opts.sort.civitai_value());
         if let Some(query) = trimmed_q.as_deref() {
             q.append_pair("query", query);
@@ -657,6 +651,7 @@ async fn civitai_search(
     let parsed: CivitaiResponse = serde_json::from_str(&body)?;
 
     let metadata = parsed.metadata;
+    let fetched = parsed.items.len();
     let mut out = Vec::new();
     for item in parsed.items {
         let nsfw_item = item.nsfw;
@@ -689,22 +684,26 @@ async fn civitai_search(
             out.push(entry);
         }
     }
-    if trimmed_q.is_some() {
-        let start = page_offset(opts);
-        out = out
-            .into_iter()
-            .skip(start)
-            .take(opts.page_size as usize)
-            .collect();
-    }
-    let observed_end = page_offset(opts).saturating_add(out.len());
-    let total = metadata
-        .total_items
-        .max(observed_end.saturating_add(usize::from(metadata.total_pages > opts.page as usize)));
-    Ok(LiveSearchResult {
-        entries: out,
-        total,
-    })
+    let filtered = out.len();
+    let start = page_offset(opts);
+    let entries = out
+        .into_iter()
+        .skip(start)
+        .take(opts.page_size as usize)
+        .collect::<Vec<_>>();
+    // Same total heuristic as `hf_search`: a short window means the feed
+    // is exhausted; a full one advertises at least one more page. Civitai
+    // still reports real totals on some responses — trust the larger.
+    let requested = opts.page.saturating_mul(opts.page_size) as usize;
+    let observed = if fetched < requested {
+        filtered
+    } else {
+        start
+            .saturating_add(entries.len())
+            .saturating_add(usize::from(!entries.is_empty()))
+    };
+    let total = metadata.total_items.max(observed);
+    Ok(LiveSearchResult { entries, total })
 }
 
 // ── HF live search ──────────────────────────────────────────────────────────
@@ -1236,6 +1235,86 @@ mod tests {
         assert!(result.entries[0].id.0.contains("dev-3"));
         assert!(result.entries[1].id.0.contains("dev-4"));
         assert_eq!(result.total, 5, "a full window must advertise another page");
+    }
+
+    /// Real Civitai ignores `page=` entirely — `/api/v1/models` is
+    /// cursor-paginated, and any page value returns the same first
+    /// window. The search must therefore fetch a `page × page_size`
+    /// window via `limit=` and slice locally, exactly like [`hf_search`].
+    #[tokio::test]
+    async fn civitai_search_fetches_a_window_and_returns_the_requested_page() {
+        let server = MockServer::start().await;
+        let items = (1..=4)
+            .map(|index| {
+                serde_json::json!({
+                    "id": 9000 + index,
+                    "name": format!("Model {index}"),
+                    "type": "Checkpoint",
+                    "nsfw": false,
+                    "creator": { "username": "alice" },
+                    "stats": { "downloadCount": 100 - index },
+                    "tags": [],
+                    "modelVersions": [{
+                        "id": 8000 + index,
+                        "name": "v1",
+                        "baseModel": "Flux.1 D",
+                        "baseModelType": "Standard",
+                        "files": [{
+                            "id": index, "name": "x.safetensors", "sizeKB": 100,
+                            "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                            "downloadUrl": "https://civitai.example/x.safetensors",
+                            "hashes": { "SHA256": "deadbeef" }
+                        }],
+                        "images": []
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        // Like the live API: the same first window regardless of `page=`,
+        // and cursor-mode metadata without totals.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": items,
+                "metadata": { "nextCursor": "1|2|3" }
+            })))
+            .mount(&server)
+            .await;
+
+        let result = civitai_search(
+            &server.uri(),
+            &LiveSearchOpts {
+                page: 2,
+                page_size: 2,
+                source: Some(Source::Civitai),
+                include_nsfw: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("civitai page");
+
+        assert_eq!(result.entries.len(), 2, "page 2 must hold fresh rows");
+        assert_eq!(result.entries[0].id.0, "cv:8003");
+        assert_eq!(result.entries[1].id.0, "cv:8004");
+        assert_eq!(result.total, 5, "a full window must advertise another page");
+
+        let requests = server.received_requests().await.expect("requests");
+        let query = requests
+            .last()
+            .expect("civitai request")
+            .url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            query.get("limit").map(std::convert::AsRef::as_ref),
+            Some("4"),
+            "limit must cover the whole page window"
+        );
+        assert!(
+            !query.contains_key("page"),
+            "page= is ignored upstream and must not be sent"
+        );
     }
 
     const VERSION_DETAIL_BODY: &str = r#"{
