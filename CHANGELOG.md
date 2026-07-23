@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-23
+
 ### Added
 
 - **iPhone model details now expose runnable quantization variants.** Variant chips are derived from the selected host's manifest siblings, show each checkpoint size, and repoint Pull to the exact selected `base:tag` without bypassing the existing duplicate-safe download lifecycle.
@@ -1132,7 +1134,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
