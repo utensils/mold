@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use mold_core::{OutputFormat, OutputMetadata, Scheduler};
-use rusqlite::{params, Connection};
+use rusqlite::backup::{Backup, StepResult};
+use rusqlite::{params, Connection, ErrorCode};
 
 use crate::migrations;
 use crate::path::canonical_dir_string;
@@ -66,6 +68,164 @@ fn query_pragma_string(conn: &Connection, name: &str) -> Result<String> {
     Ok(v)
 }
 
+fn verify_integrity(conn: &Connection) -> Result<()> {
+    let mut check = conn.prepare("PRAGMA quick_check(1)")?;
+    let messages = check.query_map([], |row| row.get::<_, String>(0))?;
+    for message in messages {
+        let message = message?;
+        if !message.eq_ignore_ascii_case("ok") {
+            bail!("metadata DB quick_check reported corruption: {message}");
+        }
+    }
+    Ok(())
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    let mut conn = Connection::open(path)
+        .with_context(|| format!("opening metadata DB at {}", path.display()))?;
+    configure_pragmas(&conn, path);
+    migrations::apply_pending(&mut conn)
+        .with_context(|| format!("applying migrations to metadata DB at {}", path.display()))?;
+
+    // Opening SQLite itself does not necessarily touch every B-tree. A
+    // corrupt gallery index can otherwise survive startup and fail only on
+    // the first ordered query. quick_check is intentionally paid once per
+    // open so corruption is discovered before the handle is published.
+    verify_integrity(&conn)?;
+    Ok(conn)
+}
+
+fn has_sqlite_error_code(error: &anyhow::Error, expected: ErrorCode) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .is_some_and(|error| {
+                matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == expected)
+            })
+    })
+}
+
+fn is_corruption_error(error: &anyhow::Error) -> bool {
+    has_sqlite_error_code(error, ErrorCode::DatabaseCorrupt)
+        || has_sqlite_error_code(error, ErrorCode::NotADatabase)
+        || error.chain().any(|cause| {
+            cause
+                .to_string()
+                .starts_with("metadata DB quick_check reported corruption:")
+        })
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{filename}{suffix}"))
+}
+
+fn acquire_recovery_lock(path: &Path) -> Result<std::fs::File> {
+    let lock_path = sidecar_path(path, ".recovery.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening metadata DB recovery lock {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("locking metadata DB recovery lock {}", lock_path.display()))?;
+    Ok(lock)
+}
+
+fn quarantine_corrupt_files(path: &Path) -> Result<PathBuf> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "mold.db".into());
+    let mut attempt = 0u32;
+    let quarantine = loop {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let candidate = path.with_file_name(format!("{filename}.corrupt-{timestamp}{suffix}"));
+        if !candidate.exists() {
+            break candidate;
+        }
+        attempt += 1;
+    };
+
+    // Copy rather than rename: replacing a WAL database's inode while another
+    // Mold process has it open is unsafe. The online backup below rewrites the
+    // live database through SQLite's locking protocol; these copies only retain
+    // the pre-recovery bytes for operator inspection or salvage.
+    std::fs::copy(path, &quarantine).with_context(|| {
+        format!(
+            "copying corrupt metadata DB {} to {}",
+            path.display(),
+            quarantine.display()
+        )
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let source = sidecar_path(path, suffix);
+        if source.exists() {
+            let target = sidecar_path(&quarantine, suffix);
+            match std::fs::copy(&source, &target) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "copying corrupt metadata DB sidecar {} to {}",
+                            source.display(),
+                            target.display()
+                        )
+                    });
+                }
+            }
+        }
+    }
+    Ok(quarantine)
+}
+
+fn rebuild_schema_in_place(conn: &mut Connection, path: &Path) -> Result<()> {
+    let mut source = Connection::open_in_memory()
+        .context("creating fresh schema source for metadata DB recovery")?;
+    migrations::apply_pending(&mut source)
+        .context("applying migrations to fresh metadata DB recovery source")?;
+
+    // SQLite's online backup API writes the replacement through the existing
+    // destination connection, so its normal locks coordinate with every other
+    // process that already has mold.db open. An incomplete backup rolls back.
+    let backup = Backup::new(&source, conn).context("starting metadata DB schema rebuild")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match backup
+            .step(100)
+            .context("writing rebuilt metadata DB schema")?
+        {
+            StepResult::Done => break,
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                if std::time::Instant::now() >= deadline {
+                    bail!("metadata DB remained busy for 5 seconds during schema rebuild");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => unreachable!("rusqlite added an unknown backup step result"),
+        }
+    }
+    drop(backup);
+    configure_pragmas(conn, path);
+    verify_integrity(conn).context("checking rebuilt metadata DB")?;
+    Ok(())
+}
+
 /// Thread-safe handle to the SQLite metadata DB.
 ///
 /// The connection is wrapped in a `Mutex` because `rusqlite::Connection` is
@@ -74,6 +234,7 @@ fn query_pragma_string(conn: &Connection, name: &str) -> Result<String> {
 pub struct MetadataDb {
     conn: Mutex<Connection>,
     path: PathBuf,
+    recovery_epoch: AtomicU64,
 }
 
 impl std::fmt::Debug for MetadataDb {
@@ -94,14 +255,71 @@ impl MetadataDb {
     /// slower. The open still succeeds — functionality is preserved, just
     /// with the default rollback journal.
     pub fn open(path: &Path) -> Result<Self> {
-        let mut conn = Connection::open(path)
-            .with_context(|| format!("opening metadata DB at {}", path.display()))?;
-        configure_pragmas(&conn, path);
-        migrations::apply_pending(&mut conn)
-            .with_context(|| format!("applying migrations to metadata DB at {}", path.display()))?;
+        let conn = match open_connection(path) {
+            Ok(conn) => conn,
+            Err(error) if path.exists() && is_corruption_error(&error) => {
+                // Serialize recovery across the server, CLI, TUI, and Discord
+                // processes. Recheck after taking the lock: another process
+                // may already have replaced the corrupt inode while we waited.
+                let _recovery_lock = acquire_recovery_lock(path)?;
+                match open_connection(path) {
+                    Ok(conn) => conn,
+                    Err(rechecked) if path.exists() && is_corruption_error(&rechecked) => {
+                        let quarantine = quarantine_corrupt_files(path)?;
+                        tracing::error!(
+                            error = %error,
+                            db = %path.display(),
+                            quarantine = %quarantine.display(),
+                            "metadata DB corruption detected at open — quarantined database and rebuilding schema"
+                        );
+                        if has_sqlite_error_code(&rechecked, ErrorCode::NotADatabase) {
+                            // The backup API cannot open an arbitrary non-SQLite
+                            // destination. No usable SQLite handle can exist for
+                            // this file, so truncating it after retaining the raw
+                            // quarantine copy is safe.
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .truncate(true)
+                                .open(path)
+                                .with_context(|| {
+                                    format!("resetting non-database file {}", path.display())
+                                })?;
+                            for suffix in ["-wal", "-shm"] {
+                                match std::fs::remove_file(sidecar_path(path, suffix)) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                            open_connection(path)?
+                        } else {
+                            let mut rebuilt = Connection::open(path).with_context(|| {
+                                format!(
+                                    "opening {} for in-place metadata DB rebuild",
+                                    path.display()
+                                )
+                            })?;
+                            rebuilt
+                                .busy_timeout(std::time::Duration::from_secs(5))
+                                .context("setting metadata DB recovery busy timeout")?;
+                            rebuild_schema_in_place(&mut rebuilt, path).with_context(|| {
+                                format!(
+                                    "rebuilding metadata DB after quarantining {}",
+                                    quarantine.display()
+                                )
+                            })?;
+                            rebuilt
+                        }
+                    }
+                    Err(rechecked) => return Err(rechecked),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
+            recovery_epoch: AtomicU64::new(0),
         })
     }
 
@@ -119,6 +337,7 @@ impl MetadataDb {
         Ok(Self {
             conn: Mutex::new(conn),
             path: PathBuf::from(":memory:"),
+            recovery_epoch: AtomicU64::new(0),
         })
     }
 
@@ -165,6 +384,35 @@ impl MetadataDb {
     /// List rows for a specific `output_dir` (or all dirs when `None`),
     /// ordered newest-first by `file_mtime_ms` (falling back to `created_at_ms`).
     pub fn list(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
+        let epoch = self.recovery_epoch.load(Ordering::Acquire);
+        match self.list_once(output_dir) {
+            Ok(rows) => Ok(rows),
+            Err(error) if is_corruption_error(&error) => {
+                self.rebuild_after_corruption(epoch, &error)?;
+                if let Some(dir) = output_dir {
+                    let stats = self.reconcile(dir).with_context(|| {
+                        format!(
+                            "reconciling gallery after rebuilding corrupt metadata DB at {}",
+                            self.path.display()
+                        )
+                    })?;
+                    tracing::error!(
+                        db = %self.path.display(),
+                        imported = stats.imported,
+                        updated = stats.updated,
+                        removed = stats.removed,
+                        kept = stats.kept,
+                        "metadata DB rebuilt from gallery after query-time corruption"
+                    );
+                }
+                self.list_once(output_dir)
+                    .context("retrying gallery query after metadata DB rebuild")
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn list_once(&self, output_dir: Option<&Path>) -> Result<Vec<GenerationRecord>> {
         let conn = self.conn.lock().expect("metadata db mutex poisoned");
         let order_clause = "ORDER BY COALESCE(file_mtime_ms, created_at_ms) DESC";
         let select = "SELECT id, filename, output_dir, created_at_ms, file_mtime_ms, \
@@ -189,6 +437,48 @@ impl MetadataDb {
             }
         }
         Ok(out)
+    }
+
+    fn rebuild_after_corruption(&self, observed_epoch: u64, error: &anyhow::Error) -> Result<()> {
+        let mut conn = self.conn.lock().expect("metadata db mutex poisoned");
+        if self.recovery_epoch.load(Ordering::Acquire) != observed_epoch {
+            return Ok(());
+        }
+        let _recovery_lock = acquire_recovery_lock(&self.path)?;
+        // A different process may have completed recovery while this process
+        // waited for the lock. Never overwrite that healthy replacement.
+        match open_connection(&self.path) {
+            Ok(reopened) => {
+                *conn = reopened;
+                self.recovery_epoch.fetch_add(1, Ordering::Release);
+                tracing::warn!(
+                    db = %self.path.display(),
+                    "metadata DB reopened after concurrent corruption recovery"
+                );
+                return Ok(());
+            }
+            Err(rechecked) if is_corruption_error(&rechecked) => {}
+            Err(rechecked) => {
+                return Err(rechecked)
+                    .context("reopening metadata DB before query-time corruption recovery");
+            }
+        }
+
+        let quarantine = quarantine_corrupt_files(&self.path)?;
+        tracing::error!(
+            error = %error,
+            db = %self.path.display(),
+            quarantine = %quarantine.display(),
+            "metadata DB corruption detected during query — quarantined database and rebuilding schema"
+        );
+        rebuild_schema_in_place(&mut conn, &self.path).with_context(|| {
+            format!(
+                "rebuilding metadata DB after quarantining {}",
+                quarantine.display()
+            )
+        })?;
+        self.recovery_epoch.fetch_add(1, Ordering::Release);
+        Ok(())
     }
 
     /// Remove a row by its `(output_dir, filename)` pair. Returns true if a
@@ -785,5 +1075,189 @@ mod tests {
         let db2 = MetadataDb::open(&path).unwrap();
         db2.upsert(&rec()).unwrap();
         assert_eq!(db2.count().unwrap(), 1);
+    }
+
+    fn quarantined_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("mold.db.corrupt-")
+                        && !name.ends_with("-wal")
+                        && !name.ends_with("-shm")
+                })
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn open_quarantines_malformed_database_and_rebuilds_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        std::fs::write(&path, b"this is not a sqlite database").unwrap();
+
+        let db = MetadataDb::open(&path).expect("corruption should self-heal at open");
+
+        assert_eq!(db.schema_version().unwrap(), crate::SCHEMA_VERSION);
+        assert!(
+            path.exists(),
+            "a fresh database should replace the corrupt file"
+        );
+        assert_eq!(
+            quarantined_files(dir.path()).len(),
+            1,
+            "the malformed database should be retained for operator inspection"
+        );
+    }
+
+    #[test]
+    fn quarantine_keeps_wal_and_shm_with_corrupt_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        std::fs::write(&path, b"db").unwrap();
+        std::fs::write(sidecar_path(&path, "-wal"), b"wal").unwrap();
+        std::fs::write(sidecar_path(&path, "-shm"), b"shm").unwrap();
+
+        let quarantine = quarantine_corrupt_files(&path).unwrap();
+
+        assert_eq!(std::fs::read(&quarantine).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(sidecar_path(&quarantine, "-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(sidecar_path(&quarantine, "-shm")).unwrap(),
+            b"shm"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"db");
+        assert_eq!(std::fs::read(sidecar_path(&path, "-wal")).unwrap(), b"wal");
+        assert_eq!(std::fs::read(sidecar_path(&path, "-shm")).unwrap(), b"shm");
+    }
+
+    #[test]
+    fn concurrent_opens_quarantine_corruption_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        std::fs::write(&path, b"not a sqlite database").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    MetadataDb::open(&path).map(|db| db.schema_version().unwrap())
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().unwrap(), crate::SCHEMA_VERSION);
+        }
+        assert_eq!(
+            quarantined_files(dir.path()).len(),
+            1,
+            "recovery lock must prevent a fresh replacement from being quarantined"
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_an_existing_second_handle_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let first = MetadataDb::open(&path).unwrap();
+        let second = MetadataDb::open(&path).unwrap();
+        {
+            let conn = first.conn.lock().unwrap();
+            conn.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET rootpage = 2147483647
+                   WHERE name = 'idx_gen_mtime';
+                 PRAGMA writable_schema = OFF;
+                 PRAGMA schema_version = 9999;",
+            )
+            .unwrap();
+        }
+
+        first.list(Some(dir.path())).unwrap();
+        second
+            .list(Some(dir.path()))
+            .expect("an already-open connection must observe the in-place rebuild");
+        assert_eq!(quarantined_files(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn failed_recovery_never_turns_handle_into_ephemeral_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let db = MetadataDb::open(&path).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET rootpage = 2147483647
+                   WHERE name = 'idx_gen_mtime';
+                 PRAGMA writable_schema = OFF;
+                 PRAGMA schema_version = 9999;",
+            )
+            .unwrap();
+        }
+        for suffix in ["-wal", "-shm", ".recovery.lock"] {
+            let _ = std::fs::remove_file(sidecar_path(&path, suffix));
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(dir.path()).unwrap();
+
+        assert!(db.list(None).is_err(), "recovery setup should fail");
+        assert!(
+            db.list(None).is_err(),
+            "later queries must keep failing instead of using an in-memory placeholder"
+        );
+    }
+
+    #[test]
+    fn list_quarantines_corrupt_index_and_reconciles_gallery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mold.db");
+        let image_path = dir.path().join("recovered.png");
+        let image = image::ImageBuffer::from_fn(64u32, 64u32, |x, y| {
+            if (x + y) % 2 == 0 {
+                image::Rgb([255u8, 32, 16])
+            } else {
+                image::Rgb([16u8, 160, 255])
+            }
+        });
+        image.save(&image_path).unwrap();
+
+        let db = MetadataDb::open(&path).unwrap();
+        db.reconcile(dir.path()).unwrap();
+        assert_eq!(db.list(Some(dir.path())).unwrap().len(), 1);
+
+        // Repoint only the ordering index at a page beyond EOF. The table
+        // remains readable, mirroring the production corruption signature.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET rootpage = 2147483647
+                   WHERE name = 'idx_gen_mtime';
+                 PRAGMA writable_schema = OFF;
+                 PRAGMA schema_version = 9999;",
+            )
+            .unwrap();
+        }
+
+        let rows = db
+            .list(Some(dir.path()))
+            .expect("gallery listing should quarantine, reconcile, and retry");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "recovered.png");
+        assert_eq!(rows[0].source, RecordSource::Backfill);
+        assert_eq!(quarantined_files(dir.path()).len(), 1);
     }
 }
