@@ -724,6 +724,36 @@ describe("useGenerateForm — enableAudio (LTX-2 / LTX-2.3)", () => {
     expect(form.toRequest().enable_audio).toBe(true);
   });
 
+  it("keeps audio off for an LTX-2 catalog checkpoint whose assets are video-only", () => {
+    const form = useGenerateForm();
+    form.applyModelDefaults(
+      makeModel({
+        name: "cv:3143864",
+        family: "ltx2",
+        supports_audio: false,
+      }),
+    );
+    expect(form.state.value.enableAudio).toBe(false);
+    expect(form.toRequest().enable_audio).toBe(false);
+  });
+
+  it("forces audio off at request time when persisted form state is stale", () => {
+    const form = useGenerateForm();
+    form.state.value.model = "cv:3143864";
+    form.state.value.modelFamily = "ltx2";
+    form.state.value.enableAudio = true;
+
+    const wire = form.toRequest(
+      makeModel({
+        name: "cv:3143864",
+        family: "ltx2",
+        supports_audio: false,
+      }),
+    );
+
+    expect(wire.enable_audio).toBe(false);
+  });
+
   it("clears enableAudio back to null when switching from an AV family to an image family", () => {
     // The server rejects `enable_audio: true` for non-AV families; the
     // form must drop the toggle on family change so the user doesn't get

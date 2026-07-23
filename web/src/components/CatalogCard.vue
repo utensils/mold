@@ -81,8 +81,7 @@ const family = computed(() => {
   return { mark: label.slice(0, 3), label, tone: "neutral" };
 });
 
-// engine_phase > 5 marks a catalog package mold can't run yet.
-const supported = computed(() => props.entry.engine_phase <= 5);
+const supported = computed(() => props.entry.supported);
 const pullLabel = computed(() => {
   if (!supported.value) return "Unsupported";
   return props.entry.installed ? "Repair" : "Pull";

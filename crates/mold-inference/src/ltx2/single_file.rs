@@ -1,4 +1,4 @@
-//! Single-file validator for LTX-2 (LTXV2 / LTXV 2.3) Civitai checkpoints (phase 5).
+//! Single-file validator for LTX-2 (LTXV2 / LTXV 2.3) Civitai checkpoints.
 //!
 //! Reads only the safetensors header to detect the tensor key layout.
 //! No tensor data is materialised.
@@ -18,9 +18,9 @@
 //! Sub-family (`v2` = 19B, `v2.3` = 22B) is runtime config — this module does
 //! not distinguish between them, and neither does the loader.
 //!
-//! Transformer-only fine-tunes (no `vae.*` keys) are rejected at
-//! `Ltx2Engine::from_single_file` because the runtime always loads the
-//! VAE from the same checkpoint path via `vb.pp("vae")`.
+//! Transformer-only fine-tunes (no `vae.*` keys) use the version-matched
+//! external VAE resolved by the catalog. Combined checkpoints keep loading
+//! `vae.*` from the primary file.
 //!
 //! LTX-Video uses the same `transformer_blocks.*` segment, so this module
 //! cannot disambiguate the two families on key shape alone — the call
@@ -59,9 +59,12 @@ pub struct Ltx2SingleFileBundle {
     #[allow(dead_code)]
     pub transformer_key_count: usize,
     /// `true` when the checkpoint contains `vae.*` keys. LTX-2 combined
-    /// checkpoints always include the VAE; transformer-only fine-tunes
-    /// will have `has_vae = false` and will be rejected by `from_single_file`.
+    /// checkpoints include the VAE; transformer-only fine-tunes have
+    /// `has_vae = false` and require an external VAE companion.
     pub has_vae: bool,
+    /// Whether the checkpoint also carries the Gemma hidden-state projection.
+    /// Diffusion-only LTX-2.3 exports move this into a separate companion.
+    pub has_text_projection: bool,
     /// `true` when the header carries NVFP4 sidecars (`*.weight_scale_2`
     /// or `*.comfy_quant`). The runtime handles these through synthetic
     /// `weight.nvfp4_*` subkeys.
@@ -90,6 +93,27 @@ pub enum LoadError {
     NoTransformerKeys,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AudioOutputAssetFlags {
+    pub(crate) audio_vae: bool,
+    pub(crate) vocoder: bool,
+}
+
+/// Inspect only the safetensors header for the two asset families required to
+/// decode LTX-2 audio. Video-only VAE companions intentionally report false.
+pub(crate) fn audio_output_asset_flags(path: &Path) -> Result<AudioOutputAssetFlags, LoadError> {
+    let header = read_header(path)?;
+    Ok(AudioOutputAssetFlags {
+        audio_vae: header.contains_key("audio_vae.per_channel_statistics.mean-of-means"),
+        vocoder: header.contains_key("vocoder.vocoder.conv_pre.weight"),
+    })
+}
+
+pub(crate) fn supports_audio_output(path: &Path) -> Result<bool, LoadError> {
+    let flags = audio_output_asset_flags(path)?;
+    Ok(flags.audio_vae && flags.vocoder)
+}
+
 /// Header-parse the safetensors at `path` and return the detected layout.
 ///
 /// Only reads the 8-byte length prefix + the JSON header — tensor data on
@@ -100,6 +124,7 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
     let mut native_count = 0usize;
     let mut diffusers_count = 0usize;
     let mut vae_count = 0usize;
+    let mut text_projection_count = 0usize;
     let mut nvfp4 = false;
 
     for key in header.keys() {
@@ -119,6 +144,8 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
             diffusers_count += 1;
         } else if has_prefix(key, VAE_KEY) {
             vae_count += 1;
+        } else if has_prefix(key, "text_embedding_projection") {
+            text_projection_count += 1;
         }
     }
 
@@ -140,6 +167,7 @@ pub fn load(path: &Path) -> Result<Ltx2SingleFileBundle, LoadError> {
         format,
         transformer_key_count,
         has_vae: vae_count > 0,
+        has_text_projection: text_projection_count > 0,
         has_nvfp4: nvfp4,
         model_version,
     })
@@ -253,6 +281,26 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn audio_output_requires_both_audio_vae_statistics_and_vocoder_weights() {
+        let complete = temp_path("audio-complete");
+        write_fixture(
+            &complete,
+            &[
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.vocoder.conv_pre.weight",
+            ],
+        );
+        assert!(supports_audio_output(&complete).unwrap());
+
+        let video_only = temp_path("video-only");
+        write_fixture(&video_only, &["vae.per_channel_statistics.mean-of-means"]);
+        assert!(!supports_audio_output(&video_only).unwrap());
+
+        let _ = std::fs::remove_file(complete);
+        let _ = std::fs::remove_file(video_only);
     }
 
     #[test]

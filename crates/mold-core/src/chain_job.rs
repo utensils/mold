@@ -155,7 +155,7 @@ impl RetakeMode {
     }
 }
 
-// ── Manifest types (spec §3.2, amended per approved Phase 1) ───────────
+// ── Manifest types (spec §3.2, current) ───────────
 
 /// Portable job description + per-stage status. Everything needed to
 /// resume or retake lives here; all paths are relative to the job dir.
@@ -437,7 +437,7 @@ impl JobDirLayout {
     }
 
     /// `final/output-<n>.mp4`. `n` derives from `manifest.finalizes.len()`,
-    /// never from a directory scan (Phase 2 gate note).
+    /// never from a directory scan.
     pub fn final_output_path(&self, n: u32) -> PathBuf {
         self.root.join(FINAL_DIR).join(format!("output-{n}.mp4"))
     }

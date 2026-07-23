@@ -4,7 +4,7 @@
 //! These tests pin the HTTP surface (method, path, JSON request body) and
 //! verify error translation (422 → Validation, 404 empty → None on stream,
 //! 404 with body → ModelNotFound). They do NOT exercise real LTX-2 work —
-//! the server side lands in Phase 2.
+//! the server-side route is available.
 
 use base64::Engine as _;
 use mold_core::chain::{

@@ -345,9 +345,9 @@ pub fn calculate_cache_budget() -> CacheBudget {
 
 ---
 
-## 5. Phased Implementation Plan
+## 5. Implementation Workstreams
 
-### Phase 1: Complete Server-Side Expansion Routing (fixes #102, low risk)
+### Workstream A: Complete Server-Side Expansion Routing (fixes #102, low risk)
 
 **Goal**: CLI defers expansion into `GenerateRequest` when targeting a server, eliminating
 client-side GPU allocation for expansion.
@@ -364,7 +364,7 @@ the request so the server handles it atomically during `prepare_generation()`.
 
 **Estimated scope**: ~50 lines changed
 
-### Phase 2: Enhance ModelCache with CPU Parking (core of #104)
+### Workstream B: Enhance ModelCache with CPU Parking (core of #104)
 
 **Goal**: Add CPU parking tier to existing `ModelCache` for fast model switching.
 
@@ -381,7 +381,7 @@ enforcement, and lock-based eviction protection.
 
 **Estimated scope**: ~200 lines new, ~150 lines changed
 
-### Phase 3: Sidecar LoRA for GGUF (biggest value, addresses #104)
+### Workstream C: Sidecar LoRA for GGUF (biggest value, addresses #104)
 
 **Goal**: Enable LoRA on the server for quantized models without sequential mode.
 
@@ -404,7 +404,7 @@ but couples LoRA logic to the denoising loop.
 
 **Estimated scope**: ~600 lines new, ~150 lines changed
 
-### Phase 4: Direct Merge LoRA for BF16 in Eager Mode
+### Workstream D: Direct Merge LoRA for BF16 in Eager Mode
 
 **Goal**: Enable LoRA for BF16 models on the server without dropping to sequential.
 
@@ -419,7 +419,7 @@ different LoRA).
 
 **Estimated scope**: ~300 lines new, ~100 lines changed
 
-### Phase 5: Shared Component Caching
+### Workstream E: Shared Component Caching
 
 **Goal**: Cache T5/CLIP/VAE independently so switching between FLUX models only reloads
 the transformer.
@@ -434,7 +434,7 @@ the transformer.
 
 **Estimated scope**: ~400 lines new, ~200 lines changed
 
-### Phase 6: LoRA Weight Caching (optimization)
+### Workstream F: LoRA Weight Caching (optimization)
 
 **Goal**: Cache computed `W + B @ A` results so repeated LoRA requests skip computation.
 
@@ -444,7 +444,7 @@ the transformer.
 
 **Estimated scope**: ~150 lines new, ~50 lines changed
 
-### Phase 7: Async Weight Streaming (deprioritized — #109)
+### Workstream G: Async Weight Streaming (deprioritized — #109)
 
 **Goal**: Overlap CPU->GPU transfers with GPU computation during block-level offloading.
 
@@ -467,27 +467,27 @@ for synchronization. ~300 lines plus candle fork changes.
 ## 6. Priority and Dependencies
 
 ```
-Phase 1 (expansion)     -----> can ship independently (~50 LOC, fixes #102)
-Phase 2 (cache parking) -----> enhances existing cache, foundation for Phases 3-6
-Phase 3 (sidecar GGUF)  -----> depends on Phase 2 (needs cache for engine lifecycle)
-Phase 4 (BF16 eager)    -----> depends on Phase 2
-Phase 5 (shared comps)  -----> depends on Phase 2 + selective GPU cleanup
-Phase 6 (LoRA cache)    -----> depends on Phase 3 or 4
-Phase 7 (async streams) -----> DEPRIORITIZED (~5-10% gain, requires candle fork)
+Workstream A (expansion)     -----> can ship independently (~50 LOC, fixes #102)
+Workstream B (cache parking) -----> enhances existing cache, foundation for Workstreams C-F
+Workstream C (sidecar GGUF)  -----> depends on Workstream B (needs cache for engine lifecycle)
+Workstream D (BF16 eager)    -----> depends on Workstream B
+Workstream E (shared comps)  -----> depends on Workstream B + selective GPU cleanup
+Workstream F (LoRA cache)    -----> depends on Workstream C or D
+Workstream G (async streams) -----> DEPRIORITIZED (~5-10% gain, requires candle fork)
 ```
 
-**Recommended order**: 1 → 2 → 3 → 4 → 5 → 6. Skip 7 until candle adds stream support.
+**Recommended order**: A → B → C → D → E → F. Skip G until candle adds stream support.
 
-Phase 1 is a quick win that completes #102. Phase 2 enhances the existing `ModelCache` with
-CPU parking. Phase 3 is the biggest value — sidecar LoRA enables server-side LoRA for GGUF
-without sequential mode. Phase 5 (shared components) is the most architecturally complex,
+Workstream A is a quick win that completes #102. Workstream B enhances the existing `ModelCache` with
+CPU parking. Workstream C is the biggest value — sidecar LoRA enables server-side LoRA for GGUF
+without sequential mode. Workstream E (shared components) is the most architecturally complex,
 requiring changes to CUDA context management and `Arc`-wrapping of encoder tensors.
 
-**Issues resolved per phase**:
-- Phase 1: #102 (compute boundaries)
-- Phases 2-4: #104 (multi-model cache + per-request LoRA)
-- Phase 5: #108 (shared component caching)
-- Phase 7: #109 (async CUDA streams — deprioritized)
+**Issues resolved per workstream**:
+- Workstream A: #102 (compute boundaries)
+- Workstreams B-D: #104 (multi-model cache + per-request LoRA)
+- Workstream E: #108 (shared component caching)
+- Workstream G: #109 (async CUDA streams — deprioritized)
 
 ---
 

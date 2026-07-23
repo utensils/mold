@@ -9,7 +9,7 @@ const makeEntry = (over: Partial<CatalogEntryWire> = {}): CatalogEntryWire => ({
   id: "hf:a",
   name: "Alpha",
   family: "flux",
-  engine_phase: 1,
+  supported: true,
   installed: false,
   source: "hf",
   source_id: "a",
@@ -72,7 +72,7 @@ const mockRetryDetail = vi.fn();
 const mockCloseDetail = vi.fn();
 const mockStartDownload = vi.fn();
 const mockCanDownload = vi.fn(
-  (e: { engine_phase: number }) => e.engine_phase <= 5,
+  (e: { supported: boolean }) => e.supported,
 );
 const mockLoad = vi.fn().mockResolvedValue(undefined);
 const mockUnload = vi.fn().mockResolvedValue(undefined);
@@ -270,8 +270,8 @@ describe("ModelDetailDrawer", () => {
       expect(mockStartDownload).toHaveBeenCalledWith("hf:a");
     });
 
-    it("disables Pull with an unsupported tooltip for engine_phase >= 6", () => {
-      mockDetail.value = catalogDetail(makeEntry({ engine_phase: 6 }));
+    it("disables Pull with an unsupported tooltip", () => {
+      mockDetail.value = catalogDetail(makeEntry({ supported: false }));
       const w = mount(ModelDetailDrawer);
       const pull = w.find("[data-test=pull-btn]");
       expect((pull.element as HTMLButtonElement).disabled).toBe(true);

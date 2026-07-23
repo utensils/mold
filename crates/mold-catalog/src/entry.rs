@@ -158,7 +158,7 @@ pub struct CatalogEntry {
     pub tags: Vec<String>,
     pub companions: Vec<CompanionRef>,
     pub download_recipe: DownloadRecipe,
-    pub engine_phase: u8,
+    pub supported: bool,
     pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub added_at: i64,

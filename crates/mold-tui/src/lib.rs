@@ -1,4 +1,4 @@
-// Phase 1 skeleton — many types are defined for future phases.
+// TUI shell — some types are reserved for planned features.
 #![allow(dead_code)]
 
 mod action;

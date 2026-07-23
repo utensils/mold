@@ -164,6 +164,40 @@ pub static COMPANIONS: &[Companion] = &[
         files: &["vae/diffusion_pytorch_model.safetensors"],
         size_bytes: 2_493_855_612,
     },
+    // LTX-2 and LTX-2.3 use different video-VAE architectures. Keep
+    // separate companions so catalog fine-tunes cannot silently decode with
+    // an incompatible latent space.
+    Companion {
+        canonical_name: "ltx2-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::Ltx2],
+        source: Source::Hf,
+        repo: "Lightricks/LTX-2",
+        files: &["vae/diffusion_pytorch_model.safetensors"],
+        size_bytes: 2_444_982_370,
+    },
+    Companion {
+        canonical_name: "ltx2.3-vae",
+        kind: Kind::Vae,
+        family_scope: &[Family::Ltx2],
+        source: Source::Hf,
+        repo: "Kijai/LTX2.3_comfy",
+        files: &["vae/LTX23_video_vae_bf16.safetensors"],
+        size_bytes: 1_452_258_578,
+    },
+    // LTX-2.3 diffusion-only / quantized exports omit the large Gemma hidden-
+    // state projection matrices even when they retain the video/audio
+    // connector blocks. This is a separate input to ComfyUI's text encoder
+    // loader and must accompany those transformer-only checkpoints.
+    Companion {
+        canonical_name: "ltx2.3-text-projection",
+        kind: Kind::TextEncoder,
+        family_scope: &[Family::Ltx2],
+        source: Source::Hf,
+        repo: "Kijai/LTX2.3_comfy",
+        files: &["text_encoders/ltx-2.3_text_projection_bf16.safetensors"],
+        size_bytes: 2_312_149_072,
+    },
     // Gemma 3 12B text encoder for LTX-2 single-file catalog entries.
     // Civitai LTX-2 fine-tunes (e.g. cv:2752735, cv:2781713) bundle the
     // transformer + VAE but not the Gemma TE — without this companion the
@@ -306,13 +340,21 @@ pub fn companions_for(
             push(&mut out, "ltx-video-vae");
         }
         Family::Ltx2 => {
-            // LTX-2 combined checkpoints bundle the VAE — no VAE companion.
             // The text encoder is Gemma 3 12B (gated), not T5: the LTX-2
             // runtime in `mold-inference` reads `paths.text_encoder_files`
             // and rejects the load if it's empty (`gemma_root` in
             // `ltx2/assets.rs`). Pulling t5-v1_1-xxl here would download
             // ~9.5 GB of unused weights and still fail the runtime check.
             push(&mut out, "ltx2-te");
+            match sub_family {
+                Some("v2") => push(&mut out, "ltx2-vae"),
+                // Civitai identifies current checkpoints as `v2.3`. Default
+                // unknown single-file rows to the current architecture.
+                _ => {
+                    push(&mut out, "ltx2.3-vae");
+                    push(&mut out, "ltx2.3-text-projection");
+                }
+            }
         }
         Family::QwenImage => {
             push(&mut out, "qwen-image-runtime");

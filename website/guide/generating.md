@@ -185,6 +185,25 @@ LTX-2 also adds:
 - `--spatial-upscale <x1.5|x2>`
 - `--temporal-upscale x2`
 
+Catalog checkpoints may contain the LTX-2 transformer without `vae.*` weights.
+`mold pull cv:<id>` detects that layout and fetches the matching LTX-2 or
+LTX-2.3 video VAE automatically. Diffusion-only LTX-2.3 exports also fetch the
+separate Gemma hidden-state projection. The resolved assets are pinned in each
+chain stage, so multi-prompt chains do not fall back to the transformer file.
+ConvRot W4A4 exports use automatic full block streaming because their packed
+on-disk byte size understates the BF16 weights reconstructed by the runtime.
+If the Gemma prompt encoder exhausts VRAM, Mold retries only Gemma on CPU while
+keeping the transformer and video VAE on CUDA.
+Multi-prompt chains support both one-stage and distilled LTX-2 checkpoints;
+multi-pass and specialized conditioning pipelines remain explicit non-chain modes.
+
+Some community checkpoints contain only the video transformer (plus Mold's
+separate video VAE) and do not include the audio VAE or vocoder. Mold detects
+this from the installed safetensors and disables **Generate audio** in web,
+desktop, and iPhone while leaving text/image-to-video available. CLI users can
+pass `--no-audio`; an explicit unsupported audio request is rejected before
+prompt encoding or denoising.
+
 The native CUDA matrix is validated across 19B/22B text+audio-video,
 image-to-video, audio-to-video, keyframe, retake, public IC-LoRA, spatial
 upscale, and temporal upscale workflows.
@@ -307,6 +326,8 @@ Models auto-pull if not downloaded.
 `/create`, `/library`, `/models`, `/machines`, and `/settings`; retired paths
 such as `/generate` and `/catalog` render Page Not Found:
 
+- The model selector shows human-readable catalog names while preserving
+  `cv:` / `hf:` identifiers internally for requests.
 - Enter submits, Shift+Enter inserts a newline, empty Enter is a no-op.
 - Per-GPU running-job cards stream SSE progress (stage, denoise step N/M, VAE
   decode) and tag the finished image with the GPU ordinal that produced it.

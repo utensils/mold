@@ -197,4 +197,26 @@ describe("InspectorPanel — model picker", () => {
     await wrapper.get('[data-test="model-option-name"]').trigger("click");
     expect(form.model).toBe("flux-dev:q8");
   });
+
+  it("shows a human-readable catalog name while preserving the runnable id", async () => {
+    const catalogModel = {
+      ...model,
+      name: "cv:23423432",
+      family: "sdxl",
+      description: "RealVisXL V5.0 by SG161222",
+    };
+    useModelStore().all = [catalogModel];
+    const form = useGenerateFormStore().form;
+    form.model = catalogModel.name;
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    expect(wrapper.get('[data-test="selected-model-name"]').text()).toBe(
+      "RealVisXL V5.0 by SG161222",
+    );
+    await wrapper.get('[data-test="selected-model-name"]').trigger("click");
+    const option = wrapper.get('[data-test="model-option-name"]');
+    expect(option.text()).toBe("RealVisXL V5.0 by SG161222");
+    await option.trigger("click");
+    expect(form.model).toBe("cv:23423432");
+  });
 });

@@ -954,7 +954,7 @@ pub(crate) struct OffloadedFluxTransformer {
     /// candle-core-mold patch exposing a stream override on `to_device`.
     /// The stream itself is created and held here so the follow-up that
     /// wires the manual transfer path can simply consume it; pinning
-    /// alone (Phase 1) already captures the bulk of the H2D speedup.
+    /// alone already captures the bulk of the H2D speedup.
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     prefetch_stream: Option<PrefetchStream>,
@@ -1094,11 +1094,11 @@ impl OffloadedFluxTransformer {
             plan.reserved_bytes() as f64 / 1_000_000_000.0,
         ));
 
-        // ── Phase 1: pin only streamed CPU-resident block weights ───────
+        // ── Pin streamed streamed CPU-resident block weights ───────
         let (pinned_regions, pinned_bytes) =
             pin_streamed_block_weights(&double_blocks, &single_blocks);
 
-        // ── Phase 2: optionally bring up a prefetch stream + buffer ────
+        // ── Optionally bring up a prefetch stream + buffer ────
         let prefetch_on = prefetch_enabled_from_env() && gpu_device.is_cuda();
         let streamed_sizes = streamed_block_sizes(&double_blocks, &single_blocks);
         let largest_block = largest_block_size_bytes(&streamed_sizes);

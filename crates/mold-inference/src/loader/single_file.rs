@@ -1,4 +1,4 @@
-//! Single-file Civitai checkpoint dispatcher (phase 2.3).
+//! Single-file Civitai checkpoint dispatcher.
 //!
 //! Header-parses a `.safetensors` checkpoint and partitions its tensor
 //! keys into UNet / VAE / CLIP-L / CLIP-G / unknown buckets, dispatched
@@ -6,7 +6,7 @@
 //! materialised. The diffusers-key rename pass and tensor materialisation
 //! are tasks 2.4 / 2.5.
 //!
-//! Phase-2.2 audit (`tasks/catalog-expansion-phase-2-tensor-audit.md`)
+//! The catalog tensor-prefix audit
 //! found that:
 //!
 //! - UNet always lives at `model.diffusion_model.*`
@@ -25,8 +25,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use mold_catalog::civitai_map::engine_phase_for;
-use mold_catalog::entry::{Bundling, Kind};
 use mold_catalog::families::Family;
 use serde_json::Value;
 use thiserror::Error;
@@ -40,7 +38,7 @@ const SDXL_CLIP_G_PREFIX: &str = "conditioner.embedders.1.model";
 /// Result of partitioning a Civitai single-file safetensors into
 /// recognised component buckets.
 ///
-/// Holds only the original key names verbatim — phase 2.4 / 2.5 do the
+/// Holds only the original key names verbatim — downstream loaders do the
 /// A1111 → diffusers rename pass and hand the renamed keys to candle's
 /// `MmapedSafetensors::multi(&[path])` to materialise tensors lazily.
 /// Keeping 2.3 zero-copy at the tensor layer avoids the `Mmap` +
@@ -70,13 +68,8 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error("safetensors header: {0}")]
     Header(String),
-    /// Returned for any family whose single-file ingest path is not in
-    /// scope yet. The `u8` is the canonical phase number from
-    /// `mold_catalog::civitai_map::engine_phase_for(family, Bundling::SingleFile, Kind::Checkpoint)`
-    /// so callers can render "arrives in mold phase N" without a second
-    /// lookup. Values at or above 6 mean unsupported by this build.
-    #[error("family {0:?} is not a single-file family yet (phase {1})")]
-    UnsupportedFamily(Family, u8),
+    #[error("family {0:?} is not handled by the SD single-file loader")]
+    UnsupportedFamily(Family),
 }
 
 /// Partition the given safetensors checkpoint into component key
@@ -84,17 +77,13 @@ pub enum LoadError {
 ///
 /// Only the safetensors header is read — tensor data is left untouched.
 /// SD1.5 + SDXL produce `Ok(SingleFileBundle)`; every other family
-/// returns `Err(LoadError::UnsupportedFamily(family, engine_phase))`
-/// per `engine_phase_for(family, Bundling::SingleFile, Kind::Checkpoint)`.
+/// returns `Err(LoadError::UnsupportedFamily(family))`.
 pub fn load(path: &Path, family: Family) -> Result<SingleFileBundle, LoadError> {
     let clip_l_prefix = match family {
         Family::Sd15 => SD15_CLIP_L_PREFIX,
         Family::Sdxl => SDXL_CLIP_L_PREFIX,
         other => {
-            return Err(LoadError::UnsupportedFamily(
-                other,
-                engine_phase_for(other, Bundling::SingleFile, Kind::Checkpoint),
-            ));
+            return Err(LoadError::UnsupportedFamily(other));
         }
     };
 
@@ -164,10 +153,10 @@ fn read_tensor_keys(path: &Path) -> Result<Vec<String>, LoadError> {
 
 /// FLUX bundled-VAE header probe. The implementation moved to
 /// `mold_core::safetensors_probe` (pure std + serde_json, no candle);
-/// this re-export keeps `mold_inference::loader::flux_single_file_bundles_vae`
+/// this re-export keeps the format-neutral probe available to inference callers.
 /// stable for existing callers (`mold-cli` catalog bridge, `mold-server`
 /// model manager).
-pub use mold_core::safetensors_probe::flux_single_file_bundles_vae;
+pub use mold_core::safetensors_probe::single_file_bundles_vae;
 
 #[cfg(test)]
 mod tests {
@@ -330,49 +319,36 @@ mod tests {
 
     #[test]
     fn unsupported_family_returns_error() {
-        // Any non-SD15/SDXL family must be rejected with the canonical
-        // phase number from `engine_phase_for`. The fixture path does
-        // not need to exist — the family check happens before I/O.
+        // Any non-SD15/SDXL family must be rejected by this loader. The
+        // fixture path does not need to exist because dispatch precedes I/O.
         let path = std::env::temp_dir().join("does-not-exist.safetensors");
 
-        let cases: &[(Family, u8)] = &[
-            (Family::Flux, 3),
-            // Flux.2 is wired through the catalog bridge (phase 1), but
-            // *this* SD15/SDXL key-partition loader still rejects it — the
-            // Flux.2 pipeline has its own loader. The error reports the
-            // canonical phase regardless.
-            (Family::Flux2, 1),
-            (Family::ZImage, 4),
-            (Family::LtxVideo, 5),
-            (Family::Ltx2, 5),
-            (Family::QwenImage, 1),
-            (Family::Wuerstchen, 1),
+        let cases = [
+            Family::Flux,
+            Family::Flux2,
+            Family::ZImage,
+            Family::LtxVideo,
+            Family::Ltx2,
+            Family::QwenImage,
+            Family::Wuerstchen,
         ];
 
-        for (family, expected_phase) in cases {
-            match load(&path, *family) {
-                Err(LoadError::UnsupportedFamily(got_family, got_phase)) => {
-                    assert_eq!(got_family, *family, "family round-trip");
-                    assert_eq!(
-                        got_phase, *expected_phase,
-                        "phase number for {:?} must match engine_phase_for",
-                        family,
-                    );
+        for family in cases {
+            match load(&path, family) {
+                Err(LoadError::UnsupportedFamily(got_family)) => {
+                    assert_eq!(got_family, family, "family round-trip");
                 }
-                other => panic!(
-                    "load(_, {:?}) expected UnsupportedFamily({:?}, {}), got {:?}",
-                    family, family, expected_phase, other
-                ),
+                other => panic!("load(_, {family:?}) expected UnsupportedFamily, got {other:?}"),
             }
         }
     }
 
-    /// Smoke test that the re-exported `flux_single_file_bundles_vae` path
+    /// Smoke test that the re-exported `single_file_bundles_vae` path
     /// (implementation lives in `mold_core::safetensors_probe`) is wired up
     /// and reachable through `mold_inference::loader`. Exhaustive prefix /
     /// error-path coverage lives in `mold-core`.
     #[test]
-    fn flux_single_file_bundles_vae_reexport_smoke() {
+    fn single_file_bundles_vae_reexport_smoke() {
         let path = temp_safetensors("flux-vae-diffusers");
         write_fixture(
             &path,
@@ -383,7 +359,7 @@ mod tests {
             ],
         );
 
-        let bundled = flux_single_file_bundles_vae(&path).expect("probe must not error");
+        let bundled = single_file_bundles_vae(&path).expect("probe must not error");
         assert!(
             bundled,
             "diffusers-style `encoder.conv_in.weight` must mark the file as VAE-bundled"

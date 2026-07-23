@@ -1971,7 +1971,7 @@ mod tests {
             modality: "image".to_string(),
             thumbnail_url: None,
             size_bytes: Some(4),
-            engine_phase: 1,
+            supported: true,
             trained_words: Vec::new(),
             primary_filename_rel: primary_rel.to_string(),
             written_at: 0,

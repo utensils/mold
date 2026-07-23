@@ -104,11 +104,7 @@ export function catalogActionLabel(entry: Pick<CatalogEntry, "installed">): "Pul
   return entry.installed ? "Repair" : "Pull";
 }
 
-/**
- * Phases `>= 6` are catalog packages no shipped engine can run yet. Older
- * servers don't report a phase — treat their entries as downloadable, same
- * as the search path does.
- */
-export function canDownloadEntry(entry: Pick<CatalogEntry, "engine_phase">): boolean {
-  return entry.engine_phase == null || entry.engine_phase <= 5;
+/** Older servers don't report support explicitly; keep those entries pullable. */
+export function canDownloadEntry(entry: Pick<CatalogEntry, "supported">): boolean {
+  return entry.supported == null || entry.supported;
 }

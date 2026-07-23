@@ -51,6 +51,21 @@ pub struct Ltx2Engine {
     /// so catalog (`cv:*` / `hf:*`) IDs select the right preset without
     /// requiring renames.
     preset_hint: Option<String>,
+    /// Separate LTX-2.3 Gemma hidden-state projection used by diffusion-only
+    /// and quantized checkpoints. Combined checkpoints leave this unset.
+    text_projection_path: Option<PathBuf>,
+}
+
+fn validate_audio_output_request(req: &GenerateRequest, supported: bool) -> Result<()> {
+    if execution::wants_audio_output(req) && !supported {
+        anyhow::bail!(
+            "LTX-2 audio output is unavailable for model '{}': the resolved checkpoint assets do \
+             not include both the audio VAE and vocoder tensors. Set enable_audio=false and retry; \
+             this request was rejected before generation starts.",
+            req.model
+        );
+    }
+    Ok(())
 }
 
 impl Ltx2Engine {
@@ -73,6 +88,15 @@ impl Ltx2Engine {
         _load_strategy: LoadStrategy,
         gpu_ordinal: usize,
     ) -> Self {
+        let text_projection_path = paths
+            .text_encoder_files
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().contains("text_projection"))
+            })
+            .cloned();
         Self {
             model_name,
             paths,
@@ -82,11 +106,12 @@ impl Ltx2Engine {
             pending_placement: None,
             gpu_ordinal,
             preset_hint: None,
+            text_projection_path,
         }
     }
 
     /// Construct an LTX-2 engine from a Civitai single-file safetensors
-    /// checkpoint (phase 5).
+    /// checkpoint.
     ///
     /// LTX-2 combined checkpoints (the standard Lightricks format) bundle
     /// both the video transformer (`transformer_blocks.*`) and the VAE
@@ -94,10 +119,8 @@ impl Ltx2Engine {
     /// `paths.transformer`, so on the checkpoint side this is structurally
     /// identical to `new()`.
     ///
-    /// Validates via `ltx_2::single_file::load` that the checkpoint has
-    /// detectable LTX-2 transformer keys and — critically — contains `vae.*`
-    /// keys. If the VAE is absent the call fails with an actionable error
-    /// message, since the LTX-2 runtime has no separate-VAE fallback.
+    /// Validates the transformer layout and resolves either the bundled
+    /// `vae.*` weights or a separate VAE companion from `paths.vae`.
     ///
     /// `paths` is the full resolved companion graph (text_encoder_files,
     /// upscalers, distilled_lora, …). `transformer` and `vae` are
@@ -105,7 +128,7 @@ impl Ltx2Engine {
     /// preserved so the Gemma TE companion (Civitai catalog entries don't
     /// bundle the encoder) and any other resolved companions reach the
     /// runtime intact. Discarding `paths` here is what bit cv:* LTX-2
-    /// loads in phase 5 — the runtime then bailed with `LTX-2 requires
+    /// loads in the catalog rollout — the runtime then bailed with `LTX-2 requires
     /// Gemma text encoder files to be available`.
     pub fn from_single_file(
         model_name: String,
@@ -128,25 +151,37 @@ impl Ltx2Engine {
             )
         })?;
 
-        if !bundle.has_vae {
-            anyhow::bail!(
-                "LTX-2 checkpoint {} contains no VAE weights (`vae.*` keys). \
-                 This appears to be a transformer-only fine-tune. \
-                 The LTX-2 runtime requires a combined transformer+VAE checkpoint. \
-                 Phase-5 does not yet support separate-VAE loading for LTX-2.",
-                checkpoint.display()
-            );
-        }
+        let vae = if bundle.has_vae {
+            PathBuf::default()
+        } else {
+            if paths.vae.as_os_str().is_empty() {
+                anyhow::bail!(
+                    "LTX-2 checkpoint {} contains no VAE weights (`vae.*` keys). \
+                     Pull the matching LTX-2 VAE companion and retry.",
+                    checkpoint.display()
+                );
+            }
+            if !paths.vae.is_file() {
+                anyhow::bail!(
+                    "LTX-2 VAE companion not on disk: {}. Re-pull the catalog model to fetch it.",
+                    paths.vae.display()
+                );
+            }
+            paths.vae.clone()
+        };
 
-        // For LTX-2 the combined checkpoint path serves as both transformer
-        // and VAE source; the runtime reads VAE under `vb.pp("vae")` from
-        // the same file, so we leave `vae` empty. Every other companion
-        // path the catalog bridge populated (most importantly
-        // `text_encoder_files` for Gemma) flows through unchanged.
+        let preset_hint = bundle.model_version.or_else(|| {
+            let filename = checkpoint
+                .file_name()
+                .and_then(|name| name.to_str())?
+                .to_ascii_lowercase();
+            (filename.contains("ltx23") || filename.contains("ltx2.3")).then(|| "2.3.0".to_string())
+        });
+
         let paths = ModelPaths {
             transformer: checkpoint,
             transformer_shards: Vec::new(),
-            vae: PathBuf::default(),
+            vae,
             ..paths
         };
 
@@ -156,7 +191,19 @@ impl Ltx2Engine {
         // from the safetensors `__metadata__` (e.g. `"2.3.0"`) is the
         // authoritative source — record it as a hint that
         // `materialize_request` consults via `preset_for_model_with_hint`.
-        engine.preset_hint = bundle.model_version;
+        engine.preset_hint = preset_hint;
+        if !bundle.has_text_projection
+            && engine
+                .preset_hint
+                .as_deref()
+                .is_some_and(|hint| hint.starts_with("2.3"))
+            && engine.text_projection_path.is_none()
+        {
+            anyhow::bail!(
+                "LTX-2.3 checkpoint contains no text embedding projection. \
+                 Pull the ltx2.3-text-projection companion and retry."
+            );
+        }
         Ok(engine)
     }
 
@@ -175,6 +222,7 @@ impl Ltx2Engine {
             pending_placement: None,
             gpu_ordinal: 0,
             preset_hint: None,
+            text_projection_path: None,
         }
     }
 
@@ -279,6 +327,7 @@ impl Ltx2Engine {
         work_dir: &Path,
         output_path: &Path,
     ) -> Result<Ltx2GeneratePlan> {
+        validate_audio_output_request(req, super::audio_output_supported(&self.paths))?;
         let pipeline = self.select_pipeline(req)?;
         let gemma_root = self.gemma_root()?;
         let prompt_tokens = GemmaAssets::discover(&gemma_root)?
@@ -305,6 +354,19 @@ impl Ltx2Engine {
             checkpoint_is_distilled: self.model_name.contains("distilled"),
             execution_graph,
             checkpoint_path: self.paths.transformer.to_string_lossy().to_string(),
+            vae_checkpoint_path: if self.paths.vae.as_os_str().is_empty()
+                || self.paths.vae == self.paths.transformer
+            {
+                self.paths.transformer.to_string_lossy().to_string()
+            } else {
+                self.paths.vae.to_string_lossy().to_string()
+            },
+            vae_in_checkpoint: self.paths.vae.as_os_str().is_empty()
+                || self.paths.vae == self.paths.transformer,
+            text_projection_path: self
+                .text_projection_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             distilled_checkpoint_path: pipeline
                 .requires_distilled_checkpoint()
                 .then(|| self.paths.transformer.to_string_lossy().to_string()),
@@ -369,14 +431,24 @@ impl Ltx2Engine {
         plan: &Ltx2GeneratePlan,
         device: Device,
     ) -> Result<Ltx2RuntimeSession> {
-        let load_start = Instant::now();
         let prompt_device = resolve_prompt_encoder_device(&device, self.gpu_ordinal);
+        self.load_runtime_session_with_devices(plan, device, prompt_device)
+    }
+
+    fn load_runtime_session_with_devices(
+        &self,
+        plan: &Ltx2GeneratePlan,
+        device: Device,
+        prompt_device: Device,
+    ) -> Result<Ltx2RuntimeSession> {
+        let load_start = Instant::now();
         log_prompt_encoder_placement(&device, &prompt_device);
         let dtype = gpu_dtype(&prompt_device);
         self.emit("Loading native LTX-2 prompt encoder");
         let prompt_encoder = NativePromptEncoder::load(
             Path::new(&plan.gemma_root),
             Path::new(&plan.checkpoint_path),
+            plan.text_projection_path.as_deref().map(Path::new),
             &plan.preset,
             &prompt_device,
             dtype,
@@ -419,7 +491,7 @@ impl Ltx2Engine {
         // pinned the encoder to a GPU, surface the OOM rather than silently
         // rewriting their request.
         let override_is_auto = matches!(tier1, None | Some(mold_core::types::DeviceRef::Auto));
-        match self.load_runtime_session_on_device(plan, device) {
+        match self.load_runtime_session_on_device(plan, device.clone()) {
             Ok(runtime) => Ok(runtime),
             Err(err)
                 if matches!(backend, Ltx2Backend::Cuda)
@@ -427,10 +499,17 @@ impl Ltx2Engine {
                     && Self::is_oom_error(&err) =>
             {
                 self.info(
-                    "Native LTX-2 prompt path ran out of CUDA memory; retrying with CPU fallback",
+                    "Native LTX-2 prompt encoder ran out of CUDA memory; retrying Gemma on CPU \
+                     while keeping the transformer and VAE on CUDA",
                 );
                 crate::device::reclaim_gpu_memory(self.gpu_ordinal);
-                self.load_runtime_session_on_device(plan, Device::Cpu)
+                let (transformer_device, prompt_placement) =
+                    prompt_encoder_oom_retry_placement(&device);
+                self.load_runtime_session_with_devices(
+                    plan,
+                    transformer_device,
+                    prompt_placement.into_device(),
+                )
             }
             Err(err) => Err(err),
         }
@@ -676,8 +755,9 @@ impl Ltx2Engine {
     /// returns an error (nonsensical — use the regular single-clip path
     /// if no tail is wanted).
     ///
-    /// Scope: distilled LTX-2 pipeline only. Other pipeline families
-    /// return an error up-front so the chain orchestrator fails fast.
+    /// Scope: single-stage and distilled LTX-2 pipelines. Multi-pass and
+    /// specialized conditioning pipelines return an error up-front so the
+    /// chain orchestrator fails fast.
     pub(crate) fn render_chain_stage(
         &mut self,
         req: &GenerateRequest,
@@ -694,9 +774,9 @@ impl Ltx2Engine {
         self.emit("Preparing native LTX-2 chain stage");
 
         let pipeline = self.select_pipeline(req)?;
-        if !matches!(pipeline, PipelineKind::Distilled) {
+        if !pipeline_supports_render_chain(pipeline) {
             bail!(
-                "render-chain v1 only supports the distilled LTX-2 pipeline, got {:?}",
+                "render-chain v1 supports one-stage and distilled LTX-2 pipelines, got {:?}",
                 pipeline,
             );
         }
@@ -788,7 +868,7 @@ impl Ltx2Engine {
         let tail_pixel_frames = motion_tail_pixel_frames as usize;
         if frames.len() < tail_pixel_frames {
             bail!(
-                "distilled render returned {} pixel frames but the chain caller requested a {}-frame tail; \
+                "LTX-2 render returned {} pixel frames but the chain caller requested a {}-frame tail; \
                  this is a pipeline wiring bug",
                 frames.len(),
                 motion_tail_pixel_frames,
@@ -812,6 +892,10 @@ impl Ltx2Engine {
     }
 }
 
+fn pipeline_supports_render_chain(pipeline: PipelineKind) -> bool {
+    matches!(pipeline, PipelineKind::OneStage | PipelineKind::Distilled)
+}
+
 impl ChainStageRenderer for Ltx2Engine {
     fn render_stage(
         &mut self,
@@ -821,8 +905,8 @@ impl ChainStageRenderer for Ltx2Engine {
         _stage_progress: Option<&mut dyn FnMut(StageProgressEvent)>,
     ) -> Result<StageOutcome> {
         // `_stage_progress` is intentionally unused in v1: per-stage
-        // denoise events flow through `self.on_progress` already. Phase 2's
-        // server route will install an on_progress callback that forwards
+        // denoise events flow through `self.on_progress` already. The server
+        // route installs an on_progress callback that forwards
         // those events onto the chain SSE stream with `stage_idx` tagged
         // in. If the orchestrator later needs denoise-step events routed
         // through its own channel, we can plumb `stage_progress` into a
@@ -908,6 +992,18 @@ pub(crate) fn resolve_prompt_encoder_device(
         return transformer_device.clone();
     }
     crate::device::resolve_ltx2_gemma_placement(gpu_ordinal).into_device()
+}
+
+/// An OOM while constructing Gemma changes only the prompt-encoder placement.
+/// Keep this policy hardware-independent so CPU-only CI can prove that the
+/// transformer's already-selected CUDA device is preserved through the retry.
+fn prompt_encoder_oom_retry_placement<T: Clone>(
+    transformer_device: &T,
+) -> (T, crate::device::LtxGemmaPlacement) {
+    (
+        transformer_device.clone(),
+        crate::device::LtxGemmaPlacement::Cpu,
+    )
 }
 
 fn log_prompt_encoder_placement(transformer_device: &Device, prompt_device: &Device) {
@@ -1299,6 +1395,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audio_request_is_rejected_before_runtime_for_video_only_checkpoint_assets() {
+        let mut req = bare_t2v_req("cv:3143864");
+        req.source_image = Some(vec![0x89, b'P', b'N', b'G']);
+        req.enable_audio = Some(true);
+
+        let err = validate_audio_output_request(&req, false).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cv:3143864"), "got: {message}");
+        assert!(message.contains("enable_audio=false"), "got: {message}");
+        assert!(
+            message.contains("before generation starts"),
+            "got: {message}"
+        );
+    }
+
     fn bare_t2v_req(model: &str) -> GenerateRequest {
         GenerateRequest {
             prompt: "test".to_string(),
@@ -1408,7 +1520,7 @@ mod tests {
 
     #[test]
     fn from_single_file_preserves_companion_paths() {
-        // Regression: phase-5 wired `cv:*` LTX-2 catalog entries into
+        // Regression: the original catalog route wired `cv:*` LTX-2 catalog entries into
         // `Ltx2Engine::from_single_file` but the constructor used to build
         // a fresh `ModelPaths` with `text_encoder_files: Vec::new()`,
         // discarding the Gemma TE companion the catalog bridge had
@@ -1459,7 +1571,60 @@ mod tests {
         assert_eq!(engine.paths.distilled_lora, distilled_in);
     }
 
+    #[test]
+    fn from_transformer_only_single_file_preserves_external_vae_for_chains() {
+        let temp = tempfile::tempdir().unwrap();
+        // Civitai converter checkpoints frequently omit model_version metadata,
+        // so retain the version marker from the original filename as a fallback.
+        let checkpoint = temp.path().join("ltx23_transformer.safetensors");
+        let vae = temp.path().join("ltx2_vae.safetensors");
+        let text_projection = temp.path().join("ltx-2.3_text_projection_bf16.safetensors");
+        let gemma = temp.path().join("gemma");
+        fs::create_dir_all(&gemma).unwrap();
+        write_test_gemma_assets(&gemma);
+        write_minimal_ltx2_checkpoint(&checkpoint, false);
+        write_minimal_ltx2_checkpoint(&vae, true);
+        fs::write(&text_projection, b"projection companion fixture").unwrap();
+
+        let mut input_paths = dummy_paths_with_gemma_root(&gemma);
+        input_paths.vae = vae.clone();
+        input_paths.text_encoder_files.push(text_projection.clone());
+        let engine = Ltx2Engine::from_single_file(
+            "cv:3143864".to_string(),
+            checkpoint.clone(),
+            input_paths,
+            LoadStrategy::Sequential,
+            0,
+        )
+        .expect("transformer-only LTX-2 should use its resolved VAE companion");
+
+        assert_eq!(engine.paths.transformer, checkpoint);
+        assert_eq!(engine.paths.vae, vae);
+        assert_eq!(engine.preset_hint.as_deref(), Some("2.3.0"));
+
+        // Chain stages call materialize_request independently; pin the path
+        // into the per-stage plan so every stage uses the same external VAE.
+        let mut req = bare_t2v_req("cv:3143864");
+        req.width = 64;
+        req.height = 64;
+        req.frames = Some(9);
+        req.enable_audio = Some(false);
+        let plan = engine
+            .materialize_request(&req, temp.path(), &temp.path().join("out.mp4"))
+            .unwrap();
+        assert_eq!(plan.vae_checkpoint_path, vae.to_string_lossy());
+        assert!(!plan.vae_in_checkpoint);
+        assert_eq!(
+            plan.text_projection_path.as_deref(),
+            Some(text_projection.to_string_lossy().as_ref())
+        );
+    }
+
     fn write_minimal_combined_ltx2_checkpoint(path: &std::path::Path) {
+        write_minimal_ltx2_checkpoint(path, true);
+    }
+
+    fn write_minimal_ltx2_checkpoint(path: &std::path::Path, include_vae: bool) {
         use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
         use std::collections::HashMap;
         let zero = 0.0f32.to_le_bytes().to_vec();
@@ -1468,10 +1633,12 @@ mod tests {
             "transformer_blocks.0.attn1.to_q.weight".to_string(),
             TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
         );
-        tensors.insert(
-            "vae.encoder.conv_in.weight".to_string(),
-            TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
-        );
+        if include_vae {
+            tensors.insert(
+                "vae.encoder.conv_in.weight".to_string(),
+                TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
+            );
+        }
         serialize_to_file(&tensors, &None, path).unwrap();
     }
 
@@ -1545,7 +1712,7 @@ mod tests {
             fps: Some(12),
             upscale_model: None,
             gif_preview: false,
-            enable_audio: Some(true),
+            enable_audio: Some(false),
             audio_file: None,
             audio_file_path: None,
             source_video: None,
@@ -1581,6 +1748,7 @@ mod tests {
         write_test_gemma_assets(&gemma_dir);
         let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
         fs::write(&paths.transformer, []).unwrap();
+        write_minimal_ltx2_checkpoint(&paths.vae, true);
 
         let mut engine = Ltx2Engine::new(
             "ltx-2-19b-distilled:fp8".to_string(),
@@ -1630,6 +1798,7 @@ mod tests {
         write_test_gemma_assets(&gemma_dir);
         let paths = dummy_paths_in(temp_dir.path(), &gemma_dir);
         fs::write(&paths.transformer, []).unwrap();
+        write_minimal_ltx2_checkpoint(&paths.vae, true);
 
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b-distilled:fp8".to_string(),
@@ -1653,7 +1822,7 @@ mod tests {
     }
 
     #[test]
-    fn render_chain_stage_rejects_non_distilled_pipeline() {
+    fn render_chain_stage_rejects_multi_pass_pipeline() {
         // A model name without "distilled" in it selects `PipelineKind::TwoStage`
         // via `select_pipeline`, which must be rejected up-front by the chain
         // entry point before any runtime work happens.
@@ -1666,12 +1835,25 @@ mod tests {
         let req = request(OutputFormat::Mp4, Some(false));
         let err = engine
             .render_chain_stage(&req, None, 4)
-            .expect_err("must fail on non-distilled pipeline");
+            .expect_err("must fail on multi-pass pipeline");
         let msg = format!("{err}");
         assert!(
-            msg.contains("distilled"),
+            msg.contains("one-stage") && msg.contains("distilled"),
             "error must name the pipeline constraint, got: {msg}",
         );
+    }
+
+    #[test]
+    fn render_chain_supports_one_stage_and_distilled_pipelines() {
+        assert!(super::pipeline_supports_render_chain(
+            PipelineKind::OneStage
+        ));
+        assert!(super::pipeline_supports_render_chain(
+            PipelineKind::Distilled
+        ));
+        assert!(!super::pipeline_supports_render_chain(
+            PipelineKind::TwoStage
+        ));
     }
 
     #[test]
@@ -1719,6 +1901,18 @@ mod tests {
                 std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
             }
         }
+    }
+
+    #[test]
+    fn prompt_encoder_oom_retry_preserves_transformer_device() {
+        // Regression: the old OOM branch retried
+        // `load_runtime_session_on_device(plan, Device::Cpu)`, silently moving
+        // the ConvRot transformer and video VAE to CPU along with Gemma.
+        // Use a sentinel instead of constructing a CUDA device so this policy
+        // test remains hardware-independent in CPU-only CI.
+        let (transformer, prompt) = prompt_encoder_oom_retry_placement(&7usize);
+        assert_eq!(transformer, 7);
+        assert_eq!(prompt, crate::device::LtxGemmaPlacement::Cpu);
     }
 
     /// `MOLD_LTX2_GEMMA_DEVICE=cpu` pins the encoder to CPU even when the

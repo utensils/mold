@@ -106,6 +106,8 @@ export interface ModelEntry {
    * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
    * and on manifest models. Display only: every API call keeps `name`. */
   display_name?: string | null;
+  /** Model-specific LTX-2 audio output support; absent on older servers. */
+  supports_audio?: boolean | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────
@@ -563,7 +565,7 @@ export interface CatalogEntry {
   /** Primary weights files a pull will fetch (detail drawer itemization). */
   download_recipe?: CatalogDownloadRecipe;
   /** `>= 6` marks catalog packages no shipped engine can run yet. */
-  engine_phase?: number;
+  supported?: boolean;
 }
 
 /** `GET /api/catalog/search` response envelope. */

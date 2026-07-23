@@ -35,7 +35,7 @@ function detail(part: Partial<CatalogEntry> = {}): CatalogEntry {
   return summary({
     modality: "image",
     file_format: "safetensors",
-    engine_phase: 3,
+    supported: true,
     description: "A moody cinematic finetune.",
     license: "CreativeML Open RAIL-M",
     tags: ["cinematic", "portrait"],
@@ -262,8 +262,8 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.emitted("pull")?.[0]?.[0]).toMatchObject({ id: "cv:8001" });
   });
 
-  it("disables the action for unsupported catalog packages (engine_phase >= 6)", async () => {
-    fetchCatalogDetail.mockResolvedValue(detail({ engine_phase: 6 }));
+  it("disables the action for unsupported catalog packages", async () => {
+    fetchCatalogDetail.mockResolvedValue(detail({ supported: false }));
     const wrapper = await mountDrawer(summary());
     const pull = wrapper.get("[data-test='drawer-pull']");
     expect((pull.element as HTMLButtonElement).disabled).toBe(true);

@@ -237,7 +237,7 @@ CREATE TABLE catalog (
     tags            TEXT,
     companions      TEXT,
     download_recipe TEXT NOT NULL,
-    engine_phase    INTEGER NOT NULL,
+    supported    INTEGER NOT NULL,
     created_at      INTEGER,
     updated_at      INTEGER,
     added_at        INTEGER NOT NULL DEFAULT 0,
@@ -249,7 +249,7 @@ CREATE INDEX idx_catalog_modality  ON catalog(modality);
 CREATE INDEX idx_catalog_downloads ON catalog(download_count DESC);
 CREATE INDEX idx_catalog_updated   ON catalog(updated_at DESC);
 CREATE INDEX idx_catalog_rating    ON catalog(rating DESC);
-CREATE INDEX idx_catalog_phase     ON catalog(engine_phase);
+CREATE INDEX idx_catalog_supported ON catalog(supported);
 
 CREATE VIRTUAL TABLE catalog_fts USING fts5(
     name,
@@ -1038,7 +1038,7 @@ mod v9_tests {
         tx.execute_batch("PRAGMA user_version = 8;").unwrap();
         tx.commit().unwrap();
         conn.execute(
-            "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, engine_phase, added_at)
+            "INSERT INTO catalog (id, source, source_id, name, family, family_role, modality, kind, file_format, bundling, download_recipe, supported, added_at)
              VALUES ('hf:legacy', 'hf', 'legacy', 'L', 'flux', 'foundation', 'image', 'checkpoint', 'safetensors', 'separated', '{}', 1, 0)",
             [],
         ).unwrap();

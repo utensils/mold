@@ -180,7 +180,7 @@ async fn civitai_controlnet_search_uses_controlnet_type_filter() {
     assert_eq!(entries.len(), 1, "one normalized ControlNet expected");
     assert_eq!(entries[0].kind, Kind::ControlNet);
     assert_eq!(entries[0].family, Family::Sdxl);
-    assert_eq!(entries[0].engine_phase, 1);
+    assert!(entries[0].supported);
 }
 
 #[tokio::test]
@@ -207,7 +207,7 @@ async fn civitai_qwen_checkpoint_is_installable_with_runtime_companion() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, Kind::Checkpoint);
     assert_eq!(entries[0].family, Family::QwenImage);
-    assert_eq!(entries[0].engine_phase, 1);
+    assert!(entries[0].supported);
     assert_eq!(entries[0].companions, vec!["qwen-image-runtime"]);
 }
 

@@ -1,4 +1,4 @@
-//! SD1.5 A1111 → diffusers key rename pass (phase 2.4).
+//! SD1.5 A1111 → diffusers key rename pass.
 //!
 //! Bridges the original LDM tensor key naming used in Civitai single-file
 //! checkpoints to the diffusers naming candle's
@@ -14,7 +14,7 @@
 //! `~/.cargo/registry/src/index.crates.io-*/candle-transformers-mold-0.9.10/
 //! src/models/stable_diffusion/{unet_2d,unet_2d_blocks,vae,clip,resnet,
 //! attention,embeddings}.rs`. Verified against the depth-2 audit dump in
-//! `tasks/catalog-expansion-phase-2-tensor-audit.md` (DreamShaper 8 / SD 1.5).
+//! The mapping was validated against DreamShaper 8 / SD 1.5.
 
 use crate::loader::single_file::SingleFileBundle;
 use std::collections::BTreeMap;

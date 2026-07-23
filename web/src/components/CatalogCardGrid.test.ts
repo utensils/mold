@@ -16,7 +16,7 @@ const baseEntry = {
   id: "hf:row-0",
   name: "Row 0",
   family: "flux",
-  engine_phase: 1,
+  supported: true,
   installed: false,
   source: "hf",
   source_id: "r0",

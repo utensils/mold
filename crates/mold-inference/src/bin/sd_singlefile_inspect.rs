@@ -1,4 +1,4 @@
-//! Phase-2 tensor-prefix audit for SD1.5 / SDXL single-file Civitai
+//! Tensor-prefix audit for SD1.5 / SDXL single-file Civitai
 //! checkpoints. Walks each input safetensors header and reports the
 //! top-level prefix layout the loader will need to consume.
 //!
@@ -6,7 +6,7 @@
 //!     cargo run -p mold-ai-inference --features dev-bins \
 //!         --bin sd_singlefile_inspect -- file1.safetensors [file2 ...]
 //!
-//! The handoff (`tasks/catalog-expansion-phase-2-handoff.md`) flags
+//! The catalog handoff notes flag
 //! Civitai SDXL CLIP-prefix variation as a tensor-loader landmine:
 //!     "Not every checkpoint uses A1111's `conditioner.embedders.*`
 //!     exactly. Some use `cond_stage_model.*` (SD-style) for CLIP-L."

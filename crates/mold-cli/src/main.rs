@@ -2192,11 +2192,8 @@ pub async fn resolve_catalog_id(id: &str) -> anyhow::Result<CatalogIdResolution>
         return Ok(CatalogIdResolution::Manifest(repo_id.to_string()));
     }
     let entry = catalog_bridge::lookup_catalog_entry_live(id).await?;
-    if entry.engine_phase >= 6 {
-        anyhow::bail!(
-            "engine_phase {} not yet supported by this build of mold (release notes for status)",
-            entry.engine_phase
-        );
+    if !entry.supported {
+        anyhow::bail!("catalog entry is not supported by this build of mold");
     }
     Ok(CatalogIdResolution::Recipe(Box::new(entry)))
 }

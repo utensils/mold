@@ -246,18 +246,23 @@ impl Ltx2VaeLatentStats {
     fn load(plan: &Ltx2GeneratePlan, device: &candle_core::Device, dtype: DType) -> Result<Self> {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+                std::slice::from_ref(&Path::new(&plan.vae_checkpoint_path)),
                 dtype,
                 device,
             )?
         };
         let config = ltx2_video_vae_config(plan);
-        let stats_vb = vb.pp("vae").pp("per_channel_statistics");
+        let stats_vb = if plan.vae_in_checkpoint {
+            vb.pp("vae")
+        } else {
+            vb
+        };
+        let stats_vb = stats_vb.pp("per_channel_statistics");
         let mean = if stats_vb.contains_tensor("mean-of-means") {
             stats_vb.get(config.latent_channels, "mean-of-means")?
         } else {
             tracing::debug!(
-                checkpoint = %plan.checkpoint_path,
+                checkpoint = %plan.vae_checkpoint_path,
                 "native LTX-2 VAE checkpoint missing mean-of-means statistics, falling back to config defaults"
             );
             Tensor::new(config.latents_mean.as_slice(), device)?.to_dtype(dtype)?
@@ -266,7 +271,7 @@ impl Ltx2VaeLatentStats {
             stats_vb.get(config.latent_channels, "std-of-means")?
         } else {
             tracing::debug!(
-                checkpoint = %plan.checkpoint_path,
+                checkpoint = %plan.vae_checkpoint_path,
                 "native LTX-2 VAE checkpoint missing std-of-means statistics, falling back to config defaults"
             );
             Tensor::new(config.latents_std.as_slice(), device)?.to_dtype(dtype)?
@@ -4452,9 +4457,19 @@ fn load_ltx2_av_transformer_with_loras(
     let lora_registry = super::lora::load_lora_registry(loras)?;
     let checkpoint_path = Path::new(&plan.checkpoint_path);
     let checkpoint_is_nvfp4 = super::nvfp4::checkpoint_is_nvfp4(checkpoint_path);
+    let checkpoint_is_convrot =
+        !checkpoint_is_nvfp4 && super::convrot::checkpoint_is_convrot_w4a4(checkpoint_path);
+    // ConvRot stores packed INT4 rows but the compatibility backend reconstructs
+    // BF16 weights. Header byte sizes therefore cannot safely drive resident
+    // placement; stream blocks so the planner never prices packed bytes as GPU
+    // residency.
+    let force_streaming = ltx2_effective_force_streaming(force_streaming, checkpoint_is_convrot);
     let checkpoint_is_fp8 = !checkpoint_is_nvfp4 && ltx2_checkpoint_is_fp8(plan);
     let vb = if checkpoint_is_nvfp4 {
         let backend = super::nvfp4::Ltx2Nvfp4Backend::from_path(checkpoint_path)?;
+        VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
+    } else if checkpoint_is_convrot {
+        let backend = super::convrot::Ltx2ConvRotBackend::from_path(checkpoint_path)?;
         VarBuilder::from_backend(Box::new(backend), gpu_dtype(device), device.clone())
     } else if checkpoint_is_fp8 {
         load_fp8_safetensors_with_callback(
@@ -4473,7 +4488,7 @@ fn load_ltx2_av_transformer_with_loras(
             progress,
         )?
     };
-    let vb = if checkpoint_is_nvfp4 {
+    let vb = if checkpoint_is_nvfp4 || checkpoint_is_convrot {
         vb
     } else {
         vb.rename_f(remap_ltx2_transformer_key)
@@ -4616,6 +4631,10 @@ fn ltx2_force_streaming_enabled() -> bool {
     )
 }
 
+fn ltx2_effective_force_streaming(configured: bool, checkpoint_is_convrot: bool) -> bool {
+    configured || checkpoint_is_convrot
+}
+
 fn select_ltx2_transformer_residency_mode(
     is_cuda: bool,
     checkpoint_is_fp8: bool,
@@ -4644,15 +4663,20 @@ fn load_ltx2_video_vae(
     progress: Option<&ProgressCallback>,
 ) -> Result<AutoencoderKLLtx2Video> {
     let vb = load_safetensors_with_progress_callback(
-        std::slice::from_ref(&Path::new(&plan.checkpoint_path)),
+        std::slice::from_ref(&Path::new(&plan.vae_checkpoint_path)),
         dtype,
         device,
         "LTX-2 VAE",
         progress,
     )?;
+    let vb = if plan.vae_in_checkpoint {
+        vb.pp("vae")
+    } else {
+        vb
+    };
     Ok(AutoencoderKLLtx2Video::new(
         ltx2_video_vae_config(plan),
-        vb.pp("vae"),
+        vb,
     )?)
 }
 
@@ -5634,6 +5658,9 @@ mod tests {
             checkpoint_is_distilled: req.model.contains("distilled"),
             execution_graph: graph,
             checkpoint_path: "/tmp/ltx2.safetensors".to_string(),
+            vae_checkpoint_path: "/tmp/ltx2.safetensors".to_string(),
+            vae_in_checkpoint: true,
+            text_projection_path: None,
             distilled_checkpoint_path: None,
             distilled_lora_path: None,
             spatial_upsampler_path: None,
@@ -6577,6 +6604,13 @@ mod tests {
             ),
             super::Ltx2TransformerResidencyMode::Streaming
         );
+    }
+
+    #[test]
+    fn ltx2_convrot_forces_streaming_for_reconstructed_bf16_weights() {
+        assert!(super::ltx2_effective_force_streaming(false, true));
+        assert!(super::ltx2_effective_force_streaming(true, false));
+        assert!(!super::ltx2_effective_force_streaming(false, false));
     }
 
     #[test]

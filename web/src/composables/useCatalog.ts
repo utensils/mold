@@ -216,7 +216,7 @@ function build() {
     // Live-search rows aren't in the DB-backed `/api/catalog/:id` endpoint,
     // so re-fetching would 404 and a `void cat.openDetail(...)` caller would
     // silently leave the drawer unmounted. The list response already carries
-    // every field the drawer needs (name, family, engine_phase, installed,
+    // every field the drawer needs (name, family, supported, installed,
     // download_recipe, …), so prefer the in-memory entry and only fall back
     // to the API when the user opens an id that isn't in the current page —
     // e.g. a future deep-link path.
@@ -357,8 +357,8 @@ function build() {
     return result;
   }
 
-  function canDownload(entry: Pick<CatalogEntryWire, "engine_phase">): boolean {
-    return entry.engine_phase <= 5;
+  function canDownload(entry: Pick<CatalogEntryWire, "supported">): boolean {
+    return entry.supported;
   }
 
   async function startDownload(id: string) {

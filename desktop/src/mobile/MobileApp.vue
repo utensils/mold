@@ -407,6 +407,9 @@ const selectedModelAvailable = computed(
     modelsHostId.value === selectedHostId.value &&
     generationModels.value.some((model) => model.name === form.model),
 );
+const selectedGenerationModel = computed(
+  () => generationModels.value.find((model) => model.name === form.model) ?? null,
+);
 const sourceControlsValid = computed(() => !caps.value.supportsImg2img || sourceValid.value);
 const stepsError = computed(() => stepsValidationError(form.steps));
 const guidanceError = computed(() => guidanceValidationError(form.guidance));
@@ -2479,6 +2482,7 @@ onBeforeUnmount(() => {
             <MobileGenerateParameters
               :form="form"
               :upscalers="upscalers"
+              :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
               @validity-change="parameterValid = $event"
             />
             <label v-if="form.model && caps.supportsNegativePrompt" class="field">

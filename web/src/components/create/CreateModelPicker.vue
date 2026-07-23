@@ -10,6 +10,7 @@
 import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
+import { modelDisplayName } from "@mold/studio";
 import type { ModelInfoExtended } from "../../types";
 import { modelDisplayName } from "../../lib/modelName";
 

@@ -51,6 +51,7 @@ const props = withDefaults(
 const emit = defineEmits<{ "append-word": [word: string] }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
+const audioOutputSupported = computed(() => props.selectedModel?.supports_audio !== false);
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
 
@@ -517,10 +518,14 @@ function reset() {
           <div class="ms-switch-row__title">Generate audio</div>
           <SwitchToggle
             :model-value="form.enableAudio"
+            :disabled="!audioOutputSupported"
             label="Generate audio"
             @update:model-value="form.enableAudio = $event"
           />
         </div>
+        <p v-if="caps.supportsAudio && !audioOutputSupported" class="ms-hint">
+          Audio assets are not included with this checkpoint. Video generation remains available.
+        </p>
         <p v-if="audioFormatError" class="ms-error" role="alert">{{ audioFormatError }}</p>
 
         <template v-if="caps.supportsAdvancedVideo">

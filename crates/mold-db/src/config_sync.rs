@@ -1,5 +1,5 @@
 //! Sync between `mold-core::Config` (TOML bootstrap file) and the
-//! DB-backed user-preference surface. Phase 3 of the SQLite settings
+//! DB-backed user-preference surface. The SQLite settings
 //! migration (issue #265): user-facing slices of config.toml move into
 //! the `settings` + `model_prefs` tables; paths/logging/credentials stay
 //! in the TOML.

@@ -132,7 +132,7 @@ impl SD15Engine {
     /// **not** build the model.
     ///
     /// `clip_tokenizer` is the path to a companion-pulled CLIP-L
-    /// tokenizer (phase 2.7); the tokenizer never lives inside the
+    /// tokenizer; the tokenizer never lives inside the
     /// single-file checkpoint.
     pub fn from_single_file(
         model_name: String,
@@ -713,7 +713,7 @@ impl SD15Engine {
         Ok((unet, vae, clip))
     }
 
-    /// Single-file (Civitai) component loader (phase 2.6 + 2.8.5).
+    /// Single-file (Civitai) component loader.
     ///
     /// Header-parses the checkpoint, builds the diffusers→A1111 remap, wraps
     /// it in a `SingleFileBackend` (which translates diffusers `vb.get(key)`
@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn from_single_file_constructs_for_synthetic_sd15_checkpoint() {
         let single_file = synth_sd15_single_file("ok");
-        // The companion tokenizer is pulled separately (phase 2.7) and is
+        // The companion tokenizer is pulled separately and is
         // not validated by the constructor — its path is just stored.
         let tokenizer_path = std::env::temp_dir().join("mold-sd15-tok-stub.json");
 
@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn load_branches_to_single_file_path_and_invokes_candle_constructors() {
-        // Phase 2.8.5 smoke: `load()` must dispatch to the single-file
+        // Smoke test: `load()` must dispatch to the single-file
         // branch, hand a `VarBuilder::from_backend(SingleFileBackend)` to
         // candle's `UNet2DConditionModel::new`, and surface an error
         // sourced from the SingleFileBackend's tensor lookup (because the
