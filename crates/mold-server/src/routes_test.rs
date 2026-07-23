@@ -5689,6 +5689,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capabilities_chain_limits_accepts_configured_catalog_ltx2_model() {
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "cv:3143864".into(),
+            mold_core::config::ModelConfig {
+                family: Some("ltx2".into()),
+                ..Default::default()
+            },
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        let response = create_router(state)
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=cv:3143864")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(limits["model"], "cv:3143864");
+        assert_eq!(limits["frames_per_clip_cap"], 97);
+    }
+
+    #[tokio::test]
     async fn capabilities_chain_limits_rejects_unknown_model() {
         let app = app_empty();
         let response = app

@@ -332,7 +332,9 @@ ConvRot W4A4 exports are reconstructed through the compatibility backend and
 full-streamed automatically so their packed checkpoint size is never mistaken
 for BF16 GPU residency. If the Gemma prompt encoder cannot fit in VRAM, only
 Gemma retries on CPU; the transformer and video VAE remain on CUDA. Native
-multi-prompt chains support both one-stage and distilled LTX-2 checkpoints.
+multi-prompt chains support both one-stage and distilled LTX-2 checkpoints,
+including installed catalog checkpoints whose stable `cv:` / `hf:` IDs do not
+encode the pipeline name.
 
 ## Features
 

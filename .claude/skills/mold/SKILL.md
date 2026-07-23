@@ -537,6 +537,8 @@ hidden-state projection used by diffusion-only/quantized exports. Combined
 checkpoints keep using their bundled assets. ConvRot W4A4 exports full-stream
 automatically because the compatibility backend reconstructs BF16 block weights.
 Native multi-prompt chains accept one-stage and distilled LTX-2 checkpoints.
+Installed catalog checkpoints with opaque `cv:` / `hf:` IDs and no bundled
+spatial upscaler use the one-stage path and remain sequence-capable.
 Single-file format detection is key-based (reads safetensors header only).
 
 **Auth:** `HF_TOKEN` for gated HF repos; `CIVITAI_TOKEN` for early-access

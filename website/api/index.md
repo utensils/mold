@@ -613,8 +613,9 @@ curl -N http://localhost:7680/api/events
 
 ## `/api/generate/chain`
 
-Chained video generation for LTX-2 distilled models. Splits a long video into
-N per-clip renders, threads a motion-tail of latents across each clip
+Chained video generation for one-stage and distilled LTX-2 models, including
+installed catalog checkpoints with opaque `cv:` / `hf:` IDs. Splits a long
+video into N per-clip renders, threads a motion-tail of latents across each clip
 boundary, and returns a single stitched MP4. See the
 [LTX-2 chained video output guide](/models/ltx2#chained-video-output) for the
 user-facing story; this section documents the wire format.
