@@ -497,6 +497,7 @@ fn installed_catalog_models(
             },
             disk_usage_bytes: sidecar.size_bytes,
             remaining_download_bytes: Some(0),
+            display_name: Some(sidecar.name.clone()),
         });
     }
     out

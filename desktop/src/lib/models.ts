@@ -14,10 +14,32 @@ export function isUtilityModel(m: ModelEntry): boolean {
   return UTILITY_FAMILIES.has(m.family);
 }
 
-/** Quant tag = the part after the first colon (`flux-dev:q8` → `q8`). */
+/** True for opaque catalog-install identifiers (`cv:<id>` / `hf:<repo>`). */
+export function isCatalogModelId(name: string): boolean {
+  return name.startsWith("cv:") || name.startsWith("hf:");
+}
+
+/** Quant tag = the part after the first colon (`flux-dev:q8` → `q8`).
+ * Catalog ids (`cv:252914`) carry no quant variant — their colon is part
+ * of the identifier, not a `base:tag` split. */
 export function quantTag(name: string): string | null {
+  if (isCatalogModelId(name)) return null;
   const i = name.indexOf(":");
   return i >= 0 ? name.slice(i + 1) : null;
+}
+
+/**
+ * Human-readable label for a model row. Catalog installs are identified by
+ * opaque `cv:`/`hf:` ids; the server sends the upstream title as an additive
+ * `display_name`, and older servers still embed it in `description`. Display
+ * only — selection, keys, and API calls must keep using `name`.
+ */
+export function modelDisplayName(
+  m: Pick<ModelEntry, "name"> & Partial<Pick<ModelEntry, "display_name" | "description">>,
+): string {
+  if (m.display_name) return m.display_name;
+  if (isCatalogModelId(m.name) && m.description) return m.description;
+  return m.name;
 }
 
 export function modelDiskBytes(m: ModelEntry): number {

@@ -8,6 +8,7 @@ import { expandPrompt } from "../lib/api/expand";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
+import { modelDisplayName } from "../lib/models";
 import type {
   CompleteEvent,
   DownloadJob,
@@ -2301,7 +2302,7 @@ onBeforeUnmount(() => {
                 {{ form.model }} · not installed
               </option>
               <option v-for="model in generationModels" :key="model.name" :value="model.name">
-                {{ model.name }}
+                {{ modelDisplayName(model) }}
               </option>
             </select>
           </label>

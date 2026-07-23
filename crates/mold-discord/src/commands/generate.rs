@@ -794,6 +794,7 @@ mod tests {
             downloaded,
             disk_usage_bytes: None,
             remaining_download_bytes: None,
+            display_name: None,
         }
     }
 
@@ -902,6 +903,7 @@ mod tests {
             downloaded: true,
             disk_usage_bytes: None,
             remaining_download_bytes: None,
+            display_name: None,
         }];
         assert_eq!(
             family_for_model(&models, "ltx-2-19b-distilled:fp8"),
@@ -928,6 +930,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -942,6 +945,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -962,6 +966,7 @@ mod tests {
             downloaded: true,
             disk_usage_bytes: None,
             remaining_download_bytes: None,
+            display_name: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
     }
@@ -987,6 +992,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1001,6 +1007,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");
@@ -1022,6 +1029,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -1036,6 +1044,7 @@ mod tests {
                 downloaded: true,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             },
         ];
         assert_eq!(resolve_default_model(&models), "flux2-klein:q8");

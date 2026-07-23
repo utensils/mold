@@ -9,6 +9,7 @@ import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
+import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
@@ -87,7 +88,10 @@ const installedNames = computed(() => new Set((props.installedEntries ?? []).map
 const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })[]>(() => {
   const q = props.query.trim().toLowerCase();
   return (props.installedEntries ?? [])
-    .filter((m) => !q || m.name.toLowerCase().includes(q))
+    .filter(
+      (m) =>
+        !q || m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
+    )
     .filter((m) => !family.value || m.family === family.value)
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
     .filter(
@@ -152,8 +156,14 @@ const combinedEntries = computed(() => {
   );
   const byId = new Map<string, CatalogEntry & { hostIds?: string[] }>();
   // Installed rows win the dedup — a live-catalog copy of an installed
-  // model must not appear untagged next to it.
-  const installedByName = new Set(installedCatalogEntries.value.map((entry) => entry.name));
+  // model must not appear untagged next to it. Catalog installs are named
+  // by their opaque id, so their human title joins the set too — that is
+  // the name the live feed knows them by.
+  const installedByName = new Set(
+    installedCatalogEntries.value.flatMap((entry) =>
+      entry.display_name ? [entry.name, entry.display_name] : [entry.name],
+    ),
+  );
   for (const entry of [
     ...installedCatalogEntries.value,
     ...manifestEntries.value,
@@ -293,10 +303,10 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
     // near-instant pull still produces a visible terminal event and refresh.
     await downloads.subscribe(host ?? undefined);
     await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
-    toasts.push(`Pulling ${entry.name}${host ? ` on ${host.label}` : ""}`);
+    toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
-      toasts.push(`${entry.name} is already queued.`);
+      toasts.push(`${entry.display_name ?? entry.name} is already queued.`);
     } else {
       toasts.push(String(err), "error");
     }
@@ -324,6 +334,9 @@ const detailTarget = computed(() => catalogTarget());
  * no colon base and get no chips (their precedence is decided in the list).
  */
 function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
+  // Catalog ids (`cv:252914`) contain a colon that is part of the
+  // identifier, not a `base:tag` quant split — they have no variants.
+  if (isCatalogModelId(entry.id)) return undefined;
   const base = entry.name.split(":")[0]!;
   if (base === entry.name) return undefined;
   const siblings = models.all.filter((model) => model.name.split(":")[0] === base);
@@ -539,7 +552,7 @@ onMounted(async () => {
 
     <DownloadTargetDialog
       v-if="pendingEntry"
-      :model-name="pendingEntry.name"
+      :model-name="pendingEntry.display_name ?? pendingEntry.name"
       :hosts="readyHosts"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"

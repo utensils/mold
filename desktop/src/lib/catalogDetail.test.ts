@@ -46,12 +46,30 @@ describe("installedModelToEntry", () => {
     );
     expect(entry).toMatchObject({
       id: "cv:8001",
+      name: "cv:8001",
       source: "civitai",
       source_id: "8001",
       size_bytes: null,
       page_url: null,
       description: null,
     });
+  });
+
+  it("titles Civitai installs with their human-readable name, keeping the id for logic", () => {
+    const entry = installedModelToEntry(
+      installedModel({
+        name: "cv:1759168",
+        hf_repo: "",
+        display_name: "Juggernaut XL - Ragnarok",
+      }),
+    );
+    expect(entry.id).toBe("cv:1759168");
+    expect(entry.name).toBe("cv:1759168");
+    expect(entry.display_name).toBe("Juggernaut XL - Ragnarok");
+  });
+
+  it("leaves display_name empty when the name is already readable", () => {
+    expect(installedModelToEntry(installedModel()).display_name).toBeNull();
   });
 
   it("keeps the repo id encoded in hf: catalog install names", () => {

@@ -61,6 +61,7 @@ import { useStatusPoll } from "../composables/useStatusPoll";
 import { useHostRouting } from "../composables/useHostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
+import { modelDisplayName } from "../lib/modelName";
 import type { HostRoute } from "../lib/hostRouting";
 import type {
   ChainRequestWire,
@@ -418,6 +419,13 @@ function stopAutoRefresh() {
 
 const currentModel = computed(
   () => models.value.find((m) => m.name === form.state.value.model) ?? null,
+);
+
+/** Human title for the selected model — falls back to the raw form value. */
+const currentModelLabel = computed(() =>
+  currentModel.value
+    ? modelDisplayName(currentModel.value)
+    : form.state.value.model,
 );
 
 const currentFamily = computed(
@@ -1379,7 +1387,7 @@ onBeforeUnmount(() => {
                 sequences need a video model
               </p>
               <p class="mt-1 font-mono text-[11px] leading-relaxed text-ink-3">
-                <span class="text-ink-2">{{ form.state.value.model }}</span>
+                <span class="text-ink-2">{{ currentModelLabel }}</span>
                 renders single prints only. pick an ltx-video or ltx-2 model to
                 chain clips into a sequence.
               </p>

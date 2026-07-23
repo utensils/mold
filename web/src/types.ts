@@ -231,6 +231,10 @@ export interface ModelInfoExtended extends ModelDefaults {
   downloaded: boolean;
   disk_usage_bytes?: number | null;
   remaining_download_bytes?: number | null;
+  /** Human-readable title for catalog installs whose `name` is an opaque
+   * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
+   * and on manifest models. Display only: every API call keeps `name`. */
+  display_name?: string | null;
 }
 
 export interface GpuInfo {

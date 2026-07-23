@@ -258,14 +258,17 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     class="border-edge fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bench shadow-raised"
     role="dialog"
     aria-modal="false"
-    :aria-label="merged.name"
+    :aria-label="merged.display_name ?? merged.name"
     data-test="catalog-detail-drawer"
   >
     <!-- Header -->
     <div class="border-edge flex items-center gap-2 border-b px-4 py-3">
       <SourceGlyph :source="glyphSource" :size="16" class="shrink-0 text-ink-3" />
-      <h2 class="min-w-0 flex-1 truncate text-body font-semibold text-ink" :title="merged.name">
-        {{ merged.name }}
+      <h2
+        class="min-w-0 flex-1 truncate text-body font-semibold text-ink"
+        :title="merged.display_name ?? merged.name"
+      >
+        {{ merged.display_name ?? merged.name }}
       </h2>
       <button
         type="button"

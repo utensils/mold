@@ -611,6 +611,61 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
         .ends_with("cv-8001/x.safetensors"));
 }
 
+/// `/api/models` rows for installed catalog checkpoints must carry the
+/// sidecar's human-readable title as an additive `display_name`, so UIs
+/// can stop rendering opaque `cv:<id>` slugs. Manifest rows stay
+/// untouched — no `display_name` key at all.
+#[tokio::test]
+async fn list_models_carries_display_name_for_catalog_rows() {
+    let (state, _server, tmp) = build_state().await;
+
+    let ckpt_dir = tmp.path().join("cv-1759168");
+    std::fs::create_dir_all(&ckpt_dir).unwrap();
+    let sidecar = CatalogSidecar {
+        schema: 1,
+        id: "cv:1759168".into(),
+        source: "civitai".into(),
+        source_id: "1759168".into(),
+        name: "Juggernaut XL - Ragnarok".into(),
+        author: Some("KandooAI".into()),
+        family: "sdxl".into(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        kind: "checkpoint".into(),
+        modality: "image".into(),
+        thumbnail_url: None,
+        // Must match the fixture file's real size or the partial-download
+        // guard in `primary_path_if_present` hides the row.
+        size_bytes: Some(1),
+        engine_phase: 3,
+        trained_words: vec![],
+        primary_filename_rel: "juggernaut.safetensors".into(),
+        written_at: 0,
+    };
+    write_sidecar(&ckpt_dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
+    std::fs::write(ckpt_dir.join("juggernaut.safetensors"), b"x").unwrap();
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let models: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+
+    let row = models
+        .iter()
+        .find(|m| m["name"] == "cv:1759168")
+        .expect("installed catalog checkpoint listed");
+    assert_eq!(row["display_name"], "Juggernaut XL - Ragnarok");
+
+    let manifest_row = models
+        .iter()
+        .find(|m| m["name"].as_str().is_some_and(|n| !n.starts_with("cv:")))
+        .expect("manifest rows present");
+    assert!(
+        manifest_row.get("display_name").is_none(),
+        "manifest rows must not grow a display_name key"
+    );
+}
+
 #[tokio::test]
 async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
     let (state, _server, tmp) = build_state().await;

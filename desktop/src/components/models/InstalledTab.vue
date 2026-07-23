@@ -12,6 +12,7 @@ import {
   groupInstalledModels,
   isUtilityModel,
   modelDiskBytes,
+  modelDisplayName,
   modelSizeLabels,
   quantTag,
 } from "../../lib/models";
@@ -41,7 +42,9 @@ const sourceEntries = computed(() => props.entries ?? models.installed);
 const filtered = computed(() => {
   const q = (props.query ?? "").trim().toLowerCase();
   const searched = q
-    ? sourceEntries.value.filter((m) => m.name.toLowerCase().includes(q))
+    ? sourceEntries.value.filter(
+        (m) => m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
+      )
     : sourceEntries.value;
   const type = props.mediaType ?? "all";
   if (type === "all") return searched;
@@ -101,15 +104,15 @@ async function remove(m: LibraryModelEntry) {
     const kept = result.kept.length;
     toasts.push(
       kept > 0
-        ? `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}, kept ${kept} shared component${kept === 1 ? "" : "s"}`
-        : `Removed ${m.name} — freed ${formatGB(result.freed_bytes)}`,
+        ? `Removed ${modelDisplayName(m)} — freed ${formatGB(result.freed_bytes)}, kept ${kept} shared component${kept === 1 ? "" : "s"}`
+        : `Removed ${modelDisplayName(m)} — freed ${formatGB(result.freed_bytes)}`,
     );
     await refreshAfterAction(m);
   } catch (err) {
     // 409 MODEL_LOADED → tell the user the one concrete fix.
     toasts.push(
       err instanceof ApiError && err.status === 409
-        ? `${m.name} is on the GPU. Unload it first.`
+        ? `${modelDisplayName(m)} is on the GPU. Unload it first.`
         : String(err),
       "error",
     );
@@ -125,10 +128,12 @@ async function repairFromDrawer(m: LibraryModelEntry) {
   drawerRepairing.value = true;
   try {
     await startCatalogDownload(m.name, targetFor(m), !!targetFor(m));
-    toasts.push(`Repairing ${m.name}`);
+    toasts.push(`Repairing ${modelDisplayName(m)}`);
   } catch (err) {
     toasts.push(
-      err instanceof ApiError && err.status === 409 ? `${m.name} is already queued.` : String(err),
+      err instanceof ApiError && err.status === 409
+        ? `${modelDisplayName(m)} is already queued.`
+        : String(err),
       "error",
     );
   } finally {
@@ -191,7 +196,7 @@ async function unload(m: LibraryModelEntry) {
           <li v-for="m in list" :key="m.name">
             <ModelTableRow
               class="px-3 py-2"
-              :name="m.name"
+              :name="modelDisplayName(m)"
               :source="modelSource(m)"
               :loaded="m.is_loaded"
               :host-labels="hostLabels(m)"
