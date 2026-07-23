@@ -17,7 +17,7 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
-import { modelDiskBytes, modelSizeLabels } from "../lib/models";
+import { modelDiskBytes, modelDisplayName, modelSizeLabels } from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
@@ -309,10 +309,12 @@ async function repairFromDrawer() {
   drawerRepairing.value = true;
   try {
     await startCatalogDownload(m.name, hostTarget() ?? undefined, h.kind === "remote");
-    toasts.push(`Repairing ${m.name} on ${h.label}`);
+    toasts.push(`Repairing ${modelDisplayName(m)} on ${h.label}`);
   } catch (err) {
     toasts.push(
-      err instanceof ApiError && err.status === 409 ? `${m.name} is already queued.` : String(err),
+      err instanceof ApiError && err.status === 409
+        ? `${modelDisplayName(m)} is already queued.`
+        : String(err),
       "error",
     );
   } finally {
@@ -687,7 +689,7 @@ async function forget() {
               <ul v-if="installedModels.length" class="divide-edge mt-2 divide-y">
                 <li v-for="m in installedModels" :key="m.name" data-test="model-row">
                   <ModelTableRow
-                    :name="m.name"
+                    :name="modelDisplayName(m)"
                     :source="modelSource(m)"
                     :loaded="m.is_loaded"
                     :family="m.family"

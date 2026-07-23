@@ -12,6 +12,7 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import { modelDisplayName } from "../lib/modelName";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
 import {
@@ -401,7 +402,7 @@ onBeforeUnmount(() => {
               class="md-models__row"
               data-test="model-row"
             >
-              <span class="md-models__name">{{ model.name }}</span>
+              <span class="md-models__name">{{ modelDisplayName(model) }}</span>
               <span
                 v-if="model.is_loaded"
                 class="md-models__loaded"

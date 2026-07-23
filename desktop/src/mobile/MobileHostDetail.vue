@@ -13,7 +13,7 @@ import type {
 import { formatGB, formatUptime, percent } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { unloadModel } from "../lib/api/models";
-import { modelSizeLabels } from "../lib/models";
+import { modelDisplayName, modelSizeLabels } from "../lib/models";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
 import type { QueueEntry } from "../stores/jobs";
 import { mobileHostTarget, type MobileHost } from "./hosts";
@@ -444,7 +444,7 @@ onBeforeUnmount(() => {
         <ul v-if="installed.length" class="mobile-data-list" data-test="host-detail-models">
           <li v-for="model in installed" :key="model.name">
             <div>
-              <strong>{{ model.name }}</strong>
+              <strong>{{ modelDisplayName(model) }}</strong>
               <span
                 >{{ model.family
                 }}<template v-if="modelSizeLabels(model).weights">

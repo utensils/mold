@@ -29,7 +29,7 @@ import {
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
-import { isUtilityModel } from "../lib/models";
+import { isCatalogModelId, isUtilityModel } from "../lib/models";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
 import type { CatalogEntry, DownloadJob, ModelComponentStatus, ModelEntry } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
@@ -205,7 +205,10 @@ function mediaMatches(entry: CatalogEntry): boolean {
 const filteredInstalled = computed(() => {
   const q = query.value.trim().toLowerCase();
   return installedEntries.value
-    .filter((entry) => !q || entry.name.toLowerCase().includes(q))
+    .filter(
+      (entry) =>
+        !q || entry.name.toLowerCase().includes(q) || entryTitle(entry).toLowerCase().includes(q),
+    )
     .filter((entry) => !family.value || entry.family === family.value)
     .filter(sourceMatches)
     .filter(mediaMatches);
@@ -290,6 +293,9 @@ const detailModel = computed(() => {
 const detailVariants = computed(() => {
   const entry = detailEntry.value;
   if (!entry) return [];
+  // Catalog ids (`cv:252914`) contain a colon that is part of the
+  // identifier, not a `base:tag` quant split — they have no variants.
+  if (isCatalogModelId(entry.id)) return [];
   const base = entry.name.split(":")[0]!;
   if (base === entry.name) return [];
   const siblings = (modelsByHost.value[props.selectedHostId] ?? [])
@@ -302,7 +308,13 @@ const detailVariants = computed(() => {
   return siblings.length > 1 ? siblings : [];
 });
 
+/** Human title for announce/toast text; ids stay `entry.name` in API calls. */
+function entryTitle(entry: MobileCatalogEntry): string {
+  return entry.display_name ?? entry.name;
+}
+
 function variantLabel(entry: MobileCatalogEntry): string {
+  if (isCatalogModelId(entry.id)) return entryTitle(entry);
   const base = entry.name.split(":")[0]!;
   return entry.name.slice(base.length + 1) || entry.name;
 }
@@ -430,6 +442,45 @@ function loadMore(): void {
   page.value += 1;
   void runSearch(false);
 }
+
+/** End-of-list sentinel: scrolling near it fetches the next page — the
+ *  old Load more button read as a dead end and (worse) looked broken
+ *  whenever upstream paging returned duplicate rows the dedup swallowed. */
+const sentinel = ref<HTMLElement | null>(null);
+const sentinelVisible = ref(false);
+/** Fetches chained since the last real intersection event — bounded like
+ *  the media-filter auto-fetch so a dedup-swallowed page can't loop. */
+let chainedFetches = 0;
+let sentinelObserver: IntersectionObserver | null = null;
+
+watch(sentinel, (el) => {
+  sentinelObserver?.disconnect();
+  sentinelObserver = null;
+  sentinelVisible.value = false;
+  if (!el) return;
+  sentinelObserver = new IntersectionObserver(
+    (hits) => {
+      for (const hit of hits) sentinelVisible.value = hit.isIntersecting;
+      if (sentinelVisible.value) {
+        chainedFetches = 0;
+        loadMore();
+      }
+    },
+    { rootMargin: "600px 0px" },
+  );
+  sentinelObserver.observe(el);
+});
+
+// A page that lands without pushing the sentinel out of view (dedup or the
+// media filter swallowed its rows) emits no new intersection event, so the
+// observer alone would stall. Chain the next fetch while the sentinel is
+// still visible, up to the auto-fetch bound.
+watch(loading, (isLoading) => {
+  if (isLoading || !sentinelVisible.value || !hasMore.value) return;
+  if (chainedFetches >= MAX_AUTO_PAGES) return;
+  chainedFetches += 1;
+  loadMore();
+});
 
 async function loadFamilies(): Promise<void> {
   const target = selectedTarget.value;
@@ -562,17 +613,17 @@ async function pullTo(entry: MobileCatalogEntry, host: MobileHost): Promise<void
   try {
     const result = await mobileDownloads.startPull(entry, host);
     if (result.kind === "conflict") {
-      announce(`${entry.name} is already queued on ${host.name}.`);
+      announce(`${entryTitle(entry)} is already queued on ${host.name}.`);
       return;
     }
     if (result.kind !== "started") return;
-    announce(`${catalogActionLabel(entry)}ing ${entry.name} on ${host.name}.`);
+    announce(`${catalogActionLabel(entry)}ing ${entryTitle(entry)} on ${host.name}.`);
   } catch (cause) {
     const alreadyQueued = cause instanceof ApiError && cause.status === 409;
     announce(
       alreadyQueued
-        ? `${entry.name} is already queued on ${host.name}.`
-        : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entry.name} on ${host.name}: ${errorMessage(cause, host.name)}`,
+        ? `${entryTitle(entry)} is already queued on ${host.name}.`
+        : `Could not ${catalogActionLabel(entry).toLowerCase()} ${entryTitle(entry)} on ${host.name}: ${errorMessage(cause, host.name)}`,
       !alreadyQueued,
     );
   }
@@ -660,12 +711,12 @@ async function changeLoadedState(load: boolean): Promise<void> {
   try {
     if (load) await loadModel(entry.name, mobileHostTarget(host));
     else await unloadModel(entry.name, mobileHostTarget(host));
-    announce(`${entry.name} ${load ? "loaded" : "unloaded"} on ${host.name}.`);
+    announce(`${entryTitle(entry)} ${load ? "loaded" : "unloaded"} on ${host.name}.`);
     emit("models-changed", host.id);
     await refreshModels();
   } catch (cause) {
     announce(
-      `Could not ${load ? "load" : "unload"} ${entry.name} on ${host.name}: ${errorMessage(cause, host.name)}`,
+      `Could not ${load ? "load" : "unload"} ${entryTitle(entry)} on ${host.name}: ${errorMessage(cause, host.name)}`,
       true,
     );
   } finally {
@@ -685,7 +736,9 @@ async function removeInstalled(): Promise<void> {
   detailBusy.value = "remove";
   try {
     const result = await removeModel(entry.name, mobileHostTarget(host));
-    announce(`Removed ${entry.name} from ${host.name}; freed ${formatGB(result.freed_bytes)}.`);
+    announce(
+      `Removed ${entryTitle(entry)} from ${host.name}; freed ${formatGB(result.freed_bytes)}.`,
+    );
     emit("models-changed", host.id);
     // The user may close this sheet and inspect another model while removal is
     // still in flight. Never let the old operation dismiss that new sheet.
@@ -696,8 +749,8 @@ async function removeInstalled(): Promise<void> {
     const onGpu = cause instanceof ApiError && cause.status === 409;
     announce(
       onGpu
-        ? `${entry.name} is on the GPU. Unload it first.`
-        : `Could not remove ${entry.name} from ${host.name}: ${errorMessage(cause, host.name)}`,
+        ? `${entryTitle(entry)} is on the GPU. Unload it first.`
+        : `Could not remove ${entryTitle(entry)} from ${host.name}: ${errorMessage(cause, host.name)}`,
       true,
     );
   } finally {
@@ -836,6 +889,7 @@ onBeforeUnmount(() => {
   ++modelsEpoch;
   ++detailEpoch;
   if (debounce) clearTimeout(debounce);
+  sentinelObserver?.disconnect();
   deactivateInteractions();
   mobileDownloads.unregisterConsumer(DOWNLOAD_CONSUMER_ID);
 });
@@ -1022,7 +1076,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="mobile-catalog-card-open"
-            :aria-label="`${entry.name} — view details`"
+            :aria-label="`${entry.display_name ?? entry.name} — view details`"
             @click="openDetail(entry)"
           >
             <span class="mobile-catalog-card-preview">
@@ -1036,7 +1090,7 @@ onBeforeUnmount(() => {
               <span v-else aria-hidden="true">{{ entry.family.slice(0, 3).toUpperCase() }}</span>
             </span>
             <span class="mobile-catalog-card-body">
-              <span class="mobile-catalog-card-title">{{ entry.name }}</span>
+              <span class="mobile-catalog-card-title">{{ entry.display_name ?? entry.name }}</span>
               <span class="mobile-catalog-card-meta">
                 {{ entry.author ? `${entry.author} · ` : "" }}{{ entry.family }}
                 <template v-if="entry.download_count">
@@ -1066,15 +1120,15 @@ onBeforeUnmount(() => {
         </li>
       </ul>
 
-      <button
+      <div
         v-if="source !== 'installed' && hasMore"
-        class="mobile-catalog-more secondary-button"
-        type="button"
-        :disabled="loading"
-        @click="loadMore"
+        ref="sentinel"
+        data-test="mobile-catalog-sentinel"
+        class="mobile-catalog-more"
+        aria-hidden="true"
       >
-        {{ loading ? "Loading…" : "Load more" }}
-      </button>
+        {{ loading ? "Loading…" : "" }}
+      </div>
     </template>
 
     <Teleport to="body">
@@ -1119,7 +1173,7 @@ onBeforeUnmount(() => {
             >
             <div class="mobile-catalog-detail-title">
               <div>
-                <h2>{{ mergedDetail.name }}</h2>
+                <h2>{{ mergedDetail.display_name ?? mergedDetail.name }}</h2>
                 <p v-if="mergedDetail.author">by {{ mergedDetail.author }}</p>
               </div>
               <span v-if="mergedDetail.installed">Installed</span>
@@ -1337,7 +1391,10 @@ onBeforeUnmount(() => {
           <header>
             <div>
               <h2 id="mobile-catalog-target-title">Choose a host</h2>
-              <p>{{ catalogActionLabel(targetEntry) }} {{ targetEntry.name }}</p>
+              <p>
+                {{ catalogActionLabel(targetEntry) }}
+                {{ targetEntry.display_name ?? targetEntry.name }}
+              </p>
             </div>
             <button
               ref="targetCloseButton"

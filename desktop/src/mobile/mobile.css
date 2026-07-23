@@ -2571,9 +2571,17 @@ button:disabled {
   opacity: 1;
 }
 
+/* Infinite-scroll sentinel at the end of the Discover list; shows the
+   in-flight label while the next page loads. */
 .mobile-catalog-more {
   width: 100%;
   margin-top: 14px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--ink-2);
 }
 
 .mobile-catalog-detail {

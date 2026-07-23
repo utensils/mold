@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { isGenerationModel, useModelStore } from "../../stores/models";
@@ -9,6 +9,7 @@ import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
+import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
 import CatalogTableRow from "./CatalogTableRow.vue";
@@ -87,7 +88,10 @@ const installedNames = computed(() => new Set((props.installedEntries ?? []).map
 const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })[]>(() => {
   const q = props.query.trim().toLowerCase();
   return (props.installedEntries ?? [])
-    .filter((m) => !q || m.name.toLowerCase().includes(q))
+    .filter(
+      (m) =>
+        !q || m.name.toLowerCase().includes(q) || modelDisplayName(m).toLowerCase().includes(q),
+    )
     .filter((m) => !family.value || m.family === family.value)
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
     .filter(
@@ -152,7 +156,9 @@ const combinedEntries = computed(() => {
   );
   const byId = new Map<string, CatalogEntry & { hostIds?: string[] }>();
   // Installed rows win the dedup — a live-catalog copy of an installed
-  // model must not appear untagged next to it.
+  // model must not appear untagged next to it. Names only: a human title
+  // is not unique enough to be a dedup key (two models can share one),
+  // and the exact same catalog version already collapses by id below.
   const installedByName = new Set(installedCatalogEntries.value.map((entry) => entry.name));
   for (const entry of [
     ...installedCatalogEntries.value,
@@ -177,7 +183,7 @@ const filteredEmptyMessage = computed(() => {
   if (type !== "all" && !combinedEntries.value.some(matchesMediaType)) {
     const noun = type === "video" ? "video" : "image";
     return hasMore.value
-      ? `No ${noun} models in these results yet — load more or show all media types.`
+      ? `No ${noun} models in these results yet — keep scrolling or show all media types.`
       : `No ${noun} models in these results.`;
   }
   return "Everything here is already installed.";
@@ -257,9 +263,53 @@ function scheduleSearch() {
 }
 
 function loadMore() {
+  if (loading.value || !hasMore.value) return;
   page.value += 1;
   void runSearch(false);
 }
+
+/** End-of-list sentinel: scrolling near it fetches the next page — the
+ *  old Load more button read as a dead end and (worse) looked broken
+ *  whenever upstream paging returned duplicate rows the dedup swallowed. */
+const sentinel = ref<HTMLElement | null>(null);
+const sentinelVisible = ref(false);
+/** Fetches chained since the last real intersection event — bounded like
+ *  the media-filter auto-fetch so a dedup-swallowed page can't loop. */
+let chainedFetches = 0;
+let observer: IntersectionObserver | null = null;
+
+watch(sentinel, (el) => {
+  observer?.disconnect();
+  observer = null;
+  sentinelVisible.value = false;
+  if (!el) return;
+  observer = new IntersectionObserver(
+    (hits) => {
+      for (const hit of hits) sentinelVisible.value = hit.isIntersecting;
+      if (sentinelVisible.value) {
+        chainedFetches = 0;
+        loadMore();
+      }
+    },
+    { rootMargin: "600px 0px" },
+  );
+  observer.observe(el);
+});
+
+// A page that lands without pushing the sentinel out of view (dedup or the
+// media filter swallowed its rows) emits no new intersection event, so the
+// observer alone would stall. Chain the next fetch while the sentinel is
+// still visible, up to the auto-fetch bound.
+watch(loading, (isLoading) => {
+  if (isLoading || !sentinelVisible.value || !hasMore.value) return;
+  if (chainedFetches >= MAX_AUTO_PAGES) return;
+  chainedFetches += 1;
+  loadMore();
+});
+
+onBeforeUnmount(() => {
+  observer?.disconnect();
+});
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
@@ -269,10 +319,10 @@ async function pullTo(entry: CatalogEntry, host: HostView | null) {
     // near-instant pull still produces a visible terminal event and refresh.
     await downloads.subscribe(host ?? undefined);
     await startCatalogDownload(entry.id, target, host ? host.kind === "remote" : false);
-    toasts.push(`Pulling ${entry.name}${host ? ` on ${host.label}` : ""}`);
+    toasts.push(`Pulling ${entry.display_name ?? entry.name}${host ? ` on ${host.label}` : ""}`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
-      toasts.push(`${entry.name} is already queued.`);
+      toasts.push(`${entry.display_name ?? entry.name} is already queued.`);
     } else {
       toasts.push(String(err), "error");
     }
@@ -300,6 +350,9 @@ const detailTarget = computed(() => catalogTarget());
  * no colon base and get no chips (their precedence is decided in the list).
  */
 function variantsFor(entry: CatalogEntry): DrawerVariant[] | undefined {
+  // Catalog ids (`cv:252914`) contain a colon that is part of the
+  // identifier, not a `base:tag` quant split — they have no variants.
+  if (isCatalogModelId(entry.id)) return undefined;
   const base = entry.name.split(":")[0]!;
   if (base === entry.name) return undefined;
   const siblings = models.all.filter((model) => model.name.split(":")[0] === base);
@@ -503,19 +556,19 @@ onMounted(async () => {
       </template>
     </div>
 
-    <button
+    <div
       v-if="hasMore"
-      type="button"
-      class="border-edge mx-auto h-8 rounded-control border px-4 text-body text-ink-2 hover:text-ink disabled:opacity-50"
-      :disabled="loading"
-      @click="loadMore"
+      ref="sentinel"
+      data-test="catalog-scroll-sentinel"
+      class="flex h-8 items-center justify-center text-caption text-ink-2"
+      aria-hidden="true"
     >
-      {{ loading ? "Loading…" : "Load more" }}
-    </button>
+      {{ loading ? "Loading…" : "" }}
+    </div>
 
     <DownloadTargetDialog
       v-if="pendingEntry"
-      :model-name="pendingEntry.name"
+      :model-name="pendingEntry.display_name ?? pendingEntry.name"
       :hosts="readyHosts"
       @close="pendingEntry = null"
       @select="(host) => pendingEntry && void pullTo(pendingEntry, host)"

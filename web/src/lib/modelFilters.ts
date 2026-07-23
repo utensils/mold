@@ -142,7 +142,13 @@ function activePredicates(
   const query = filters.query.trim().toLowerCase();
   if (query) {
     predicates.push((model) =>
-      [model.name, model.family, model.description, model.hf_repo]
+      [
+        model.name,
+        model.display_name ?? "",
+        model.family,
+        model.description,
+        model.hf_repo,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(query),

@@ -55,6 +55,7 @@ pub fn build_model_catalog(
             },
             disk_usage_bytes,
             remaining_download_bytes: Some(remaining_download_bytes),
+            display_name: None,
         });
     }
 
@@ -94,6 +95,7 @@ pub fn build_model_catalog(
             },
             disk_usage_bytes: Some(disk_usage_bytes),
             remaining_download_bytes: None,
+            display_name: None,
         });
     }
 
@@ -278,6 +280,7 @@ mod tests {
                 downloaded: false,
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
+                display_name: None,
             }
         }
 

@@ -880,6 +880,12 @@ pub struct ModelInfoExtended {
     pub disk_usage_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_download_bytes: Option<u64>,
+    /// Human-readable title for catalog-installed models whose `name` is
+    /// an opaque `cv:<id>` / `hf:<repo>` identifier (additive; absent for
+    /// manifest models, whose `name` is already readable). Display only —
+    /// every API call still addresses the model by `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 impl ModelInfoExtended {

@@ -6,6 +6,7 @@
  * testable (project test rule).
  */
 import { modelSource } from "./modelSource";
+import { modelDisplayName } from "./models";
 import type { CatalogEntry, ModelEntry } from "./api/types";
 
 /**
@@ -22,11 +23,15 @@ export function installedModelToEntry(m: ModelEntry): CatalogEntry {
   const catalogNamed = m.name.startsWith("cv:") || m.name.startsWith("hf:");
   const sourceId = catalogNamed ? m.name.slice(3) : m.hf_repo || null;
   const hfRepo = m.name.startsWith("hf:") ? m.name.slice(3) : m.hf_repo || null;
+  const displayName = modelDisplayName(m);
   return {
     id: m.name,
     source: modelSource(m),
     source_id: sourceId,
+    // `name` stays the raw identifier — load/unload/remove and dedup key
+    // off it. The human title rides along as additive `display_name`.
     name: m.name,
+    display_name: displayName !== m.name ? displayName : null,
     family: m.family,
     kind: "checkpoint",
     nsfw: false,

@@ -207,9 +207,74 @@ async fn live_search_returns_normalized_civitai_rows() {
     );
 }
 
+/// Two Flux LoRAs so page 2 with page_size 1 has a distinct row to
+/// return. Served for every request regardless of paging params —
+/// exactly how the real Civitai API behaves (`page=` is ignored;
+/// pagination is cursor-only), which is why the proxy must widen
+/// `limit=` to the full window and slice locally.
+const TWO_FLUX_LORA_FIXTURE: &str = r#"{
+    "items": [{
+        "id": 9001,
+        "name": "Live Flux LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "alice" },
+        "stats": { "downloadCount": 4242, "rating": 4.6, "favoriteCount": 1 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8001,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 1, "name": "x.safetensors", "sizeKB": 100,
+                "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/x.safetensors",
+                "hashes": { "SHA256": "deadbeef" }
+            }],
+            "images": []
+        }]
+    }, {
+        "id": 9002,
+        "name": "Second Flux LoRA",
+        "type": "LORA",
+        "nsfw": false,
+        "creator": { "username": "bob" },
+        "stats": { "downloadCount": 41, "rating": 4.0, "favoriteCount": 1 },
+        "tags": [],
+        "modelVersions": [{
+            "id": 8002,
+            "name": "v1",
+            "baseModel": "Flux.1 D",
+            "baseModelType": "Standard",
+            "trainedWords": [],
+            "files": [{
+                "id": 2, "name": "y.safetensors", "sizeKB": 100,
+                "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                "downloadUrl": "https://civitai.example/y.safetensors",
+                "hashes": { "SHA256": "cafef00d" }
+            }],
+            "images": []
+        }]
+    }],
+    "metadata": { "totalPages": 37, "totalItems": 37, "currentPage": 1 }
+}"#;
+
 #[tokio::test]
 async fn live_search_honors_page_size_and_reports_the_upstream_total() {
-    let (state, server, _tmp) = build_state().await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(TWO_FLUX_LORA_FIXTURE))
+        .mount(&server)
+        .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
     let router = create_router(state);
 
     let (status, body) = get(
@@ -222,7 +287,12 @@ async fn live_search_honors_page_size_and_reports_the_upstream_total() {
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(parsed["page"], 2);
     assert_eq!(parsed["page_size"], 1);
-    assert_eq!(parsed["entries"].as_array().expect("entries").len(), 1);
+    let entries = parsed["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["id"], "cv:8002",
+        "page 2 must surface the next row, not repeat page 1"
+    );
     assert_eq!(
         parsed["total"], 37,
         "total must describe the complete filtered feed, not this page"
@@ -234,8 +304,15 @@ async fn live_search_honors_page_size_and_reports_the_upstream_total() {
         .url
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
-    assert_eq!(query.get("page").map(|value| value.as_ref()), Some("2"));
-    assert_eq!(query.get("limit").map(|value| value.as_ref()), Some("1"));
+    assert!(
+        !query.contains_key("page"),
+        "page= is ignored by Civitai and must not be sent"
+    );
+    assert_eq!(
+        query.get("limit").map(|value| value.as_ref()),
+        Some("2"),
+        "limit must cover the whole page window"
+    );
 }
 
 /// `?sort=` must be validated, not silently ignored — silent ignoring is
@@ -532,6 +609,61 @@ async fn live_search_marks_installed_when_sidecar_and_file_present() {
         .as_str()
         .unwrap()
         .ends_with("cv-8001/x.safetensors"));
+}
+
+/// `/api/models` rows for installed catalog checkpoints must carry the
+/// sidecar's human-readable title as an additive `display_name`, so UIs
+/// can stop rendering opaque `cv:<id>` slugs. Manifest rows stay
+/// untouched — no `display_name` key at all.
+#[tokio::test]
+async fn list_models_carries_display_name_for_catalog_rows() {
+    let (state, _server, tmp) = build_state().await;
+
+    let ckpt_dir = tmp.path().join("cv-1759168");
+    std::fs::create_dir_all(&ckpt_dir).unwrap();
+    let sidecar = CatalogSidecar {
+        schema: 1,
+        id: "cv:1759168".into(),
+        source: "civitai".into(),
+        source_id: "1759168".into(),
+        name: "Juggernaut XL - Ragnarok".into(),
+        author: Some("KandooAI".into()),
+        family: "sdxl".into(),
+        family_role: "finetune".into(),
+        sub_family: None,
+        kind: "checkpoint".into(),
+        modality: "image".into(),
+        thumbnail_url: None,
+        // Must match the fixture file's real size or the partial-download
+        // guard in `primary_path_if_present` hides the row.
+        size_bytes: Some(1),
+        engine_phase: 3,
+        trained_words: vec![],
+        primary_filename_rel: "juggernaut.safetensors".into(),
+        written_at: 0,
+    };
+    write_sidecar(&ckpt_dir.join(SIDECAR_FILENAME), &sidecar).unwrap();
+    std::fs::write(ckpt_dir.join("juggernaut.safetensors"), b"x").unwrap();
+
+    let router = create_router(state);
+    let (status, body) = get(router, "/api/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let models: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+
+    let row = models
+        .iter()
+        .find(|m| m["name"] == "cv:1759168")
+        .expect("installed catalog checkpoint listed");
+    assert_eq!(row["display_name"], "Juggernaut XL - Ragnarok");
+
+    let manifest_row = models
+        .iter()
+        .find(|m| m["name"].as_str().is_some_and(|n| !n.starts_with("cv:")))
+        .expect("manifest rows present");
+    assert!(
+        manifest_row.get("display_name").is_none(),
+        "manifest rows must not grow a display_name key"
+    );
 }
 
 #[tokio::test]

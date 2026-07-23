@@ -102,6 +102,10 @@ export interface ModelEntry {
   downloaded: boolean;
   disk_usage_bytes?: number | null;
   remaining_download_bytes?: number | null;
+  /** Human-readable title for catalog installs whose `name` is an opaque
+   * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
+   * and on manifest models. Display only: every API call keeps `name`. */
+  display_name?: string | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────
@@ -525,6 +529,10 @@ export interface CatalogEntry {
   /** Upstream id without the `hf:`/`cv:` prefix — the HF repo id or Civitai version id. */
   source_id?: string | null;
   name: string;
+  /** Human-readable title when `name` is an opaque catalog id (installed
+   * `cv:`/`hf:` rows). Client-side only today — render `display_name ??
+   * name`, but keep every id/equality/API use on `name`. */
+  display_name?: string | null;
   author?: string | null;
   family: string;
   kind: string;

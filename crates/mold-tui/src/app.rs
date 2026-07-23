@@ -10030,6 +10030,7 @@ mod tests {
             downloaded: true,
             disk_usage_bytes: None,
             remaining_download_bytes: None,
+            display_name: None,
         }
     }
 
@@ -11673,6 +11674,7 @@ mod tests {
             downloaded,
             disk_usage_bytes: None,
             remaining_download_bytes: None,
+            display_name: None,
         }
     }
 

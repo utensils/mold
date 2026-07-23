@@ -68,7 +68,7 @@ const counts = computed(() => {
 
 <template>
   <ModelTableRow
-    :name="entry.name"
+    :name="entry.display_name ?? entry.name"
     :source="glyphSource"
     :family="entry.family"
     :host-labels="hosts ?? []"

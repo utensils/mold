@@ -11,6 +11,7 @@ import { computed } from "vue";
 import { RouterLink } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
+import { modelDisplayName } from "../../lib/modelName";
 
 const props = defineProps<{
   models: ModelInfoExtended[];
@@ -72,7 +73,7 @@ function onChange(event: Event) {
         :label="group.family"
       >
         <option v-for="m in group.list" :key="m.name" :value="m.name">
-          {{ m.name }}
+          {{ modelDisplayName(m) }}
         </option>
       </optgroup>
     </select>

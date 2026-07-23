@@ -17,6 +17,7 @@ import {
   mergeInstalledModels,
 } from "../../lib/generateModels";
 import { modelAvailabilityTag, normalizeTargetHost } from "../../lib/hosts";
+import { modelDisplayName } from "../../lib/models";
 import { modelSource } from "../../lib/modelSource";
 import { generationCapabilitiesForFamily } from "../../lib/capabilities";
 import { advancedActiveCount } from "../../lib/advancedCount";
@@ -231,7 +232,7 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
             @click="pickerOpen = !pickerOpen"
           >
             <span data-test="selected-model-name" class="min-w-0 break-all text-left">{{
-              selectedModel?.name ?? "Choose a model"
+              selectedModel ? modelDisplayName(selectedModel) : "Choose a model"
             }}</span>
             <span v-if="selectedModel?.disk_usage_bytes" class="data-mono ms-model__size">
               {{ formatGB(selectedModel.disk_usage_bytes) }}
@@ -252,9 +253,9 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
                   <span
                     data-test="model-option-name"
                     class="block break-all text-ink"
-                    :title="m.name"
+                    :title="modelDisplayName(m)"
                   >
-                    {{ m.name }}
+                    {{ modelDisplayName(m) }}
                   </span>
                   <span
                     v-if="availabilityTag(m)"

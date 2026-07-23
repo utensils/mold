@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupInstalledModels, modelSizeLabels, quantTag } from "./models";
+import { groupInstalledModels, modelDisplayName, modelSizeLabels, quantTag } from "./models";
 import type { ModelEntry } from "./api/types";
 
 function model(
@@ -30,6 +30,11 @@ describe("quantTag", () => {
     expect(quantTag("flux-dev:q8")).toBe("q8");
     expect(quantTag("sdxl:fp16")).toBe("fp16");
     expect(quantTag("real-esrgan-x4plus")).toBeNull();
+  });
+
+  it("returns null for opaque catalog ids — cv:252914 has no quant variant", () => {
+    expect(quantTag("cv:252914")).toBeNull();
+    expect(quantTag("hf:org/repo")).toBeNull();
   });
 });
 
@@ -75,5 +80,29 @@ describe("modelSizeLabels", () => {
       weights: "3.2 GB weights",
       runtime: null,
     });
+  });
+});
+
+describe("modelDisplayName", () => {
+  const base = model("cv:1759168", "sdxl", 6_900_000_000);
+
+  it("prefers the server's display_name", () => {
+    expect(modelDisplayName({ ...base, display_name: "Juggernaut XL - Ragnarok" })).toBe(
+      "Juggernaut XL - Ragnarok",
+    );
+  });
+
+  it("falls back to the description for catalog ids on older servers", () => {
+    expect(modelDisplayName({ ...base, description: "Juggernaut XL - Ragnarok by KandooAI" })).toBe(
+      "Juggernaut XL - Ragnarok by KandooAI",
+    );
+  });
+
+  it("keeps the raw name for catalog ids with no readable metadata", () => {
+    expect(modelDisplayName({ ...base, description: "" })).toBe("cv:1759168");
+  });
+
+  it("never swaps manifest names for their marketing description", () => {
+    expect(modelDisplayName(model("flux-dev:q8", "flux", 1))).toBe("flux-dev:q8");
   });
 });

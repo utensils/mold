@@ -13,6 +13,7 @@ import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
 import { useCatalog } from "../../composables/useCatalog";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
+import { modelDisplayName } from "../../lib/modelName";
 import { requestConfirm, toast } from "../../lib/toasts";
 import type {
   CatalogEntryWire,
@@ -120,7 +121,9 @@ const mediaLabel = computed(() => {
 });
 
 const name = computed(
-  () => entry.value?.name ?? installedModel.value?.name ?? "",
+  () =>
+    entry.value?.name ??
+    (installedModel.value ? modelDisplayName(installedModel.value) : ""),
 );
 
 const family = computed(
@@ -324,7 +327,7 @@ async function handleDelete() {
   const modelName = m.name;
   const ok = await requestConfirm({
     title: "Delete model?",
-    body: `Remove ${modelName} and its files from disk. Shared components used by other models are kept.`,
+    body: `Remove ${modelDisplayName(m)} and its files from disk. Shared components used by other models are kept.`,
     confirmLabel: "Delete",
     danger: true,
   });

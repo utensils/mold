@@ -8,6 +8,7 @@
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
+import { modelDisplayName } from "../../lib/modelName";
 import { formatGB } from "../../util/format";
 
 const props = defineProps<{ model: ModelInfoExtended }>();
@@ -26,7 +27,7 @@ const emit = defineEmits<{ open: [] }>();
     </span>
     <span class="row__body">
       <span class="row__head">
-        <span class="row__name">{{ props.model.name }}</span>
+        <span class="row__name">{{ modelDisplayName(props.model) }}</span>
         <BadgePill
           v-if="props.model.is_loaded"
           tone="accent"

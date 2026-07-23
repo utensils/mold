@@ -97,7 +97,7 @@ function onCardKeydown(event: KeyboardEvent): void {
     tabindex="0"
     data-test="catalog-card"
     data-layout="grid"
-    :aria-label="`${entry.name} — view details`"
+    :aria-label="`${entry.display_name ?? entry.name} — view details`"
     @click="emit('open', entry)"
     @keydown.enter="onCardKeydown"
     @keydown.space="onCardKeydown"
@@ -129,11 +129,11 @@ function onCardKeydown(event: KeyboardEvent): void {
           <button
             type="button"
             class="truncate text-left text-body text-ink transition-colors duration-100 hover:text-safelight"
-            :title="`${entry.name} — view details`"
+            :title="`${entry.display_name ?? entry.name} — view details`"
             data-test="card-title"
             @click.stop="emit('open', entry)"
           >
-            {{ entry.name }}
+            {{ entry.display_name ?? entry.name }}
           </button>
         </span>
         <span class="flex shrink-0 items-center gap-1.5">
@@ -141,7 +141,7 @@ function onCardKeydown(event: KeyboardEvent): void {
             v-if="pageUrl"
             type="button"
             class="text-ink-3 transition-colors duration-100 hover:text-ink"
-            :aria-label="`Open ${entry.name} model page`"
+            :aria-label="`Open ${entry.display_name ?? entry.name} model page`"
             title="Open model page"
             data-test="page-link"
             @click.stop="openPage"
