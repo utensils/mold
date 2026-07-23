@@ -1,5 +1,6 @@
 export interface DisplayableModel {
   name: string;
+  display_name?: string | null;
   description?: string | null;
 }
 
@@ -9,6 +10,8 @@ export interface DisplayableModel {
  * labels so people see the actual model name.
  */
 export function modelDisplayName(model: DisplayableModel): string {
+  const displayName = model.display_name?.trim();
+  if (displayName) return displayName;
   if (model.name.startsWith("cv:") || model.name.startsWith("hf:")) {
     const description = model.description?.trim();
     if (description) return description;

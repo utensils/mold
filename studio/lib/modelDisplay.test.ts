@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { modelDisplayName } from "./modelDisplay";
 
 describe("modelDisplayName", () => {
+  it("prefers the server-provided display name", () => {
+    expect(
+      modelDisplayName({
+        name: "cv:23423432",
+        display_name: "Juggernaut XL - Ragnarok",
+        description: "Older fallback title",
+      }),
+    ).toBe("Juggernaut XL - Ragnarok");
+  });
+
   it("uses the human-readable catalog description instead of a Civitai id", () => {
     expect(
       modelDisplayName({

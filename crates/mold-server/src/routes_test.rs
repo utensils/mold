@@ -5746,6 +5746,10 @@ mod tests {
         let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(limits["model"], "cv:3143864");
         assert_eq!(limits["frames_per_clip_cap"], 97);
+        assert_eq!(
+            limits["supports_audio"], false,
+            "chain limits must preserve the checkpoint-specific audio capability",
+        );
     }
 
     #[tokio::test]

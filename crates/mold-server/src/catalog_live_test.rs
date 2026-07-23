@@ -637,7 +637,7 @@ async fn list_models_carries_display_name_for_catalog_rows() {
         // Must match the fixture file's real size or the partial-download
         // guard in `primary_path_if_present` hides the row.
         size_bytes: Some(1),
-        engine_phase: 3,
+        supported: true,
         trained_words: vec![],
         primary_filename_rel: "juggernaut.safetensors".into(),
         written_at: 0,
