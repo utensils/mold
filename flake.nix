@@ -302,7 +302,11 @@
               while IFS= read -r -d $'\0' candidate; do
                 needed="$(patchelf --print-needed "$candidate" 2>/dev/null)" || continue
                 if printf '%s\n' "$needed" | grep -Fxq libcuda.so.1; then
-                  patchelf --add-rpath /run/opengl-driver/lib "$candidate"
+                  rpath="$(patchelf --print-rpath "$candidate")"
+                  case ":$rpath:" in
+                    *":/run/opengl-driver/lib:"*) ;;
+                    *) patchelf --add-rpath /run/opengl-driver/lib "$candidate" ;;
+                  esac
                 fi
               done < <(find "$root" -type f -print0)
             }
@@ -325,7 +329,7 @@
                 fi
               done < <(find "$root" -type f -print0)
               if [ "$cuda_consumers" -eq 0 ]; then
-                echo "desktop runtime closure contains no libcuda.so.1 consumer" >&2
+                echo "no libcuda.so.1 consumer found under $root" >&2
                 return 1
               fi
             }
