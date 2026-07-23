@@ -296,6 +296,63 @@
             '';
           };
 
+          desktopDriverRunpathScript = ''
+            fixupDesktopDriverRunpath() {
+              local root="$1"
+              while IFS= read -r -d $'\0' candidate; do
+                needed="$(patchelf --print-needed "$candidate" 2>/dev/null)" || continue
+                if printf '%s\n' "$needed" | grep -Fxq libcuda.so.1; then
+                  rpath="$(patchelf --print-rpath "$candidate")"
+                  case ":$rpath:" in
+                    *":/run/opengl-driver/lib:"*) ;;
+                    *) patchelf --add-rpath /run/opengl-driver/lib "$candidate" ;;
+                  esac
+                fi
+              done < <(find "$root" -type f -print0)
+            }
+
+            assertDesktopDriverRunpath() {
+              local root="$1"
+              local cuda_consumers=0
+              while IFS= read -r -d $'\0' candidate; do
+                needed="$(patchelf --print-needed "$candidate" 2>/dev/null)" || continue
+                if printf '%s\n' "$needed" | grep -Fxq libcuda.so.1; then
+                  cuda_consumers=$((cuda_consumers + 1))
+                  rpath="$(patchelf --print-rpath "$candidate")"
+                  case ":$rpath:" in
+                    *":/run/opengl-driver/lib:"*) ;;
+                    *)
+                      echo "CUDA consumer is missing the NVIDIA driver RUNPATH: $candidate" >&2
+                      return 1
+                      ;;
+                  esac
+                fi
+              done < <(find "$root" -type f -print0)
+              if [ "$cuda_consumers" -eq 0 ]; then
+                echo "no libcuda.so.1 consumer found under $root" >&2
+                return 1
+              fi
+            }
+          '';
+
+          # This hook is deliberately listed after autoPatchelfHook and
+          # wrapGAppsHook3. autoPatchelf replaces RUNPATHs and wrapGApps renames
+          # the real executable, so the driver path must be added after both.
+          desktopDriverRunpathHook = pkgs.writeTextFile {
+            name = "mold-desktop-driver-runpath-hook";
+            destination = "/nix-support/setup-hook";
+            text = ''
+              ${desktopDriverRunpathScript}
+
+              fixupAndAssertDesktopDriverRunpath() {
+                fixupDesktopDriverRunpath "$out"
+                assertDesktopDriverRunpath "$out"
+              }
+
+              postFixupHooks+=(fixupAndAssertDesktopDriverRunpath)
+            '';
+          };
+
           # Merged CUDA toolkit so bindgen_cuda can find both bin/nvcc and include/cuda.h
           cudaToolkit = pkgs.symlinkJoin {
             name = "cuda-toolkit-merged";
@@ -441,6 +498,7 @@
                 pkgs.cudaPackages.cuda_nvcc
                 pkgs.lld
                 pkgs.wrapGAppsHook3
+                desktopDriverRunpathHook
               ];
               buildInputs = [
                 pkgs.openssl
@@ -485,29 +543,25 @@
               # A signed/notarized bundle must not load /nix/store dylibs
               # (dyld Team-ID rejection); libiconv links in via stdenv — point
               # it at the system copy and re-sign ad hoc.
-              postFixup =
-                lib.optionalString isDarwin ''
-                  app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
-                  if [ -f "$app_bin" ]; then
-                    for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
-                      | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
-                      ${pkgs.darwin.cctools}/bin/install_name_tool \
-                        -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
-                    done
-                    # install_name_tool invalidates the ad-hoc signature; re-sign
-                    # with the sigtool codesign shim (sandbox has no Apple codesign).
-                    ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
-                    # tail +2: otool's header line is the binary's own store path.
-                    if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
-                      echo "mold-desktop still references /nix/store dylibs:" >&2
-                      ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
-                      exit 1
-                    fi
+              postFixup = lib.optionalString isDarwin ''
+                app_bin="$out/Applications/Mold.app/Contents/MacOS/mold-desktop"
+                if [ -f "$app_bin" ]; then
+                  for ref in $(${pkgs.darwin.cctools}/bin/otool -L "$app_bin" \
+                    | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
+                    ${pkgs.darwin.cctools}/bin/install_name_tool \
+                      -change "$ref" /usr/lib/libiconv.2.dylib "$app_bin"
+                  done
+                  # install_name_tool invalidates the ad-hoc signature; re-sign
+                  # with the sigtool codesign shim (sandbox has no Apple codesign).
+                  ${pkgs.darwin.sigtool}/bin/codesign -f -s - "$app_bin"
+                  # tail +2: otool's header line is the binary's own store path.
+                  if ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" | tail -n +2 | grep -q "/nix/store"; then
+                    echo "mold-desktop still references /nix/store dylibs:" >&2
+                    ${pkgs.darwin.cctools}/bin/otool -L "$app_bin" >&2
+                    exit 1
                   fi
-                ''
-                + lib.optionalString isLinux ''
-                  patchelf --add-rpath /run/opengl-driver/lib "$out/bin/mold-desktop"
-                '';
+                fi
+              '';
 
               meta = with lib; {
                 description = "Mold — native desktop app for local AI image/video generation";
@@ -699,6 +753,10 @@
                   exit 1
                 fi
               done
+
+              ${desktopDriverRunpathScript}
+              assertDesktopDriverRunpath ${mold-desktop}
+
               touch "$out"
             '';
           };
