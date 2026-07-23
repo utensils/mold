@@ -256,6 +256,16 @@ On server startup the DB runs an asynchronous reconciliation pass:
   etc.) get pruned
 - size/mtime changes trigger a row refresh
 
+At each open, mold runs SQLite's `quick_check`. If SQLite reports a corrupt or
+non-database file at startup—or an indexed gallery query discovers corruption
+later—mold serializes recovery across local mold processes, copies the database and
+any WAL/SHM sidecars to `mold.db.corrupt-<timestamp>*`, replaces the live schema
+through SQLite's coordinated online-backup API, and rebuilds gallery rows from
+the files in `MOLD_OUTPUT_DIR`. The quarantined files remain available
+for manual inspection or salvage. Because the same database also contains user
+preferences and prompt history, those values reset unless they are manually
+recovered from the quarantined copy.
+
 Set `MOLD_DB_DISABLE=1` to opt out — both surfaces fall back to the
 filesystem walk + embedded-metadata behavior from before. The NixOS
 module exposes the same toggle:
