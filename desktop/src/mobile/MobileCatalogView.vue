@@ -431,6 +431,25 @@ function loadMore(): void {
   void runSearch(false);
 }
 
+/** End-of-list sentinel: scrolling near it fetches the next page — the
+ *  old Load more button read as a dead end and (worse) looked broken
+ *  whenever upstream paging returned duplicate rows the dedup swallowed. */
+const sentinel = ref<HTMLElement | null>(null);
+let sentinelObserver: IntersectionObserver | null = null;
+
+watch(sentinel, (el) => {
+  sentinelObserver?.disconnect();
+  sentinelObserver = null;
+  if (!el) return;
+  sentinelObserver = new IntersectionObserver(
+    (hits) => {
+      if (hits.some((hit) => hit.isIntersecting)) loadMore();
+    },
+    { rootMargin: "600px 0px" },
+  );
+  sentinelObserver.observe(el);
+});
+
 async function loadFamilies(): Promise<void> {
   const target = selectedTarget.value;
   const epoch = ++familyEpoch;
@@ -836,6 +855,7 @@ onBeforeUnmount(() => {
   ++modelsEpoch;
   ++detailEpoch;
   if (debounce) clearTimeout(debounce);
+  sentinelObserver?.disconnect();
   deactivateInteractions();
   mobileDownloads.unregisterConsumer(DOWNLOAD_CONSUMER_ID);
 });
@@ -1066,15 +1086,15 @@ onBeforeUnmount(() => {
         </li>
       </ul>
 
-      <button
+      <div
         v-if="source !== 'installed' && hasMore"
-        class="mobile-catalog-more secondary-button"
-        type="button"
-        :disabled="loading"
-        @click="loadMore"
+        ref="sentinel"
+        data-test="mobile-catalog-sentinel"
+        class="mobile-catalog-more"
+        aria-hidden="true"
       >
-        {{ loading ? "Loading…" : "Load more" }}
-      </button>
+        {{ loading ? "Loading…" : "" }}
+      </div>
     </template>
 
     <Teleport to="body">

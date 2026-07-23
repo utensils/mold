@@ -134,6 +134,32 @@ function searchResponse(entries: CatalogEntry[]): CatalogSearchResponse {
   return { entries, page: 1, page_size: 24, total: entries.length };
 }
 
+/** Records instances so tests can walk the end-of-list sentinel into view. */
+class FakeIntersectionObserver {
+  static instances: FakeIntersectionObserver[] = [];
+  targets: Element[] = [];
+  constructor(private callback: IntersectionObserverCallback) {
+    FakeIntersectionObserver.instances.push(this);
+  }
+  observe(el: Element) {
+    this.targets.push(el);
+  }
+  disconnect() {
+    this.targets = [];
+  }
+  intersect() {
+    this.callback(
+      this.targets.map((target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry),
+      this as unknown as IntersectionObserver,
+    );
+  }
+}
+
+/** Fires "sentinel scrolled into view" on every live observer. */
+function scrollToSentinel() {
+  for (const observer of FakeIntersectionObserver.instances) observer.intersect();
+}
+
 function jsonResponse<T>(value: T): Response {
   return { json: () => Promise.resolve(value) } as Response;
 }
@@ -171,6 +197,9 @@ function mountCatalog(
 beforeEach(() => {
   streams.length = 0;
   vi.clearAllMocks();
+  FakeIntersectionObserver.instances = [];
+  (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver =
+    FakeIntersectionObserver;
   fetchCatalogFamilies.mockResolvedValue(["flux", "ltx2"]);
   fetchCatalogDetail.mockImplementation((id: string) =>
     Promise.resolve({ ...entry("detail"), id, name: "Catalog model", description: "Full detail" }),
@@ -223,10 +252,40 @@ afterEach(() => {
   wrapper?.unmount();
   wrapper = null;
   document.body.innerHTML = "";
+  delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
   vi.useRealTimers();
 });
 
 describe("MobileCatalogView", () => {
+  it("loads the next page when the end-of-list sentinel scrolls into view", async () => {
+    const fullPage = (page: number) =>
+      Array.from({ length: 24 }, (_, i) => entry(`catalog-${page}-${i}`));
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: fullPage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: 24,
+        total: 10_000,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    expect(searchCatalog.mock.calls.length).toBe(1);
+    expect(wrapper.find("[data-test='mobile-catalog-sentinel']").exists()).toBe(true);
+    // No manual pagination button remains.
+    expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(false);
+
+    scrollToSentinel();
+    // Re-firing while the page is already loading must not double-fetch.
+    scrollToSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as { page?: number }).page);
+    expect(pages).toEqual([1, 2]);
+    expect(wrapper.text()).toContain("catalog-2-0");
+  });
+
   it("repoints the detail pull to the selected manifest variant", async () => {
     searchCatalog.mockResolvedValue(searchResponse([]));
     apiFetchTo.mockImplementation((_target: ApiTarget, path: string) => {

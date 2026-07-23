@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import type { CatalogEntry } from "../../lib/api/types";
@@ -25,6 +25,32 @@ import { useHostsStore } from "../../stores/hosts";
 import { useModelStore } from "../../stores/models";
 
 const PAGE_SIZE = 24;
+
+/** Records instances so tests can walk the sentinel into view. */
+class FakeIntersectionObserver {
+  static instances: FakeIntersectionObserver[] = [];
+  targets: Element[] = [];
+  constructor(private callback: IntersectionObserverCallback) {
+    FakeIntersectionObserver.instances.push(this);
+  }
+  observe(el: Element) {
+    this.targets.push(el);
+  }
+  disconnect() {
+    this.targets = [];
+  }
+  intersect() {
+    this.callback(
+      this.targets.map((target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry),
+      this as unknown as IntersectionObserver,
+    );
+  }
+}
+
+/** Fires "sentinel scrolled into view" on every live observer. */
+function scrollToSentinel() {
+  for (const observer of FakeIntersectionObserver.instances) observer.intersect();
+}
 
 function entry(name: string, family: string): CatalogEntry {
   return {
@@ -59,8 +85,15 @@ async function mountTab(mediaType: "all" | "image" | "video" = "all") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  FakeIntersectionObserver.instances = [];
+  (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver =
+    FakeIntersectionObserver;
   fetchCatalogFamilies.mockResolvedValue([]);
   searchCatalog.mockResolvedValue({ entries: [], page: 1, page_size: PAGE_SIZE, total: 0 });
+});
+
+afterEach(() => {
+  delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
 });
 
 describe("CatalogTab media filter under pagination", () => {
@@ -188,8 +221,8 @@ describe("CatalogTab media filter under pagination", () => {
 
     const empty = wrapper.get("[data-test='catalog-empty']");
     expect(empty.text()).toContain("No video models");
-    // Results are exhausted — no dangling Load more button.
-    expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(false);
+    // Results are exhausted — no dangling infinite-scroll sentinel.
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(false);
   });
 
   it("offers a clear-filter affordance that emits clear-media-filter", async () => {
@@ -206,7 +239,7 @@ describe("CatalogTab media filter under pagination", () => {
     expect(wrapper.emitted("clear-media-filter")).toHaveLength(1);
   });
 
-  it("bounds the auto-fetch and keeps Load more available for further pages", async () => {
+  it("bounds the auto-fetch and keeps the scroll sentinel for further pages", async () => {
     // Every page is a full page of image models — the loop must stop at its
     // bound instead of walking the whole catalog.
     searchCatalog.mockImplementation((params: CatalogSearchParams) =>
@@ -221,8 +254,34 @@ describe("CatalogTab media filter under pagination", () => {
 
     expect(searchCatalog.mock.calls.length).toBeLessThanOrEqual(5);
     expect(wrapper.get("[data-test='catalog-empty']").text()).toContain("No video models");
-    // More pages exist — the user can keep digging manually.
-    expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(true);
+    // More pages exist — scrolling keeps digging.
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
+  });
+
+  it("loads the next page when the end-of-list sentinel scrolls into view", async () => {
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: PAGE_SIZE,
+        total: 10_000,
+      }),
+    );
+    const wrapper = await mountTab("all");
+    expect(searchCatalog.mock.calls.length).toBe(1);
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
+
+    scrollToSentinel();
+    // Re-firing while the page is already loading must not double-fetch.
+    scrollToSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as CatalogSearchParams).page);
+    expect(pages).toEqual([1, 2]);
+    expect(wrapper.text()).toContain("image-2-0");
+
+    // No manual pagination button remains.
+    expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(false);
   });
 
   it("keys the empty state on the filtered list, not the raw page", async () => {

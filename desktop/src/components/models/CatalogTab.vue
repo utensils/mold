@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { isGenerationModel, useModelStore } from "../../stores/models";
@@ -177,7 +177,7 @@ const filteredEmptyMessage = computed(() => {
   if (type !== "all" && !combinedEntries.value.some(matchesMediaType)) {
     const noun = type === "video" ? "video" : "image";
     return hasMore.value
-      ? `No ${noun} models in these results yet — load more or show all media types.`
+      ? `No ${noun} models in these results yet — keep scrolling or show all media types.`
       : `No ${noun} models in these results.`;
   }
   return "Everything here is already installed.";
@@ -257,9 +257,33 @@ function scheduleSearch() {
 }
 
 function loadMore() {
+  if (loading.value || !hasMore.value) return;
   page.value += 1;
   void runSearch(false);
 }
+
+/** End-of-list sentinel: scrolling near it fetches the next page — the
+ *  old Load more button read as a dead end and (worse) looked broken
+ *  whenever upstream paging returned duplicate rows the dedup swallowed. */
+const sentinel = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+watch(sentinel, (el) => {
+  observer?.disconnect();
+  observer = null;
+  if (!el) return;
+  observer = new IntersectionObserver(
+    (hits) => {
+      if (hits.some((hit) => hit.isIntersecting)) loadMore();
+    },
+    { rootMargin: "600px 0px" },
+  );
+  observer.observe(el);
+});
+
+onBeforeUnmount(() => {
+  observer?.disconnect();
+});
 
 async function pullTo(entry: CatalogEntry, host: HostView | null) {
   pulling.value.add(entry.id);
@@ -503,15 +527,15 @@ onMounted(async () => {
       </template>
     </div>
 
-    <button
+    <div
       v-if="hasMore"
-      type="button"
-      class="border-edge mx-auto h-8 rounded-control border px-4 text-body text-ink-2 hover:text-ink disabled:opacity-50"
-      :disabled="loading"
-      @click="loadMore"
+      ref="sentinel"
+      data-test="catalog-scroll-sentinel"
+      class="flex h-8 items-center justify-center text-caption text-ink-2"
+      aria-hidden="true"
     >
-      {{ loading ? "Loading…" : "Load more" }}
-    </button>
+      {{ loading ? "Loading…" : "" }}
+    </div>
 
     <DownloadTargetDialog
       v-if="pendingEntry"
