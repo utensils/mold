@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live latent previews now develop on the web and iPhone Create canvases**, matching the desktop: during denoising the server's `preview` SSE frames render under the shared Develop grain, the blur tightening and the grain thinning as the print forms, with the develop bed adopting the submitted print's aspect ratio. Web keeps the progress ring + stage line until the first preview arrives and drops the preview the moment a job settles (nothing heavy is ever persisted); the iPhone bed appears above the existing status line only while a preview exists, so WebKit does no extra compositing during model load.
+- **Web Create's seed section gains desktop's "lock last (seed)" affordance**: while the seed is Random, one click pins the most recent finished print's seed as a Fixed seed — the value survives reloads via the persisted job metadata.
+
 - **iPhone model details now expose runnable quantization variants.** Variant chips are derived from the selected host's manifest siblings, show each checkpoint size, and repoint Pull to the exact selected `base:tag` without bypassing the existing duplicate-safe download lifecycle.
 - **Desktop Create shows live RunPod spend beside an active pod-routed print.** The activity strip joins the job's snapshotted host URL to a running pod, then reuses the shared accrued-cost meter for a compact current-total and hourly-rate chip; local and ordinary remote jobs remain unchanged.
 - **Metadata-DB reads no longer silently miss under concurrent access.** Connections now set a 5-second SQLite busy timeout; previously a reader that landed on another process's write lock or checkpoint (running the TUI beside `mold serve`, both sharing `mold.db`) got an instant `SQLITE_BUSY` that most read paths swallowed as "no value" — surfacing as settings, theme, or host-registry values intermittently reading back empty.

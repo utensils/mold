@@ -32,6 +32,7 @@ import { blobToBase64 } from "../lib/base64";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import Icon from "@ui/components/Icon.vue";
 import { ASPECTS } from "@ui/lib/resolution";
+import type { DevelopPhase } from "@ui/lib/grain";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import {
   createChainJob,
@@ -336,7 +337,22 @@ const scriptComposerRef = ref<InstanceType<typeof ScriptComposer> | null>(null);
 const selected = ref<GalleryImage | null>(null);
 const selectedIndex = ref<number>(-1);
 
-const stream = useGenerateStream();
+// Seed of the most recent finished print — powers the seed section's
+// "lock last" affordance (desktop InspectorPanel parity). Tracked in a ref
+// rather than computed off the job list because completed cards auto-dismiss
+// from the rail ~1.5 s after landing.
+const lastSeedUsed = ref<number | null>(null);
+const stream = useGenerateStream((job) => {
+  if (job.result) lastSeedUsed.value = job.result.seed_used;
+});
+// Rehydrated jobs keep their metadata-only result, so a reload still knows
+// the last seed. The rail is newest-first — the first done row wins.
+for (const j of stream.jobs.value) {
+  if (j.state === "done" && j.result) {
+    lastSeedUsed.value = j.result.seed_used;
+    break;
+  }
+}
 const CHAIN_JOB_STORAGE_KEY = "mold.create.chain-job";
 function loadSubmittedChainJobId(): string | null {
   try {
@@ -638,6 +654,15 @@ const genStage = computed(() => {
   if (p.step !== null && p.totalSteps)
     return `Developing ${p.step} / ${p.totalSteps}`;
   return p.stage || "Loading model";
+});
+
+// Develop-bed props for the generating canvas (desktop `jobPhase` mapping):
+// latent until the first denoise step is reported, developing during, and the
+// canvas flips to result/error modes at finish so "fixed" never renders here.
+const developPhase = computed<DevelopPhase>(() => {
+  const j = runningJob.value;
+  if (!j) return "latent";
+  return j.progress.step !== null ? "developing" : "latent";
 });
 
 const resultSrc = computed(() => {
@@ -1448,6 +1473,7 @@ onBeforeUnmount(() => {
                   :family="currentFamily"
                   :adv-count="advCount"
                   :mobile="true"
+                  :last-seed="lastSeedUsed"
                   @open-advanced="openAdvanced"
                 />
               </div>
@@ -1484,6 +1510,12 @@ onBeforeUnmount(() => {
             :mode="canvasMode"
             :progress="genProgress"
             :stage="genStage"
+            :preview-src="runningJob?.previewUrl ?? undefined"
+            :progress-fraction="genProgress / 100"
+            :develop-seed="runningJob?.seedVisual"
+            :develop-phase="developPhase"
+            :print-width="runningJob?.request.width"
+            :print-height="runningJob?.request.height"
             :result-src="resultSrc"
             :result-caption="resultCaption"
             :error="latestError?.error ?? undefined"
@@ -1529,6 +1561,7 @@ onBeforeUnmount(() => {
           :family="currentFamily"
           :adv-count="advCount"
           :mobile="false"
+          :last-seed="lastSeedUsed"
           @open-advanced="openAdvanced"
         />
         <!-- Tablet+ : inline, always-visible Advanced column. -->

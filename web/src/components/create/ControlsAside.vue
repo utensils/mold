@@ -32,8 +32,11 @@ const props = withDefaults(
     /** Phone surface: the Advanced sheet button shows here; on tablet+ the
      * Advanced sections render inline in the controls region instead. */
     mobile?: boolean;
+    /** Seed of the most recent finished print — powers "lock last seed"
+     * (desktop InspectorPanel parity). */
+    lastSeed?: number | null;
   }>(),
-  { advCount: 0, mobile: false },
+  { advCount: 0, mobile: false, lastSeed: null },
 );
 
 const emit = defineEmits<{
@@ -113,6 +116,12 @@ function setSeedSegment(v: "random" | "fixed") {
 function setSeed(value: number) {
   patch({ seed: Number.isFinite(value) ? value : null });
 }
+// Lock last seed (desktop parity): pin the previous print's seed so the next
+// generate reproduces it. Switching to the Fixed segment reveals the input.
+function lockLastSeed() {
+  if (props.lastSeed === null) return;
+  patch({ seedMode: "static", seed: props.lastSeed });
+}
 </script>
 
 <template>
@@ -191,6 +200,19 @@ function setSeed(value: number) {
         :value="modelValue.seed ?? ''"
         @input="setSeed(Number(($event.target as HTMLInputElement).value))"
       />
+      <p v-if="seedSegment === 'random'" class="controls__hint">
+        New seed every print<template v-if="lastSeed !== null">
+          ·
+          <button
+            type="button"
+            data-test="lock-last-seed"
+            class="controls__lock"
+            @click="lockLastSeed"
+          >
+            lock last ({{ lastSeed }})
+          </button></template
+        >
+      </p>
     </div>
 
     <div class="controls__group">
@@ -314,6 +336,21 @@ function setSeed(value: number) {
   font-size: 11px;
   color: var(--ink-3);
   line-height: 1.4;
+}
+
+.controls__lock {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+.controls__lock:hover {
+  color: var(--safelight);
 }
 
 .controls__advanced {

@@ -78,6 +78,12 @@ When several jobs are submitted, the Queue section keeps them visible while
 you continue composing. Mold limits simultaneous streams so generation does
 not starve gallery or download requests.
 
+For model families that stream live latent previews (FLUX.1, Flux.2,
+Z-Image), the active print develops right on the Create screen: the preview
+sharpens as denoising progresses under a thinning film-grain wash, in a bed
+matching the print's aspect ratio. Hosts without previews keep the plain
+status line.
+
 Batch is also the expansion count. Batch 1 freezes the selected host through
 the next **Develop** while keeping quick undo. Batch 2 or greater first requests
 exactly N non-empty prompts from that host and opens an inline workspace where

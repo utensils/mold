@@ -29,3 +29,51 @@ Object.defineProperty(globalThis, "localStorage", {
   writable: true,
   configurable: true,
 });
+
+// happy-dom has no canvas implementation (`getContext` returns null), but the
+// shared DevelopCanvas primitive (@ui) paints the develop grain on a real 2D
+// context at mount. Provide a minimal no-op context so components that layer
+// the grain can mount in tests without stubbing the component everywhere.
+function stubContext2d(): object {
+  return {
+    imageSmoothingEnabled: true,
+    globalAlpha: 1,
+    globalCompositeOperation: "source-over",
+    fillStyle: "",
+    clearRect() {},
+    fillRect() {},
+    drawImage() {},
+    putImageData() {},
+    createPattern() {
+      return null;
+    },
+  };
+}
+
+const canvasProto = (
+  globalThis as unknown as {
+    HTMLCanvasElement?: { prototype: { getContext: unknown } };
+  }
+).HTMLCanvasElement?.prototype;
+if (canvasProto) {
+  Object.defineProperty(canvasProto, "getContext", {
+    value: () => stubContext2d(),
+    writable: true,
+    configurable: true,
+  });
+}
+
+// happy-dom ships a ResizeObserver, but keep a guard for environments that
+// don't — DevelopCanvas sizes its backing store from one.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  class NoopResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    value: NoopResizeObserver,
+    writable: true,
+    configurable: true,
+  });
+}

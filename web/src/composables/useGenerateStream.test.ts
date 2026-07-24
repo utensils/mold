@@ -527,6 +527,134 @@ describe("auto-remove completed jobs", () => {
   });
 });
 
+// ── Live latent preview ─────────────────────────────────────────────────────
+//
+// The server emits `preview` progress events (small base64 PNG at latent
+// resolution) during denoising. The reducer folds them into the job as a
+// data URI — deliberately NOT a blob URL, so the persisted module-singleton
+// job list needs no revoke lifecycle — and drops them once the job settles.
+describe("live latent preview", () => {
+  beforeEach(() => {
+    lastSingleHandlers = null;
+    try {
+      localStorage.removeItem("mold.generate.jobs");
+    } catch {
+      /* ignore — happy-dom should have it */
+    }
+    const stream = useGenerateStream();
+    for (const j of stream.jobs.value) {
+      if (j.state === "running") stream.cancel(j.id);
+    }
+    stream.clearDone();
+  });
+
+  it("reduces a preview event into a data-URI preview with step/total", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.previewUrl).toBeNull();
+
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "UFJFVklFVw==",
+      step: 3,
+      total: 8,
+    });
+
+    expect(job.previewUrl).toBe("data:image/png;base64,UFJFVklFVw==");
+    expect(job.progress.step).toBe(3);
+    expect(job.progress.totalSteps).toBe(8);
+    // A preview only exists once denoising is underway — it proves work.
+    expect(job.workStarted).toBe(true);
+  });
+
+  it("clears the preview when the job completes", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "AAAA",
+      step: 1,
+      total: 4,
+    });
+    expect(job.previewUrl).not.toBeNull();
+
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    expect(job.state).toBe("done");
+    expect(job.previewUrl).toBeNull();
+  });
+
+  it("clears the preview when the job errors", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "AAAA",
+      step: 1,
+      total: 4,
+    });
+    expect(job.previewUrl).not.toBeNull();
+
+    lastSingleHandlers!.onError({ kind: "http", status: 500, body: "boom" });
+    expect(job.state).toBe("error");
+    expect(job.previewUrl).toBeNull();
+  });
+
+  it("derives seedVisual from an explicit seed", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1, seed: 42 }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.seedVisual).toBe("42");
+  });
+
+  it("derives a stable model·prompt seedVisual when the seed is random", () => {
+    const stream = useGenerateStream();
+    const req = singleGen({ frames: 1 });
+    const id = stream.submit(req, { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.seedVisual).toBe(`${req.model}·${req.prompt}`);
+  });
+
+  it("omits previewUrl from persistence and rehydrates it as null", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = useGenerateStream();
+      const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+      lastSingleHandlers!.onProgress({
+        type: "preview",
+        image: "UFJFVklFVw==",
+        step: 3,
+        total: 8,
+      });
+      expect(stream.jobs.value.find((j) => j.id === id)?.previewUrl).not.toBe(
+        null,
+      );
+
+      // Let the deep watcher flush, then the 200 ms persist debounce fire.
+      await vi.advanceTimersByTimeAsync(300);
+      const raw = localStorage.getItem(__testing__.STORAGE_KEY);
+      expect(raw).not.toBeNull();
+      expect(raw!).not.toContain("previewUrl");
+      expect(raw!).not.toContain("UFJFVklFVw==");
+
+      const restored = __testing__.loadPersistedJobs(raw);
+      const back = restored.find((j) => j.id === id)!;
+      expect(back.previewUrl).toBeNull();
+      // seedVisual is recomputed from the persisted request.
+      expect(back.seedVisual).toBe(
+        `${back.request.model}·${(back.request as GenerateRequestWire).prompt}`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("useGenerateStream host routing", () => {
   beforeEach(() => {
     localStorage.clear();

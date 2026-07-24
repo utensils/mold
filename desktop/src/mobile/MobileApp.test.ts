@@ -131,7 +131,8 @@ const openStreams: Array<{
 function mountMobileApp(pinia: Pinia = createPinia()): VueWrapper {
   return mount(MobileApp, {
     attachTo: document.body,
-    global: { plugins: [pinia] },
+    // DevelopCanvas paints on a real 2D context happy-dom doesn't provide.
+    global: { plugins: [pinia], stubs: { DevelopCanvas: true } },
   });
 }
 
@@ -1852,6 +1853,55 @@ describe("MobileApp generation queue", () => {
     expect(openStreams[0]?.options.body).toMatchObject({ seed: 1234 });
     await wrapper.get("[data-test='mobile-seed-mode-random']").trigger("click");
     expect(wrapper.find("[data-test='mobile-seed-input']").exists()).toBe(false);
+  });
+
+  it("develops the active print over a live latent preview once one arrives", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("a latent preview print");
+
+    // Before the first preview frame the status line stands alone.
+    expect(wrapper.find("[data-test='mobile-develop-bed']").exists()).toBe(false);
+
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "denoise_step", step: 2, total: 8, elapsed_ms: 40 }),
+    );
+    openStreams[0]?.options.onEvent(
+      "progress",
+      JSON.stringify({ type: "preview", image: btoa("latent-png"), step: 2, total: 8 }),
+    );
+    await flushPromises();
+
+    const bed = wrapper.get("[data-test='mobile-develop-bed']");
+    // The bed adopts the submitted print's aspect ratio.
+    expect(bed.attributes("style")).toContain("aspect-ratio");
+    const preview = wrapper.get("[data-test='mobile-develop-preview']");
+    // The reducer turns the base64 payload into a blob URL (mocked here).
+    expect(preview.attributes("src")).toMatch(/^blob:/);
+    // blur(max(2, 14 − 12·p)) at p = 2/8 → 11px.
+    expect(preview.attributes("style")).toContain("blur(11px)");
+    // The develop grain layers over the preview and thins with progress.
+    expect(wrapper.find("develop-canvas-stub").exists()).toBe(true);
+
+    openStreams[0]?.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated-image"),
+        format: "png",
+        width: 768,
+        height: 512,
+        seed_used: 42,
+        generation_time_ms: 1_250,
+        model: model.name,
+      }),
+    );
+    openStreams[0]?.resolve();
+    await flushPromises();
+
+    // Settled jobs drop the bed; the finished print renders instead.
+    expect(wrapper.find("[data-test='mobile-develop-bed']").exists()).toBe(false);
+    expect(wrapper.find("img.result-media").exists()).toBe(true);
   });
 
   it("snapshots multiple prompts, shows their live queue, and cancels only one", async () => {
