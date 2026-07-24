@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { grainParams, makeGrainTile, tint, type DevelopPhase, type GrainParams } from "./grain";
+import {
+  grainParams,
+  makeGrainTile,
+  tint,
+  type DevelopPhase,
+  type GrainParams,
+} from "../lib/grain";
 
 const props = withDefaults(
   defineProps<{
@@ -18,7 +24,8 @@ let raf = 0;
 let current: GrainParams = grainParams(0, "latent");
 
 const reducedMotion =
-  typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  typeof matchMedia !== "undefined" &&
+  matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const target = computed(() => grainParams(props.progress, props.phase));
 
@@ -122,5 +129,14 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <canvas ref="canvas" class="h-full w-full" aria-hidden="true" />
+  <canvas ref="canvas" class="ms-develop" aria-hidden="true" />
 </template>
+
+<style scoped>
+/* Fill the host box exactly as the former Tailwind `h-full w-full` did —
+   the canvas stays inline so its box math is unchanged. */
+.ms-develop {
+  width: 100%;
+  height: 100%;
+}
+</style>

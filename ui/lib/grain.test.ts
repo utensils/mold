@@ -28,7 +28,11 @@ describe("grainParams", () => {
   });
 
   it("latent is cold, coarse-free, and high-amplitude", () => {
-    expect(grainParams(0, "latent")).toEqual({ amplitude: 0.9, cell: 2, warmth: 0 });
+    expect(grainParams(0, "latent")).toEqual({
+      amplitude: 0.9,
+      cell: 2,
+      warmth: 0,
+    });
   });
 
   it("fixed clears the grain; stopped keeps it visible and cold", () => {
