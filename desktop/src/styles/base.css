@@ -7,13 +7,20 @@ body,
 #app {
   height: 100%;
   overflow: hidden;
+}
+
+:root:not([data-platform="linux"]),
+:root:not([data-platform="linux"]) body,
+:root:not([data-platform="linux"]) #app {
   overscroll-behavior: none;
 }
 
 /* Native-app feel: no WebKit elastic rubber-banding anywhere. The shell rule
- * above only covers the root; every inner scroll region (library grid, host
- * detail, drawers, settings) must also stop dead at its limits. */
-* {
+ * above covers the document containers; every inner scroll region (library
+ * grid, host detail, drawers, settings) must also stop dead at its limits.
+ * WebKitGTK only recently enabled this property and can trap wheel input in
+ * nested scrollers, while Linux has no elastic rubber-banding to suppress. */
+:root:not([data-platform="linux"]) * {
   overscroll-behavior: none;
 }
 
