@@ -318,6 +318,22 @@ describe("CatalogTab media filter under pagination", () => {
     expect(wrapper.text()).toContain("image-2-0");
   });
 
+  it("falls back to the server-echoed page_size when an older server omits total", async () => {
+    // No `total` on the wire and the server clamped the page to 12 rows: a
+    // full clamped page still means more results, even though it is short of
+    // the client's requested PAGE_SIZE.
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1, 12),
+        page: params.page ?? 1,
+        page_size: 12,
+      }),
+    );
+    const wrapper = await mountTab("all");
+
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
+  });
+
   it("stops paginating when the accumulated rows reach the wire total", async () => {
     searchCatalog.mockImplementation((params: CatalogSearchParams) =>
       Promise.resolve({

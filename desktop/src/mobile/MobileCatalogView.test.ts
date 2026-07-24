@@ -323,6 +323,23 @@ describe("MobileCatalogView", () => {
     expect(wrapper.text()).toContain("catalog-2-0");
   });
 
+  it("falls back to the server-echoed page_size when an older server omits total", async () => {
+    // No `total` on the wire and the server clamped the page to 12 rows: a
+    // full clamped page still means more results, even though it is short of
+    // the client's requested page size.
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: Array.from({ length: 12 }, (_, i) => entry(`catalog-${params.page ?? 1}-${i}`)),
+        page: params.page ?? 1,
+        page_size: 12,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-catalog-sentinel']").exists()).toBe(true);
+  });
+
   it("stops paginating when the accumulated rows reach the wire total", async () => {
     searchCatalog.mockImplementation((params: { page?: number }) =>
       Promise.resolve({

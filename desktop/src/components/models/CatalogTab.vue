@@ -260,7 +260,8 @@ async function runSearch(reset: boolean) {
       hasMore.value =
         typeof res.total === "number"
           ? entries.value.length < res.total
-          : res.entries.length === PAGE_SIZE;
+          : res.entries.length ===
+            (typeof res.page_size === "number" && res.page_size > 0 ? res.page_size : PAGE_SIZE);
       fetched += 1;
       // Under a media chip, keep paging (bounded) until something survives
       // the filter — otherwise the chip renders a blank, message-less grid.

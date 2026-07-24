@@ -443,7 +443,10 @@ async function runSearch(reset: boolean): Promise<void> {
       hasMore.value =
         typeof response.total === "number"
           ? entries.value.length < response.total
-          : response.entries.length === PAGE_SIZE;
+          : response.entries.length ===
+            (typeof response.page_size === "number" && response.page_size > 0
+              ? response.page_size
+              : PAGE_SIZE);
       const filtered = combinedEntries.value.some(mediaMatches);
       if (mediaType.value === "all" || filtered || !hasMore.value || fetched + 1 >= MAX_AUTO_PAGES)
         break;
