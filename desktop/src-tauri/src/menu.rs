@@ -22,6 +22,13 @@ const NAVIGATION_MENU_ITEMS: [(&str, &str, &str); 4] = [
     ("nav:/machines", "Machines", "4"),
 ];
 
+#[cfg(target_os = "linux")]
+const LINUX_WINDOW_MENU_ITEMS: [(&str, &str); 3] = [
+    ("window:minimize", "Minimize"),
+    ("window:toggle-maximize", "Maximize"),
+    ("window:close", "Close Window"),
+];
+
 fn app_name(is_development: bool) -> &'static str {
     if is_development {
         "mold-dev"
@@ -177,6 +184,20 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
         .fullscreen()
         .build()?;
 
+    #[cfg(target_os = "linux")]
+    let window = {
+        let mut window = SubmenuBuilder::new(app, "Window");
+        for (id, label) in LINUX_WINDOW_MENU_ITEMS {
+            let mut item = MenuItemBuilder::with_id(id, label);
+            if id == "window:close" {
+                item = item.accelerator(accelerator("W"));
+            }
+            window = window.item(&item.build(app)?);
+        }
+        window.build()?
+    };
+
+    #[cfg(not(target_os = "linux"))]
     let window = SubmenuBuilder::new(app, "Window")
         .minimize()
         .maximize()
@@ -208,6 +229,28 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
                     }
                 }
             }
+            "window:minimize" => {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.minimize();
+                }
+            }
+            "window:toggle-maximize" => {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_maximized().unwrap_or(false) {
+                        let _ = window.unmaximize();
+                    } else {
+                        let _ = window.maximize();
+                    }
+                }
+            }
+            "window:close" => {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.close();
+                }
+            }
             "help:docs" => {
                 use tauri_plugin_opener::OpenerExt;
                 let _ = app
@@ -230,6 +273,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, is_development: bool) -> tauri::Res
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::LINUX_WINDOW_MENU_ITEMS;
     use super::{about_metadata, accelerator, app_name, NAVIGATION_MENU_ITEMS};
 
     #[test]
@@ -271,6 +316,19 @@ mod tests {
                 ("nav:/library", "Library", "2"),
                 ("nav:/models", "Models", "3"),
                 ("nav:/machines", "Machines", "4"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_window_menu_uses_supported_command_items() {
+        assert_eq!(
+            LINUX_WINDOW_MENU_ITEMS,
+            [
+                ("window:minimize", "Minimize"),
+                ("window:toggle-maximize", "Maximize"),
+                ("window:close", "Close Window"),
             ]
         );
     }
