@@ -2381,15 +2381,54 @@ button:disabled {
   outline-offset: 2px;
 }
 
+/* Kind chips scroll sideways — seven kinds never fit an iPhone row. */
+.mobile-catalog-kinds {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mobile-catalog-kinds button {
+  flex: none;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-pill);
+  background: var(--bench);
+  color: var(--ink-2);
+  font-family: var(--font-utility);
+  font-size: var(--text-data);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.mobile-catalog-kinds button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--safelight) 72%, var(--control-edge));
+  background: color-mix(in srgb, var(--safelight) 11%, var(--bench));
+  color: var(--safelight);
+}
+
+.mobile-catalog-kinds button:not([aria-pressed="true"]):active {
+  background: color-mix(in srgb, var(--safelight) 7%, var(--bench));
+  color: var(--rebate);
+}
+
+.mobile-catalog-kinds button:focus-visible {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
 .mobile-catalog-filters {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
   gap: 12px;
   margin-top: 12px;
 }
 
-.mobile-catalog-filters > label:first-child {
+.mobile-catalog-filters > label:not(.mobile-catalog-nsfw) {
   display: grid;
   gap: 5px;
   color: var(--ink-3);

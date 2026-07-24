@@ -79,7 +79,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
 - **Models** — one searchable model workspace split into **Installed** and
   **Discover** segments: installed models in the Installed segment, above
   the live Hugging Face/Civitai catalog in Discover, filtered by
-  **All / Images / Video** media chips, with compact Grid and Table layouts. Active downloads pin to
+  **All / Images / Video** media chips and a model-kind chip row (Models,
+  LoRAs, CLIP, text encoders, VAEs, tokenizers, ControlNet), sorted by
+  downloads, rating, or recency, with compact Grid and Table layouts. Active downloads pin to
   the top of the view, each showing its source glyph and the host receiving
   the pull. The desktop reuses cacheable 512 px Civitai thumbnails across both
   layouts, lazily decodes them, and contains each card's layout and paint

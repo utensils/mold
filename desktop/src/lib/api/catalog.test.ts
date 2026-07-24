@@ -18,7 +18,12 @@ vi.mock("../catalogCredentials", () => ({
   }),
 }));
 
-import { fetchCatalogDetail, fetchCatalogInstalled, startCatalogDownload } from "./catalog";
+import {
+  fetchCatalogDetail,
+  fetchCatalogInstalled,
+  searchCatalog,
+  startCatalogDownload,
+} from "./catalog";
 import type { CatalogEntry } from "./types";
 
 const PRIMARY = { baseUrl: "http://127.0.0.1:49152", apiKey: null };
@@ -26,6 +31,27 @@ const PRIMARY = { baseUrl: "http://127.0.0.1:49152", apiKey: null };
 beforeEach(() => {
   vi.clearAllMocks();
   currentTarget.mockReturnValue(PRIMARY);
+});
+
+describe("searchCatalog", () => {
+  it("puts kind and sort on the wire", async () => {
+    apiJsonTo.mockResolvedValueOnce({ entries: [], page: 1, page_size: 24, total: 0 });
+    await searchCatalog({ kind: "lora", sort: "rating" });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      PRIMARY,
+      "/api/catalog/search?kind=lora&sort=rating",
+      expect.anything(),
+    );
+  });
+
+  it("omits kind and sort when unset", async () => {
+    apiJsonTo.mockResolvedValueOnce({ entries: [], page: 1, page_size: 24, total: 0 });
+    await searchCatalog({ q: "flux" });
+    const [, path] = apiJsonTo.mock.calls[0] as [unknown, string];
+    expect(path).toBe("/api/catalog/search?q=flux");
+    expect(path).not.toContain("kind=");
+    expect(path).not.toContain("sort=");
+  });
 });
 
 describe("fetchCatalogDetail", () => {
