@@ -786,9 +786,29 @@ async fn civitai_search_paged(
             }
         }
         if !chain.exhausted && chain.leftover.len() < page_size {
-            // Fetch budget spent mid-walk. Keep the chain's progress and
-            // answer short — `total()` still advertises more rows, and
-            // the next request resumes from the stored cursor.
+            // Fetch budget spent mid-walk. When the shortfall lands on the
+            // requested page, emit the buffered rows rather than a false
+            // empty page — clients treat an empty page as exhaustion and
+            // would skip them. Intermediate pages are never emitted short:
+            // the walk resumes from the stored cursor on the next request
+            // and `total()` keeps advertising more rows either way.
+            if chain.next_page == opts.page && !chain.leftover.is_empty() {
+                let entries: Vec<CatalogEntry> = chain.leftover.drain(..).collect();
+                chain.emitted += entries.len();
+                let page_result = LiveSearchResult {
+                    entries,
+                    total: chain.total(),
+                };
+                cache.put_civitai_page(
+                    SourcePageKey {
+                        chain: key.clone(),
+                        page: chain.next_page,
+                    },
+                    page_result.clone(),
+                );
+                chain.next_page += 1;
+                result = Some(page_result);
+            }
             break;
         }
         let take = page_size.min(chain.leftover.len());
@@ -1830,6 +1850,55 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             2,
             "a second window fetch must top the page up"
+        );
+    }
+
+    /// When the per-request window budget runs out before the requested
+    /// page fills, the rows already buffered must still be served —
+    /// clients treat an empty page as exhaustion and would permanently
+    /// skip them.
+    #[tokio::test]
+    async fn civitai_budget_exhaustion_emits_partial_page_not_empty() {
+        let server = MockServer::start().await;
+        // Every window yields one row and keeps the cursor open, so a
+        // page_size-20 request drains the whole fetch budget.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(300..=300, Some("c"))),
+            )
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let opts = civitai_opts(1, 20);
+        let page1 = civitai_search_paged(&server.uri(), &cache, &opts)
+            .await
+            .expect("page 1");
+
+        assert_eq!(
+            page1.entries.len(),
+            MAX_WINDOW_FETCHES,
+            "buffered rows must be emitted when the budget expires"
+        );
+        assert!(
+            page1.total > page1.entries.len(),
+            "total must keep advertising more rows while the cursor is open"
+        );
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES,
+            "the walk stops at the fetch budget"
+        );
+
+        let again = civitai_search_paged(&server.uri(), &cache, &opts)
+            .await
+            .expect("page 1 again");
+        assert_eq!(again.entries.len(), MAX_WINDOW_FETCHES);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES,
+            "the partial page must be served from the page cache"
         );
     }
 
