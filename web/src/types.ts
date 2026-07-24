@@ -303,6 +303,8 @@ export type SseProgressEvent =
   | { type: "info"; message: string }
   | { type: "cache_hit"; resource: string }
   | { type: "denoise_step"; step: number; total: number; elapsed_ms: number }
+  /** Live latent preview: base64 PNG at latent resolution (client upscales). */
+  | { type: "preview"; image: string; step: number; total: number }
   | { type: "queued"; position: number; id: string }
   | {
       type: "weight_load";

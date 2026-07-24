@@ -54,7 +54,11 @@ pushed screen opened from the header.
   prompt **style** presets compose at submit without rewriting the prompt text.
   Source-fit and Upscale then fit preprocessing use a per-Create-form cache, so
   unchanged Batch siblings and repeat submissions share one host upscale and
-  fitted source while keeping the editable original intact.
+  fitted source while keeping the editable original intact. When the host
+  streams live latent previews (`preview` SSE events), the active print
+  develops in a bed above the status line — the preview sharpens with denoise
+  progress under the shared thinning Develop grain, matching the print's
+  aspect ratio; without previews the plain status line remains.
 - **Library** merges saved media from every configured host. Its full-screen
   viewer shows uncropped images, streams videos with native controls, swipes
   horizontally between prints, restores recorded prompt settings, and can use

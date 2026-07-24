@@ -2,14 +2,19 @@
 /*
  * Result canvas (Mold Studio Create) — the develop bed. Four states:
  *  - empty: brand headline + what-to-do guidance.
- *  - generating: shimmering print bed with a progress ring + stage line.
+ *  - generating: the develop bed — live latent preview under the thinning
+ *    Develop grain (desktop parity), with a progress ring + stage line until
+ *    the first preview arrives.
  *  - result: the finished print with a mono provenance caption.
  *  - variations: batch>1 expansion review — editable prompts with per-row Use,
  *    plus Discard / Queue N.
  * Presentational only: the parent owns job state and the submit paths.
  */
+import { computed } from "vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
+import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
+import type { DevelopPhase } from "@ui/lib/grain";
 
 const props = withDefaults(
   defineProps<{
@@ -18,6 +23,17 @@ const props = withDefaults(
     progress?: number;
     /** generating — stage line, e.g. "Developing 12 / 28". */
     stage?: string;
+    /** generating — latest live latent preview (data URI). */
+    previewSrc?: string;
+    /** generating — 0–1 denoise progress for the blur/grain math. */
+    progressFraction?: number;
+    /** generating — seed feeding the Develop grain (job `seedVisual`). */
+    developSeed?: string;
+    /** generating — develop phase for the grain shader. */
+    developPhase?: DevelopPhase;
+    /** generating — submitted print dims; the bed adopts their aspect. */
+    printWidth?: number;
+    printHeight?: number;
     /** result — image URL and prebuilt mono caption. */
     resultSrc?: string;
     resultCaption?: string;
@@ -26,7 +42,26 @@ const props = withDefaults(
     /** variations — the editable prompt list. */
     variations?: string[];
   }>(),
-  { progress: 0, stage: "", variations: () => [] },
+  { progress: 0, stage: "", progressFraction: 0, variations: () => [] },
+);
+
+// Desktop parity (GenerateView.vue): the preview's blur tightens as denoising
+// progresses while the grain canvas thins to reveal the forming print.
+const clampedFraction = computed(() =>
+  Math.min(1, Math.max(0, props.progressFraction)),
+);
+const previewBlurPx = computed(() =>
+  Math.max(2, 14 - 12 * clampedFraction.value),
+);
+const grainOpacity = computed(() =>
+  props.previewSrc
+    ? String(Math.max(0.18, 1 - clampedFraction.value * 0.9))
+    : "1",
+);
+const bedStyle = computed(() =>
+  props.printWidth && props.printHeight
+    ? { aspectRatio: `${props.printWidth} / ${props.printHeight}` }
+    : undefined,
 );
 
 const emit = defineEmits<{
@@ -58,10 +93,35 @@ function editVariation(index: number, value: string) {
       class="canvas__generating"
       data-test="canvas-generating"
     >
-      <div class="canvas__bed ms-shimmer">
-        <ProgressRing :value="progress" :size="104" show-label />
+      <div class="canvas__bed ms-shimmer" :style="bedStyle">
+        <!-- Live latent preview: a tiny PNG upscaled by CSS; the blur tightens
+             as denoising progresses so the print develops on the canvas. -->
+        <img
+          v-if="previewSrc"
+          :src="previewSrc"
+          alt=""
+          class="canvas__preview"
+          data-test="canvas-preview"
+          :style="{ filter: `blur(${previewBlurPx}px)` }"
+        />
+        <!-- The grain canvas paints edge-to-edge; once previews exist it thins
+             with progress to reveal the forming print underneath. -->
+        <DevelopCanvas
+          :seed="developSeed ?? 'mold'"
+          :progress="clampedFraction"
+          :phase="developPhase ?? 'developing'"
+          class="canvas__develop"
+          :style="{ opacity: grainOpacity }"
+        />
+        <!-- Ring + stage overlay the grain only until the first latent
+             preview arrives; then the forming print takes over. -->
+        <div v-if="!previewSrc" class="canvas__ring">
+          <ProgressRing :value="progress" :size="104" show-label />
+        </div>
       </div>
-      <div class="canvas__stage" data-test="canvas-stage">{{ stage }}</div>
+      <div v-if="!previewSrc" class="canvas__stage" data-test="canvas-stage">
+        {{ stage }}
+      </div>
     </div>
 
     <div
@@ -167,6 +227,8 @@ function editVariation(index: number, value: string) {
 }
 
 .canvas__bed {
+  position: relative;
+  overflow: hidden;
   width: min(300px, 60vw);
   aspect-ratio: 1;
   border-radius: var(--radius-control-lg);
@@ -174,6 +236,27 @@ function editVariation(index: number, value: string) {
   align-items: center;
   justify-content: center;
   margin: 0 auto;
+}
+
+.canvas__preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.canvas__develop {
+  position: absolute;
+  inset: 0;
+}
+
+.canvas__ring {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .canvas__stage {

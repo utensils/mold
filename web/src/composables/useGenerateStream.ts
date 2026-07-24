@@ -68,6 +68,42 @@ export interface Job {
    * `null` until the required queued event arrives. The reconciliation poller
    * only sweeps cards whose `serverId` is known. */
   serverId: string | null;
+  /** Latest live latent preview as a `data:image/png;base64,…` URI.
+   * Deliberately a data URI rather than a blob URL: the module-singleton job
+   * list is persisted and shared across consumers, so there is no sane place
+   * to hang a `URL.revokeObjectURL` lifecycle. Cleared when the job settles;
+   * never persisted. */
+  previewUrl: string | null;
+  /** Seed driving the Develop grain — the explicit request seed as a string,
+   * or a stable `model·prompt` stand-in when the seed is random (desktop
+   * `generationJob.ts` recipe). Recomputed from the request on rehydrate. */
+  seedVisual: string;
+}
+
+/**
+ * The running job the Create canvas should develop.
+ *
+ * The rail is newest-first, but with several jobs queued (prepared batch
+ * variations) the server denoises the EARLIEST submission — a naive "first
+ * running" pick binds the canvas to a job that sits previewless while another
+ * is actively developing. Prefer the running job that holds a live preview
+ * (proof the server is denoising it); otherwise the earliest-submitted
+ * running job, which is next in line.
+ */
+export function activeCanvasJob(jobs: readonly Job[]): Job | undefined {
+  let earliest: Job | undefined;
+  for (const job of jobs) {
+    if (job.state !== "running") continue;
+    if (job.previewUrl !== null) return job;
+    if (!earliest || job.startedAt < earliest.startedAt) earliest = job;
+  }
+  return earliest;
+}
+
+function seedVisualFor(req: GenerateRequestWire | ChainRequestWire): string {
+  return req.seed != null
+    ? String(req.seed)
+    : `${req.model}·${(req as GenerateRequestWire).prompt ?? ""}`;
 }
 
 export interface ChainJobMeta {
@@ -120,6 +156,14 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
       p.step = evt.step;
       p.totalSteps = evt.total;
       p.elapsedMs = evt.elapsed_ms;
+      break;
+    case "preview":
+      // A latent preview only exists once denoising is underway.
+      markWorkStarted(job);
+      p.stage = "Denoising";
+      p.step = evt.step;
+      p.totalSteps = evt.total;
+      job.previewUrl = `data:image/png;base64,${evt.image}`;
       break;
     case "queued":
       p.stage = `Queued (position ${evt.position})`;
@@ -412,6 +456,9 @@ function loadPersistedJobs(raw: string | null): Job[] {
         hostLabel: p.hostLabel,
         target: null,
         serverId: p.serverId,
+        // Previews are ephemeral SSE payload — never persisted.
+        previewUrl: null,
+        seedVisual: seedVisualFor(p.request),
       };
     });
   } catch {
@@ -583,6 +630,8 @@ function submitJob(
     hostLabel: route?.label ?? null,
     target: route?.target ?? null,
     serverId: null,
+    previewUrl: null,
+    seedVisual: seedVisualFor(req),
   }) as Job;
   jobs.value = [job, ...jobs.value];
 
@@ -602,6 +651,7 @@ function submitJob(
       job.error = err.message ?? "network error";
     }
     job.state = "error";
+    job.previewUrl = null;
   };
 
   const startStream = () => {
@@ -614,6 +664,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = chainCompleteToSingle(req, evt);
             job.state = "done";
+            job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
             fireComplete(job);
@@ -640,6 +691,7 @@ function submitJob(
           onComplete: (evt) => {
             job.result = evt;
             job.state = "done";
+            job.previewUrl = null;
             if (evt.gpu !== null && evt.gpu !== undefined)
               job.progress.gpu = evt.gpu;
             fireComplete(job);
@@ -669,6 +721,7 @@ async function cancelJob(id: string): Promise<void> {
   if (!job) return;
   job.controller.abort();
   job.state = "canceled";
+  job.previewUrl = null;
   if (!job.serverId) return;
   try {
     await cancelQueueJob(job.serverId, job.target ?? undefined);
