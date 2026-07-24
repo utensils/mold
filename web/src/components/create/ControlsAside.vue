@@ -151,7 +151,7 @@ function lockLastSeed() {
         label="Detail"
         :model-value="modelValue.steps"
         :min="1"
-        :max="100"
+        :max="60"
         :value-label="`${modelValue.steps} steps`"
         @update:model-value="patch({ steps: $event })"
       />
@@ -162,8 +162,8 @@ function lockLastSeed() {
         label="Prompt strength"
         :model-value="modelValue.guidance"
         :min="0"
-        :max="20"
-        :step="0.5"
+        :max="12"
+        :step="0.1"
         :value-label="modelValue.guidance.toFixed(1)"
         @update:model-value="patch({ guidance: $event })"
       />

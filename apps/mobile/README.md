@@ -64,7 +64,8 @@ pushed screen opened from the header.
   horizontally between prints, restores recorded prompt settings, and can use
   a still as the next source or Qwen edit target.
 - **Models** merges installed models with Hugging Face and Civitai results,
-  supports host/media/source/family filters, exposes model details and
+  supports host/media/source/family/kind filters with a downloads/rating/recent
+  sort, exposes model details and
   components, and routes pull/load/unload/remove actions to the owning or
   selected host. Detail-sheet variant chips select an exact manifest
   `base:tag` target before pulling. Pull actions progress through `Connecting...`, `Starting...`,

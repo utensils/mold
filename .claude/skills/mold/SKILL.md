@@ -129,9 +129,11 @@ mold run flux-dev:bf16 "epic shot" \
 
 **Models browse:** the desktop's single **Models** workspace (Installed +
 Discover segments) stacks installed
-models above the live catalog with **All / Images / Video** media chips and
+models above the live catalog with **All / Images / Video** media chips, a
+model-kind chip row (Models / LoRAs / CLIP / Text encoders / VAEs / Tokenizers
+/ ControlNet), a Downloads / Rating / Recent sort, and
 Grid / Table layouts; active downloads pin to the top with a source glyph and
-target host. The Installed segment merges every ready host with host badges and
+target host. The iPhone Models view shares the same kind/sort options. The Installed segment merges every ready host with host badges and
 host-routed actions; host detail mirrors that host's active pulls. Rows label
 primary weights separately from the footprint including shared runtime files.
 Curated manifest variants replace ambiguous multi-checkpoint Hugging Face
