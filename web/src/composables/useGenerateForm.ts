@@ -605,7 +605,9 @@ export function useGenerateForm(): UseGenerateForm {
         // time: video-only LTX-2 exports must never reach the server with audio
         // enabled, even if initial model hydration did not reapply defaults.
         enable_audio:
-          model?.supports_audio === false ? false : (s.enableAudio ?? undefined),
+          model?.supports_audio === false
+            ? false
+            : (s.enableAudio ?? undefined),
         ...(ltx2
           ? {
               audio_file: s.audioFile?.base64 ?? undefined,

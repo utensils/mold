@@ -71,9 +71,7 @@ const mockDetailError = ref<{ id: string; message: string } | null>(null);
 const mockRetryDetail = vi.fn();
 const mockCloseDetail = vi.fn();
 const mockStartDownload = vi.fn();
-const mockCanDownload = vi.fn(
-  (e: { supported: boolean }) => e.supported,
-);
+const mockCanDownload = vi.fn((e: { supported: boolean }) => e.supported);
 const mockLoad = vi.fn().mockResolvedValue(undefined);
 const mockUnload = vi.fn().mockResolvedValue(undefined);
 const mockDelete = vi
