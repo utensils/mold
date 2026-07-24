@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Web Create sliders now match the desktop inspector's ranges.** Detail tops out at 60 steps (was 100) and Prompt strength at 12 with a finer 0.1 step (was 20 / 0.5), so the same drag lands on the same value on both surfaces; restored metadata beyond a slider's max still shows its true value. The shared Advanced section order (scheduler → negative → source → LoRA → upscale → output → video, plus web's trailing GPU placement) is now pinned by contract tests on both surfaces.
 - **Desktop Advanced controls now expand inside the existing Create settings inspector.** The simplified essentials-only view remains the default; its Advanced toggle reveals capability-gated, icon-led sections directly below without dimming or covering the canvas. The nested section accordions are gone—every applicable control is immediately visible—and the web Create surface uses the same always-open icon treatment and explicit Off-or-upscaler picker.
 - **Mold Remote now publishes and links its privacy policy.** The website has a dedicated policy covering on-device storage, Keychain credentials, user-selected Mold server traffic, third-party model catalogs, TestFlight, and deletion choices; iPhone and desktop Settings → About open it in the external browser for an App Store-compliant in-app disclosure and cross-platform parity.
 
