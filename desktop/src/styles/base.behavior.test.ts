@@ -8,6 +8,6 @@ describe("desktop document behavior", () => {
     expect(css).toMatch(
       /:root:not\(\[data-platform="linux"\]\)[^{]*{[^}]*overscroll-behavior:\s*none;/s,
     );
-    expect(css).not.toMatch(/(?:^|\n)\*\s*{\s*overscroll-behavior:\s*none;/s);
+    expect(css).not.toMatch(/(?:^|\n)\s*\*\s*{\s*overscroll-behavior:\s*none;/s);
   });
 });
