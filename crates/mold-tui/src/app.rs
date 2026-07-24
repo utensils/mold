@@ -10992,7 +10992,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(mold_env)]
     async fn apply_theme_preset_supports_every_preset() {
+        // `apply_theme_preset` persists through the process-global DB env.
+        // Serialize this in-memory coverage test so it cannot write into an
+        // isolated persistence test's temporary database.
         for preset in crate::ui::theme::ThemePreset::ALL {
             let mut app = make_settings_test_app();
             app.apply_theme_preset(preset);
