@@ -4,9 +4,9 @@
  * icon sections. Each section maps onto EXISTING form fields; sections a
  * family doesn't support never render.
  *
- * Surface split (spec §06 v0.12): the web app is the power surface, so at
- * tablet width and above these six sections render INLINE as an always-visible
- * column in the Create controls region (`mobile` false → a plain <section>).
+ * Surface split (spec §06 v0.13): the web app is the power surface, so at
+ * tablet width and above the applicable sections render INLINE as an
+ * always-visible column in the Create controls region (`mobile` false → a plain <section>).
  * On phones (`mobile` true) the same content collapses into the full-screen
  * Advanced SheetPanel. Reset clears advanced fields only — the prompt, model,
  * shape, resolution, detail and seed survive.
