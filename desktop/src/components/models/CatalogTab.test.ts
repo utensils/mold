@@ -99,6 +99,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete (globalThis as Partial<typeof globalThis>).IntersectionObserver;
+  vi.useRealTimers();
 });
 
 describe("CatalogTab media filter under pagination", () => {
@@ -445,6 +446,140 @@ describe("CatalogTab Discover source chips", () => {
     const chips = wrapper.get("[data-test='catalog-source-chips']").findAll("button");
     expect(chips.map((c) => c.text())).toEqual(["All", "HuggingFace", "Civitai"]);
     expect(chips[0]!.attributes("aria-pressed")).toBe("true");
+  });
+});
+
+describe("CatalogTab kind and sort filters", () => {
+  it("renders the shared kind chips and sort options", async () => {
+    const wrapper = await mountTab();
+
+    const chips = wrapper.get("[data-test='catalog-kind-chips']").findAll("button");
+    expect(chips.map((c) => c.text())).toEqual([
+      "All",
+      "Models",
+      "LoRAs",
+      "CLIP",
+      "Text encoders",
+      "VAEs",
+      "Tokenizers",
+      "ControlNet",
+    ]);
+    expect(chips[0]!.attributes("aria-pressed")).toBe("true");
+
+    const options = wrapper.get("[data-test='catalog-sort']").findAll("option");
+    expect(options.map((o) => o.text())).toEqual(["Downloads", "Rating", "Recent"]);
+  });
+
+  it("omits kind and sort from the search at their defaults", async () => {
+    await mountTab();
+    const params = searchCatalog.mock.calls[0]![0] as CatalogSearchParams & { sort?: string };
+    expect(params.kind).toBeUndefined();
+    expect(params.sort).toBeUndefined();
+  });
+
+  it("resets to page 1 with the kind on the wire when a kind chip is toggled", async () => {
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: PAGE_SIZE,
+        total: 10_000,
+      }),
+    );
+    const wrapper = await mountTab();
+    scrollToSentinel();
+    scrollPastSentinel();
+    await flushPromises();
+    expect((searchCatalog.mock.calls.at(-1)![0] as CatalogSearchParams).page).toBe(2);
+
+    vi.useFakeTimers();
+    const lora = wrapper
+      .get("[data-test='catalog-kind-chips']")
+      .findAll("button")
+      .find((c) => c.text() === "LoRAs")!;
+    await lora.trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+
+    const params = searchCatalog.mock.calls.at(-1)![0] as CatalogSearchParams & { sort?: string };
+    expect(params.kind).toBe("lora");
+    expect(params.page).toBe(1);
+    expect(lora.attributes("aria-pressed")).toBe("true");
+  });
+
+  it("resets to page 1 with the sort on the wire when the sort changes", async () => {
+    const wrapper = await mountTab();
+    vi.useFakeTimers();
+    await wrapper.get("[data-test='catalog-sort']").setValue("rating");
+    await vi.advanceTimersByTimeAsync(400);
+
+    const params = searchCatalog.mock.calls.at(-1)![0] as CatalogSearchParams & { sort?: string };
+    expect(params.sort).toBe("rating");
+    expect(params.page).toBe(1);
+  });
+
+  it("hides manifest and installed rows under a non-checkpoint kind", async () => {
+    setActivePinia(createPinia());
+    useModelStore().all = [
+      {
+        name: "flux-dev:q8",
+        family: "flux",
+        size_gb: 12,
+        is_loaded: false,
+        hf_repo: "org/flux-dev",
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "",
+        downloaded: false,
+      },
+    ];
+    searchCatalog.mockResolvedValue({
+      entries: [{ ...entry("Detail LoRA", "flux"), kind: "lora" }],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "sd15:q8",
+            family: "sd15",
+            size_gb: 2,
+            is_loaded: false,
+            hf_repo: "org/sd15",
+            default_steps: 25,
+            default_guidance: 7,
+            default_width: 512,
+            default_height: 512,
+            description: "",
+            downloaded: true,
+            hostIds: ["local"],
+          },
+        ],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("flux-dev:q8");
+    expect(wrapper.text()).toContain("sd15:q8");
+
+    vi.useFakeTimers();
+    const lora = wrapper
+      .get("[data-test='catalog-kind-chips']")
+      .findAll("button")
+      .find((c) => c.text() === "LoRAs")!;
+    await lora.trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Detail LoRA");
+    expect(wrapper.text()).not.toContain("flux-dev:q8");
+    expect(wrapper.text()).not.toContain("sd15:q8");
   });
 });
 
