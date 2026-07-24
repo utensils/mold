@@ -143,7 +143,7 @@ COPY --from=builder /build/target/release/mold /usr/local/bin/mold
 
 # Copy the built web gallery SPA. `mold serve` picks this up via
 # MOLD_WEB_DIR and serves it as the SPA fallback alongside /api/*.
-COPY --from=web-builder /web/dist /opt/mold/web
+COPY --from=web-builder /frontend/web/dist /opt/mold/web
 
 # Copy the entrypoint script
 COPY docker/start.sh /start.sh
