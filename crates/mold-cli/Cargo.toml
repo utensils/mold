@@ -31,11 +31,11 @@ metrics = ["mold-server/metrics"]
 mdns = ["mold-server/mdns"]
 
 [dependencies]
-mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.20.2" }
-mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.20.2" }
-mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.20.2" }
-mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.20.2" }
-mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.20.2" }
+mold-core = { path = "../mold-core", package = "mold-ai-core", version = "0.21.0" }
+mold-catalog = { path = "../mold-catalog", package = "mold-ai-catalog", version = "0.21.0" }
+mold-db = { path = "../mold-db", package = "mold-ai-db", version = "0.21.0" }
+mold-inference = { path = "../mold-inference", package = "mold-ai-inference", version = "0.21.0" }
+mold-server = { path = "../mold-server", package = "mold-ai-server", version = "0.21.0" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env", "unstable-ext"] }
@@ -62,8 +62,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hostname = "0.4"
 viuer = { version = "0.11", optional = true }
-mold-discord = { path = "../mold-discord", package = "mold-ai-discord", version = "0.20.2", optional = true }
-mold-tui = { path = "../mold-tui", package = "mold-ai-tui", version = "0.20.2", optional = true }
+mold-discord = { path = "../mold-discord", package = "mold-ai-discord", version = "0.21.0", optional = true }
+mold-tui = { path = "../mold-tui", package = "mold-ai-tui", version = "0.21.0", optional = true }
 walkdir = "2.5.0"
 
 [dev-dependencies]
