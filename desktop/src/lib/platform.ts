@@ -26,6 +26,13 @@ export const CURRENT_PLATFORM = detectPlatform(
   "__TAURI_INTERNALS__" in globalThis,
 );
 
+export function applyPlatformAttribute(
+  root: HTMLElement,
+  platform: DesktopPlatform = CURRENT_PLATFORM,
+) {
+  root.dataset.platform = platform;
+}
+
 export function platformUi(raw: string | DesktopPlatform | undefined = CURRENT_PLATFORM) {
   const platform = normalizePlatform(raw === "unknown" ? undefined : raw);
   const isMacOS = platform === "macos";

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { detectPlatform, platformUi, primaryModifierPressed } from "./platform";
+import {
+  applyPlatformAttribute,
+  detectPlatform,
+  platformUi,
+  primaryModifierPressed,
+} from "./platform";
 
 describe("detectPlatform", () => {
   it("falls back to the browser platform when the Tauri build variable is unavailable", () => {
@@ -12,6 +17,14 @@ describe("detectPlatform", () => {
 
   it("keeps ordinary browser previews platform-neutral", () => {
     expect(detectPlatform(undefined, "MacIntel", false)).toBe("unknown");
+  });
+});
+
+describe("applyPlatformAttribute", () => {
+  it("exposes Linux to CSS before the desktop shell mounts", () => {
+    const root = document.createElement("html");
+    applyPlatformAttribute(root, "linux");
+    expect(root.dataset.platform).toBe("linux");
   });
 });
 
