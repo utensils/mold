@@ -5,7 +5,7 @@ import type {
   ProgressEvent,
   SseChainCompleteEvent,
 } from "./api/types";
-import type { DevelopPhase } from "./develop/grain";
+import type { DevelopPhase } from "@ui/lib/grain";
 
 export type JobStatus = "queued" | "loading" | "denoising" | "finishing" | "complete" | "error";
 

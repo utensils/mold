@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
-import type { DevelopPhase } from "../../lib/develop/grain";
+import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
+import type { DevelopPhase } from "@ui/lib/grain";
 import type { ChainStageForm } from "../../lib/chainForm";
 import { frames8n1Error, snapFrames } from "../../lib/chain";
 import { authedMediaUrl } from "../../lib/gallery/media";
