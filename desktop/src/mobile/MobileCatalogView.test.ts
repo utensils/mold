@@ -1039,6 +1039,73 @@ describe("MobileCatalogView", () => {
     expect(tiles.textContent).toContain("8.0 GB");
   });
 
+  it("sends kind and sort from the Discover filters and resets to page 1", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog();
+    await vi.waitFor(() => expect(searchCatalog).toHaveBeenCalledTimes(1));
+    const initial = searchCatalog.mock.calls[0]![0] as { kind?: string; sort?: string };
+    expect(initial.kind).toBeUndefined();
+    expect(initial.sort).toBeUndefined();
+
+    const chips = wrapper.get("[data-test='mobile-catalog-kind-chips']").findAll("button");
+    expect(chips.map((c) => c.text())).toEqual([
+      "All",
+      "Models",
+      "LoRAs",
+      "CLIP",
+      "Text encoders",
+      "VAEs",
+      "Tokenizers",
+      "ControlNet",
+    ]);
+    await chips.find((c) => c.text() === "LoRAs")!.trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(searchCatalog).toHaveBeenCalledTimes(2);
+    expect(searchCatalog.mock.calls[1]![0]).toMatchObject({ kind: "lora", page: 1 });
+
+    await wrapper.get("[data-test='mobile-catalog-sort']").setValue("rating");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(searchCatalog).toHaveBeenCalledTimes(3);
+    expect(searchCatalog.mock.calls[2]![0]).toMatchObject({
+      kind: "lora",
+      sort: "rating",
+      page: 1,
+    });
+  });
+
+  it("hides installed rows under a non-checkpoint kind and clears kind entering Installed", async () => {
+    vi.useFakeTimers();
+    wrapper = mountCatalog(studio.id, [studio]);
+    await vi.waitFor(() => expect(wrapper!.text()).toContain("installed:q8"));
+    expect(wrapper.text()).toContain("safe-variant:q4");
+
+    const loraChip = () =>
+      wrapper!
+        .get("[data-test='mobile-catalog-kind-chips']")
+        .findAll("button")
+        .find((c) => c.text() === "LoRAs")!;
+    await loraChip().trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(wrapper.text()).not.toContain("installed:q8");
+    expect(wrapper.text()).not.toContain("safe-variant:q4");
+    expect(loraChip().attributes("aria-pressed")).toBe("true");
+
+    // Installed hides the chips and still lists everything installed.
+    await wrapper.get("[data-test='mobile-catalog-segment-installed']").trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(wrapper.find("[data-test='mobile-catalog-kind-chips']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("installed:q8");
+
+    // Returning to Discover starts from All, like the family filter.
+    await wrapper.get("[data-test='mobile-catalog-segment-discover']").trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    const all = wrapper
+      .get("[data-test='mobile-catalog-kind-chips']")
+      .findAll("button")
+      .find((c) => c.text() === "All")!;
+    expect(all.attributes("aria-pressed")).toBe("true");
+  });
+
   it("clears a hidden family filter when switching to installed models", async () => {
     wrapper = mountCatalog();
     await flushPromises();

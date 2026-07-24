@@ -254,6 +254,7 @@ function reset() {
         :summary="schedulerSummary"
         :open="true"
         :header-interactive="false"
+        data-test="section-scheduler"
       >
         <template v-if="caps.supportsScheduler">
           <label class="ms-label">Scheduler</label>
@@ -284,6 +285,7 @@ function reset() {
         summary="What to steer away from"
         :open="true"
         :header-interactive="false"
+        data-test="section-negative"
       >
         <textarea
           v-model="form.negativePrompt"
@@ -312,6 +314,7 @@ function reset() {
         summary="Image-to-image &amp; inpainting"
         :open="true"
         :header-interactive="false"
+        data-test="section-source"
       >
         <SourceImageWell :form="form" />
       </AccordionSection>
@@ -324,6 +327,7 @@ function reset() {
         summary="Style adapters"
         :open="true"
         :header-interactive="false"
+        data-test="section-lora"
       >
         <LoraStack :form="form" :model="form.model" @append-word="emit('append-word', $event)" />
       </AccordionSection>
@@ -336,6 +340,7 @@ function reset() {
         :summary="form.upscaleModel || 'Off'"
         :open="true"
         :header-interactive="false"
+        data-test="section-upscale"
       >
         <label class="ms-label">Upscaler</label>
         <select v-model="form.upscaleModel" data-test="upscale-select" class="ms-select">
@@ -353,6 +358,7 @@ function reset() {
         summary="Format, exact size, reproducibility"
         :open="true"
         :header-interactive="false"
+        data-test="section-output"
       >
         <label class="ms-label">File format</label>
         <SegmentedControl
@@ -415,6 +421,7 @@ function reset() {
         summary="Frames, motion &amp; pipeline"
         :open="true"
         :header-interactive="false"
+        data-test="section-video"
       >
         <label class="ms-label">Frames</label>
         <input

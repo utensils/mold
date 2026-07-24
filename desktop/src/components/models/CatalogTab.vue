@@ -9,6 +9,12 @@ import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { sortInstalledFirst } from "../../lib/catalog";
+import {
+  CATALOG_KIND_OPTIONS,
+  CATALOG_SORT_OPTIONS,
+  type CatalogKindFilter,
+  type CatalogSortOption,
+} from "../../lib/catalogFilters";
 import { isCatalogModelId, modelDisplayName } from "../../lib/models";
 import { type MediaType } from "../../lib/modelAvailability";
 import CatalogCard from "./CatalogCard.vue";
@@ -54,6 +60,8 @@ type Source = "all" | "hf" | "civitai";
 
 const source = ref<Source>("all");
 const family = ref("");
+const kind = ref<CatalogKindFilter | "">("");
+const sort = ref<CatalogSortOption>("downloads");
 const includeNsfw = ref(false);
 const families = ref<string[]>([]);
 
@@ -94,6 +102,7 @@ const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })
     )
     .filter((m) => !family.value || m.family === family.value)
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
+    .filter((entry) => !kind.value || entry.kind === kind.value)
     .filter(
       (entry) =>
         source.value === "all" ||
@@ -114,6 +123,8 @@ const manifestEntries = computed<CatalogEntry[]>(() => {
   const installed = installedNames.value;
   const q = props.query.trim().toLowerCase();
   if (source.value === "civitai") return [];
+  // Manifest rows are all checkpoints — a non-checkpoint kind hides them.
+  if (kind.value && kind.value !== "checkpoint") return [];
   return models.all
     .filter((model) => !model.downloaded && isGenerationModel(model))
     .filter((model) => !installed.has(model.name))
@@ -229,8 +240,10 @@ async function runSearch(reset: boolean) {
         {
           q: props.query || undefined,
           family: family.value || undefined,
+          kind: kind.value || undefined,
           source: source.value === "all" ? undefined : source.value,
           include_nsfw: includeNsfw.value,
+          sort: sort.value === "downloads" ? undefined : sort.value,
           page: page.value,
           page_size: PAGE_SIZE,
         },
@@ -374,7 +387,7 @@ function pullFromDrawer(entry: CatalogEntry) {
   pull(entry);
 }
 
-watch([() => props.query, source, family, includeNsfw], () => {
+watch([() => props.query, source, family, kind, sort, includeNsfw], () => {
   scheduleSearch();
 });
 
@@ -417,12 +430,46 @@ onMounted(async () => {
         </button>
       </div>
 
+      <div class="flex items-center gap-1" data-test="catalog-kind-chips" aria-label="Model kind">
+        <button
+          type="button"
+          class="border-edge h-7 rounded-full border px-2.5 text-caption"
+          :class="kind === '' ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          :aria-pressed="kind === ''"
+          @click="kind = ''"
+        >
+          All
+        </button>
+        <button
+          v-for="opt in CATALOG_KIND_OPTIONS"
+          :key="opt.value"
+          type="button"
+          class="border-edge h-7 rounded-full border px-2.5 text-caption"
+          :class="kind === opt.value ? 'bg-safelight text-on-accent' : 'text-ink-2 hover:text-ink'"
+          :aria-pressed="kind === opt.value"
+          @click="kind = opt.value"
+        >
+          {{ opt.label }}
+        </button>
+      </div>
+
       <select
         v-model="family"
         class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
       >
         <option value="">All families</option>
         <option v-for="f in families" :key="f" :value="f">{{ f }}</option>
+      </select>
+
+      <select
+        v-model="sort"
+        data-test="catalog-sort"
+        aria-label="Sort by"
+        class="border-edge h-7 rounded-control border bg-bath px-1.5 text-caption text-ink"
+      >
+        <option v-for="opt in CATALOG_SORT_OPTIONS" :key="opt.value" :value="opt.value">
+          {{ opt.label }}
+        </option>
       </select>
 
       <label class="flex items-center gap-1 text-caption text-ink-2">
