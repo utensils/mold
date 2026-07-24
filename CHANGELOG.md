@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Desktop Advanced controls now expand inside the existing Create settings inspector.** The simplified essentials-only view remains the default; its Advanced toggle reveals the same capability-gated accordion controls directly below without dimming or covering the canvas, and collapses back into the compact inspector with all edits preserved.
+- **Desktop Advanced controls now expand inside the existing Create settings inspector.** The simplified essentials-only view remains the default; its Advanced toggle reveals capability-gated, icon-led sections directly below without dimming or covering the canvas. The nested section accordions are gone—every applicable control is immediately visible—and the web Create surface uses the same always-open icon treatment and explicit Off-or-upscaler picker.
 - **Mold Remote now publishes and links its privacy policy.** The website has a dedicated policy covering on-device storage, Keychain credentials, user-selected Mold server traffic, third-party model catalogs, TestFlight, and deletion choices; iPhone and desktop Settings → About open it in the external browser for an App Store-compliant in-app disclosure and cross-platform parity.
 
 - **Project attribution now consistently credits both core contributors.** Desktop, web, and iPhone About surfaces; native package metadata; Rust crate authors; website and README ownership copy; and AUR maintainer headers now name James Brink and Jeffrey Dilley, matching the MIT license.

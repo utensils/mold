@@ -64,7 +64,7 @@ surface powers it, so anything the app does maps to a documented endpoint.
   persists committed widths, and defaults to 340 px so all five shape ratios
   stay on one row; double-click the divider to restore that default. The
   essentials-only inspector stays compact by default. Toggle **Advanced** to
-  extend the capability-gated accordion controls below those essentials in the
+  extend capability-gated, always-open icon sections below those essentials in the
   same scrolling inspector; the canvas remains visible and edits apply
   immediately.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed

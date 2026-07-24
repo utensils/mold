@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
- * Advanced controls (Mold Studio Create) — the capability-gated accordion of
- * fine controls. One section open at a time. Each section maps onto EXISTING
- * form fields; sections a family doesn't support never render.
+ * Advanced controls (Mold Studio Create) — capability-gated, always-open
+ * icon sections. Each section maps onto EXISTING form fields; sections a
+ * family doesn't support never render.
  *
  * Surface split (spec §06 v0.12): the web app is the power surface, so at
  * tablet width and above these six sections render INLINE as an always-visible
@@ -11,7 +11,7 @@
  * Advanced SheetPanel. Reset clears advanced fields only — the prompt, model,
  * shape, resolution, detail and seed survive.
  */
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
@@ -58,8 +58,7 @@ const props = withDefaults(
     advCount?: number;
     /** Phone surface → SheetPanel instead of DrawerPanel. */
     mobile?: boolean;
-    /** Section to reveal when the drawer opens (e.g. "lora" from + Add LoRA).
-     * Null → open on the first available section. */
+    /** Retained for caller compatibility; every applicable section is visible. */
     openTo?: SectionKey | null;
     /** GPUs for the placement section (empty → section hidden). */
     placementGpus?: { ordinal: number; name: string }[];
@@ -112,55 +111,6 @@ const showPlacement = computed(() => props.placementGpus.length > 0);
 // upscaler whenever the response is a video (`queue.rs`), so video families
 // never see the section.
 const showUpscale = computed(() => !caps.value.supportsVideo);
-
-// Sections that take part in the single-open accordion, in template order.
-// Output & seed is always present; the rest are capability-gated. Used to pick
-// a sensible default-open section (never a hidden one like Scheduler on a flux
-// model) and to honour `openTo`. Upscale is deliberately absent: it is a switch
-// row whose body follows the switch, not the accordion.
-const visibleSections = computed<SectionKey[]>(() => {
-  const out: SectionKey[] = [];
-  if (showScheduler.value) out.push("scheduler");
-  if (caps.value.supportsNegativePrompt) out.push("negative");
-  out.push("source");
-  if (caps.value.supportsLora) out.push("lora");
-  out.push("output");
-  if (caps.value.supportsVideo) out.push("video");
-  if (showPlacement.value) out.push("placement");
-  return out;
-});
-
-function initialSection(): SectionKey | null {
-  const sections = visibleSections.value;
-  if (props.openTo && sections.includes(props.openTo)) return props.openTo;
-  return sections[0] ?? null;
-}
-const openSection = ref<SectionKey | null>(initialSection());
-function toggle(section: SectionKey) {
-  openSection.value = openSection.value === section ? null : section;
-}
-
-// Reveal `openTo` whenever it's set (inline: "+ Add LoRA" jumps to the LoRA
-// section without any open/close event; sheet: applied when it opens).
-watch(
-  () => props.openTo,
-  (to) => {
-    if (to && visibleSections.value.includes(to)) openSection.value = to;
-  },
-);
-// Phone sheet: when it opens, resolve to openTo or the first available section.
-watch(
-  () => props.open,
-  (isOpen) => {
-    if (isOpen) openSection.value = initialSection();
-  },
-);
-// Family switch changes which sections exist — never leave a hidden one open.
-watch(visibleSections, (sections) => {
-  if (!openSection.value || !sections.includes(openSection.value)) {
-    openSection.value = sections[0] ?? null;
-  }
-});
 
 // The Scheduler type permits parameterized object variants; the drawer only
 // surfaces the named string schedulers.
@@ -372,9 +322,9 @@ function resetAdvanced() {
         icon="scheduler"
         title="Scheduler & sampling"
         :summary="schedulerSummary"
-        :open="openSection === 'scheduler'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-scheduler"
-        @toggle="toggle('scheduler')"
       >
         <div v-if="caps.supportsScheduler" class="adv__field">
           <label class="adv__label">Scheduler</label>
@@ -405,9 +355,9 @@ function resetAdvanced() {
         icon="negative"
         title="Negative prompt"
         summary="What to steer away from"
-        :open="openSection === 'negative'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-negative"
-        @toggle="toggle('negative')"
       >
         <textarea
           class="adv__textarea"
@@ -445,9 +395,9 @@ function resetAdvanced() {
               ? 'Target and reference images'
               : 'Image-to-image & inpainting'
         "
-        :open="openSection === 'source'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-source"
-        @toggle="toggle('source')"
       >
         <button
           v-if="!hasSource"
@@ -585,9 +535,9 @@ function resetAdvanced() {
         icon="layers"
         title="LoRA stack"
         :summary="`${modelValue.loras.length} active · style adapters`"
-        :open="openSection === 'lora'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-lora"
-        @toggle="toggle('lora')"
       >
         <LoraPicker
           :family="family"
@@ -607,9 +557,9 @@ function resetAdvanced() {
         icon="output"
         title="Output & seed"
         summary="Format and reproducibility"
-        :open="openSection === 'output'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-output"
-        @toggle="toggle('output')"
       >
         <div class="adv__field">
           <label class="adv__label">File format</label>
@@ -690,9 +640,9 @@ function resetAdvanced() {
         icon="video"
         title="Video"
         :summary="`${modelValue.frames ?? 25} frames · ${modelValue.fps ?? 24} fps`"
-        :open="openSection === 'video'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-video"
-        @toggle="toggle('video')"
       >
         <div class="adv__field">
           <label class="adv__label">Frames (8n+1)</label>
@@ -747,9 +697,9 @@ function resetAdvanced() {
         icon="machines"
         title="GPU placement"
         summary="Pin this job to a device"
-        :open="openSection === 'placement'"
+        :open="true"
+        :header-interactive="false"
         data-test="section-placement"
-        @toggle="toggle('placement')"
       >
         <PlacementPanel
           :model-value="modelValue.placement"

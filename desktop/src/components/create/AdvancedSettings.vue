@@ -54,12 +54,6 @@ const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
 
-// One section open at a time.
-const openSection = ref<string | null>(null);
-function toggle(id: string) {
-  openSection.value = openSection.value === id ? null : id;
-}
-
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
 const schedulerLabels: Record<string, string> = {
   default: "Default",
@@ -154,7 +148,6 @@ function setCameraMode(mode: string) {
   }
 }
 
-const advancedOpen = ref(false);
 const keyframePickerOpen = ref(false);
 const pipelineOptions: Ltx2PipelineMode[] = [
   "one-stage",
@@ -259,8 +252,8 @@ function reset() {
         icon="scheduler"
         title="Scheduler &amp; sampling"
         :summary="schedulerSummary"
-        :open="openSection === 'scheduler'"
-        @toggle="toggle('scheduler')"
+        :open="true"
+        :header-interactive="false"
       >
         <template v-if="caps.supportsScheduler">
           <label class="ms-label">Scheduler</label>
@@ -289,8 +282,8 @@ function reset() {
         icon="negative"
         title="Negative prompt"
         summary="What to steer away from"
-        :open="openSection === 'negative'"
-        @toggle="toggle('negative')"
+        :open="true"
+        :header-interactive="false"
       >
         <textarea
           v-model="form.negativePrompt"
@@ -317,8 +310,8 @@ function reset() {
         icon="image"
         title="Source image"
         summary="Image-to-image &amp; inpainting"
-        :open="openSection === 'source'"
-        @toggle="toggle('source')"
+        :open="true"
+        :header-interactive="false"
       >
         <SourceImageWell :form="form" />
       </AccordionSection>
@@ -329,8 +322,8 @@ function reset() {
         icon="layers"
         title="LoRA stack"
         summary="Style adapters"
-        :open="openSection === 'lora'"
-        @toggle="toggle('lora')"
+        :open="true"
+        :header-interactive="false"
       >
         <LoraStack :form="form" :model="form.model" @append-word="emit('append-word', $event)" />
       </AccordionSection>
@@ -341,8 +334,8 @@ function reset() {
         icon="upscale"
         title="Upscale after generate"
         :summary="form.upscaleModel || 'Off'"
-        :open="openSection === 'upscale'"
-        @toggle="toggle('upscale')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">Upscaler</label>
         <select v-model="form.upscaleModel" data-test="upscale-select" class="ms-select">
@@ -358,8 +351,8 @@ function reset() {
         icon="output"
         title="Output &amp; seed"
         summary="Format, exact size, reproducibility"
-        :open="openSection === 'output'"
-        @toggle="toggle('output')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">File format</label>
         <SegmentedControl
@@ -420,8 +413,8 @@ function reset() {
         icon="video"
         title="Video"
         summary="Frames, motion &amp; pipeline"
-        :open="openSection === 'video'"
-        @toggle="toggle('video')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">Frames</label>
         <input
@@ -524,15 +517,6 @@ function reset() {
         <p v-if="audioFormatError" class="ms-error" role="alert">{{ audioFormatError }}</p>
 
         <template v-if="caps.supportsAdvancedVideo">
-          <button
-            type="button"
-            class="ms-disclosure"
-            data-test="ltx2-disclosure"
-            :aria-expanded="advancedOpen"
-            @click="advancedOpen = !advancedOpen"
-          >
-            {{ advancedOpen ? "▾" : "▸" }} LTX-2 pipeline
-          </button>
           <p
             v-if="advancedVideoError"
             data-test="ltx2-validation-error"
@@ -541,7 +525,7 @@ function reset() {
           >
             {{ advancedVideoError }}
           </p>
-          <div v-if="advancedOpen">
+          <div data-test="ltx2-controls">
             <label class="ms-label ms-label--mt">Pipeline</label>
             <select
               :value="form.pipeline ?? ''"
@@ -832,17 +816,6 @@ function reset() {
   padding: 8px 10px;
   font-size: 11px;
   color: var(--ink-2);
-}
-.ms-disclosure {
-  margin-top: 16px;
-  border: 0;
-  background: transparent;
-  color: var(--ink-3);
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
 }
 .ms-file {
   display: block;
