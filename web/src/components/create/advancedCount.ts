@@ -1,6 +1,6 @@
 /*
- * Advanced "N on" count — the badge on the Advanced button and drawer header.
- * A pure sum of the currently-active advanced fields so the badge, the drawer
+ * Advanced "N on" count — the badge on the Advanced entry and section header.
+ * A pure sum of the currently-active advanced fields so the badge, the section
  * header, and any tests all agree. Extends the prototype's advCount (negative +
  * source + loras + upscale + non-default scheduler) with custom size, video
  * non-defaults, ControlNet, and the LTX-2 video suite, per the Create spec.
@@ -24,7 +24,7 @@ export interface AdvancedCountParams {
   customSize: boolean;
   /** A video family has non-default video controls set. */
   videoNonDefault: boolean;
-  /** A ControlNet guidance image + model is active (drawer Source section).
+  /** A ControlNet guidance image + model is active (Advanced Source section).
    * Optional so callers that never surface ControlNet can omit it. */
   controlNet?: boolean;
   /** Any LTX-2 / video advanced control beyond frames/fps is set — pipeline,

@@ -39,16 +39,6 @@ import { outputFormatsForFamily } from "../../composables/useGenerateForm";
 import { blobToBase64 } from "../../lib/base64";
 import { useOverlayFocus } from "../../composables/useOverlayFocus";
 
-type SectionKey =
-  | "scheduler"
-  | "negative"
-  | "source"
-  | "lora"
-  | "upscale"
-  | "output"
-  | "video"
-  | "placement";
-
 const props = withDefaults(
   defineProps<{
     /** Sheet open state (phone only; ignored when inline). */
@@ -58,8 +48,6 @@ const props = withDefaults(
     advCount?: number;
     /** Phone surface → SheetPanel instead of DrawerPanel. */
     mobile?: boolean;
-    /** Retained for caller compatibility; every applicable section is visible. */
-    openTo?: SectionKey | null;
     /** GPUs for the placement section (empty → section hidden). */
     placementGpus?: { ordinal: number; name: string }[];
     /** Installed models on the selected generation route. */
@@ -69,7 +57,6 @@ const props = withDefaults(
     open: false,
     advCount: 0,
     mobile: false,
-    openTo: null,
     placementGpus: () => [],
     models: () => [],
   },

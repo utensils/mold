@@ -53,19 +53,19 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
 </helmet>
 <doc-page margin="0.85in">
   <div slot="footer" style="display:flex;justify-content:space-between;align-items:center;font-family:'Martian Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#a7a1b3;padding-top:6px;">
-    <span>mold studio · design spec</span><span>v0.12 · draft</span>
+    <span>mold studio · design spec</span><span>v0.13 · build handoff</span>
   </div>
 
   <h1>Mold Studio — Interface Spec</h1>
   <p class="lead">A single design system across five surfaces for a local, no-cloud diffusion studio. This document is the source of truth for the simplified UI: its principles, tokens, shared components, information architecture, and the flows an implementer should complete without drifting from the system.</p>
   <div class="meta"><span>Product: mold · local image + video generation</span><span>Surfaces: macOS · iOS · Web · Mobile web · Terminal (TUI)</span><span>Status: prototype → build handoff</span></div>
 
-  <div class="callout"><div class="h">North star</div>Dead-simple by default; power on demand. A newcomer can type a prompt and press Generate without meeting a single advanced control. Everything else is <strong>progressively disclosed</strong> and <strong>tucked away</strong> until asked for. One shared component vocabulary drives every surface, so the product feels like one tool wearing five native shells — four graphical and one terminal — never a web app bolted onto a desktop frame.</p></div>
+  <div class="callout"><div class="h">North star</div>Dead-simple by default; power on demand. A newcomer can type a prompt and press Generate without meeting a single advanced control on simplified shells; tablet-and-wider web deliberately keeps Advanced visible as its power surface. Everywhere else, depth is <strong>progressively disclosed</strong> until asked for. One shared component vocabulary drives every surface, so the product feels like one tool wearing five native shells — four graphical and one terminal — never a web app bolted onto a desktop frame.</div>
 
   <h2><span class="n">01</span> Principles</h2>
   <div class="grid2">
     <div class="item"><div class="t">Simplicity first</div><div class="d">The primary path — describe, choose a look, generate — is always one screen with no scrolling to essentials. If a screen feels empty, that is correct, not a gap to fill.</div></div>
-    <div class="item"><div class="t">Progressive disclosure</div><div class="d">Advanced capability lives behind one clearly-labelled entry (Advanced, More options) and opens collapsed. Never surface a control a beginner can't act on.</div></div>
+    <div class="item"><div class="t">Progressive disclosure</div><div class="d">Advanced capability uses one clearly-labelled, surface-appropriate entry (inline toggle, sheet, or accordion) with no redundant nested disclosure. Tablet-and-wider web is the intentional power-surface exception and keeps the same icon sections visible.</div></div>
     <div class="item"><div class="t">One system, five shells</div><div class="d">Identical tokens, components, copy and state. Each surface only changes chrome and layout density — not vocabulary. The terminal reads the same vocabulary rendered in a monospace cell grid.</div></div>
     <div class="item"><div class="t">Shared source of truth</div><div class="d">Prompt, model, settings, theme and library are one state. An edit on any surface reflects on all; components read the same bindings.</div></div>
     <div class="item"><div class="t">Contained, not global</div><div class="d">Every overlay (drawer, sheet, lightbox, palette, modal) renders inside the frame it belongs to — never a page-level layer that escapes its window.</div></div>
@@ -123,8 +123,8 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
       <tr><td><strong>Icon section</strong></td><td>The Advanced grouping primitive on desktop and web. Header (icon plate + title + one-line summary) leads an always-visible body; no nested chevron or disclosure.</td></tr>
       <tr><td><strong>Card &amp; Tile</strong></td><td>Flat <span class="m">--bench</span> card, hairline border. Image tiles are square, lift on hover, carry a NEW badge when fresh.</td></tr>
       <tr><td><strong>Progress</strong></td><td>Ring (in-canvas generate) · bar (downloads, telemetry, activity). Shimmer placeholder while developing.</td></tr>
-      <tr><td><strong>Drawer</strong></td><td>Right-side panel for detail/settings on wide surfaces (model detail, Advanced). Slides in; dims its own frame.</td></tr>
-      <tr><td><strong>Sheet</strong></td><td>Full-screen (viewer, model, advanced) or bottom (nav, actions) panel on phone surfaces. Same content as the wide drawer, single column.</td></tr>
+      <tr><td><strong>Drawer</strong></td><td>Right-side panel for detail/settings on wide surfaces (model detail). Slides in; dims its own frame.</td></tr>
+      <tr><td><strong>Sheet</strong></td><td>Full-screen (viewer, model, advanced) or bottom (nav, actions) panel on phone surfaces. Advanced sheets use the same always-open icon sections as the inline layouts.</td></tr>
       <tr><td><strong>Modal</strong></td><td>Centered, focused task (connect a machine). Stepped when multi-stage with a 3-dot progress.</td></tr>
       <tr><td><strong>Command palette</strong></td><td>⌘K launcher (<span class="m">^K</span> in the terminal): search + grouped actions (Go to / Action / Model / Theme). Enter runs top match, Esc closes.</td></tr>
       <tr><td><strong>Empty state</strong></td><td>Dashed frame + one-line what-to-do. Used for the develop canvas and unpopulated filters.</td></tr>
@@ -185,7 +185,7 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
   <p>Batch = 1: one-tap <em>rewrite</em> that enriches the prompt in place with a visible <strong>undo</strong>. Batch &gt; 1: generates editable <em>variations</em> to review, edit, and queue. Never silently overwrite the user's words.</p>
   <h3>Style &amp; Advanced</h3>
   <p>Style is a single collapsible chip row, deselectable. Advanced is one entry per surface with capability-gated, always-open icon sections: <strong>Scheduler &amp; sampling</strong> (default / ddim / euler-ancestral / unipc + CFG rescale), <strong>Negative prompt</strong> (with quick-adds), <strong>Source image</strong> (denoise strength · fit · inpaint mask), <strong>LoRA stack</strong> (add + per-adapter weight), <strong>Upscale after generate</strong> (Off or Real-ESRGAN), <strong>Output &amp; seed</strong> (format · seed mode), plus family-specific Video and GPU placement sections. There are no nested section disclosures; an active-count badge shows how many advanced options are set and Reset clears them.</p>
-  <p><strong>Surface split (v0.12):</strong> the web app at tablet width and above is the power surface — Advanced renders <em>inline</em> as an always-visible column in the Create controls region. Mobile web keeps the same icon sections in its phone sheet. The desktop app deliberately stays simplified until its single Advanced toggle is opened; then the same always-open icon sections extend inline below the essentials in the existing resizable settings inspector, preserving the canvas and avoiding a second overlaying panel.</p>
+  <p><strong>Surface split (v0.13):</strong> the web app at tablet width and above is the power surface — Advanced renders <em>inline</em> as an always-visible column in the Create controls region. Mobile web keeps the same icon sections in its phone sheet. The desktop app deliberately stays simplified until its single Advanced toggle is opened; then the same always-open icon sections extend inline below the essentials in the existing resizable settings inspector, preserving the canvas and avoiding a second overlaying panel.</p>
   <h3>Library, Models, Machines</h3>
   <p>Library: grid/feed with all/images/video filters and search; opening a print uses a desktop/web <strong>lightbox</strong> (image + metadata + Reuse settings) and a phone <strong>full-screen viewer</strong> (position counter, reuse, save). Models: installed/discover; a row opens detail (drawer/sheet) with family, checkpoint/footprint, components, variants, source, license, and a load/pull action. Machines: host cards with live telemetry open a detail view (GPU load, memory, temp, queue, uptime, loaded &amp; installed models, set-as-target); <strong>+ Add machine</strong> opens the stepped connect modal (type → details → connected).</p>
   <h3>System affordances</h3>
@@ -200,7 +200,7 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
   </ul>
 
   <h2><span class="n">08</span> Open items — fill these in, on-system</h2>
-  <p>Remaining work for the implementing agent. Each must reuse the shared components above, keep the default path simple, and tuck any new depth behind disclosure. Acceptance in <b>teal</b>.</p>
+  <p>Remaining work for the implementing agent. Each must reuse the shared components above, keep the default path simple, and use one surface-appropriate entry for any new depth. Acceptance in <b>teal</b>.</p>
   <div class="gap"><div class="t"><span class="id">G1</span> Connect flow completes for real</div><div class="a">Finishing the connect modal adds a live host card to Machines (all surfaces) and makes it selectable as a target. <b>Done when</b> a connected machine appears as a card with idle telemetry and can be set as the generation target. <b>Resolution:</b> the shared connect modal now lands the host as a live Machines card on desktop, web, and mobile-web and makes it a selectable Create target on every surface.</div></div>
   <div class="gap"><div class="t"><span class="id">G2</span> Activity → real queue</div><div class="a">Promote the activity strip to a shared queue: reorder, cancel, and per-host lanes, mirrored in Machines. <b>Done when</b> cancel/reorder on Create and Machines reflect the same queue state. <b>Resolution:</b> the activity strip is now a shared queue store backed by <span class="m">PATCH /api/queue/:id</span> (<span class="m">position</span> reorder, gated by <span class="m">capabilities.queue.can_reorder</span>), rendered as the Create activity strip and the Machines per-host lanes.</div></div>
   <div class="gap"><div class="t"><span class="id">G3</span> Machines detail parity on web/mobile-web</div><div class="a">Host detail currently richest on desktop. <b>Done when</b> web and mobile-web show the same telemetry + models + actions using the shared drawer/sheet. <b>Resolution:</b> web and mobile-web host detail now reuse the shared drawer/sheet, reaching desktop-level telemetry, models, and actions.</div></div>
@@ -219,8 +219,8 @@ doc-page .gap .a b{color:var(--teal);font-weight:600;}
 
   <div class="callout"><div class="h">Adherence checklist for any new UI</div>
   <ul style="margin:.2em 0 0;">
-    <li>Does the default path stay one screen with no advanced controls visible?</li>
-    <li>Is new depth behind a disclosure (accordion / drawer / sheet / palette), collapsed by default?</li>
+    <li>Does the default path stay one screen, with Advanced secondary to the composer and hidden on simplified shells?</li>
+    <li>Is new depth behind one surface-appropriate entry (inline toggle / sheet / palette) without redundant nested disclosure?</li>
     <li>Is it built only from the shared components, referencing tokens (no new hues, no hard-coded hex)?</li>
     <li>Does it read from shared state so all surfaces stay in sync?</li>
     <li>Does any overlay render inside its own frame?</li>

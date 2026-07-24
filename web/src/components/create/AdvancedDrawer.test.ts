@@ -189,13 +189,8 @@ describe("AdvancedDrawer always-open sections", () => {
     expect(w.find("[aria-expanded]").exists()).toBe(false);
   });
 
-  it("keeps the LoRA picker visible when callers pass the legacy openTo hint", () => {
-    const w = factory("flux", {}, { openTo: "lora" });
-    expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
-  });
-
-  it("still hides unavailable sections regardless of openTo", () => {
-    const w = factory("sd3.5", {}, { openTo: "lora" });
+  it("still hides sections unavailable to the selected family", () => {
+    const w = factory("sd3.5");
     expect(w.find("[data-test='section-lora']").exists()).toBe(false);
     expect(w.find("[data-test='cfg-plus']").exists()).toBe(true);
   });

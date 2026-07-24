@@ -1,6 +1,6 @@
 /**
- * How many Advanced-drawer sections currently hold a non-default value. Drives
- * the inspector's "N on" pill and the drawer header's "N active" badge from one
+ * How many Advanced sections currently hold a non-default value. Drives
+ * the inspector's "N on" pill and the section header's "N active" badge from one
  * pure function so the two never disagree. Only counts controls the current
  * family actually exposes (a stale negative prompt on a FLUX model isn't
  * "active" because FLUX has no negative-prompt control).
