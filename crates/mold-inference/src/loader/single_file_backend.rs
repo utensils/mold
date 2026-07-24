@@ -1,4 +1,4 @@
-//! Custom `SimpleBackend` for Civitai single-file checkpoints (phase 2.6).
+//! Custom `SimpleBackend` for Civitai single-file checkpoints.
 //!
 //! Translates each diffusers `vb.get(name)` call (issued by candle's
 //! `stable_diffusion::{unet_2d::UNet2DConditionModel, vae::AutoEncoderKL,
@@ -118,7 +118,7 @@ fn check_safetensors_not_truncated(path: &Path) -> Result<()> {
 
 /// One NVFP4 sub-component routed through a sub-key on the diffusers side.
 ///
-/// Phase 2 streaming dequant emits THREE sub-keys per NVFP4 layer
+/// Streaming dequant emits THREE sub-keys per NVFP4 layer
 /// (`weight.nvfp4_packed`, `weight.nvfp4_block_scales`, `weight.nvfp4_tensor_scale`)
 /// instead of fusing them into a single `weight` lookup. `Flux2Linear::load_with_bias`
 /// detects NVFP4 by probing `vb.contains_tensor("weight.nvfp4_packed")` and
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn flux2_nvfp4_does_not_emit_bare_weight_for_nvfp4_layers() {
-        // Phase 2 streaming dequant routes everything through NVFP4 sub-keys;
+        // Streaming dequant routes everything through NVFP4 sub-keys;
         // the bare `weight` lookup must NOT resolve for NVFP4 layers (or
         // `Flux2Linear::load_with_bias` would fall through to the FP8/Standard
         // path and try to load a non-existent fused tensor).

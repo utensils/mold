@@ -44,9 +44,14 @@ surface powers it, so anything the app does maps to a documented endpoint.
 
 - **Create** — a capability-driven inspector that shows only the
   controls a model's family supports (negative prompt, scheduler, CFG++, LoRA
-  stack, img2img source/mask/control, video frames/fps/audio). Generation is
-  visualized as a print _developing_: a deterministic grain field, seeded from
-  the job's real seed, resolves in lockstep with `DenoiseStep` events. Batches
+  stack, img2img source/mask/control, video frames/fps/audio). Models are
+  selected by their human-readable catalog names even when their stable
+  internal generation ids are `cv:` or `hf:`. For video-only LTX-2 community
+  checkpoints, Mold disables
+  generated audio when the installed files lack an audio VAE or vocoder while
+  keeping image-to-video available. Generation is visualized as a
+  print _developing_: a deterministic grain field, seeded from the job's real
+  seed, resolves in lockstep with `DenoiseStep` events. Batches
   run sequentially with `base_seed + i`, and a VRAM preflight forecasts fit
   before you press Generate. Drop a PNG or JPEG from the file manager anywhere
   in Create to attach it as the current family's source; Mold images with

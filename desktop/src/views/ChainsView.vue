@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { modelDisplayName } from "@mold/studio";
 import EmptyState from "../components/shell/EmptyState.vue";
 import ImagePickerModal from "../components/generate/ImagePickerModal.vue";
 import StageCard from "../components/chains/StageCard.vue";
@@ -286,7 +287,7 @@ onMounted(() => {
             :value="m.name"
             :disabled="isCudaOnlyOnThisMachine(m)"
           >
-            {{ m.name }}{{ isCudaOnlyOnThisMachine(m) ? " — CUDA only" : "" }}
+            {{ modelDisplayName(m) }}{{ isCudaOnlyOnThisMachine(m) ? " — CUDA only" : "" }}
           </option>
         </select>
       </div>

@@ -1,4 +1,4 @@
-//! Single-file validator for LTX-Video (LTXV) Civitai checkpoints (phase 5).
+//! Single-file validator for LTX-Video (LTXV) Civitai checkpoints.
 //!
 //! Reads only the safetensors header to detect the tensor key layout and
 //! partition keys into transformer and VAE buckets. No tensor data is

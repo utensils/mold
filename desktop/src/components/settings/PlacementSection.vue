@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
+import { modelDisplayName } from "@mold/studio";
 import { apiJson } from "../../lib/api/client";
 import {
   deleteModelPlacement,
@@ -165,7 +166,9 @@ async function clear() {
         class="border-edge data-mono mt-1 h-8 w-full rounded-control border bg-bath px-2 text-ink"
         data-test="placement-model"
       >
-        <option v-for="m in installed" :key="m.name" :value="m.name">{{ m.name }}</option>
+        <option v-for="m in installed" :key="m.name" :value="m.name">
+          {{ modelDisplayName(m) }}
+        </option>
       </select>
 
       <label class="mt-4 block text-caption text-ink-2" for="placement-te">Text encoders</label>

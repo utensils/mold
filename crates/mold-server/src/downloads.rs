@@ -4,7 +4,7 @@
 //! task per job, forwards `DownloadProgressEvent` → `DownloadEvent` on a
 //! broadcast channel, and cleans up on completion or cancellation.
 //!
-//! **Agent A boundary** — this module is owned by the Downloads phase. Do
+//! This module owns the download queue and progress contract. Do
 //! not take a lock on resources (Agent B) or placement (Agent C) from here.
 
 use std::collections::{HashMap, VecDeque};

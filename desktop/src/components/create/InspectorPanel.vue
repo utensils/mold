@@ -138,7 +138,7 @@ const modelDescription = computed(() => {
   const m = selectedModel.value;
   if (!m) return null;
   const parts: string[] = [];
-  if (m.description) parts.push(m.description);
+  if (m.description && modelDisplayName(m) === m.name) parts.push(m.description);
   if (m.disk_usage_bytes) parts.push(formatGB(m.disk_usage_bytes));
   if (m.is_loaded) parts.push("loaded");
   return parts.length ? parts.join(" · ") : null;

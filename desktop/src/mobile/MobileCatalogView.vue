@@ -1400,7 +1400,7 @@ onBeforeUnmount(() => {
           >
             {{ announcement }}
           </p>
-          <p v-if="mergedDetail.engine_phase != null && !canDownloadEntry(mergedDetail)">
+          <p v-if="mergedDetail.supported != null && !canDownloadEntry(mergedDetail)">
             This catalog package is not supported by a shipped Mold engine yet.
           </p>
           <p v-else-if="catalogFetchCaption(catalogSizeInfo(mergedDetail))">

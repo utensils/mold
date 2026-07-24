@@ -48,7 +48,8 @@ pub struct CatalogSidecar {
     pub modality: String,
     pub thumbnail_url: Option<String>,
     pub size_bytes: Option<u64>,
-    pub engine_phase: u8,
+    #[serde(default = "default_true")]
+    pub supported: bool,
     /// Trigger phrases for LoRA entries — what the picker renders as
     /// click-to-insert chips. Empty for non-LoRA entries.
     #[serde(default)]
@@ -59,6 +60,10 @@ pub struct CatalogSidecar {
     /// stays portable across `MOLD_HOME` moves.
     pub primary_filename_rel: String,
     pub written_at: i64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Build a sidecar from a normalized [`CatalogEntry`] plus the resolved
@@ -81,7 +86,7 @@ pub fn sidecar_from_entry(entry: &CatalogEntry, primary_filename_rel: String) ->
         modality: serde_kebab(&entry.modality),
         thumbnail_url: entry.thumbnail_url.clone(),
         size_bytes: entry.size_bytes,
-        engine_phase: entry.engine_phase,
+        supported: entry.supported,
         trained_words: entry.trained_words.clone(),
         primary_filename_rel,
         written_at: chrono_now_unix(),
@@ -253,7 +258,7 @@ mod tests {
                 files: vec![],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 3,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,

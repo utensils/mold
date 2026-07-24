@@ -437,6 +437,30 @@ mod tests {
     }
 
     #[test]
+    fn every_theme_round_trips_through_session_storage() {
+        let db = MetadataDb::open_in_memory().unwrap();
+
+        for preset in crate::ui::theme::ThemePreset::ALL {
+            let session = TuiSession {
+                theme: Some(preset.slug().to_string()),
+                ..Default::default()
+            };
+            save_to_db(&db, &session);
+
+            let loaded = load_from_db(&db);
+            let parsed = loaded
+                .theme
+                .as_deref()
+                .map(crate::ui::theme::ThemePreset::from_slug)
+                .unwrap_or_default();
+            assert_eq!(
+                parsed, preset,
+                "preset {preset:?} did not round-trip through session storage"
+            );
+        }
+    }
+
+    #[test]
     #[serial(mold_env)]
     fn save_then_load_roundtrip_through_db() {
         with_isolated_env(|_home| {

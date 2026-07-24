@@ -52,6 +52,9 @@ pushed screen opened from the header.
   target-host estimates, proportional resolution choices, and explicit Random
   or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
   prompt **style** presets compose at submit without rewriting the prompt text.
+  For LTX-2 checkpoints, the sheet honors additive `supports_audio` model
+  metadata: video-only community checkpoints disable generated audio with an
+  explanation while source-image video remains available.
   Source-fit and Upscale then fit preprocessing use a per-Create-form cache, so
   unchanged Batch siblings and repeat submissions share one host upscale and
   fitted source while keeping the editable original intact. When the host

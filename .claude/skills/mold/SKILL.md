@@ -170,7 +170,9 @@ selected LoRA — clicking a chip appends the phrase to the active prompt.
 
 **Create web UI:** the Create tab only lists downloaded standalone
 generation models; the Models tab is the install/repair surface for missing
-models and companions. The controls rail mirrors placement controls, exposes
+models and companions. Web and desktop selectors label installed `cv:` / `hf:`
+entries with their catalog descriptions while keeping those ids as the actual
+form, routing, and generation values. The controls rail mirrors placement controls, exposes
 family-specific schedulers, uses installed upscaler dropdowns, shows
 server-derived peak-memory estimates, reports component readiness via
 `GET /api/models/:model/components`, and can save/load named web-local
@@ -252,6 +254,13 @@ mold run ltx-2-19b-distilled:fp8 "lantern-lit cave entrance" --camera-control do
 **Models:** `ltx-2-19b-dev:fp8`, `ltx-2-19b-distilled:fp8`, `ltx-2.3-22b-dev:fp8`, `ltx-2.3-22b-distilled:fp8`
 
 **Important flags:** `--audio`, `--no-audio`, `--audio-file`, `--video`, repeatable `--keyframe`, repeatable `--lora`, `--pipeline`, `--retake`, `--camera-control`, `--spatial-upscale`, `--temporal-upscale`, `--clip-frames`, `--motion-tail`
+
+Community LTX-2 checkpoints can be video-only even when their transformer and
+video VAE are complete. Mold inspects the installed safetensors for both the
+audio VAE and vocoder; web, desktop, and iPhone disable generated audio when
+either is absent, while text/image-to-video continues normally. `--audio` and
+direct API requests then fail before prompt encoding or denoising; use
+`--no-audio` for those checkpoints.
 
 **Chained (arbitrary-length) video output:** for LTX-2 19B and 22B distilled models, `--frames` above the 97-frame per-clip cap automatically renders multiple clips with a motion-tail of latents carried across each clip boundary, then stitches them into a single MP4. The CLI picks this path transparently — `mold run ltx-2-19b-distilled:fp8 "a cat walking" --frames 400` produces one 400-frame MP4 from 5 chained stages. Advanced callers can override the per-clip length via `--clip-frames N` (must be `8k+1`, clamped to the model cap) and the overlap via `--motion-tail N` (default 4 pixel frames, 0 disables carryover). Legacy `mold run` returns only the final output, while durable job workflows use `mold jobs` / `/api/chain-jobs` for resume and retake. Other model families reject `--frames > 97` with an actionable error.
 
@@ -511,19 +520,25 @@ in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
-hit the upstream APIs directly for the recipe. Phase-1 supports HF
-separated-bundling entries; phases 2 (SD1.5/SDXL), 3 (FLUX 1.x), 4
-(Z-Image), and 5 (LTX-Video / LTX-2 / LTX-2.3) single-file Civitai
-checkpoints are supported — downloaded with companions and runnable
+hit the upstream APIs directly for the recipe. HF separated-bundling entries
+and supported SD1.5, SDXL, FLUX, Z-Image, LTX-Video, LTX-2, and LTX-2.3
+single-file Civitai checkpoints download with companions and are runnable
 via `mold run cv:<id>`. Z-Image fine-tunes pull `z-image-te`
 (Tongyi-MAI Qwen3 shards + tokenizer + fallback VAE; satisfied by an existing
 `z-image-turbo` install) and use recipe-provided text-encoder files
 when the Civitai version publishes them. Flux.2 fine-tunes pull `flux2-vae` (168 MB
 Klein VAE, ungated) and either `flux2-te` (Qwen3-4B, ungated, for
 `sub_family=klein-4b`) or `flux2-te-9b` (Qwen3-8B, **HF_TOKEN required**,
-for `klein-9b` / `flux2-d`). Phase-5 LTX-Video entries pull
+for `klein-9b` / `flux2-d`). LTX-Video entries pull
 `ltx-video-vae` as a companion (Civitai fine-tunes are transformer-only);
-LTX-2/2.3 entries require a combined checkpoint with bundled VAE.
+LTX-2 and LTX-2.3 entries pull their version-matched video VAE when the
+checkpoint is transformer-only; LTX-2.3 entries also pull the standalone Gemma
+hidden-state projection used by diffusion-only/quantized exports. Combined
+checkpoints keep using their bundled assets. ConvRot W4A4 exports full-stream
+automatically because the compatibility backend reconstructs BF16 block weights.
+Native multi-prompt chains accept one-stage and distilled LTX-2 checkpoints.
+Installed catalog checkpoints with opaque `cv:` / `hf:` IDs and no bundled
+spatial upscaler use the one-stage path and remain sequence-capable.
 Single-file format detection is key-based (reads safetensors header only).
 
 **Auth:** `HF_TOKEN` for gated HF repos; `CIVITAI_TOKEN` for early-access
@@ -803,7 +818,7 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_CFG_PLUS`                       | unset                             | Set `1` to enable CFG++ (manifold-projection guidance). Drops usable CFG to ~1.5–2.5, removes guidance artifacts. Per-request `--cfg-plus` overrides. Supported on SD3, SDXL, and SD1.5 (DDIM scheduler only — Euler-A / UniPC fall back to standard CFG with a warn). Ignored by guidance-distilled families (FLUX, Z-Image, Flux.2) and at cfg ≈ 1.0.                                                                                                                                                        |
 | `MOLD_VAE_DTYPE`                      | `auto`                            | Override VAE precision: `auto` (per-pipeline default), `bf16`, `fp16`, `fp32`. Use `fp32` to fix banding artifacts on FLUX/SD3 finetuned VAEs (~2× decode VRAM; tiled VAE absorbs OOM). Wired into FLUX, FLUX2, SD3, SDXL, SD1.5; no-op for Z-Image CPU VAE / Wuerstchen / Qwen-Image (already F32).                                                                                                                                                                                                           |
 | `MOLD_NVFP4_BACKEND`                  | `auto`                            | NVFP4 backend for Flux.2 and LTX-2: `auto` / `portable` use CPU BF16 streaming dequant; `native` is reserved for validated sm_120/Blackwell tensor-core execution and fails clearly on non-Blackwell hosts.                                                                                                                                                                                                                                                                                                    |
-| `MOLD_LTX2_GEMMA_DEVICE`              | `auto`                            | LTX-2 Gemma 3 12B prompt encoder placement: `auto` (active GPU → sibling GPUs → CPU based on free VRAM, threshold 24 GB), `cpu` (force system RAM, ~30–60 s encode vs ~1–3 s on GPU but no VRAM contention), `gpu` (force the active GPU, surface OOM rather than auto-offload). The deprecated `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER=1` is a one-shot-warn alias for `cpu`. Server-side preflight uses the same resolver so cv:2752735 admits/rejects in lockstep with what the runtime will do.          |
+| `MOLD_LTX2_GEMMA_DEVICE`              | `auto`                            | LTX-2 Gemma 3 12B prompt encoder placement: `auto` (active GPU → sibling GPUs → CPU based on free VRAM, threshold 24 GB), `cpu` (force system RAM, ~30–60 s encode vs ~1–3 s on GPU but no VRAM contention), `gpu` (force the active GPU, surface OOM rather than auto-offload). An auto-placement OOM retries only Gemma on CPU; the transformer and video VAE remain on CUDA. The deprecated `MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER=1` is a one-shot-warn alias for `cpu`. Server-side preflight uses the same resolver so cv:2752735 admits/rejects in lockstep with what the runtime will do.          |
 | `MOLD_LTX2_GEMMA_VARIANT`             | `auto`                            | LTX-2 Gemma 3 12B weight format: `auto` (BF16 if both formats present, GGUF if only GGUF), `q4` (force Q4 GGUF — `google/gemma-3-12b-it-qat-q4_0-gguf`, ~7 GB; fits comfortably on a 24 GB card alongside the streaming transformer), `bf16` (force BF16 split — `google/gemma-3-12b-it-qat-q4_0-unquantized`, ~23 GB; historical default). Auto-detection scans the gemma_root for `*.gguf` and `model*.safetensors`. Place the Q4 GGUF manually in your gemma_root for V1 — manifest auto-fetch is deferred. |
 | `MOLD_LTX2_VAE_FORCE_FULL_DECODE`     | unset                             | Set `1` to disable adaptive temporal chunked LTX-2 VAE decode and force one full decode pass. Useful for debugging/comparison; long or high-resolution clips may OOM.                                                                                                                                                                                                                                                                                                                                          |
 | `MOLD_LTX2_VAE_FORCE_FRAMEWISE`       | unset                             | Set `1` to force temporal-chunk LTX-2 VAE decode even when a full decode would fit. Reduces peak VRAM at a small decode-time cost.                                                                                                                                                                                                                                                                                                                                                                             |

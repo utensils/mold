@@ -886,6 +886,10 @@ pub struct ModelInfoExtended {
     /// every API call still addresses the model by `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Model-specific LTX-2 audio-output capability. `None` preserves
+    /// compatibility with older servers that only advertised family support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_audio: Option<bool>,
 }
 
 impl ModelInfoExtended {

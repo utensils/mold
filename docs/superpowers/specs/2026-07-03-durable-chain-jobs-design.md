@@ -360,7 +360,7 @@ their shapes aside from optional correlation metadata.
 
 ## 10. Rider refactor: model-agnostic chain module
 
-Moves, as part of this work (not a separate phase):
+Moves as part of this work (not a separate workstream):
 
 - `ltx2/chain.rs` (orchestrator, `ChainTail`, `ChainStageRenderer`,
   `StageOutcome`) and `ltx2/stitch.rs` → `mold_inference::chain`. The RGB

@@ -467,18 +467,15 @@ pub async fn post_catalog_download(
             .into_response();
     };
 
-    if entry.engine_phase >= 6 {
+    if !entry.supported {
         return (
             StatusCode::CONFLICT,
-            format!(
-                "engine_phase {} not yet supported by this build — see release notes",
-                entry.engine_phase
-            ),
+            "catalog entry is not supported by this build".to_string(),
         )
             .into_response();
     }
 
-    // Phase 2: companions auto-pull before the primary entry. Civitai
+    // Companions auto-pull before the primary entry. Civitai
     // single-file checkpoints commonly strip their text encoders + VAE,
     // so the catalog records `companions: ["clip-l", ...]` on those
     // entries. Each canonical companion has a hidden synthetic manifest
@@ -1062,7 +1059,7 @@ fn live_entry_to_wire(
         "companions": entry.companions,
         "companion_details": companion_details,
         "download_recipe": entry.download_recipe,
-        "engine_phase": entry.engine_phase,
+        "supported": entry.supported,
         "installed": installed,
         "primary_path": primary_path,
         "created_at": entry.created_at,
@@ -1111,7 +1108,7 @@ pub(crate) fn sidecar_to_wire(
         companions: Vec::new(),
         companion_details: Vec::new(),
         download_recipe: mold_core::catalog_wire::DownloadRecipeWire::default(),
-        engine_phase: sc.engine_phase,
+        supported: sc.supported,
         installed,
         primary_path,
         created_at: None,

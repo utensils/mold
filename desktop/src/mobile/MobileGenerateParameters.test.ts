@@ -33,12 +33,13 @@ function formFor(family: string, model = `${family}:test`): GenerateForm {
 function mountParameters(
   initial: GenerateForm,
   upscalers: ModelEntry[] = [],
+  audioOutputSupported = true,
 ): { wrapper: VueWrapper; form: GenerateForm } {
   const form = reactive(initial) as GenerateForm;
   const Harness = defineComponent({
     components: { MobileGenerateParameters },
-    setup: () => ({ form, upscalers }),
-    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" />`,
+    setup: () => ({ audioOutputSupported, form, upscalers }),
+    template: `<MobileGenerateParameters :form="form" :upscalers="upscalers" :audio-output-supported="audioOutputSupported" />`,
   });
   return { wrapper: mount(Harness), form };
 }
@@ -229,6 +230,17 @@ describe("MobileGenerateParameters", () => {
     await flushPromises();
     expect(wrapper.get("[data-test='mobile-audio-format-error']").text()).toContain("MP4");
     expect(child.emitted("validity-change")?.at(-1)).toEqual([false]);
+  });
+
+  it("disables generated audio for video-only LTX-2 checkpoints", () => {
+    const initial = formFor("ltx2", "cv:3143864");
+    initial.enableAudio = false;
+    const { wrapper } = mountParameters(initial, [], false);
+
+    expect(wrapper.get("[data-test='mobile-enable-audio']").attributes()).toHaveProperty(
+      "disabled",
+    );
+    expect(wrapper.text()).toContain("Audio assets are not included with this checkpoint");
   });
 
   it("requires a real custom camera LoRA path", async () => {

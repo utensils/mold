@@ -56,6 +56,16 @@ describe("decideChainRouting", () => {
     });
   });
 
+  it("chains installed catalog LTX-2 checkpoints whose stable id has no pipeline label", () => {
+    const d = decideChainRouting(241, "ltx2", "cv:3143864");
+    expect(d).toEqual({
+      kind: "chain",
+      clipFrames: 97,
+      motionTail: DEFAULT_MOTION_TAIL,
+      stageCount: 3,
+    });
+  });
+
   it("chain stage count matches Rust normalise() expectations", () => {
     // Mirrors crates/mold-core/src/chain.rs test cases:
     //   (400, 97, 4, 5)  — 97 + 4*93 = 469 ≥ 400

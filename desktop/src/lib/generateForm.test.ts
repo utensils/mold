@@ -33,6 +33,15 @@ function ltx2Form() {
   return form;
 }
 
+describe("model-specific audio capability", () => {
+  it("turns audio off when an LTX-2 checkpoint has video-only assets", () => {
+    const form = newGenerateForm();
+    form.enableAudio = true;
+    applyModelDefaults(form, { ...ltx2Model(), name: "cv:3143864", supports_audio: false });
+    expect(form.enableAudio).toBe(false);
+  });
+});
+
 describe("seedMode", () => {
   it("derives random from an empty field and fixed from any number", () => {
     expect(seedMode("")).toBe("random");

@@ -102,4 +102,18 @@ describe("ActivityStrip", () => {
     });
     expect(wrapper.text()).toContain("Loading model");
   });
+
+  it("keeps failed jobs visible with the server error until dismissed", async () => {
+    const failed = makeJob({
+      state: "error",
+      error: "LTX-2 audio output is unavailable; set enable_audio=false.",
+    });
+    const wrapper = mount(ActivityStrip, { props: { jobs: [failed] } });
+
+    expect(wrapper.get("[data-test='activity-error-job-1']").text()).toContain(
+      "LTX-2 audio output is unavailable",
+    );
+    await wrapper.get("[data-test='activity-dismiss-job-1']").trigger("click");
+    expect(wrapper.emitted("dismiss")?.[0]).toEqual(["job-1"]);
+  });
 });

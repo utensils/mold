@@ -125,6 +125,25 @@ function emptyProgress(): JobProgress {
   };
 }
 
+function serverErrorMessage(body: string | undefined): string | null {
+  if (!body) return null;
+  try {
+    const parsed = JSON.parse(body) as {
+      message?: unknown;
+      error?: unknown;
+    };
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message;
+    }
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error;
+    }
+  } catch {
+    // Plain-text HTTP errors are already suitable for display.
+  }
+  return body.trim() || null;
+}
+
 function markWorkStarted(job: Job) {
   job.workStarted = true;
   job.progress.queuePosition = null;
@@ -643,10 +662,13 @@ function submitJob(
     message?: string;
   }) => {
     if (err.kind === "http") {
+      const message = serverErrorMessage(err.body);
       job.error =
         err.status === 503
           ? `Queue full (retry after ${err.retryAfter ?? "?"}s)`
-          : `HTTP ${err.status}: ${err.body ?? ""}`;
+          : err.status === 0
+            ? (message ?? "generation failed")
+            : `HTTP ${err.status}${message ? `: ${message}` : ""}`;
     } else {
       job.error = err.message ?? "network error";
     }

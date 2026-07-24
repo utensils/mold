@@ -56,7 +56,7 @@ pub(crate) struct Ltx2ExecutionGraph {
     pub(crate) denoise_passes: Vec<DenoisePassPlan>,
 }
 
-fn wants_audio_output(req: &GenerateRequest) -> bool {
+pub(crate) fn wants_audio_output(req: &GenerateRequest) -> bool {
     req.enable_audio
         .unwrap_or(req.resolved_output_format() == OutputFormat::Mp4)
 }
@@ -373,7 +373,8 @@ mod tests {
             "ltx-2.3-22b-distilled:fp8",
             dummy_paths_with_gemma_root(gemma_dir.path()),
         );
-        let req = req("ltx-2.3-22b-distilled:fp8");
+        let mut req = req("ltx-2.3-22b-distilled:fp8");
+        req.enable_audio = Some(false);
         let temp_dir = tempfile::tempdir().unwrap();
         let plan = engine
             .materialize_request(&req, temp_dir.path(), &temp_dir.path().join("out.mp4"))

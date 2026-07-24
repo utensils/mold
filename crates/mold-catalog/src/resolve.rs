@@ -92,10 +92,10 @@ pub enum ResolveError {
     )]
     PrimaryFileMissing { model: String },
 
-    /// The FLUX bundled-VAE probe couldn't be run (e.g. malformed
+    /// The bundled-VAE probe couldn't be run (e.g. malformed
     /// safetensors header).
-    #[error("probe of FLUX checkpoint {path} for bundled VAE failed: {source}")]
-    FluxProbeFailed {
+    #[error("probe of checkpoint {path} for bundled VAE failed: {source}")]
+    VaeProbeFailed {
         path: String,
         #[source]
         source: std::io::Error,
@@ -138,29 +138,29 @@ pub fn resolve_intent_to_model_config(
     apply_catalog_runtime_defaults(&mut cfg, intent);
     cfg.transformer = Some(primary_str.clone());
 
-    // FLUX is the only family with mixed bundling — peek the safetensors
-    // header to decide whether the primary file carries the VAE or whether
-    // the flux-vae companion has to populate cfg.vae.
+    // FLUX and LTX-2 both have mixed bundling — peek the safetensors header
+    // to decide whether the primary carries a VAE or a companion must fill it.
     let family = family_for_slug(model_name, &intent.family)?;
-    let probe_says_bundled = if family == Family::Flux && intent.primary_recipe_path.exists() {
-        Some(
-            mold_core::safetensors_probe::flux_single_file_bundles_vae(&intent.primary_recipe_path)
-                .map_err(|e| ResolveError::FluxProbeFailed {
-                    path: intent.primary_recipe_path.display().to_string(),
-                    source: e,
-                })?,
-        )
-    } else if family == Family::Flux {
-        // Primary not on disk yet — defer. The flux-vae companion (which is
-        // in the required list for FLUX) must populate cfg.vae below.
-        None
-    } else if family_bundles_vae_unconditionally(family) {
-        // SDXL / SD1.5 / LTX-2 always bundle the VAE.
-        Some(true)
-    } else {
-        // Flux.2 / Z-Image / LTX-Video always need a separate VAE companion.
-        Some(false)
-    };
+    let probe_says_bundled =
+        if matches!(family, Family::Flux | Family::Ltx2) && intent.primary_recipe_path.exists() {
+            Some(
+                mold_core::safetensors_probe::single_file_bundles_vae(&intent.primary_recipe_path)
+                    .map_err(|e| ResolveError::VaeProbeFailed {
+                        path: intent.primary_recipe_path.display().to_string(),
+                        source: e,
+                    })?,
+            )
+        } else if matches!(family, Family::Flux | Family::Ltx2) {
+            // Primary not on disk yet — defer. The required family/version VAE
+            // companion must populate cfg.vae below.
+            None
+        } else if family_bundles_vae_unconditionally(family) {
+            // SDXL / SD1.5 always bundle the VAE.
+            Some(true)
+        } else {
+            // Flux.2 / Z-Image / LTX-Video always need a separate VAE companion.
+            Some(false)
+        };
     if probe_says_bundled == Some(true) {
         cfg.vae = Some(primary_str);
     }
@@ -254,7 +254,7 @@ pub fn copy_companion_into_model_config(
         "flux-vae" if cfg.vae.is_none() => {
             cfg.vae = to_str(&paths.transformer);
         }
-        "ltx-video-vae" | "flux2-vae" => {
+        "ltx-video-vae" | "ltx2-vae" | "ltx2.3-vae" | "flux2-vae" => {
             cfg.vae = to_str(&paths.transformer);
         }
         "t5-v1_1-xxl" => {
@@ -287,6 +287,15 @@ pub fn copy_companion_into_model_config(
                 .filter_map(to_str)
                 .collect::<Vec<_>>()
                 .into();
+        }
+        "ltx2.3-text-projection" => {
+            let mut files = cfg.text_encoder_files.take().unwrap_or_default();
+            if let Some(path) = to_str(&paths.transformer) {
+                if !files.contains(&path) {
+                    files.push(path);
+                }
+            }
+            cfg.text_encoder_files = Some(files);
         }
         "qwen-image-runtime" => {
             cfg.vae = to_str(&paths.vae);
@@ -383,6 +392,9 @@ fn known_companion_static(name: &str) -> Option<&'static str> {
         "flux2-vae" => "flux2-vae",
         "z-image-te" => "z-image-te",
         "ltx-video-vae" => "ltx-video-vae",
+        "ltx2-vae" => "ltx2-vae",
+        "ltx2.3-vae" => "ltx2.3-vae",
+        "ltx2.3-text-projection" => "ltx2.3-text-projection",
         "ltx2-te" => "ltx2-te",
         "qwen-image-runtime" => "qwen-image-runtime",
         "wuerstchen-runtime" => "wuerstchen-runtime",
@@ -583,7 +595,7 @@ mod tests {
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 1,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,
@@ -1261,7 +1273,7 @@ mod tests {
         family: &str,
         sub_family: Option<&str>,
         primary_rel: &str,
-        engine_phase: u8,
+        supported: bool,
     ) {
         let install_dir = models_dir.join(dir_name);
         let primary = install_dir.join(primary_rel);
@@ -1281,7 +1293,7 @@ mod tests {
             modality: "image".to_string(),
             thumbnail_url: None,
             size_bytes: Some(4),
-            engine_phase,
+            supported,
             trained_words: Vec::new(),
             primary_filename_rel: primary_rel.to_string(),
             written_at: 0,
@@ -1303,12 +1315,17 @@ mod tests {
             "ltx2",
             Some("v2.3"),
             "ltx2/civitai/2752735/ltx23_full.safetensors",
-            5,
+            true,
         );
         let intent = installed_intent_from_sidecar(dir.path(), "cv:2752735")
             .expect("installed sidecar should synthesize an intent");
         assert_eq!(intent.family, "ltx2");
         assert!(intent.companions.iter().any(|c| c.name == "ltx2-te"));
+        assert!(intent.companions.iter().any(|c| c.name == "ltx2.3-vae"));
+        assert!(intent
+            .companions
+            .iter()
+            .any(|c| c.name == "ltx2.3-text-projection"));
     }
 
     #[test]
@@ -1321,7 +1338,7 @@ mod tests {
             "z-image",
             Some("turbo"),
             "z-image/civitai/2442439/zImageTurbo_turbo_txt.safetensors",
-            4,
+            true,
         );
         assert!(installed_intent_from_sidecar(dir.path(), "cv:2442439").is_none());
     }
@@ -1336,7 +1353,7 @@ mod tests {
             "flux2",
             Some("klein-9b"),
             "flux2/civitai/2597527/qwen38BFluxKlein9BTE_38b.safetensors",
-            5,
+            true,
         );
         assert!(installed_intent_from_sidecar(dir.path(), "cv:2597527").is_none());
     }
@@ -1358,7 +1375,7 @@ mod tests {
             "sdxl",
             None,
             "sdxl/civitai/1075446/realism.safetensors",
-            2,
+            true,
         );
         let intent = installed_intent_from_sidecar(models_dir, "cv:1075446")
             .expect("installed checkpoint sidecar resolves");

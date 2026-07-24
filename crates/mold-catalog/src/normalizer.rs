@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::civitai_map::{engine_phase_for, map_base_model};
+use crate::civitai_map::{map_base_model, supported_for};
 use crate::companions::companions_for;
 use crate::entry::{
     Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind, LicenseFlags,
@@ -238,7 +238,7 @@ pub fn from_hf(
         Bundling::SingleFile => companions_for(family, None, bundling, kind),
         Bundling::Separated => Vec::new(),
     };
-    let phase = engine_phase_for(family, bundling, kind);
+    let supported = supported_for(family, bundling, kind);
 
     let now = chrono_now_unix();
 
@@ -276,7 +276,7 @@ pub fn from_hf(
         tags: detail.tags.clone(),
         companions,
         download_recipe: DownloadRecipe { files, needs_token },
-        engine_phase: phase,
+        supported,
         created_at: parse_iso(&detail.created_at),
         updated_at: parse_iso(&detail.last_modified),
         added_at: now,
@@ -458,7 +458,7 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         Bundling::Separated
     };
     let companions = companions_for(family, sub_family.as_deref(), bundling, kind);
-    let phase = engine_phase_for(family, bundling, kind);
+    let supported = supported_for(family, bundling, kind);
     let modality = match family {
         Family::LtxVideo | Family::Ltx2 => Modality::Video,
         _ => Modality::Image,
@@ -524,7 +524,7 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         tags: item.tags.clone(),
         companions,
         download_recipe: recipe,
-        engine_phase: phase,
+        supported,
         created_at: None,
         updated_at: None,
         added_at: now,

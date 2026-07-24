@@ -14,7 +14,7 @@ use std::path::Path;
 use serde_json::Value;
 
 /// Peek the safetensors header (8-byte length prefix + JSON, no tensor data
-/// read) to determine whether a FLUX single-file checkpoint bundles its VAE.
+/// read) to determine whether a single-file checkpoint bundles its VAE.
 /// Returns `true` when any VAE-encoder marker key is present.
 ///
 /// The keys we look for are inclusive of the conventions used by Civitai
@@ -23,15 +23,15 @@ use serde_json::Value;
 /// - `first_stage_model.encoder.*` — A1111/ComfyUI-style root
 /// - `vae.encoder.*`               — some pruning tools' convention
 ///
-/// Civitai's FLUX fine-tune convention is inconsistent — some bundle the VAE
+/// Civitai's FLUX and LTX-2 fine-tune conventions are inconsistent — some bundle the VAE
 /// (`*_full.safetensors`), some are transformer-only (`*Unet.safetensors` /
 /// `*_diffusion.safetensors`). Without this probe the catalog bridge would
 /// unconditionally point `cfg.vae` at the primary checkpoint and the engine
 /// would crash with `cannot find tensor encoder.conv_in.weight` on every
-/// transformer-only fine-tune.
+/// transformer-only fine-tune. LTX-2 uses the `vae.encoder.*` form.
 ///
 /// Returns `Err` only on bona fide I/O / parse failures — never panics.
-pub fn flux_single_file_bundles_vae(path: &Path) -> std::io::Result<bool> {
+pub fn single_file_bundles_vae(path: &Path) -> std::io::Result<bool> {
     let mut file = File::open(path)?;
     let mut len_buf = [0u8; 8];
     file.read_exact(&mut len_buf)?;
@@ -111,7 +111,7 @@ mod tests {
             ],
         );
 
-        let bundled = flux_single_file_bundles_vae(&path).expect("probe must not error");
+        let bundled = single_file_bundles_vae(&path).expect("probe must not error");
         assert!(
             bundled,
             "diffusers-style `encoder.conv_in.weight` must mark the file as VAE-bundled"
@@ -137,7 +137,7 @@ mod tests {
             ],
         );
 
-        let bundled = flux_single_file_bundles_vae(&path).expect("probe must not error");
+        let bundled = single_file_bundles_vae(&path).expect("probe must not error");
         assert!(
             !bundled,
             "transformer-only checkpoint (no encoder.conv_in / first_stage_model / vae prefix) \
@@ -160,7 +160,7 @@ mod tests {
             ],
         );
 
-        let bundled = flux_single_file_bundles_vae(&path).expect("probe must not error");
+        let bundled = single_file_bundles_vae(&path).expect("probe must not error");
         assert!(
             bundled,
             "A1111 `first_stage_model.encoder.*` prefix must mark the file as VAE-bundled"
@@ -181,7 +181,7 @@ mod tests {
             ],
         );
 
-        let bundled = flux_single_file_bundles_vae(&path).expect("probe must not error");
+        let bundled = single_file_bundles_vae(&path).expect("probe must not error");
         assert!(
             bundled,
             "pruner-style `vae.encoder.*` prefix must mark the file as VAE-bundled"
@@ -197,7 +197,7 @@ mod tests {
         // the file as transformer-only.
         let missing = std::env::temp_dir().join("mold-probe-flux-vae-missing.safetensors");
         let _ = std::fs::remove_file(&missing); // ensure it doesn't exist
-        let err = flux_single_file_bundles_vae(&missing).unwrap_err();
+        let err = single_file_bundles_vae(&missing).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }

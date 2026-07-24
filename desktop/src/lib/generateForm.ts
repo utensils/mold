@@ -253,7 +253,7 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
     form.controlImage = null;
     form.controlModel = "";
   }
-  if (!caps.supportsAudio) form.enableAudio = false;
+  if (!caps.supportsAudio || m.supports_audio === false) form.enableAudio = false;
   if (!caps.supportsAdvancedVideo) {
     form.sourceVideo = null;
     form.keyframes = [];

@@ -1,12 +1,11 @@
-//! SDXL A1111 → diffusers key rename pass (phase 2.5).
+//! SDXL A1111 → diffusers key rename pass.
 //!
 //! Bridges Civitai single-file SDXL checkpoints (LDM tensor naming)
 //! to the diffusers naming candle's
 //! `stable_diffusion::{unet_2d::UNet2DConditionModel, vae::AutoEncoderKL,
 //! clip::ClipTextTransformer}` constructors expect.
 //!
-//! Layout per the phase-2.2 audit
-//! (`tasks/catalog-expansion-phase-2-tensor-audit.md`):
+//! Layout from the catalog tensor-prefix audit:
 //!
 //! - **UNet** at `model.diffusion_model.*` — 3 stages
 //!   (`block_out_channels = [320, 640, 1280]`). Down stage 0 is resnet-only;

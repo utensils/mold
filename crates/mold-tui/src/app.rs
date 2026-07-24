@@ -10031,6 +10031,7 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            supports_audio: None,
         }
     }
 
@@ -10992,24 +10993,16 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(mold_env)]
-    async fn theme_save_then_load_round_trip_preserves_preset() {
-        crate::test_env::with_isolated_env(|_home| {
-            for preset in crate::ui::theme::ThemePreset::ALL {
-                let mut app = make_settings_test_app();
-                app.apply_theme_preset(preset);
-
-                let loaded = crate::session::TuiSession::load();
-                let parsed = loaded
-                    .theme
-                    .as_deref()
-                    .map(crate::ui::theme::ThemePreset::from_slug)
-                    .unwrap_or_default();
-                assert_eq!(
-                    parsed, preset,
-                    "preset {preset:?} did not round-trip via TuiSession::load (got {parsed:?})"
-                );
-            }
-        });
+    async fn apply_theme_preset_supports_every_preset() {
+        // `apply_theme_preset` persists through the process-global DB env.
+        // Serialize this in-memory coverage test so it cannot write into an
+        // isolated persistence test's temporary database.
+        for preset in crate::ui::theme::ThemePreset::ALL {
+            let mut app = make_settings_test_app();
+            app.apply_theme_preset(preset);
+            assert_eq!(app.settings.theme_preset, preset);
+            assert_eq!(app.theme.accent, preset.build().accent);
+        }
     }
 
     #[tokio::test]
@@ -11675,6 +11668,7 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            supports_audio: None,
         }
     }
 

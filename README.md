@@ -131,7 +131,8 @@ independently of This Mac's startup; unreachable hosts stay visible and retry.
 Pod-routed Create jobs show their live RunPod accrued cost in the activity strip.
 Chain authoring inside Create also uses the all-host video-model union and keeps
 creation, progress, previews, and durable job actions routed to the selected
-model's host.
+model's host. Web and desktop selectors show catalog-provided model names while
+retaining `cv:` / `hf:` ids internally for routing and generation.
 Desktop Settings → About links to the public
 [Mold privacy policy](https://utensils.io/mold/privacy), matching the iPhone app.
 
@@ -156,7 +157,8 @@ build:web`, `bun run build:desktop`, or `bun run build:mobile`.
 
 The browser uses `/create`, `/library`, `/models`, `/machines`, and `/settings`.
 The root redirects to Create; retired `/generate` and `/catalog` URLs render
-Page Not Found and the web client requires the current server API contract.
+Page Not Found and the web client requires the current server API contract. Its
+Create model selector shows installed catalog names rather than opaque ids.
 
 The macOS DMG is signed and notarized. Linux builds are currently available
 through Nix or as source/CI artifacts; tagged releases do not publish an
@@ -320,6 +322,19 @@ Supports 11 model families with 80+ variants:
 Bare names auto-resolve: `mold run flux-schnell "a cat"` picks the best available variant.
 
 See the full [model catalog](https://utensils.io/mold/models/) for sizes, VRAM requirements, and recommended settings.
+Transformer-only LTX-2 catalog checkpoints automatically pull and use the
+version-matched video VAE and, for LTX-2.3 diffusion-only exports, the separate
+Gemma text projection; the resolved assets are retained across chain stages.
+Some community checkpoints are video-only: Mold detects whether the installed
+files contain both the audio VAE and vocoder, disables generated audio in its
+apps when they do not, and still supports normal text/image-to-video output.
+ConvRot W4A4 exports are reconstructed through the compatibility backend and
+full-streamed automatically so their packed checkpoint size is never mistaken
+for BF16 GPU residency. If the Gemma prompt encoder cannot fit in VRAM, only
+Gemma retries on CPU; the transformer and video VAE remain on CUDA. Native
+multi-prompt chains support both one-stage and distilled LTX-2 checkpoints,
+including installed catalog checkpoints whose stable `cv:` / `hf:` IDs do not
+encode the pipeline name.
 
 ## Features
 

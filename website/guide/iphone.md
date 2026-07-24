@@ -69,6 +69,10 @@ The mobile composer includes:
   retake, and LTX-2 pipeline/spatial/temporal controls; and
 - a host-aware memory estimate before submission.
 
+For video-only LTX-2 community checkpoints, **Generate audio** is disabled with
+an explanation when the connected server reports that the installed files lack
+an audio VAE or vocoder. Source-image video generation remains available.
+
 Choose resolution through orientation, proportionally drawn aspect-ratio
 tiles, a resolution tier, or explicit custom dimensions. Seed has separate
 **Random** and **Fixed** modes, including one-tap reuse of the last generated

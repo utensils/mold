@@ -304,6 +304,7 @@ pub fn storage_path(manifest: &ModelManifest, file: &ModelFile) -> PathBuf {
                 "clip-g" | "sdxl-vae" => "sdxl",
                 "sd-vae-ft-mse" => "sd15",
                 "ltx-video-vae" => "ltx-video",
+                "ltx2-vae" | "ltx2.3-vae" | "ltx2.3-text-projection" => "ltx2",
                 "z-image-te" => "z-image",
                 "flux2-vae" | "flux2-te" | "flux2-te-9b" => "flux2",
                 "ltx2-te" => "ltx2",
@@ -4489,9 +4490,9 @@ fn qwen3_expand_manifests() -> Vec<ModelManifest> {
 /// config-writing path.
 ///
 /// File lists are deliberately minimal — just the safetensors + (where
-/// applicable) the unified `tokenizer.json`. Phase-2 single-file engines
+/// applicable) the unified `tokenizer.json`. Single-file engines
 /// only need the encoder weights and a tokenizer; richer A1111-style
-/// loaders that want config/vocab/merges files are a phase-3+ concern.
+/// loaders that want config/vocab/merges files are a future extension.
 fn companion_manifests() -> Vec<ModelManifest> {
     let defaults = ManifestDefaults {
         steps: 0,
@@ -4585,7 +4586,7 @@ fn companion_manifests() -> Vec<ModelManifest> {
             hidden: true,
         },
         // T5-XXL — shared text encoder for FLUX, Flux.2, LTX-Video, LTX-2.
-        // The bf16 variant is the canonical full-precision companion; phase-3
+        // The bf16 variant is the canonical full-precision companion;
         // FLUX single-file flows can pull this instead of bundling T5 in the
         // checkpoint.
         ModelManifest {
@@ -4637,6 +4638,59 @@ fn companion_manifests() -> Vec<ModelManifest> {
                 size_bytes: 2_493_855_612,
                 gated: false,
                 sha256: None,
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: "ltx2-vae".to_string(),
+            family: "companion".to_string(),
+            description: "LTX-2 video VAE companion for transformer-only checkpoints"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Lightricks/LTX-2".to_string(),
+                hf_filename: "vae/diffusion_pytorch_model.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 2_444_982_370,
+                gated: false,
+                sha256: Some(
+                    "107cc359e3c4bce18c53d98686f4b3fe10c4207b6665d89b38b0741270514bfb",
+                ),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: "ltx2.3-vae".to_string(),
+            family: "companion".to_string(),
+            description: "LTX-2.3 video VAE companion for transformer-only checkpoints"
+                .to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Kijai/LTX2.3_comfy".to_string(),
+                hf_filename: "vae/LTX23_video_vae_bf16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 1_452_258_578,
+                gated: false,
+                sha256: Some(
+                    "01ea62d09bc139f95c5dee7b5c062ad6a3e6cd8be910a1983ac02e7eb5b8ee3b",
+                ),
+            }],
+            defaults: defaults.clone(),
+            hidden: true,
+        },
+        ModelManifest {
+            name: "ltx2.3-text-projection".to_string(),
+            family: "companion".to_string(),
+            description: "LTX-2.3 Gemma hidden-state projection companion for diffusion-only checkpoints".to_string(),
+            files: vec![ModelFile {
+                hf_repo: "Kijai/LTX2.3_comfy".to_string(),
+                hf_filename: "text_encoders/ltx-2.3_text_projection_bf16.safetensors".to_string(),
+                component: ModelComponent::Transformer,
+                size_bytes: 2_312_149_072,
+                gated: false,
+                sha256: Some(
+                    "911d59bb4cb7708179c9a0045ea0fe41212ecfb77aed3a02702b7c0a8274911f",
+                ),
             }],
             defaults: defaults.clone(),
             hidden: true,
@@ -5533,13 +5587,13 @@ mod tests {
 
     #[test]
     fn known_manifests_count() {
-        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 14 Companion = 111
+        // 24 FLUX + 3 SD1.5 + 4 SD3 + 8 SDXL + 4 Z-Image + 8 Flux.2 + 24 Qwen-Image/Qwen-Image-Edit + 1 Wuerstchen + 5 LTX Video + 4 LTX-2 + 3 ControlNet + 2 Qwen3-Expand + 7 Upscaler + 17 Companion = 114
         // Companion bump: +flux2-te, +flux2-te-9b, +flux2-vae for the
         // catalog bridge (single-file Civitai Flux.2 fine-tunes); +z-image-te
         // for single-file Civitai Z-Image checkpoints; +ltx2-te for the
         // catalog bridge (single-file Civitai LTX-2 / LTX-2.3 fine-tunes —
         // Gemma 3 12B text encoder).
-        assert_eq!(known_manifests().len(), 111);
+        assert_eq!(known_manifests().len(), 114);
     }
 
     #[test]
@@ -6797,13 +6851,14 @@ mod tests {
     #[test]
     fn all_utility_models_identified_by_is_utility() {
         let utility_count = known_manifests().iter().filter(|m| m.is_utility()).count();
-        // Currently 16: 2 qwen3-expand variants + 14 catalog companions
+        // Currently 19: 2 qwen3-expand variants + 17 catalog companions
         // (clip-l, clip-g, sdxl-vae, sd-vae-ft-mse, t5-v1_1-xxl, flux-vae,
-        // ltx-video-vae, flux2-te, flux2-te-9b, flux2-vae, z-image-te, ltx2-te,
-        // qwen-image-runtime, wuerstchen-runtime).
+        // ltx-video-vae, ltx2-vae, ltx2.3-vae, ltx2.3-text-projection, flux2-te, flux2-te-9b,
+        // flux2-vae, z-image-te, ltx2-te, qwen-image-runtime,
+        // wuerstchen-runtime).
         assert_eq!(
-            utility_count, 16,
-            "expected exactly 16 utility models, got {utility_count}"
+            utility_count, 19,
+            "expected exactly 19 utility models, got {utility_count}"
         );
     }
 
@@ -6843,6 +6898,9 @@ mod tests {
         "flux2-vae",
         "z-image-te",
         "ltx-video-vae",
+        "ltx2-vae",
+        "ltx2.3-vae",
+        "ltx2.3-text-projection",
         "ltx2-te",
     ];
 

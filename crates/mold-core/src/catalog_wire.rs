@@ -11,6 +11,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstalledCatalogResponse {
     #[serde(default)]
@@ -75,8 +79,8 @@ pub struct InstalledCatalogEntry {
     pub companion_details: Vec<serde_json::Value>,
     #[serde(default)]
     pub download_recipe: DownloadRecipeWire,
-    #[serde(default)]
-    pub engine_phase: u8,
+    #[serde(default = "default_true")]
+    pub supported: bool,
     #[serde(default)]
     pub installed: bool,
     #[serde(default)]

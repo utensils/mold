@@ -95,6 +95,7 @@ impl NativePromptEncoder {
     pub fn load(
         gemma_root: &std::path::Path,
         checkpoint_path: &std::path::Path,
+        text_projection_path: Option<&std::path::Path>,
         preset: &Ltx2ModelPreset,
         device: &Device,
         dtype: DType,
@@ -120,13 +121,12 @@ impl NativePromptEncoder {
             device = ?gemma_backend.device(),
             "loaded LTX-2 Gemma 3 12B prompt encoder"
         );
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                std::slice::from_ref(&checkpoint_path),
-                dtype,
-                device,
-            )?
-        };
+        let (video_connector_prefix, audio_connector_prefix) = connector_prefixes(checkpoint_path)?;
+        let mut connector_paths = vec![checkpoint_path];
+        if let Some(path) = text_projection_path {
+            connector_paths.push(path);
+        }
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&connector_paths, dtype, device)? };
         let embeddings_processor = build_embeddings_processor(
             vb,
             preset.feature_extractor,
@@ -138,7 +138,7 @@ impl NativePromptEncoder {
                 GemmaFeatureExtractorKind::V2DualAv => preset.audio_transformer_inner_dim(),
             }),
             ConnectorSpec {
-                prefix: "model.diffusion_model.video_embeddings_connector.",
+                prefix: video_connector_prefix,
                 num_attention_heads: preset.connectors.video_num_attention_heads,
                 attention_head_dim: preset.connectors.video_attention_head_dim,
                 num_layers: preset.connectors.video_num_layers,
@@ -150,7 +150,7 @@ impl NativePromptEncoder {
                 num_learnable_registers: preset.connectors.num_learnable_registers,
             },
             Some(ConnectorSpec {
-                prefix: "model.diffusion_model.audio_embeddings_connector.",
+                prefix: audio_connector_prefix,
                 num_attention_heads: match preset.feature_extractor {
                     GemmaFeatureExtractorKind::V1SharedAv => {
                         preset.connectors.video_num_attention_heads
@@ -231,6 +231,52 @@ impl NativePromptEncoder {
                 self.padding_side,
             )
             .context("failed to project native LTX-2 prompt embeddings")
+    }
+}
+
+fn connector_prefixes(checkpoint_path: &std::path::Path) -> Result<(&'static str, &'static str)> {
+    let tensors = unsafe { candle_core::safetensors::MmapedSafetensors::new(checkpoint_path) }
+        .with_context(|| {
+            format!(
+                "mmap LTX-2 connector weights at {}",
+                checkpoint_path.display()
+            )
+        })?;
+    let keys = tensors
+        .tensors()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    connector_prefixes_from_keys(keys.iter().map(String::as_str)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "LTX-2 checkpoint {} contains no video/audio embeddings connector weights",
+            checkpoint_path.display()
+        )
+    })
+}
+
+fn connector_prefixes_from_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Option<(&'static str, &'static str)> {
+    let mut native_video = false;
+    let mut native_audio = false;
+    let mut diffusers_video = false;
+    let mut diffusers_audio = false;
+    for key in keys {
+        native_video |= key.starts_with("video_embeddings_connector.");
+        native_audio |= key.starts_with("audio_embeddings_connector.");
+        diffusers_video |= key.starts_with("model.diffusion_model.video_embeddings_connector.");
+        diffusers_audio |= key.starts_with("model.diffusion_model.audio_embeddings_connector.");
+    }
+    if diffusers_video && diffusers_audio {
+        Some((
+            "model.diffusion_model.video_embeddings_connector.",
+            "model.diffusion_model.audio_embeddings_connector.",
+        ))
+    } else if native_video && native_audio {
+        Some(("video_embeddings_connector.", "audio_embeddings_connector."))
+    } else {
+        None
     }
 }
 
@@ -332,7 +378,10 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::VarBuilder;
 
-    use super::{build_embeddings_processor, ConnectorSpec, NativePromptEncoder};
+    use super::{
+        build_embeddings_processor, connector_prefixes_from_keys, ConnectorSpec,
+        NativePromptEncoder,
+    };
     use crate::ltx2::model::LtxRopeType;
     use crate::ltx2::preset::GemmaFeatureExtractorKind;
     use crate::ltx2::text::connectors::PaddingSide;
@@ -360,6 +409,31 @@ mod tests {
             sliding_window_pattern: 2,
             max_position_embeddings: 32,
         }
+    }
+
+    #[test]
+    fn connector_prefixes_accept_native_diffusion_only_checkpoints() {
+        assert_eq!(
+            connector_prefixes_from_keys([
+                "video_embeddings_connector.transformer_1d_blocks.0.attn1.to_q.weight",
+                "audio_embeddings_connector.transformer_1d_blocks.0.attn1.to_q.weight",
+            ]),
+            Some(("video_embeddings_connector.", "audio_embeddings_connector.",))
+        );
+    }
+
+    #[test]
+    fn connector_prefixes_preserve_diffusers_combined_checkpoints() {
+        assert_eq!(
+            connector_prefixes_from_keys([
+                "model.diffusion_model.video_embeddings_connector.learnable_registers",
+                "model.diffusion_model.audio_embeddings_connector.learnable_registers",
+            ]),
+            Some((
+                "model.diffusion_model.video_embeddings_connector.",
+                "model.diffusion_model.audio_embeddings_connector.",
+            ))
+        );
     }
 
     fn zero_gemma_var_builder(cfg: &GemmaConfig) -> VarBuilder<'static> {
