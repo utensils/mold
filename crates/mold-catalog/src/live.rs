@@ -8,13 +8,17 @@
 //! against `/api/v1/models` with a small TTL cache to absorb duplicate
 //! calls (SPA re-mounts, page-flips back to the same query, etc.).
 //!
-//! The cache is bounded — past `max_entries`, the oldest entry is
-//! evicted on each insert. There is no LRU heat-tracking because the
-//! TTL is short (5 minutes by default) and the working set is small.
+//! The cache is bounded and per-source — emitted Civitai pages, emitted
+//! HF pages, and in-flight Civitai cursor chains each live in their own
+//! TTL map. Past `max_entries`, the oldest entry is evicted on each
+//! insert. There is no LRU heat-tracking because the TTL is short
+//! (5 minutes by default) and the working set is small.
 //!
-//! HF is intentionally out-of-scope for this module: HF rarely
-//! rate-limits and the existing seed-walker keeps working until a
-//! follow-up release deprecates it.
+//! Civitai's `/api/v1/models` is cursor-paginated (`page=` is ignored),
+//! so deep pages are served by walking a per-query cursor chain forward
+//! one `page_size` window at a time, buffering locally-filtered leftover
+//! rows so every emitted page is full-length. Both upstreams are fetched
+//! concurrently in merged mode.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -149,79 +153,210 @@ pub enum LiveSearchError {
     },
 }
 
-/// Bounded TTL cache. Holds whole result vectors keyed on the
-/// caller-visible [`LiveSearchOpts`] so equal opts hit the same entry.
-#[derive(Clone)]
-pub struct LiveCache {
-    inner: Arc<Mutex<CacheState>>,
+/// Bounded FIFO map with a per-entry TTL. Expired entries are dropped on
+/// lookup; past `max_entries`, the oldest insertion is evicted. There is
+/// no LRU heat-tracking because the TTL is short and the working set is
+/// small.
+struct TtlMap<K, V> {
+    map: HashMap<K, TtlValue<V>>,
+    /// Insertion order — oldest at the front. Used to evict on overflow.
+    order: Vec<K>,
     ttl: Duration,
     max_entries: usize,
 }
 
-struct CacheState {
-    map: HashMap<LiveSearchOpts, CacheValue>,
-    /// Insertion order — oldest at the front. Used to evict on overflow.
-    order: Vec<LiveSearchOpts>,
-}
-
-struct CacheValue {
+struct TtlValue<V> {
     stored_at: Instant,
-    result: LiveSearchResult,
+    value: V,
 }
 
-impl LiveCache {
-    pub fn new(ttl: Duration, max_entries: usize) -> Self {
+impl<K: Clone + Eq + std::hash::Hash, V: Clone> TtlMap<K, V> {
+    fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(CacheState {
-                map: HashMap::new(),
-                order: Vec::new(),
-            })),
+            map: HashMap::new(),
+            order: Vec::new(),
             ttl,
             max_entries: max_entries.max(1),
         }
     }
 
+    fn get(&mut self, key: &K) -> Option<V> {
+        let now = Instant::now();
+        if let Some(v) = self.map.get(key) {
+            if now.duration_since(v.stored_at) <= self.ttl {
+                return Some(v.value.clone());
+            }
+        }
+        // Expired or missing — drop any stale entry so the next pass
+        // doesn't re-check it.
+        if self.map.remove(key).is_some() {
+            self.order.retain(|k| k != key);
+        }
+        None
+    }
+
+    fn put(&mut self, key: K, value: V) {
+        if self.map.contains_key(&key) {
+            self.order.retain(|k| k != &key);
+        }
+        self.order.push(key.clone());
+        self.map.insert(
+            key,
+            TtlValue {
+                stored_at: Instant::now(),
+                value,
+            },
+        );
+        while self.order.len() > self.max_entries {
+            let evict = self.order.remove(0);
+            self.map.remove(&evict);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// Per-source key for one *chain* of Civitai cursor windows (or, with
+/// [`SourcePageKey`], one emitted page of either upstream). Any change to
+/// query/filter/sort/token/page-size lands on a different key, which is
+/// what resets a cursor chain when the user changes filters.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SourceChainKey {
+    q: Option<String>,
+    family: Option<Family>,
+    kind: Option<Kind>,
+    include_nsfw: bool,
+    sort: CatalogSort,
+    token: Option<String>,
+    /// Per-source page size (post split across sources), not the
+    /// caller-visible one.
+    page_size: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SourcePageKey {
+    chain: SourceChainKey,
+    page: u32,
+}
+
+fn chain_key(opts: &LiveSearchOpts, token: Option<&String>) -> SourceChainKey {
+    SourceChainKey {
+        q: opts.q.clone(),
+        family: opts.family,
+        kind: opts.kind,
+        include_nsfw: opts.include_nsfw,
+        sort: opts.sort,
+        token: token.cloned(),
+        page_size: opts.page_size,
+    }
+}
+
+/// Bounded TTL cache backing [`search_page`]. Three private maps: emitted
+/// Civitai pages, emitted HF pages, and in-flight Civitai cursor chains.
+/// Caching per source (rather than per merged result) lets a page fetched
+/// during a forward cursor walk satisfy later requests for that page, and
+/// keeps a Civitai chain's progress across merged/soloed queries.
+#[derive(Clone)]
+pub struct LiveCache {
+    civitai_pages: Arc<Mutex<TtlMap<SourcePageKey, LiveSearchResult>>>,
+    hf_pages: Arc<Mutex<TtlMap<SourcePageKey, LiveSearchResult>>>,
+    civitai_chains: Arc<Mutex<TtlMap<SourceChainKey, CivitaiChain>>>,
+}
+
+impl LiveCache {
+    pub fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            civitai_pages: Arc::new(Mutex::new(TtlMap::new(ttl, max_entries))),
+            hf_pages: Arc::new(Mutex::new(TtlMap::new(ttl, max_entries))),
+            civitai_chains: Arc::new(Mutex::new(TtlMap::new(ttl, max_entries))),
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("cache mutex").map.len()
+        self.civitai_pages.lock().expect("cache mutex").len()
+            + self.hf_pages.lock().expect("cache mutex").len()
+            + self.civitai_chains.lock().expect("cache mutex").len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    fn get(&self, key: &LiveSearchOpts) -> Option<LiveSearchResult> {
-        let now = Instant::now();
-        let mut state = self.inner.lock().expect("cache mutex");
-        if let Some(v) = state.map.get(key) {
-            if now.duration_since(v.stored_at) <= self.ttl {
-                return Some(v.result.clone());
-            }
-        }
-        // Expired or missing — drop any stale entry so the next pass
-        // doesn't re-check it.
-        if state.map.remove(key).is_some() {
-            state.order.retain(|k| k != key);
-        }
-        None
+    fn get_civitai_page(&self, key: &SourcePageKey) -> Option<LiveSearchResult> {
+        self.civitai_pages.lock().expect("cache mutex").get(key)
     }
 
-    fn put(&self, key: LiveSearchOpts, result: LiveSearchResult) {
-        let mut state = self.inner.lock().expect("cache mutex");
-        if state.map.contains_key(&key) {
-            state.order.retain(|k| k != &key);
+    fn put_civitai_page(&self, key: SourcePageKey, result: LiveSearchResult) {
+        self.civitai_pages
+            .lock()
+            .expect("cache mutex")
+            .put(key, result);
+    }
+
+    fn get_hf_page(&self, key: &SourcePageKey) -> Option<LiveSearchResult> {
+        self.hf_pages.lock().expect("cache mutex").get(key)
+    }
+
+    fn put_hf_page(&self, key: SourcePageKey, result: LiveSearchResult) {
+        self.hf_pages.lock().expect("cache mutex").put(key, result);
+    }
+
+    fn get_chain(&self, key: &SourceChainKey) -> Option<CivitaiChain> {
+        self.civitai_chains.lock().expect("cache mutex").get(key)
+    }
+
+    fn put_chain(&self, key: SourceChainKey, chain: CivitaiChain) {
+        self.civitai_chains
+            .lock()
+            .expect("cache mutex")
+            .put(key, chain);
+    }
+}
+
+/// One Civitai cursor chain: where the next window fetch resumes and what
+/// filtered rows are buffered ahead of the next emitted page. Cursors only
+/// move forward — a request for an earlier, uncached page restarts the
+/// chain and re-walks (re-populating the page cache along the way).
+#[derive(Clone, Debug)]
+struct CivitaiChain {
+    /// Cursor for the next window fetch; `None` before the first fetch
+    /// and after exhaustion.
+    next_cursor: Option<String>,
+    /// Upstream signalled the end of the feed (no `nextCursor` or an
+    /// empty window).
+    exhausted: bool,
+    /// Next page (1-based) this chain will emit into the page cache.
+    next_page: u32,
+    /// Filtered rows fetched but not yet emitted — keeps every emitted
+    /// page full-length even when local filters drop upstream rows.
+    leftover: Vec<CatalogEntry>,
+    /// Filtered rows already emitted into cached pages.
+    emitted: usize,
+    /// Largest `totalItems` the upstream has reported (0 in cursor mode).
+    reported_total: usize,
+}
+
+impl CivitaiChain {
+    fn new() -> Self {
+        Self {
+            next_cursor: None,
+            exhausted: false,
+            next_page: 1,
+            leftover: Vec::new(),
+            emitted: 0,
+            reported_total: 0,
         }
-        state.order.push(key.clone());
-        state.map.insert(
-            key,
-            CacheValue {
-                stored_at: Instant::now(),
-                result,
-            },
-        );
-        while state.order.len() > self.max_entries {
-            let evict = state.order.remove(0);
-            state.map.remove(&evict);
-        }
+    }
+
+    /// Complete-feed estimate: the reported total when the upstream gives
+    /// one, otherwise the rows seen so far — plus one phantom row while
+    /// the cursor is still open so `hasMore` stays true until the feed is
+    /// genuinely exhausted. Exact at exhaustion.
+    fn total(&self) -> usize {
+        self.reported_total
+            .max(self.emitted + self.leftover.len() + usize::from(!self.exhausted))
     }
 }
 
@@ -235,10 +370,26 @@ struct CivitaiResponse {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct CivitaiMetadata {
-    /// Absent on cursor-mode responses; 0 then, and the window heuristic
-    /// in [`civitai_search`] supplies the observed floor instead.
+    /// Absent on cursor-mode responses; 0 then, and [`CivitaiChain::total`]
+    /// supplies the observed floor instead.
     #[serde(default, rename = "totalItems")]
     total_items: usize,
+    /// Cursor for the next window. Documented as string-or-number, so
+    /// deserialize leniently.
+    #[serde(default, rename = "nextCursor", deserialize_with = "de_cursor")]
+    next_cursor: Option<String>,
+}
+
+fn de_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -277,31 +428,43 @@ pub async fn search_page(
     cache: &LiveCache,
     opts: &LiveSearchOpts,
 ) -> Result<LiveSearchResult, LiveSearchError> {
-    if let Some(hit) = cache.get(opts) {
-        return Ok(hit);
-    }
-
     let local_components = companion_component_entries(opts);
     if matches!(opts.kind, Some(Kind::Clip | Kind::Tokenizer)) {
-        let result = paginate_local(local_components, opts);
-        cache.put(opts.clone(), result.clone());
-        return Ok(result);
+        return Ok(paginate_local(local_components, opts));
     }
-    let mut entries = Vec::new();
-    let mut total = 0;
     let source_count =
         if opts.source.is_none() { 2 } else { 1 } + u32::from(!local_components.is_empty());
     let mut upstream_opts = opts.clone();
     upstream_opts.page_size = opts.page_size.div_ceil(source_count);
-    if !matches!(opts.source, Some(Source::Hf)) {
-        let page = civitai_search(civitai_base, &upstream_opts).await?;
+
+    let want_civitai = !matches!(opts.source, Some(Source::Hf));
+    let want_hf = !matches!(opts.source, Some(Source::Civitai));
+    let civitai_fut = async {
+        if want_civitai {
+            Some(civitai_search_paged(civitai_base, cache, &upstream_opts).await)
+        } else {
+            None
+        }
+    };
+    let hf_fut = async {
+        if want_hf {
+            Some(hf_search_paged(hf_base, cache, &upstream_opts).await)
+        } else {
+            None
+        }
+    };
+    let (civitai_result, hf_result) = tokio::join!(civitai_fut, hf_fut);
+
+    let mut entries = Vec::new();
+    let mut total = 0;
+    if let Some(page) = civitai_result.transpose()? {
         total += page.total;
         entries.extend(page.entries);
     }
-    if !matches!(opts.source, Some(Source::Civitai)) {
+    if let Some(result) = hf_result {
         // Authentication errors must surface so the server can retry with its
         // next credential candidate; other combined-search failures stay soft.
-        match hf_search(hf_base, &upstream_opts).await {
+        match result {
             Ok(page) => {
                 total += page.total;
                 entries.extend(page.entries);
@@ -324,9 +487,7 @@ pub async fn search_page(
     }
     entries.truncate(opts.page_size as usize);
 
-    let result = LiveSearchResult { entries, total };
-    cache.put(opts.clone(), result.clone());
-    Ok(result)
+    Ok(LiveSearchResult { entries, total })
 }
 
 fn paginate_local(entries: Vec<CatalogEntry>, opts: &LiveSearchOpts) -> LiveSearchResult {
@@ -561,10 +722,139 @@ fn kind_tag(kind: Kind) -> &'static str {
     }
 }
 
-async fn civitai_search(
+/// Cap on upstream window fetches a single [`civitai_search_paged`] call
+/// may issue. A deep forward walk (cache expired, client re-requests page
+/// N) costs about one fetch per page plus leftover top-ups; past this
+/// budget the request returns short and the persisted chain resumes on
+/// the next call.
+const MAX_WINDOW_FETCHES: usize = 12;
+
+/// One fetched-and-filtered Civitai cursor window.
+struct CivitaiWindow {
+    /// Rows that survived the local nsfw/family/kind re-filtering.
+    entries: Vec<CatalogEntry>,
+    /// Raw upstream item count, pre-filtering — an empty raw window means
+    /// the feed is done regardless of what filtering kept.
+    raw_count: usize,
+    next_cursor: Option<String>,
+    total_items: usize,
+}
+
+/// Serve one page of Civitai results via true cursor pagination.
+///
+/// Page-cache hit fast path; otherwise the per-chain cursor state is
+/// advanced window-by-window, buffering filtered leftovers so every
+/// emitted page is a full `page_size` (short mid-feed pages kill infinite
+/// scroll). Pages emitted during the walk are cached individually, so a
+/// deep jump re-populates every page on the way. Cursors cannot rewind:
+/// a request for an earlier, uncached page restarts the chain.
+async fn civitai_search_paged(
     base: &str,
+    cache: &LiveCache,
     opts: &LiveSearchOpts,
 ) -> Result<LiveSearchResult, LiveSearchError> {
+    let key = chain_key(opts, opts.civitai_token.as_ref());
+    let page_key = SourcePageKey {
+        chain: key.clone(),
+        page: opts.page,
+    };
+    if let Some(hit) = cache.get_civitai_page(&page_key) {
+        return Ok(hit);
+    }
+
+    // Clone the chain out and put it back after the walk — the cache
+    // mutex must never be held across an await.
+    let mut chain = cache.get_chain(&key).unwrap_or_else(CivitaiChain::new);
+    if opts.page < chain.next_page {
+        chain = CivitaiChain::new();
+    }
+
+    let page_size = opts.page_size.clamp(1, 100) as usize;
+    let mut fetches = 0usize;
+    let mut result = None;
+    while chain.next_page <= opts.page {
+        while chain.leftover.len() < page_size && !chain.exhausted && fetches < MAX_WINDOW_FETCHES {
+            let window = civitai_fetch_window(base, opts, chain.next_cursor.as_deref()).await?;
+            fetches += 1;
+            chain.reported_total = chain.reported_total.max(window.total_items);
+            chain.leftover.extend(window.entries);
+            if window.raw_count == 0 || window.next_cursor.is_none() {
+                chain.exhausted = true;
+                chain.next_cursor = None;
+            } else {
+                chain.next_cursor = window.next_cursor;
+            }
+        }
+        if !chain.exhausted && chain.leftover.len() < page_size {
+            // Fetch budget spent mid-walk. When the shortfall lands on the
+            // requested page, emit the buffered rows rather than a false
+            // empty page — clients treat an empty page as exhaustion and
+            // would skip them. Intermediate pages are never emitted short:
+            // the walk resumes from the stored cursor on the next request
+            // and `total()` keeps advertising more rows either way.
+            if chain.next_page == opts.page && !chain.leftover.is_empty() {
+                let entries: Vec<CatalogEntry> = chain.leftover.drain(..).collect();
+                chain.emitted += entries.len();
+                let page_result = LiveSearchResult {
+                    entries,
+                    total: chain.total(),
+                };
+                cache.put_civitai_page(
+                    SourcePageKey {
+                        chain: key.clone(),
+                        page: chain.next_page,
+                    },
+                    page_result.clone(),
+                );
+                chain.next_page += 1;
+                result = Some(page_result);
+            }
+            break;
+        }
+        let take = page_size.min(chain.leftover.len());
+        let entries: Vec<CatalogEntry> = chain.leftover.drain(..take).collect();
+        chain.emitted += entries.len();
+        let page_result = LiveSearchResult {
+            entries,
+            total: chain.total(),
+        };
+        cache.put_civitai_page(
+            SourcePageKey {
+                chain: key.clone(),
+                page: chain.next_page,
+            },
+            page_result.clone(),
+        );
+        if chain.next_page == opts.page {
+            result = Some(page_result);
+        }
+        chain.next_page += 1;
+        if chain.exhausted && chain.leftover.is_empty() && result.is_none() {
+            // Every remaining page is empty — answer directly instead of
+            // caching arbitrarily deep empty pages one by one.
+            result = Some(LiveSearchResult {
+                entries: Vec::new(),
+                total: chain.total(),
+            });
+            break;
+        }
+    }
+    let total = chain.total();
+    cache.put_chain(key, chain);
+    Ok(result.unwrap_or(LiveSearchResult {
+        entries: Vec::new(),
+        total,
+    }))
+}
+
+/// Fetch one Civitai cursor window: `limit = page_size`, `cursor=` when
+/// resuming, never `page=` (ignored upstream, rejected alongside
+/// `query=`). Rows are re-filtered locally for nsfw/family/kind drift.
+async fn civitai_fetch_window(
+    base: &str,
+    opts: &LiveSearchOpts,
+    cursor: Option<&str>,
+) -> Result<CivitaiWindow, LiveSearchError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()?;
@@ -579,15 +869,11 @@ async fn civitai_search(
         .map(str::to_string);
     {
         let mut q = url.query_pairs_mut();
-        // Civitai's `/api/v1/models` is cursor-paginated: `page=` is
-        // ignored (every value returns the same first window) and is
-        // rejected outright when `query=` is present. So we never send
-        // it — instead fetch one `page × page_size` window via `limit=`
-        // and slice locally, same as `hf_search`. Depth is capped by
-        // Civitai's limit ceiling of 100; deep cursor pagination is a
-        // follow-up.
-        let window = opts.page.saturating_mul(opts.page_size).clamp(1, 100);
-        q.append_pair("limit", &window.to_string());
+        let limit = opts.page_size.clamp(1, 100);
+        q.append_pair("limit", &limit.to_string());
+        if let Some(cursor) = cursor {
+            q.append_pair("cursor", cursor);
+        }
         q.append_pair("sort", opts.sort.civitai_value());
         if let Some(query) = trimmed_q.as_deref() {
             q.append_pair("query", query);
@@ -651,7 +937,7 @@ async fn civitai_search(
     let parsed: CivitaiResponse = serde_json::from_str(&body)?;
 
     let metadata = parsed.metadata;
-    let fetched = parsed.items.len();
+    let raw_count = parsed.items.len();
     let mut out = Vec::new();
     for item in parsed.items {
         let nsfw_item = item.nsfw;
@@ -684,29 +970,35 @@ async fn civitai_search(
             out.push(entry);
         }
     }
-    let filtered = out.len();
-    let start = page_offset(opts);
-    let entries = out
-        .into_iter()
-        .skip(start)
-        .take(opts.page_size as usize)
-        .collect::<Vec<_>>();
-    // Same total heuristic as `hf_search`: a short window means the feed
-    // is exhausted; a full one advertises at least one more page. Civitai
-    // still reports real totals on some responses — trust the larger.
-    let requested = opts.page.saturating_mul(opts.page_size) as usize;
-    let observed = if fetched < requested {
-        filtered
-    } else {
-        start
-            .saturating_add(entries.len())
-            .saturating_add(usize::from(!entries.is_empty()))
-    };
-    let total = metadata.total_items.max(observed);
-    Ok(LiveSearchResult { entries, total })
+    Ok(CivitaiWindow {
+        entries: out,
+        raw_count,
+        next_cursor: metadata.next_cursor,
+        total_items: metadata.total_items,
+    })
 }
 
 // ── HF live search ──────────────────────────────────────────────────────────
+
+/// Per-page cache wrapper around [`hf_search`]. HF keeps the offset
+/// window strategy (real offsets, clamped at 1000) — only the caching is
+/// per (query, page) like the Civitai side.
+async fn hf_search_paged(
+    base: &str,
+    cache: &LiveCache,
+    opts: &LiveSearchOpts,
+) -> Result<LiveSearchResult, LiveSearchError> {
+    let key = SourcePageKey {
+        chain: chain_key(opts, opts.hf_token.as_ref()),
+        page: opts.page,
+    };
+    if let Some(hit) = cache.get_hf_page(&key) {
+        return Ok(hit);
+    }
+    let result = hf_search(base, opts).await?;
+    cache.put_hf_page(key, result.clone());
+    Ok(result)
+}
 
 /// HF `/api/models?search=…` summary row. Lean compared to the per-repo
 /// detail; `tree` is fetched lazily on download (`fetch_hf_repo`).
@@ -1138,8 +1430,94 @@ pub async fn fetch_hf_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_cache() -> LiveCache {
+        LiveCache::new(Duration::from_secs(300), 256)
+    }
+
+    fn civitai_opts(page: u32, page_size: u32) -> LiveSearchOpts {
+        LiveSearchOpts {
+            page,
+            page_size,
+            source: Some(Source::Civitai),
+            ..Default::default()
+        }
+    }
+
+    fn civitai_item(version_id: u64, nsfw: bool) -> serde_json::Value {
+        serde_json::json!({
+            "id": 100_000 + version_id,
+            "name": format!("Model {version_id}"),
+            "type": "Checkpoint",
+            "nsfw": nsfw,
+            "creator": { "username": "alice" },
+            "stats": { "downloadCount": 100 },
+            "tags": [],
+            "modelVersions": [{
+                "id": version_id,
+                "name": "v1",
+                "baseModel": "Flux.1 D",
+                "baseModelType": "Standard",
+                "files": [{
+                    "id": version_id, "name": "x.safetensors", "sizeKB": 100,
+                    "downloadCount": 1, "metadata": { "format": "SafeTensor" },
+                    "downloadUrl": "https://civitai.example/x.safetensors",
+                    "hashes": { "SHA256": "deadbeef" }
+                }],
+                "images": []
+            }]
+        })
+    }
+
+    fn civitai_body(
+        version_ids: std::ops::RangeInclusive<u64>,
+        next_cursor: Option<&str>,
+    ) -> serde_json::Value {
+        let items = version_ids
+            .map(|id| civitai_item(id, false))
+            .collect::<Vec<_>>();
+        let metadata = match next_cursor {
+            Some(cursor) => serde_json::json!({ "nextCursor": cursor }),
+            None => serde_json::json!({}),
+        };
+        serde_json::json!({ "items": items, "metadata": metadata })
+    }
+
+    fn hf_hit(index: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("black-forest-labs/FLUX.1-dev-{index}"),
+            "tags": ["diffusers", "flux"],
+            "pipeline_tag": "text-to-image"
+        })
+    }
+
+    fn ids(result: &LiveSearchResult) -> Vec<&str> {
+        result
+            .entries
+            .iter()
+            .map(|entry| entry.id.0.as_str())
+            .collect()
+    }
+
+    async fn request_queries(
+        server: &MockServer,
+    ) -> Vec<std::collections::HashMap<String, String>> {
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect()
+            })
+            .collect()
+    }
 
     #[test]
     fn catalog_sort_maps_to_each_upstream_vocabulary() {
@@ -1238,82 +1616,598 @@ mod tests {
     }
 
     /// Real Civitai ignores `page=` entirely — `/api/v1/models` is
-    /// cursor-paginated, and any page value returns the same first
-    /// window. The search must therefore fetch a `page × page_size`
-    /// window via `limit=` and slice locally, exactly like [`hf_search`].
+    /// cursor-paginated. The proxy fetches one `page_size` window at a
+    /// time (never `limit = page × page_size`) and buffers leftovers, so
+    /// a deep page rides the cursor chain instead of widening the limit.
     #[tokio::test]
-    async fn civitai_search_fetches_a_window_and_returns_the_requested_page() {
+    async fn civitai_search_paged_requests_single_page_windows() {
         let server = MockServer::start().await;
-        let items = (1..=4)
-            .map(|index| {
-                serde_json::json!({
-                    "id": 9000 + index,
-                    "name": format!("Model {index}"),
-                    "type": "Checkpoint",
-                    "nsfw": false,
-                    "creator": { "username": "alice" },
-                    "stats": { "downloadCount": 100 - index },
-                    "tags": [],
-                    "modelVersions": [{
-                        "id": 8000 + index,
-                        "name": "v1",
-                        "baseModel": "Flux.1 D",
-                        "baseModelType": "Standard",
-                        "files": [{
-                            "id": index, "name": "x.safetensors", "sizeKB": 100,
-                            "downloadCount": 1, "metadata": { "format": "SafeTensor" },
-                            "downloadUrl": "https://civitai.example/x.safetensors",
-                            "hashes": { "SHA256": "deadbeef" }
-                        }],
-                        "images": []
-                    }]
-                })
-            })
-            .collect::<Vec<_>>();
-        // Like the live API: the same first window regardless of `page=`,
-        // and cursor-mode metadata without totals.
+        // Like the live API: one window (here over-full) with cursor-mode
+        // metadata and no totals.
         Mock::given(method("GET"))
             .and(path("/api/v1/models"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "items": items,
-                "metadata": { "nextCursor": "1|2|3" }
-            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(8001..=8004, Some("1|2|3"))),
+            )
             .mount(&server)
             .await;
 
-        let result = civitai_search(
+        let result = civitai_search_paged(&server.uri(), &test_cache(), &civitai_opts(2, 2))
+            .await
+            .expect("civitai page");
+
+        assert_eq!(result.entries.len(), 2, "page 2 must hold fresh rows");
+        assert_eq!(ids(&result), ["cv:8003", "cv:8004"]);
+        assert_eq!(
+            result.total, 5,
+            "an open cursor must advertise another page"
+        );
+
+        let queries = request_queries(&server).await;
+        assert_eq!(queries.len(), 1, "leftovers must cover page 2 (no refetch)");
+        assert_eq!(
+            queries[0].get("limit").map(String::as_str),
+            Some("2"),
+            "limit must be one page, not the page × page_size window"
+        );
+        assert!(
+            !queries[0].contains_key("page"),
+            "page= is ignored upstream and must not be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_pagination_advances_with_the_stored_cursor() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(103..=104, Some("c2"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let page1 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(1, 2))
+            .await
+            .expect("page 1");
+        assert_eq!(ids(&page1), ["cv:101", "cv:102"]);
+
+        let page2 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(2, 2))
+            .await
+            .expect("page 2");
+        assert_eq!(ids(&page2), ["cv:103", "cv:104"]);
+
+        let queries = request_queries(&server).await;
+        assert_eq!(queries.len(), 2);
+        for query in &queries {
+            assert!(!query.contains_key("page"), "page= must never be sent");
+            assert_eq!(query.get("limit").map(String::as_str), Some("2"));
+        }
+        assert_eq!(
+            queries[1].get("cursor").map(String::as_str),
+            Some("c1"),
+            "page 2 must ride the cursor from page 1's response"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_page_cache_serves_repeats_without_upstream_calls() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let first = civitai_search_paged(&server.uri(), &cache, &civitai_opts(1, 2))
+            .await
+            .expect("first");
+        let second = civitai_search_paged(&server.uri(), &cache, &civitai_opts(1, 2))
+            .await
+            .expect("second");
+
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1,
+            "the repeat must be a page-cache hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_deep_jump_walks_forward_and_caches_intermediate_pages() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=101, Some("c1"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(102..=102, Some("c2"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c2"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(103..=103, Some("c3"))),
+            )
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let page3 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(3, 1))
+            .await
+            .expect("page 3");
+        assert_eq!(ids(&page3), ["cv:103"]);
+        assert_eq!(server.received_requests().await.expect("requests").len(), 3);
+
+        // The forward walk populated pages 1..3 — page 2 must now be a
+        // cache hit even though it was never requested directly.
+        let page2 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(2, 1))
+            .await
+            .expect("page 2");
+        assert_eq!(ids(&page2), ["cv:102"]);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            3,
+            "page 2 must come from the walk's page cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn civitai_exhausted_feed_reports_exact_total_and_serves_empty_pages() {
+        let server = MockServer::start().await;
+        // No nextCursor → the feed ends after these two rows.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, None)))
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let page1 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(1, 2))
+            .await
+            .expect("page 1");
+        assert_eq!(ids(&page1), ["cv:101", "cv:102"]);
+        assert_eq!(page1.total, 2, "exhausted feed must report the exact total");
+
+        let page3 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(3, 2))
+            .await
+            .expect("page 3");
+        assert!(page3.entries.is_empty());
+        assert_eq!(page3.total, 2);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1,
+            "pages past exhaustion must not refetch"
+        );
+    }
+
+    /// Locally-filtered rows (NSFW here) must not shorten emitted pages —
+    /// the chain buffers leftovers and fetches another window until the
+    /// page is full, otherwise infinite scroll stalls on a short page.
+    #[tokio::test]
+    async fn civitai_filtered_rows_do_not_shorten_pages() {
+        let server = MockServer::start().await;
+        let mut window1 = civitai_body(101..=101, Some("c1"));
+        window1["items"]
+            .as_array_mut()
+            .expect("items")
+            .push(civitai_item(999, true));
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(window1))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(102..=103, Some("c2"))),
+            )
+            .mount(&server)
+            .await;
+
+        let opts = LiveSearchOpts {
+            include_nsfw: false,
+            ..civitai_opts(1, 2)
+        };
+        let page1 = civitai_search_paged(&server.uri(), &test_cache(), &opts)
+            .await
+            .expect("page 1");
+
+        assert_eq!(
+            ids(&page1),
+            ["cv:101", "cv:102"],
+            "the filtered row must be backfilled from the next window"
+        );
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            2,
+            "a second window fetch must top the page up"
+        );
+    }
+
+    /// When the per-request window budget runs out before the requested
+    /// page fills, the rows already buffered must still be served —
+    /// clients treat an empty page as exhaustion and would permanently
+    /// skip them.
+    #[tokio::test]
+    async fn civitai_budget_exhaustion_emits_partial_page_not_empty() {
+        let server = MockServer::start().await;
+        // Every window yields one row and keeps the cursor open, so a
+        // page_size-20 request drains the whole fetch budget.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(300..=300, Some("c"))),
+            )
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let opts = civitai_opts(1, 20);
+        let page1 = civitai_search_paged(&server.uri(), &cache, &opts)
+            .await
+            .expect("page 1");
+
+        assert_eq!(
+            page1.entries.len(),
+            MAX_WINDOW_FETCHES,
+            "buffered rows must be emitted when the budget expires"
+        );
+        assert!(
+            page1.total > page1.entries.len(),
+            "total must keep advertising more rows while the cursor is open"
+        );
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES,
+            "the walk stops at the fetch budget"
+        );
+
+        let again = civitai_search_paged(&server.uri(), &cache, &opts)
+            .await
+            .expect("page 1 again");
+        assert_eq!(again.entries.len(), MAX_WINDOW_FETCHES);
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            MAX_WINDOW_FETCHES,
+            "the partial page must be served from the page cache"
+        );
+    }
+
+    /// The regression this module exists to fix: Civitai caps `limit=` at
+    /// 100, so the old `limit = page × page_size` window could never
+    /// surface rows past 100. Cursor pagination has no such ceiling.
+    #[tokio::test]
+    async fn civitai_pages_beyond_row_100_are_reachable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param_is_missing("cursor"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(1001..=1050, Some("c1"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(1051..=1100, Some("c2"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("cursor", "c2"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(1101..=1150, Some("c3"))),
+            )
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        for page in 1..=2 {
+            civitai_search_paged(&server.uri(), &cache, &civitai_opts(page, 50))
+                .await
+                .expect("shallow page");
+        }
+        let page3 = civitai_search_paged(&server.uri(), &cache, &civitai_opts(3, 50))
+            .await
+            .expect("page 3");
+
+        assert_eq!(page3.entries.len(), 50);
+        assert_eq!(
+            page3.entries[0].id.0, "cv:1101",
+            "row 101 must be reachable"
+        );
+        assert_eq!(page3.entries[49].id.0, "cv:1150");
+        let queries = request_queries(&server).await;
+        assert!(queries
+            .iter()
+            .all(|q| q.get("limit").map(String::as_str) == Some("50")));
+    }
+
+    #[tokio::test]
+    async fn civitai_sort_change_starts_a_fresh_chain() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("sort", "Most Downloaded"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .and(query_param("sort", "Highest Rated"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(201..=202, Some("r1"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let downloads = civitai_search_paged(&server.uri(), &cache, &civitai_opts(1, 2))
+            .await
+            .expect("downloads sort");
+        assert_eq!(ids(&downloads), ["cv:101", "cv:102"]);
+
+        let rated = civitai_search_paged(
             &server.uri(),
+            &cache,
             &LiveSearchOpts {
-                page: 2,
-                page_size: 2,
-                source: Some(Source::Civitai),
-                include_nsfw: false,
+                sort: CatalogSort::Rating,
+                ..civitai_opts(1, 2)
+            },
+        )
+        .await
+        .expect("rating sort");
+        assert_eq!(
+            ids(&rated),
+            ["cv:201", "cv:202"],
+            "a sort change must key a fresh chain, not replay the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_search_fetches_civitai_and_hf_in_parallel() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(civitai_body(101..=102, Some("c1")))
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(vec![hf_hit(1), hf_hit(2)])
+                    .set_delay(Duration::from_millis(300)),
+            )
+            .mount(&server)
+            .await;
+
+        let started = std::time::Instant::now();
+        let result = search_page(
+            &server.uri(),
+            &server.uri(),
+            &test_cache(),
+            &LiveSearchOpts {
+                page_size: 4,
                 ..Default::default()
             },
         )
         .await
-        .expect("civitai page");
+        .expect("merged page");
+        let elapsed = started.elapsed();
 
-        assert_eq!(result.entries.len(), 2, "page 2 must hold fresh rows");
-        assert_eq!(result.entries[0].id.0, "cv:8003");
-        assert_eq!(result.entries[1].id.0, "cv:8004");
-        assert_eq!(result.total, 5, "a full window must advertise another page");
-
-        let requests = server.received_requests().await.expect("requests");
-        let query = requests
-            .last()
-            .expect("civitai request")
-            .url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(
-            query.get("limit").map(std::convert::AsRef::as_ref),
-            Some("4"),
-            "limit must cover the whole page window"
+        assert!(
+            result.entries.iter().any(|e| e.id.0.starts_with("cv:")),
+            "civitai rows present"
         );
         assert!(
-            !query.contains_key("page"),
-            "page= is ignored upstream and must not be sent"
+            result.entries.iter().any(|e| e.id.0.starts_with("hf:")),
+            "hf rows present"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "two 300ms upstreams must overlap, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_search_reuses_per_source_page_caches() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![hf_hit(1), hf_hit(2)]))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let opts = LiveSearchOpts {
+            page_size: 4,
+            ..Default::default()
+        };
+        let first = search_page(&server.uri(), &server.uri(), &cache, &opts)
+            .await
+            .expect("first");
+        let second = search_page(&server.uri(), &server.uri(), &cache, &opts)
+            .await
+            .expect("second");
+
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            2,
+            "the repeat must hit both per-source page caches"
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_search_propagates_hf_auth_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad token"))
+            .mount(&server)
+            .await;
+
+        let err = search_page(
+            &server.uri(),
+            &server.uri(),
+            &test_cache(),
+            &LiveSearchOpts::default(),
+        )
+        .await
+        .expect_err("401 must propagate for the credential-retry loop");
+        match err {
+            LiveSearchError::Upstream { host, status, .. } => {
+                assert_eq!(host, "huggingface.co");
+                assert_eq!(status, 401);
+            }
+            other => panic!("expected Upstream 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn merged_search_soft_fails_hf_server_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(civitai_body(101..=102, Some("c1"))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("hf down"))
+            .mount(&server)
+            .await;
+
+        let result = search_page(
+            &server.uri(),
+            &server.uri(),
+            &test_cache(),
+            &LiveSearchOpts::default(),
+        )
+        .await
+        .expect("merged search must survive an HF 5xx");
+        assert!(result.entries.iter().all(|e| e.id.0.starts_with("cv:")));
+        assert!(!result.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_search_propagates_civitai_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("civitai down"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![hf_hit(1)]))
+            .mount(&server)
+            .await;
+
+        let err = search_page(
+            &server.uri(),
+            &server.uri(),
+            &test_cache(),
+            &LiveSearchOpts::default(),
+        )
+        .await
+        .expect_err("civitai errors must propagate from the parallel path");
+        match err {
+            LiveSearchError::Upstream { host, status, .. } => {
+                assert_eq!(host, "civitai.com");
+                assert_eq!(status, 500);
+            }
+            other => panic!("expected Upstream 500, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hf_page_cache_serves_repeats_without_upstream_calls() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![hf_hit(1), hf_hit(2)]))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = test_cache();
+        let opts = LiveSearchOpts {
+            source: Some(Source::Hf),
+            page_size: 2,
+            ..Default::default()
+        };
+        let first = search_page("http://127.0.0.1:1", &server.uri(), &cache, &opts)
+            .await
+            .expect("first");
+        let second = search_page("http://127.0.0.1:1", &server.uri(), &cache, &opts)
+            .await
+            .expect("second");
+
+        assert_eq!(ids(&first), ids(&second));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1,
+            "the repeat must be an HF page-cache hit"
         );
     }
 
