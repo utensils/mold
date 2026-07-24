@@ -74,6 +74,74 @@ function sections(family: string, extra: Record<string, unknown> = {}) {
   };
 }
 
+// The canonical Advanced section order shared with the desktop inspector
+// (which has no placement section — desktop owns GPU placement in Settings).
+const SECTION_ORDER = [
+  "scheduler",
+  "negative",
+  "source",
+  "lora",
+  "upscale",
+  "output",
+  "video",
+  "placement",
+] as const;
+
+function sectionIds(wrapper: ReturnType<typeof factory>): string[] {
+  return wrapper
+    .findAll("[data-test^='section-']")
+    .map((node) => node.attributes("data-test")!.replace("section-", ""));
+}
+
+describe("AdvancedDrawer section ordering contract", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => __testing__.resetForTest());
+
+  const gpus = { placementGpus: [{ ordinal: 0, name: "GPU 0" }] };
+
+  it("renders still-image sections in the canonical order", () => {
+    expect(sectionIds(factory("sdxl", {}, gpus))).toEqual([
+      "scheduler",
+      "negative",
+      "source",
+      "lora",
+      "upscale",
+      "output",
+      "placement",
+    ]);
+  });
+
+  it("renders video sections in the canonical order", () => {
+    expect(sectionIds(factory("ltx2", {}, gpus))).toEqual([
+      "negative",
+      "source",
+      "lora",
+      "output",
+      "video",
+      "placement",
+    ]);
+  });
+
+  it("keeps every family's rendered sections a subsequence of the canon", () => {
+    const families = [
+      "sdxl",
+      "sd15",
+      "sd3.5",
+      "flux",
+      "qwen-image-edit",
+      "ltx-video",
+      "ltx2",
+    ];
+    for (const family of families) {
+      const rendered = sectionIds(factory(family, {}, gpus));
+      expect(rendered.length).toBeGreaterThan(0);
+      expect(rendered).toEqual(
+        SECTION_ORDER.filter((id) => rendered.includes(id)),
+      );
+    }
+  });
+});
+
 describe("AdvancedDrawer capability matrix", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());

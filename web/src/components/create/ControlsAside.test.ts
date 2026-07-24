@@ -64,12 +64,23 @@ describe("ControlsAside", () => {
     );
   });
 
-  it("keeps the full SDXL guidance range reachable", () => {
+  it("matches the desktop inspector's Detail range (1–60 steps)", () => {
+    const wrapper = factory({}, "sdxl");
+    const detail = wrapper
+      .findAllComponents(SliderRow)
+      .find((row) => row.props("label") === "Detail");
+    expect(detail?.props("min")).toBe(1);
+    expect(detail?.props("max")).toBe(60);
+  });
+
+  it("matches the desktop inspector's Prompt strength range (0–12, step 0.1)", () => {
     const wrapper = factory({}, "sdxl");
     const strength = wrapper
       .findAllComponents(SliderRow)
       .find((row) => row.props("label") === "Prompt strength");
-    expect(strength?.props("max")).toBe(20);
+    expect(strength?.props("min")).toBe(0);
+    expect(strength?.props("max")).toBe(12);
+    expect(strength?.props("step")).toBe(0.1);
   });
 
   it("applies the projected dims when a shape is picked", async () => {

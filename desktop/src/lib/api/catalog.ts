@@ -14,6 +14,7 @@ export interface CatalogSearchParams {
   kind?: string | undefined;
   source?: string | undefined;
   include_nsfw?: boolean | undefined;
+  sort?: string | undefined;
   page?: number | undefined;
   page_size?: number | undefined;
 }
@@ -29,6 +30,7 @@ export async function searchCatalog(
   if (params.kind) query.set("kind", params.kind);
   if (params.source) query.set("source", params.source);
   if (params.include_nsfw != null) query.set("include_nsfw", String(params.include_nsfw));
+  if (params.sort) query.set("sort", params.sort);
   if (params.page != null) query.set("page", String(params.page));
   if (params.page_size != null) query.set("page_size", String(params.page_size));
   const headers = await catalogCredentialHeaders(forwardCredentials);
