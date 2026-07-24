@@ -719,7 +719,7 @@ fn is_ltx2_frame_count(n: u32) -> bool {
 }
 
 /// Compute the stage count and per-stage frame allocation for the auto-
-/// expand form, matching Phase 1.4's stitch math:
+/// expand form, matching the chain stitch math:
 ///
 /// - Stage 0 contributes `clip_frames` pixel frames.
 /// - Each continuation contributes `clip_frames - motion_tail_frames` new

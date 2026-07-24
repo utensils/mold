@@ -35,7 +35,7 @@ function fakeEntry(
     tags: [],
     companions: [],
     download_recipe: { files: [], needs_token: null },
-    engine_phase: 1,
+    supported: true,
     installed: true,
     primary_path: primaryPath,
     created_at: null,

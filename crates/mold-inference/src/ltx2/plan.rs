@@ -30,6 +30,9 @@ pub(crate) struct Ltx2GeneratePlan {
     pub(crate) checkpoint_is_distilled: bool,
     pub(crate) execution_graph: Ltx2ExecutionGraph,
     pub(crate) checkpoint_path: String,
+    pub(crate) vae_checkpoint_path: String,
+    pub(crate) vae_in_checkpoint: bool,
+    pub(crate) text_projection_path: Option<String>,
     #[allow(dead_code)]
     pub(crate) distilled_checkpoint_path: Option<String>,
     pub(crate) distilled_lora_path: Option<String>,

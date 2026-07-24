@@ -392,6 +392,7 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes,
             display_name: None,
+            supports_audio: None,
         }
     }
 

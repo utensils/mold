@@ -121,6 +121,14 @@ const CHAIN_CAPABLE_FAMILIES: ReadonlySet<string> = new Set(["ltx2", "ltx-video"
  * level) because there's no overlap region to trim. */
 const FAMILIES_WITH_CONTEXT_HANDOFF: ReadonlySet<string> = new Set(["ltx2"]);
 
+/** Live-catalog checkpoints keep an opaque stable id. Unlike built-in LTX-2
+ * manifests they do not bundle the spatial upscaler, so the runtime selects
+ * the chain-capable one-stage pipeline even though the id cannot say
+ * "distilled". */
+function isCatalogModel(model: string): boolean {
+  return model.startsWith("cv:") || model.startsWith("hf:");
+}
+
 /** Normalize a raw family string to the canonical form the sets above use:
  * lower-case, trimmed, with the "ltx-2" alias folded onto "ltx2". Mirrors the
  * alias set the desktop capabilities layer accepts. */
@@ -191,10 +199,10 @@ export function decideChainRouting(
   const fam = canonicalizeFamily(family);
   const isChainCapable =
     CHAIN_CAPABLE_FAMILIES.has(fam) &&
-    // ltx2 still requires a distilled checkpoint — only the distilled path
-    // implements `as_chain_renderer` on the server. ltx-video accepts any
-    // model in the family because the fallback wraps the standard t2v path.
-    (fam !== "ltx2" || model.includes("distilled"));
+    // LTX-2 chain rendering supports one-stage and distilled pipelines.
+    // Built-in ids encode distilled explicitly; live-catalog ids are opaque
+    // and default to one-stage because they do not bundle a spatial upscaler.
+    (fam !== "ltx2" || model.includes("distilled") || isCatalogModel(model));
 
   if (!isChainCapable) {
     if (frames <= LTX2_DISTILLED_CLIP_CAP) return { kind: "single" };

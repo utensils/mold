@@ -122,6 +122,7 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
             primary.as_deref(),
             primary.is_some(),
         ));
+        annotate_audio_capabilities(&mut catalog, &config);
         return catalog;
     }
 
@@ -135,7 +136,18 @@ pub(crate) async fn list_models(state: &AppState) -> Vec<ModelInfoExtended> {
         snapshot.model_name.as_deref(),
         snapshot.is_loaded,
     ));
+    annotate_audio_capabilities(&mut catalog, &config);
     catalog
+}
+
+fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Config) {
+    for entry in catalog {
+        if entry.info.family != "ltx2" || entry.supports_audio.is_some() || !entry.downloaded {
+            continue;
+        }
+        entry.supports_audio = ModelPaths::resolve(&entry.info.name, config)
+            .map(|paths| mold_inference::ltx2::audio_output_supported(&paths));
+    }
 }
 
 fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
@@ -438,9 +450,11 @@ fn installed_catalog_models(
         }
         // Skip sidecars whose primary file isn't actually present —
         // partial pulls / aborted downloads.
-        if mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar).is_none() {
+        let Some(primary_path) =
+            mold_catalog::sidecar::primary_path_if_present(&sidecar_dir, &sidecar)
+        else {
             continue;
-        }
+        };
         // Skip entries already covered by a manifest.
         if mold_core::manifest::find_manifest_by_hf_repo(&sidecar.source_id).is_some() {
             continue;
@@ -498,6 +512,8 @@ fn installed_catalog_models(
             disk_usage_bytes: sidecar.size_bytes,
             remaining_download_bytes: Some(0),
             display_name: Some(sidecar.name.clone()),
+            supports_audio: (sidecar.family == "ltx2")
+                .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
         });
     }
     out
@@ -664,6 +680,26 @@ pub(crate) async fn model_component_status(
         return Ok(ModelComponentsResponse {
             model: resolved,
             components,
+        });
+    }
+
+    if looks_like_catalog_id(model_name) {
+        let resolved_paths = check_model_available(state, model_name).await?;
+        let paths = match resolved_paths {
+            Some(paths) => paths,
+            None => {
+                let config = state.config.read().await;
+                ModelPaths::resolve(model_name, &config).ok_or_else(|| {
+                    ApiError::not_found(format!(
+                        "catalog model '{model_name}' is loaded but its runtime paths are unavailable"
+                    ))
+                })?
+            }
+        };
+        let config = state.config.read().await;
+        return Ok(ModelComponentsResponse {
+            model: model_name.to_string(),
+            components: component_status_from_paths(&config, model_name, &paths),
         });
     }
 
@@ -1332,6 +1368,62 @@ mod tests {
     use std::path::PathBuf;
 
     const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn installed_ltx2_catalog_models_advertise_checkpoint_audio_assets() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("cv-3143864");
+        let primary = install_dir.join("model.safetensors");
+        std::fs::create_dir_all(&install_dir).unwrap();
+
+        let sidecar = mold_catalog::sidecar::CatalogSidecar {
+            schema: 1,
+            id: "cv:3143864".into(),
+            source: "civitai".into(),
+            source_id: "3143864".into(),
+            name: "LTX 2.3 INT4 ConvRot".into(),
+            author: None,
+            family: "ltx2".into(),
+            family_role: "finetune".into(),
+            sub_family: Some("v2.3".into()),
+            kind: "checkpoint".into(),
+            modality: "video".into(),
+            thumbnail_url: None,
+            size_bytes: None,
+            supported: true,
+            trained_words: vec![],
+            primary_filename_rel: "model.safetensors".into(),
+            written_at: 0,
+        };
+        mold_catalog::sidecar::write_sidecar(
+            &install_dir.join(mold_catalog::sidecar::SIDECAR_FILENAME),
+            &sidecar,
+        )
+        .unwrap();
+
+        write_safetensors_with_keys(
+            &primary,
+            &["model.diffusion_model.transformer_blocks.0.attn1.to_q.weight"],
+        );
+        let config = Config {
+            models_dir: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let state = AppState::for_tests();
+        let video_only = installed_catalog_models(&state, &config, dir.path(), None, false);
+        assert_eq!(video_only[0].supports_audio, Some(false));
+
+        write_safetensors_with_keys(
+            &primary,
+            &[
+                "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight",
+                "audio_vae.per_channel_statistics.mean-of-means",
+                "vocoder.vocoder.conv_pre.weight",
+            ],
+        );
+        let combined = installed_catalog_models(&state, &config, dir.path(), None, false);
+        assert_eq!(combined[0].supports_audio, Some(true));
+    }
 
     /// RAII guard for `MOLD_LTX2_GEMMA_DEVICE` (and the deprecated alias).
     /// Drop restores the prior values so adjacent tests don't see stale
@@ -2987,7 +3079,7 @@ mod tests {
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 1,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,
@@ -3438,7 +3530,7 @@ mod tests {
                 ],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 1,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,

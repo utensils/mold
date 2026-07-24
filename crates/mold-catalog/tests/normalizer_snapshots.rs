@@ -27,7 +27,7 @@ fn hf_flux_dev_normalizes() {
     // Diffusers layout (presence of model_index.json + text_encoder/ etc.)
     // → Bundling::Separated.
     assert_eq!(entry.bundling, Bundling::Separated);
-    assert_eq!(entry.engine_phase, 1);
+    assert!(entry.supported);
     assert_eq!(entry.likes, 12_300);
     assert!(!entry.nsfw);
     assert!(!entry.download_recipe.files.is_empty());
@@ -48,8 +48,8 @@ fn civitai_juggernaut_normalizes_as_sdxl_single_file() {
     assert_eq!(entry.family, Family::Sdxl);
     assert_eq!(entry.bundling, Bundling::SingleFile);
     assert_eq!(entry.file_format, FileFormat::Safetensors);
-    assert_eq!(entry.engine_phase, 2); // SDXL single-file → phase 2
-                                       // Companions are required for single-file SDXL.
+    assert!(entry.supported);
+    // Companions are required for single-file SDXL.
     assert!(entry.companions.contains(&"clip-l".to_string()));
     assert!(entry.companions.contains(&"clip-g".to_string()));
     assert!(entry.companions.contains(&"sdxl-vae".to_string()));
@@ -280,13 +280,13 @@ fn civitai_lora_classifies_as_kind_lora() {
 }
 
 #[test]
-fn civitai_qwen_lora_is_downloadable_without_phase_sentinel() {
+fn civitai_qwen_lora_is_downloadable_when_supported() {
     let item: CivitaiItem =
         serde_json::from_str(&civitai_lora_json("LORA", "Qwen")).expect("parse");
     let entry = from_civitai(item).expect("Qwen LoRA must round-trip");
     assert_eq!(entry.kind, Kind::Lora);
     assert_eq!(entry.family, Family::QwenImage);
-    assert_eq!(entry.engine_phase, 1);
+    assert!(entry.supported);
 }
 
 #[test]

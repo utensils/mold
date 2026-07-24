@@ -2768,6 +2768,7 @@ fn expand_capabilities(
     )
 )]
 async fn capabilities_chain_limits(
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     let raw_model = match params.get("model") {
@@ -2782,22 +2783,42 @@ async fn capabilities_chain_limits(
     };
 
     let resolved = mold_core::manifest::resolve_model_name(&raw_model);
-    let Some(manifest) = mold_core::manifest::find_manifest(&resolved) else {
-        return (StatusCode::NOT_FOUND, "unknown model\n").into_response();
-    };
-    let family = manifest.family.clone();
+    let (family, quant, supports_audio) =
+        if let Some(manifest) = mold_core::manifest::find_manifest(&resolved) {
+            let quant = resolved
+                .split_once(':')
+                .map(|(_, tag)| tag.to_string())
+                .unwrap_or_default();
+            let family = manifest.family.clone();
+            let supports_audio = crate::chain_limits::family_supports_audio(&family);
+            (family, quant, supports_audio)
+        } else {
+            // Installed live-catalog models retain opaque `cv:` / `hf:` ids and
+            // therefore cannot be found in the built-in manifest. Resolve them
+            // through the same installed-sidecar inventory as `/api/models`;
+            // config lookup alone deliberately does not synthesize catalog
+            // metadata and would incorrectly return 404 for runnable installs.
+            let Some(entry) = model_manager::list_models(&state)
+                .await
+                .into_iter()
+                .find(|entry| entry.downloaded && entry.info.name == raw_model)
+            else {
+                return (StatusCode::NOT_FOUND, "unknown model\n").into_response();
+            };
+            let family = entry.info.family;
+            let supports_audio = entry
+                .supports_audio
+                .unwrap_or_else(|| crate::chain_limits::family_supports_audio(&family));
+            (family, String::new(), supports_audio)
+        };
 
     if crate::chain_limits::family_cap(&family).is_none() {
         return (StatusCode::NOT_FOUND, "model is not chain-capable\n").into_response();
     }
 
-    let quant = resolved
-        .split_once(':')
-        .map(|(_, tag)| tag.to_string())
-        .unwrap_or_default();
-
     // TODO(sub-project D): pass live free VRAM from AppState.
-    let limits = crate::chain_limits::compute_limits(&resolved, &family, &quant, 0);
+    let mut limits = crate::chain_limits::compute_limits(&raw_model, &family, &quant, 0);
+    limits.supports_audio = supports_audio;
     Json(limits).into_response()
 }
 

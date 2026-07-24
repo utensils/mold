@@ -235,6 +235,8 @@ export interface ModelInfoExtended extends ModelDefaults {
    * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
    * and on manifest models. Display only: every API call keeps `name`. */
   display_name?: string | null;
+  /** Model-specific LTX-2 audio output support; absent on older servers. */
+  supports_audio?: boolean | null;
 }
 
 export interface GpuInfo {
@@ -819,7 +821,7 @@ export interface CatalogEntryWire {
     }[];
     needs_token: "hf" | "civitai" | null;
   };
-  engine_phase: number;
+  supported: boolean;
   /**
    * True when every file the entry needs is already present under the
    * configured models_dir. Computed server-side per request from the

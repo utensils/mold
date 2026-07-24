@@ -155,42 +155,24 @@ pub const CIVITAI_BASE_MODELS: &[&str] = &[
     "Upscaler",
 ];
 
-/// Returns the phase that unlocks installability/runnability for a catalog row.
-/// Phase 6 is the current "not supported by this build" boundary.
-pub fn engine_phase_for(family: Family, bundling: Bundling, kind: Kind) -> u8 {
+/// Whether this build can install and run a catalog row.
+pub fn supported_for(family: Family, bundling: Bundling, kind: Kind) -> bool {
     use Family::*;
     use Kind::*;
     match kind {
         // Supporting assets and adapters are installable when the family has
         // a compatible runtime. They are not standalone generation models, so
-        // don't inherit checkpoint runnability phases.
-        Lora => match family {
-            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | QwenImage => 1,
-            LtxVideo | Wuerstchen => 6,
-        },
-        Vae | TextEncoder | Tokenizer | Clip => 1,
-        ControlNet => match family {
-            Sd15 | Sdxl => 1,
-            Flux | Flux2 | ZImage | LtxVideo | Ltx2 | QwenImage | Wuerstchen => 6,
-        },
-        Checkpoint => engine_phase_for_checkpoint(family, bundling),
+        // don't inherit checkpoint runnability rules.
+        Lora => matches!(
+            family,
+            Flux | Flux2 | Sd15 | Sdxl | ZImage | Ltx2 | QwenImage
+        ),
+        Vae | TextEncoder | Tokenizer | Clip => true,
+        ControlNet => matches!(family, Sd15 | Sdxl),
+        Checkpoint => supported_for_checkpoint(family, bundling),
     }
 }
 
-fn engine_phase_for_checkpoint(family: Family, bundling: Bundling) -> u8 {
-    use Bundling::*;
-    use Family::*;
-    match (family, bundling) {
-        // Diffusers HF entries already work via existing engine paths.
-        (_, Separated) => 1,
-        (Sd15 | Sdxl, SingleFile) => 2,
-        // Flux.2 single-file is wired through the catalog bridge with the
-        // `flux2-te` + `flux2-vae` companions. FLUX (1.x) single-file is
-        // still pending — its bridge wiring lands later.
-        (Flux2, SingleFile) => 1,
-        (Flux, SingleFile) => 3,
-        (ZImage, SingleFile) => 4,
-        (LtxVideo | Ltx2, SingleFile) => 5,
-        (QwenImage | Wuerstchen, SingleFile) => 1,
-    }
+fn supported_for_checkpoint(_family: Family, _bundling: Bundling) -> bool {
+    true
 }

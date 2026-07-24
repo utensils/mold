@@ -31,8 +31,9 @@ const props = withDefaults(
   defineProps<{
     form: GenerateForm;
     upscalers?: ModelEntry[];
+    audioOutputSupported?: boolean;
   }>(),
-  { upscalers: () => [] },
+  { upscalers: () => [], audioOutputSupported: true },
 );
 
 const emit = defineEmits<{
@@ -496,8 +497,16 @@ const fpsErrorId = `mobile-fps-error-${useId()}`;
           <strong>Generate audio</strong>
           <small>Include a synchronized soundtrack when the model supports it.</small>
         </span>
-        <input v-model="form.enableAudio" type="checkbox" data-test="mobile-enable-audio" />
+        <input
+          v-model="form.enableAudio"
+          type="checkbox"
+          :disabled="!audioOutputSupported"
+          data-test="mobile-enable-audio"
+        />
       </label>
+      <p v-if="caps.supportsAudio && !audioOutputSupported" class="mobile-generate-validation">
+        Audio assets are not included with this checkpoint. Video generation remains available.
+      </p>
       <p
         v-if="audioFormatError"
         class="mobile-generate-validation"

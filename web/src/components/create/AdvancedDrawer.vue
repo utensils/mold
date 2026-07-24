@@ -52,6 +52,8 @@ const props = withDefaults(
     placementGpus?: { ordinal: number; name: string }[];
     /** Installed models on the selected generation route. */
     models?: ModelInfoExtended[];
+    /** Selected model's resolved audio assets are available. */
+    audioOutputSupported?: boolean;
   }>(),
   {
     open: false,
@@ -59,6 +61,7 @@ const props = withDefaults(
     mobile: false,
     placementGpus: () => [],
     models: () => [],
+    audioOutputSupported: true,
   },
 );
 
@@ -675,6 +678,7 @@ function resetAdvanced() {
         <Ltx2VideoControls
           v-if="showLtx2"
           :model-value="modelValue"
+          :audio-output-supported="audioOutputSupported"
           @update:model-value="emit('update:modelValue', $event)"
         />
       </AccordionSection>

@@ -483,7 +483,7 @@ const chainDecision = computed(() =>
 // every form edit.
 const estimateRequest = computed<GenerateRequestWire | null>(() => {
   if (!form.state.value.model) return null;
-  const request = { ...form.toRequest() };
+  const request = { ...form.toRequest(currentModel.value) };
   delete request.source_image;
   delete request.mask_image;
   delete request.control_image;
@@ -918,7 +918,7 @@ async function onSubmit() {
   }
   const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
-  const req = form.toRequest();
+  const req = form.toRequest(currentModel.value);
   if (quick) req.original_prompt = quick.originalPrompt;
   if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
@@ -1005,7 +1005,7 @@ async function onExpand() {
     const family = currentFamily.value;
     const model = form.state.value.model;
     const selectedHostPolicy = routing.targetId.value;
-    const baseRequest = form.toRequest();
+    const baseRequest = form.toRequest(currentModel.value);
     const style = styleHint(form.state.value.stylePreset ?? "");
     composerError.value = null;
     try {
@@ -1355,6 +1355,7 @@ onBeforeUnmount(() => {
         <ActivityStrip
           :jobs="stream.jobs.value"
           @cancel="stream.cancel"
+          @dismiss="stream.remove"
           @open="openJob"
         />
 
@@ -1580,6 +1581,7 @@ onBeforeUnmount(() => {
           :adv-count="advCount"
           :placement-gpus="gpuListForPlacement"
           :models="models"
+          :audio-output-supported="currentModel?.supports_audio !== false"
           @open-picker="showPicker = true"
           @clear-source="onClearSource"
           @open-mask="showMask = true"
@@ -1600,6 +1602,7 @@ onBeforeUnmount(() => {
         :adv-count="advCount"
         :placement-gpus="gpuListForPlacement"
         :models="models"
+        :audio-output-supported="currentModel?.supports_audio !== false"
         @close="showAdvanced = false"
         @open-picker="showPicker = true"
         @clear-source="onClearSource"

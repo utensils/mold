@@ -692,7 +692,7 @@ impl LtxVideoEngine {
     }
 
     /// Construct an LTX-Video engine from a Civitai single-file safetensors
-    /// checkpoint (phase 5).
+    /// checkpoint.
     ///
     /// Header-parses `checkpoint` via `ltx_video::single_file::load` to
     /// detect the key format (native vs. diffusers) and VAE presence.

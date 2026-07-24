@@ -208,16 +208,15 @@ describe("catalogActionLabel", () => {
 });
 
 describe("canDownloadEntry", () => {
-  it("allows entries whose engine phase is shipped (<= 5)", () => {
-    expect(canDownloadEntry(entry({ engine_phase: 1 }))).toBe(true);
-    expect(canDownloadEntry(entry({ engine_phase: 5 }))).toBe(true);
+  it("allows supported entries", () => {
+    expect(canDownloadEntry(entry({ supported: true }))).toBe(true);
   });
 
-  it("blocks unsupported catalog packages (phase >= 6)", () => {
-    expect(canDownloadEntry(entry({ engine_phase: 6 }))).toBe(false);
+  it("blocks unsupported catalog packages", () => {
+    expect(canDownloadEntry(entry({ supported: false }))).toBe(false);
   });
 
-  it("allows entries from older servers that don't report a phase", () => {
+  it("allows entries from older servers that don't report support", () => {
     expect(canDownloadEntry(entry())).toBe(true);
   });
 });

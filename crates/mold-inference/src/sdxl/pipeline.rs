@@ -140,7 +140,7 @@ impl SDXLEngine {
     /// **not** build the model.
     ///
     /// `clip_l_tokenizer` and `clip_g_tokenizer` are paths to companion-pulled
-    /// tokenizer assets (phase 2.7); tokenizers never live inside the
+    /// tokenizer assets; tokenizers never live inside the
     /// single-file checkpoint.
     ///
     /// `is_turbo` is threaded through from the manifest / model config —
@@ -708,7 +708,7 @@ impl SDXLEngine {
         Ok((unet, vae, clip_l, clip_g))
     }
 
-    /// Single-file (Civitai) component loader (phase 2.6 + 2.8.5).
+    /// Single-file (Civitai) component loader.
     ///
     /// Header-parses the checkpoint, builds the diffusers→A1111 remap
     /// (incl. CLIP-G `RenameOutput::FusedSlice` entries for the OpenCLIP
@@ -1853,7 +1853,7 @@ mod tests {
     fn from_single_file_constructs_for_synthetic_sdxl_checkpoint() {
         let single_file = synth_sdxl_single_file("ok");
         // Companion CLIP-L / CLIP-G tokenizers are pulled separately
-        // (phase 2.7) and are not validated by the constructor — their
+        // and are not validated by the constructor — their
         // paths are just stored.
         let clip_l_tok = std::env::temp_dir().join("mold-sdxl-clip-l-stub.json");
         let clip_g_tok = std::env::temp_dir().join("mold-sdxl-clip-g-stub.json");
@@ -2032,7 +2032,7 @@ mod tests {
 
     #[test]
     fn load_branches_to_single_file_path_and_invokes_candle_constructors() {
-        // Phase 2.8.5 smoke (TDD parity with SD15): single-file SDXL
+        // Smoke test (TDD parity with SD15): single-file SDXL
         // `load()` must dispatch to the single-file branch and hand four
         // `VarBuilder::from_backend(SingleFileBackend)` instances to
         // candle's per-component constructors. The synthetic checkpoint
@@ -2191,7 +2191,7 @@ mod tests {
         let _ = std::fs::remove_file(single_file);
     }
 
-    // ----- Phase 2.6: is_turbo threaded into the single-file constructor -----
+    // ----- Single-file: is_turbo threaded into the single-file constructor -----
 
     #[test]
     fn from_single_file_threads_is_turbo_true() {

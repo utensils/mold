@@ -705,6 +705,7 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            supports_audio: None,
         }];
         let embed = format_model_list(&models);
         assert!(embed.description.contains("**FLUX**"));
@@ -736,6 +737,7 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                supports_audio: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -757,6 +759,7 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                supports_audio: None,
             },
             ModelInfoExtended {
                 info: mold_core::ModelInfo {
@@ -778,6 +781,7 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                supports_audio: None,
             },
         ];
         let embed = format_model_list(&models);

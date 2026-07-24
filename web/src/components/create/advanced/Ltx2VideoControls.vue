@@ -22,7 +22,13 @@ import type {
 } from "../../../types";
 import { blobToBase64 } from "../../../lib/base64";
 
-const props = defineProps<{ modelValue: GenerateFormState }>();
+const props = withDefaults(
+  defineProps<{
+    modelValue: GenerateFormState;
+    audioOutputSupported?: boolean;
+  }>(),
+  { audioOutputSupported: true },
+);
 const emit = defineEmits<{ "update:modelValue": [value: GenerateFormState] }>();
 
 function patch(next: Partial<GenerateFormState>) {
@@ -32,7 +38,9 @@ function patch(next: Partial<GenerateFormState>) {
 // ── Audio decode toggle ───────────────────────────────────────────────
 // enableAudio is boolean | null; null lets the server default (on for MP4).
 // The switch reads on unless explicitly disabled, and writes true/false.
-const audioOn = computed(() => props.modelValue.enableAudio !== false);
+const audioOn = computed(
+  () => props.audioOutputSupported && props.modelValue.enableAudio !== false,
+);
 function setAudio(on: boolean) {
   patch({ enableAudio: on });
 }
@@ -199,11 +207,20 @@ function removeKeyframe(index: number) {
       <span class="ltx2__label">Decode audio</span>
       <SwitchToggle
         :model-value="audioOn"
+        :disabled="!audioOutputSupported"
         label="Decode audio"
         data-test="ltx2-enable-audio"
         @update:model-value="setAudio"
       />
     </div>
+    <p
+      v-if="!audioOutputSupported"
+      class="ltx2__hint"
+      data-test="ltx2-audio-unavailable"
+    >
+      Audio assets are not included with this checkpoint. Video generation
+      remains available.
+    </p>
 
     <div class="ltx2__field">
       <label class="ltx2__label">Pipeline</label>

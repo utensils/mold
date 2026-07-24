@@ -11,6 +11,19 @@ use crate::theme;
 use crate::ui::print_server_fallback;
 use crate::AlreadyReported;
 
+fn rendered_primary_dest<'a>(
+    recipe: &mold_catalog::entry::DownloadRecipe,
+    rendered_dests: &'a [String],
+) -> Option<&'a str> {
+    recipe
+        .files
+        .iter()
+        .zip(rendered_dests)
+        .find(|(file, _)| file.role.is_none())
+        .or_else(|| recipe.files.iter().zip(rendered_dests).next())
+        .map(|(_, dest)| dest.as_str())
+}
+
 /// Download a model and write its config. Returns the updated Config.
 pub async fn pull_and_configure(
     model: &str,
@@ -320,6 +333,23 @@ pub async fn run_recipe(
             AlreadyReported.into()
         })?;
 
+    // Refresh the sidecar even when the primary was already present. Besides
+    // keeping live metadata current, this upgrades legacy sidecars from the
+    // removed numeric compatibility field to the direct `supported` boolean.
+    if id_str.starts_with("cv:") {
+        let primary_dest = rendered_primary_dest(recipe, &rendered_dests)
+            .ok_or_else(|| anyhow::anyhow!("catalog recipe {id_str} has no primary file"))?;
+        let sidecar = mold_catalog::sidecar::sidecar_from_entry(&entry, primary_dest.to_string());
+        let sidecar_path =
+            mold_catalog::sidecar::civitai_sidecar_path(&models_dir, entry.id.as_str());
+        mold_catalog::sidecar::write_sidecar(&sidecar_path, &sidecar).map_err(|error| {
+            anyhow::anyhow!(
+                "write catalog sidecar {} after pull: {error}",
+                sidecar_path.display()
+            )
+        })?;
+    }
+
     status!("");
     status!("{} {} is ready!", theme::icon_done(), id_str.bold());
     status!("  mold run {id_str} \"your prompt\"");
@@ -349,4 +379,41 @@ async fn pull_via_server(ctx: &CliContext, manifest: &ModelManifest) -> Result<(
         ctx.client().host().bold(),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mold_catalog::entry::{DownloadRecipe, RecipeFile, RecipeFileRole};
+
+    #[test]
+    fn rendered_primary_dest_skips_explicit_companion_roles() {
+        let recipe = DownloadRecipe {
+            files: vec![
+                RecipeFile {
+                    url: "https://example/vae".into(),
+                    dest: "vae.safetensors".into(),
+                    sha256: None,
+                    size_bytes: None,
+                    role: Some(RecipeFileRole::Vae),
+                },
+                RecipeFile {
+                    url: "https://example/model".into(),
+                    dest: "model.safetensors".into(),
+                    sha256: None,
+                    size_bytes: None,
+                    role: None,
+                },
+            ],
+            needs_token: None,
+        };
+        let rendered = vec![
+            "resolved/vae.safetensors".into(),
+            "resolved/model.safetensors".into(),
+        ];
+        assert_eq!(
+            rendered_primary_dest(&recipe, &rendered),
+            Some("resolved/model.safetensors")
+        );
+    }
 }

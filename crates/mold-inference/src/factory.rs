@@ -75,6 +75,14 @@ fn is_flux2_bfl_native_single_file(paths: &ModelPaths) -> bool {
     )
 }
 
+/// LTX-2 catalog fine-tunes can pair one native transformer checkpoint with
+/// a separate VAE, so equality between the transformer and VAE paths cannot
+/// identify the single-file transformer layout. Use its header validator.
+fn is_ltx2_native_single_file(paths: &ModelPaths) -> bool {
+    paths.transformer_shards.is_empty()
+        && crate::ltx2::single_file::load(&paths.transformer).is_ok()
+}
+
 /// Create an inference engine for the given model, auto-detecting the family.
 ///
 /// Returns the appropriate engine (FluxEngine, SD15Engine, SDXLEngine, or ZImageEngine)
@@ -137,13 +145,13 @@ pub fn create_engine_with_pool(
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
             let scheduler = model_cfg.scheduler.unwrap_or(Scheduler::Ddim);
             if is_single_file(&paths) {
-                // Companion-pulled CLIP-L tokenizer (phase 2.7). Civitai
+                // Companion-pulled CLIP-L tokenizer. Civitai
                 // single-file checkpoints never bundle the tokenizer.
                 let clip_tokenizer = paths
                     .clip_tokenizer
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!(
-                        "single-file SD1.5 dispatch requires a companion-pulled clip_tokenizer (phase 2.7)"
+                        "single-file SD1.5 dispatch requires a companion-pulled clip_tokenizer"
                     ))?;
                 let single_file = paths.transformer.clone();
                 Ok(Box::new(SD15Engine::from_single_file(
@@ -176,15 +184,15 @@ pub fn create_engine_with_pool(
                 Scheduler::Ddim
             });
             if is_single_file(&paths) {
-                // Companion-pulled CLIP-L + CLIP-G tokenizers (phase 2.7).
+                // Companion-pulled CLIP-L + CLIP-G tokenizers.
                 let clip_l_tokenizer = paths.clip_tokenizer.clone().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "single-file SDXL dispatch requires a companion-pulled clip_tokenizer (CLIP-L, phase 2.7)"
+                        "single-file SDXL dispatch requires a companion-pulled clip_tokenizer(CLIP-L)"
                     )
                 })?;
                 let clip_g_tokenizer = paths.clip_tokenizer_2.clone().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "single-file SDXL dispatch requires a companion-pulled clip_tokenizer_2 (CLIP-G, phase 2.7)"
+                        "single-file SDXL dispatch requires a companion-pulled clip_tokenizer_2(CLIP-G)"
                     )
                 })?;
                 let single_file = paths.transformer.clone();
@@ -299,7 +307,7 @@ pub fn create_engine_with_pool(
                 .ok()
                 .or_else(|| config.t5_variant.clone());
             if is_single_file(&paths) {
-                // Civitai single-file dispatch (phase 5). `paths.vae` is
+                // Civitai single-file dispatch. `paths.vae` is
                 // either the same checkpoint (combined transformer+VAE) or
                 // the ltx-video-vae companion set by `populate_companion_paths`.
                 let vae_path = if paths.vae != paths.transformer {
@@ -330,12 +338,11 @@ pub fn create_engine_with_pool(
             }
         }
         "ltx2" | "ltx-2" => {
-            if is_single_file(&paths) {
-                // Civitai single-file dispatch (phase 5). The combined
-                // LTX-2 checkpoint includes the VAE under `vae.*`. Pass the
-                // full `paths` so `text_encoder_files` (Gemma TE companion,
-                // resolved by the catalog bridge) survives the
-                // ModelPaths rebuild — the runtime's `gemma_root` reads it.
+            if is_ltx2_native_single_file(&paths) {
+                // Civitai single-file dispatch. Combined checkpoints use
+                // `vae.*`; transformer-only checkpoints use `paths.vae`.
+                // Pass the full companion graph so both the Gemma encoder
+                // and version-matched VAE reach the runtime and chain stages.
                 let checkpoint = paths.transformer.clone();
                 Ok(Box::new(Ltx2Engine::from_single_file(
                     model_name,
@@ -665,7 +672,7 @@ mod tests {
         assert_eq!(engine.model_name(), "my-wurst");
     }
 
-    // ----- Phase 2.6 single-file routing -----
+    // ----- Single-file routing -----
 
     fn single_file_paths(checkpoint: &std::path::Path) -> ModelPaths {
         // The factory routing decision keys off transformer == vae +
@@ -725,6 +732,27 @@ mod tests {
             !super::is_single_file(&paths),
             "non-`.safetensors` extension must never route to single-file",
         );
+    }
+
+    #[test]
+    fn ltx2_native_single_file_dispatch_survives_external_vae_path() {
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+        use std::collections::HashMap;
+
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = temp.path().join("ltx23_transformer.safetensors");
+        let zero = 0.0f32.to_le_bytes();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "transformer_blocks.0.attn1.to_q.weight".to_string(),
+            TensorView::new(SafeDtype::F32, vec![1], &zero).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &checkpoint).unwrap();
+
+        let mut paths = single_file_paths(&checkpoint);
+        paths.vae = temp.path().join("external_vae.safetensors");
+        assert!(super::is_ltx2_native_single_file(&paths));
+        assert!(!super::is_single_file(&paths));
     }
 
     /// Synthesise a minimal SD1.5-shaped single-file safetensors so the

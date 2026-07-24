@@ -1,9 +1,9 @@
 //! Shared VAE A1111 → diffusers key rename pass.
 //!
-//! Phase-2.2 audit point 3 confirmed SD1.5 and SDXL ship the **identical**
+//! The tensor-prefix audit confirmed SD1.5 and SDXL ship the **identical**
 //! VAE weights — same 248 keys, same shapes, same naming. So both family
 //! loaders can share a single rename helper. Factored out of
-//! `sd15_keys::apply_sd15_vae_rename` during phase 2.5 when the SDXL
+//! `sd15_keys::apply_sd15_vae_rename` for SDXL when the SDXL
 //! loader landed.
 //!
 //! Diffusers naming reference:

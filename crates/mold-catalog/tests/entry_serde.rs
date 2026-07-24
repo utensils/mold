@@ -43,7 +43,7 @@ fn sample_entry() -> CatalogEntry {
             }],
             needs_token: Some(TokenKind::Hf),
         },
-        engine_phase: 1,
+        supported: true,
         created_at: Some(1_700_000_000),
         updated_at: Some(1_710_000_000),
         added_at: 1_720_000_000,

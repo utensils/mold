@@ -11,7 +11,7 @@ function makePageEntries(page: number, size: number) {
       id: `hf:row-${idx}`,
       name: `Row ${idx}`,
       family: "flux",
-      engine_phase: 1,
+      supported: true,
       installed: false,
       source: "hf",
       source_id: `r${idx}`,
@@ -184,7 +184,7 @@ describe("useCatalog", () => {
             id: fallbackId,
             name: "Fallback",
             family: "flux",
-            engine_phase: 1,
+            supported: true,
             installed: false,
             source: "hf",
             source_id: "x",
@@ -290,14 +290,10 @@ describe("useCatalog", () => {
     expect(cat.detailError.value).toBeNull();
   });
 
-  it("enables download for engine_phase 1–5, disables for engine_phase >= 6", async () => {
+  it("uses the direct catalog support capability", async () => {
     const cat = useCatalog();
-    expect(cat.canDownload({ engine_phase: 1 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 2 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 3 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 4 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 5 } as any)).toBe(true);
-    expect(cat.canDownload({ engine_phase: 6 } as any)).toBe(false);
+    expect(cat.canDownload({ supported: true } as any)).toBe(true);
+    expect(cat.canDownload({ supported: false } as any)).toBe(false);
   });
 });
 

@@ -180,7 +180,9 @@ function modelDefaultsPatch(
   if (!formats.includes(next.outputFormat)) {
     next.outputFormat = formats[0];
   }
-  next.enableAudio = capabilities.supportsAudio ? true : null;
+  next.enableAudio = capabilities.supportsAudio
+    ? model.supports_audio !== false
+    : null;
   if (!capabilities.supportsScheduler) {
     next.scheduler = null;
   }
@@ -445,7 +447,11 @@ export interface UseGenerateForm {
   removeLora: (index: number) => void;
   /** Append `phrase` to the active prompt with sensible whitespace. */
   appendPromptPhrase: (phrase: string) => void;
-  toRequest: () => GenerateRequestWire;
+  /**
+   * Build the wire request. Pass the resolved catalog row when available so
+   * checkpoint-specific capabilities can override stale persisted form state.
+   */
+  toRequest: (model?: ModelInfoExtended | null) => GenerateRequestWire;
   isVideoFamily: (family: string) => boolean;
   supportsNegativePrompt: (family: string) => boolean;
   supportsScheduler: (family: string) => boolean;
@@ -516,7 +522,7 @@ export function useGenerateForm(): UseGenerateForm {
       // the new variant's tensor layout.
       state.value = modelDefaultsPatch(state.value, m);
     },
-    toRequest: () => {
+    toRequest: (model = null) => {
       const s = state.value;
       // The wire format strips per-row metadata (trigger phrases) — only
       // path + scale travel to the server. We send `loras` (plural) so
@@ -594,7 +600,14 @@ export function useGenerateForm(): UseGenerateForm {
           capabilities.supportsVideo && s.gifPreview ? true : undefined,
         placement: s.placement ?? undefined,
         loras: loras.length ? loras : undefined,
-        enable_audio: s.enableAudio ?? undefined,
+        // A persisted draft can retain `true` from a previously-selected AV
+        // checkpoint. The resolved model row is the final authority at submit
+        // time: video-only LTX-2 exports must never reach the server with audio
+        // enabled, even if initial model hydration did not reapply defaults.
+        enable_audio:
+          model?.supports_audio === false
+            ? false
+            : (s.enableAudio ?? undefined),
         ...(ltx2
           ? {
               audio_file: s.audioFile?.base64 ?? undefined,

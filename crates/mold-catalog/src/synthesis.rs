@@ -214,8 +214,8 @@ pub fn intent_has_companion(intent: &CatalogModelIntent, name: &str) -> bool {
 /// VAE in the primary single-file safetensors. SDXL/SD1.5 are
 /// guaranteed bundled; FLUX is mixed (some bundle, some are
 /// transformer-only) so this returns false to force the disk-aware
-/// resolver to peek the safetensors header. Flux.2 / LTX-Video / LTX-2
-/// always need a separate VAE companion.
+/// resolver to peek the safetensors header. LTX-2 is mixed for the same
+/// reason. Flux.2 / Z-Image / LTX-Video always use separate VAE files.
 ///
 /// Used by the resolution layer to decide whether to even attempt the
 /// bundled-VAE probe vs. unconditionally route to the VAE companion.
@@ -224,8 +224,9 @@ pub fn family_bundles_vae_unconditionally(family: Family) -> bool {
         Family::Sd15 | Family::Sdxl => true,
         // Mixed bundling — let the resolver probe the actual safetensors.
         Family::Flux => false,
-        // Always-bundled single-file checkpoints.
-        Family::Ltx2 => true,
+        // Mixed bundling — combined official checkpoints and transformer-only
+        // fine-tunes both exist.
+        Family::Ltx2 => false,
         // Always-separate VAE.
         Family::Flux2 | Family::ZImage | Family::LtxVideo => false,
         Family::QwenImage | Family::Wuerstchen => false,
@@ -277,7 +278,7 @@ mod tests {
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 1,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,
@@ -321,7 +322,7 @@ mod tests {
                 }],
                 needs_token: Some(TokenKind::Civitai),
             },
-            engine_phase: 1,
+            supported: true,
             created_at: None,
             updated_at: None,
             added_at: 0,
@@ -420,8 +421,8 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_catalog_primary_bundles_vae() {
-        assert!(family_bundles_vae_unconditionally(Family::Ltx2));
+    fn ltx2_catalog_primary_may_need_external_vae() {
+        assert!(!family_bundles_vae_unconditionally(Family::Ltx2));
         assert!(!family_bundles_vae_unconditionally(Family::LtxVideo));
     }
 

@@ -1,5 +1,5 @@
 use mold_catalog::civitai_map::{
-    engine_phase_for, map_base_model, CIVITAI_BASE_MODELS, CIVITAI_DROPS,
+    map_base_model, supported_for, CIVITAI_BASE_MODELS, CIVITAI_DROPS,
 };
 use mold_catalog::entry::{Bundling, Kind};
 use mold_catalog::families::Family;
@@ -29,83 +29,28 @@ fn unknown_strings_drop_silently() {
 }
 
 #[test]
-fn engine_phase_classifies_separated_as_one() {
+fn checkpoints_are_supported_for_both_bundle_layouts() {
     for fam in [Family::Flux, Family::Sdxl, Family::Sd15, Family::ZImage] {
-        assert_eq!(
-            engine_phase_for(fam, Bundling::Separated, Kind::Checkpoint),
-            1
-        );
+        assert!(supported_for(fam, Bundling::Separated, Kind::Checkpoint));
+        assert!(supported_for(fam, Bundling::SingleFile, Kind::Checkpoint));
     }
 }
 
 #[test]
-fn engine_phase_classifies_single_file_correctly() {
-    assert_eq!(
-        engine_phase_for(Family::Sd15, Bundling::SingleFile, Kind::Checkpoint),
-        2
-    );
-    assert_eq!(
-        engine_phase_for(Family::Sdxl, Bundling::SingleFile, Kind::Checkpoint),
-        2
-    );
-    assert_eq!(
-        engine_phase_for(Family::Flux, Bundling::SingleFile, Kind::Checkpoint),
-        3
-    );
-    // Flux.2 is wired through the catalog bridge — phase 1 (runnable).
-    assert_eq!(
-        engine_phase_for(Family::Flux2, Bundling::SingleFile, Kind::Checkpoint),
-        1
-    );
-    assert_eq!(
-        engine_phase_for(Family::ZImage, Bundling::SingleFile, Kind::Checkpoint),
-        4
-    );
-    assert_eq!(
-        engine_phase_for(Family::LtxVideo, Bundling::SingleFile, Kind::Checkpoint),
-        5
-    );
-    assert_eq!(
-        engine_phase_for(Family::Ltx2, Bundling::SingleFile, Kind::Checkpoint),
-        5
-    );
-    assert_eq!(
-        engine_phase_for(Family::QwenImage, Bundling::SingleFile, Kind::Checkpoint),
-        1
-    );
-    assert_eq!(
-        engine_phase_for(Family::Wuerstchen, Bundling::SingleFile, Kind::Checkpoint),
-        1
-    );
-    assert_eq!(
-        engine_phase_for(Family::Sd15, Bundling::SingleFile, Kind::ControlNet),
-        1
-    );
-    assert_eq!(
-        engine_phase_for(Family::Sdxl, Bundling::SingleFile, Kind::ControlNet),
-        1
-    );
-}
-
-#[test]
-fn engine_phase_never_uses_legacy_unsupported_sentinel() {
-    const LEGACY_UNSUPPORTED_SENTINEL: u8 = 100 - 1;
-    for family in mold_catalog::families::ALL_FAMILIES {
-        for bundling in [Bundling::Separated, Bundling::SingleFile] {
-            for kind in [
-                Kind::Checkpoint,
-                Kind::Lora,
-                Kind::Vae,
-                Kind::TextEncoder,
-                Kind::Tokenizer,
-                Kind::Clip,
-                Kind::ControlNet,
-            ] {
-                assert_ne!(
-                    engine_phase_for(*family, bundling, kind),
-                    LEGACY_UNSUPPORTED_SENTINEL
-                );
-            }
-        }
-    }
+fn support_is_a_direct_capability() {
+    assert!(supported_for(
+        Family::Sd15,
+        Bundling::SingleFile,
+        Kind::ControlNet
+    ));
+    assert!(!supported_for(
+        Family::Flux,
+        Bundling::SingleFile,
+        Kind::ControlNet
+    ));
+    assert!(supported_for(
+        Family::Ltx2,
+        Bundling::SingleFile,
+        Kind::Checkpoint
+    ));
 }

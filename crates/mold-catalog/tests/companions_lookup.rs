@@ -65,7 +65,7 @@ fn flux2_unknown_subfamily_defaults_to_9b_encoder() {
 }
 
 #[test]
-fn ltx2_single_file_pulls_gemma_te_not_t5() {
+fn ltx2_single_file_pulls_gemma_te_and_matching_vae_not_t5() {
     // LTX-2 / LTX-2.3 use Gemma 3 12B as the text encoder, not T5. Civitai
     // single-file LTX-2 checkpoints (e.g. cv:2752735, cv:2781713) bundle
     // the transformer + VAE but ship no encoder, and the runtime
@@ -74,7 +74,12 @@ fn ltx2_single_file_pulls_gemma_te_not_t5() {
     // the load with `LTX-2 requires Gemma text encoder files to be
     // available`. Pin the correct companion so a future scope-creep edit
     // doesn't silently swap T5 back in.
-    let names = companions_for(Family::Ltx2, None, Bundling::SingleFile, Kind::Checkpoint);
+    let names = companions_for(
+        Family::Ltx2,
+        Some("v2.3"),
+        Bundling::SingleFile,
+        Kind::Checkpoint,
+    );
     assert!(
         names.contains(&"ltx2-te".to_string()),
         "LTX-2 must pull the Gemma TE companion; got {names:?}"
@@ -82,6 +87,30 @@ fn ltx2_single_file_pulls_gemma_te_not_t5() {
     assert!(
         !names.contains(&"t5-v1_1-xxl".to_string()),
         "LTX-2 must NOT pull T5 (unused, ~9.5 GB wasted download); got {names:?}"
+    );
+    assert!(
+        names.contains(&"ltx2.3-vae".to_string()),
+        "LTX-2.3 transformer-only checkpoints need the matching video VAE; got {names:?}"
+    );
+    assert!(
+        names.contains(&"ltx2.3-text-projection".to_string()),
+        "LTX-2.3 diffusion-only checkpoints need the Gemma projection; got {names:?}"
+    );
+}
+
+#[test]
+fn ltx2_v2_single_file_uses_v2_vae() {
+    let names = companions_for(
+        Family::Ltx2,
+        Some("v2"),
+        Bundling::SingleFile,
+        Kind::Checkpoint,
+    );
+    assert!(names.contains(&"ltx2-vae".to_string()), "got {names:?}");
+    assert!(!names.contains(&"ltx2.3-vae".to_string()), "got {names:?}");
+    assert!(
+        !names.contains(&"ltx2.3-text-projection".to_string()),
+        "got {names:?}"
     );
 }
 

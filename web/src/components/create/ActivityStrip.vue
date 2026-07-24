@@ -23,6 +23,7 @@ function hostBadge(job: Job): string | null {
 
 const emit = defineEmits<{
   cancel: [id: string];
+  dismiss: [id: string];
   open: [job: Job];
 }>();
 
@@ -47,7 +48,12 @@ const running = computed(() =>
 const queued = computed(() =>
   props.jobs.filter((j) => j.state === "running" && !j.workStarted),
 );
-const active = computed(() => running.value.length + queued.value.length > 0);
+const errors = computed(() =>
+  props.jobs.filter((j) => j.state === "error" && j.error),
+);
+const active = computed(
+  () => running.value.length + queued.value.length + errors.value.length > 0,
+);
 </script>
 
 <template>
@@ -123,6 +129,29 @@ const active = computed(() => running.value.length + queued.value.length > 0);
           <Icon name="close" :size="12" />
         </button>
       </span>
+    </div>
+
+    <div
+      v-for="job in errors"
+      :key="job.id"
+      class="activity__error"
+      role="alert"
+      :data-test="`activity-error-${job.id}`"
+    >
+      <Icon name="negative" :size="15" />
+      <span class="activity__error-body">
+        <span class="activity__error-prompt">{{ promptFor(job) }}</span>
+        <span>{{ job.error }}</span>
+      </span>
+      <button
+        type="button"
+        class="activity__dismiss"
+        :aria-label="`Dismiss error for ${promptFor(job)}`"
+        :data-test="`activity-dismiss-${job.id}`"
+        @click="emit('dismiss', job.id)"
+      >
+        <Icon name="close" :size="13" />
+      </button>
     </div>
   </div>
 </template>
@@ -202,6 +231,44 @@ const active = computed(() => running.value.length + queued.value.length > 0);
   padding: 1px 6px;
   margin-right: 5px;
   vertical-align: middle;
+}
+
+.activity__error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
+  background: color-mix(in srgb, var(--stop) 10%, var(--bench));
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  color: var(--stop);
+  font-size: 12px;
+}
+
+.activity__error-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+
+.activity__error-prompt {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.activity__dismiss {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  padding: 2px;
+  color: var(--ink-3);
+}
+
+.activity__dismiss:hover {
+  background: color-mix(in srgb, var(--stop) 15%, transparent);
+  color: var(--stop);
 }
 
 .activity__pct {

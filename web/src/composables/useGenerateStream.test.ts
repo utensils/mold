@@ -444,6 +444,23 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("error");
   });
 
+  it("shows the server's JSON error message without transport noise", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 25 }), { kind: "single" });
+    lastSingleHandlers!.onError({
+      kind: "http",
+      status: 0,
+      body: JSON.stringify({
+        message:
+          "generation error: LTX-2 audio output is unavailable. Set enable_audio=false and retry.",
+      }),
+    });
+
+    expect(stream.jobs.value.find((j) => j.id === id)?.error).toBe(
+      "generation error: LTX-2 audio output is unavailable. Set enable_audio=false and retry.",
+    );
+  });
+
   it("does NOT auto-remove a canceled job", () => {
     const stream = useGenerateStream();
     const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });

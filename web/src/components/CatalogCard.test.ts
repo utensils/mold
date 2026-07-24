@@ -7,7 +7,7 @@ const baseEntry: CatalogEntryWire = {
   id: "hf:a",
   name: "Alpha",
   family: "flux",
-  engine_phase: 1,
+  supported: true,
   installed: false,
   source: "hf",
   source_id: "a",
@@ -65,13 +65,12 @@ describe("CatalogCard (discover)", () => {
     expect(w.emitted("open")).toBeTruthy();
   });
 
-  it("disables Pull with an unsupported tooltip for engine_phase >= 6", () => {
-    const entry: CatalogEntryWire = { ...baseEntry, engine_phase: 6 };
+  it("disables Pull with an unsupported tooltip", () => {
+    const entry: CatalogEntryWire = { ...baseEntry, supported: false };
     const w = mount(CatalogCard, { props: { entry } });
     const pull = w.find("[data-test=pull-btn]");
     expect((pull.element as HTMLButtonElement).disabled).toBe(true);
     expect(pull.attributes("title")).toMatch(/unsupported/i);
-    expect(w.text()).not.toMatch(/phase 6/i);
   });
 
   it("labels Pull as Repair and shows an installed badge when installed", () => {
