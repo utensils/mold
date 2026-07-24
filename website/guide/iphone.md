@@ -132,9 +132,10 @@ entire video into phone memory.
 ## Models
 
 Models combines installed models with live Hugging Face and Civitai results.
-You can search, filter All/Images/Video, filter by source or family, inspect
-download contents and installed components, and include NSFW entries
-explicitly. When a manifest model has multiple quantizations, its detail sheet
+You can search, filter All/Images/Video, filter by source, family, or model
+kind (Models, LoRAs, CLIP, text encoders, VAEs, tokenizers, ControlNet), sort
+by downloads, rating, or recency, inspect download contents and installed
+components, and include NSFW entries explicitly. When a manifest model has multiple quantizations, its detail sheet
 shows variant chips with checkpoint sizes; the selected chip is the exact model
 the Pull action downloads.
 

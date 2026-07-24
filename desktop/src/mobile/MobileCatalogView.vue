@@ -26,6 +26,12 @@ import {
   downloadContentsTotalBytes,
   installedModelToEntry,
 } from "../lib/catalogDetail";
+import {
+  CATALOG_KIND_OPTIONS,
+  CATALOG_SORT_OPTIONS,
+  type CatalogKindFilter,
+  type CatalogSortOption,
+} from "../lib/catalogFilters";
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
@@ -81,6 +87,8 @@ const source = ref<CatalogSource>("all");
 // restores the chosen HuggingFace/Civitai filter instead of resetting to All.
 const lastDiscoverSource = ref<CatalogSource>("all");
 const family = ref("");
+const kind = ref<CatalogKindFilter | "">("");
+const sort = ref<CatalogSortOption>("downloads");
 const includeNsfw = ref(false);
 const families = ref<string[]>([]);
 const entries = ref<CatalogEntry[]>([]);
@@ -182,6 +190,8 @@ function manifestModelToEntry(model: ModelEntry): MobileCatalogEntry {
 
 /** Curated `/api/models` variants are safe pull targets and must beat an aggregate HF repo row. */
 const manifestEntries = computed<MobileCatalogEntry[]>(() => {
+  // Manifest rows are all checkpoints — a non-checkpoint kind hides them.
+  if (kind.value && kind.value !== "checkpoint") return [];
   const q = query.value.trim().toLowerCase();
   return (modelsByHost.value[props.selectedHostId] ?? [])
     .filter((model) => !model.downloaded && !isUtilityModel(model))
@@ -210,6 +220,7 @@ const filteredInstalled = computed(() => {
         !q || entry.name.toLowerCase().includes(q) || entryTitle(entry).toLowerCase().includes(q),
     )
     .filter((entry) => !family.value || entry.family === family.value)
+    .filter((entry) => !kind.value || entry.kind === kind.value)
     .filter(sourceMatches)
     .filter(mediaMatches);
 });
@@ -412,8 +423,10 @@ async function runSearch(reset: boolean): Promise<void> {
         {
           q: query.value.trim() || undefined,
           family: family.value || undefined,
+          kind: kind.value || undefined,
           source: source.value === "all" ? undefined : source.value,
           include_nsfw: includeNsfw.value,
+          sort: sort.value === "downloads" ? undefined : sort.value,
           page: page.value,
           page_size: PAGE_SIZE,
         },
@@ -823,8 +836,12 @@ function deactivateInteractions(): void {
 watch(
   source,
   (next) => {
-    if (next === "installed") family.value = "";
-    else lastDiscoverSource.value = next;
+    if (next === "installed") {
+      family.value = "";
+      kind.value = "";
+    } else {
+      lastDiscoverSource.value = next;
+    }
   },
   { flush: "sync" },
 );
@@ -837,7 +854,7 @@ function showDiscoverModels(): void {
   if (source.value === "installed") source.value = lastDiscoverSource.value;
 }
 
-watch([query, source, family, includeNsfw], scheduleSearch);
+watch([query, source, family, kind, sort, includeNsfw], scheduleSearch);
 
 watch(mediaType, () => {
   if (source.value === "installed" || loading.value || mediaType.value === "all") return;
@@ -1036,6 +1053,25 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
+      <div
+        v-if="source !== 'installed'"
+        class="mobile-catalog-kinds"
+        role="group"
+        aria-label="Model kind"
+        data-test="mobile-catalog-kind-chips"
+      >
+        <button type="button" :aria-pressed="kind === ''" @click="kind = ''">All</button>
+        <button
+          v-for="option in CATALOG_KIND_OPTIONS"
+          :key="option.value"
+          type="button"
+          :aria-pressed="kind === option.value"
+          @click="kind = option.value"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+
       <div v-if="source !== 'installed'" class="mobile-catalog-filters">
         <label>
           <span>Family</span>
@@ -1043,6 +1079,18 @@ onBeforeUnmount(() => {
             <option value="">All families</option>
             <option v-for="option in families" :key="option" :value="option">
               {{ option }}
+            </option>
+          </select>
+        </label>
+        <label>
+          <span>Sort</span>
+          <select v-model="sort" data-test="mobile-catalog-sort">
+            <option
+              v-for="option in CATALOG_SORT_OPTIONS"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
             </option>
           </select>
         </label>
