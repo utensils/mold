@@ -1873,7 +1873,12 @@ button:disabled {
   position: relative;
   overflow: hidden;
   width: 100%;
-  max-height: 55vh;
+  /* Cap the ratio-derived height at 55vh by capping WIDTH: a plain
+     max-height would clamp the aspect-ratio box while width stayed 100%,
+     distorting the layered preview/grain on portrait prints. The component
+     sets --bed-ar to the print's width/height ratio. */
+  max-width: min(100%, calc(55vh * var(--bed-ar, 1)));
+  margin-inline: auto;
   margin-top: 16px;
   background: var(--color-print-surface);
   border-radius: var(--radius-media);

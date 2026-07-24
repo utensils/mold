@@ -49,7 +49,16 @@ import {
   useGenerateForm,
 } from "../composables/useGenerateForm";
 import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
-import { useGenerateStream, type Job } from "../composables/useGenerateStream";
+import {
+  activeCanvasJob,
+  useGenerateStream,
+  type Job,
+} from "../composables/useGenerateStream";
+import {
+  completedSeedToLock,
+  loadLastSeed,
+  storeLastSeed,
+} from "../lib/lastSeed";
 import { useChainJobStream } from "../composables/useChainJobStream";
 import { useQueue } from "../composables/useQueue";
 import { decideGenerateRequestRouting } from "../lib/chainRouting";
@@ -339,20 +348,17 @@ const selectedIndex = ref<number>(-1);
 
 // Seed of the most recent finished print — powers the seed section's
 // "lock last" affordance (desktop InspectorPanel parity). Tracked in a ref
-// rather than computed off the job list because completed cards auto-dismiss
-// from the rail ~1.5 s after landing.
-const lastSeedUsed = ref<number | null>(null);
+// backed by its own tiny localStorage key: completed cards auto-dismiss from
+// the rail ~1.5 s after landing and the persistence watcher then writes the
+// shortened list, so the job rail alone forgets the seed across reloads.
+// `completedSeedToLock` filters chain completions that fabricate seed_used=0.
+const lastSeedUsed = ref<number | null>(loadLastSeed());
 const stream = useGenerateStream((job) => {
-  if (job.result) lastSeedUsed.value = job.result.seed_used;
+  const seed = completedSeedToLock(job);
+  if (seed === null) return;
+  lastSeedUsed.value = seed;
+  storeLastSeed(seed);
 });
-// Rehydrated jobs keep their metadata-only result, so a reload still knows
-// the last seed. The rail is newest-first — the first done row wins.
-for (const j of stream.jobs.value) {
-  if (j.state === "done" && j.result) {
-    lastSeedUsed.value = j.result.seed_used;
-    break;
-  }
-}
 const CHAIN_JOB_STORAGE_KEY = "mold.create.chain-job";
 function loadSubmittedChainJobId(): string | null {
   try {
@@ -608,9 +614,11 @@ function percentFor(job: Job): number | null {
   return null;
 }
 
-const runningJob = computed(() =>
-  stream.jobs.value.find((j) => j.state === "running"),
-);
+// The job the canvas develops: the running job with a live preview (the one
+// the server is actually denoising), else the earliest-submitted running job.
+// A naive newest-first pick would bind the canvas to a queued batch sibling
+// that never previews while an earlier sibling is mid-denoise.
+const runningJob = computed(() => activeCanvasJob(stream.jobs.value));
 const latestDone = computed(() => {
   let best: Job | null = null;
   for (const j of stream.jobs.value) {

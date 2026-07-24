@@ -1874,8 +1874,10 @@ describe("MobileApp generation queue", () => {
     await flushPromises();
 
     const bed = wrapper.get("[data-test='mobile-develop-bed']");
-    // The bed adopts the submitted print's aspect ratio.
+    // The bed adopts the submitted print's aspect ratio and hands the same
+    // ratio to CSS so the 55vh cap can ride the width axis without distortion.
     expect(bed.attributes("style")).toContain("aspect-ratio");
+    expect(bed.attributes("style")).toContain("--bed-ar");
     const preview = wrapper.get("[data-test='mobile-develop-preview']");
     // The reducer turns the base64 payload into a blob URL (mocked here).
     expect(preview.attributes("src")).toMatch(/^blob:/);

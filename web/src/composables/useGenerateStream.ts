@@ -80,6 +80,26 @@ export interface Job {
   seedVisual: string;
 }
 
+/**
+ * The running job the Create canvas should develop.
+ *
+ * The rail is newest-first, but with several jobs queued (prepared batch
+ * variations) the server denoises the EARLIEST submission — a naive "first
+ * running" pick binds the canvas to a job that sits previewless while another
+ * is actively developing. Prefer the running job that holds a live preview
+ * (proof the server is denoising it); otherwise the earliest-submitted
+ * running job, which is next in line.
+ */
+export function activeCanvasJob(jobs: readonly Job[]): Job | undefined {
+  let earliest: Job | undefined;
+  for (const job of jobs) {
+    if (job.state !== "running") continue;
+    if (job.previewUrl !== null) return job;
+    if (!earliest || job.startedAt < earliest.startedAt) earliest = job;
+  }
+  return earliest;
+}
+
 function seedVisualFor(req: GenerateRequestWire | ChainRequestWire): string {
   return req.seed != null
     ? String(req.seed)

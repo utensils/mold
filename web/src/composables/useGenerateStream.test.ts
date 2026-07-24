@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
+  activeCanvasJob,
   isPrebuiltChainRequest,
   resolveChainRequest,
   useGenerateStream,
+  type Job,
 } from "./useGenerateStream";
 import type {
   ChainRequestWire,
@@ -652,6 +654,69 @@ describe("live latent preview", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── Active-canvas job selection ─────────────────────────────────────────────
+//
+// With several jobs queued (prepared batch variations), the rail is
+// newest-first but the server denoises the EARLIEST submission — a naive
+// "first running" pick binds the canvas to a job that will sit previewless
+// while another one is actively developing.
+describe("activeCanvasJob", () => {
+  function runningJob(overrides: Partial<Job> = {}): Job {
+    return {
+      id: crypto.randomUUID(),
+      request: singleGen({ frames: 1 }),
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Starting",
+        step: null,
+        totalSteps: null,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: null,
+      previewUrl: null,
+      seedVisual: "seed",
+      ...overrides,
+    };
+  }
+
+  it("returns undefined when nothing is running", () => {
+    expect(activeCanvasJob([])).toBeUndefined();
+    expect(activeCanvasJob([runningJob({ state: "done" })])).toBeUndefined();
+  });
+
+  it("prefers the running job that holds a live preview over a newer one", () => {
+    const newerIdle = runningJob({ id: "newer", startedAt: 200 });
+    const olderDeveloping = runningJob({
+      id: "older",
+      startedAt: 100,
+      previewUrl: "data:image/png;base64,AAAA",
+    });
+    // Rail order is newest-first.
+    expect(activeCanvasJob([newerIdle, olderDeveloping])?.id).toBe("older");
+  });
+
+  it("falls back to the earliest-submitted running job when none has a preview", () => {
+    const newer = runningJob({ id: "newer", startedAt: 200 });
+    const older = runningJob({ id: "older", startedAt: 100 });
+    const settled = runningJob({ id: "done", startedAt: 50, state: "done" });
+    expect(activeCanvasJob([newer, older, settled])?.id).toBe("older");
   });
 });
 

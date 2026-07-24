@@ -239,3 +239,22 @@ describe("mobile safe areas", () => {
     }
   });
 });
+
+describe("mobile develop bed", () => {
+  it("caps the bed by viewport height without distorting the print ratio", () => {
+    // A portrait bed clamped by a plain `max-height: 55vh` keeps width: 100%,
+    // so the aspect-ratio box no longer matches the print and the layered
+    // preview/grain distort. The cap must ride the width axis instead: the
+    // component supplies the print's ratio as `--bed-ar`, and the width cap
+    // keeps the ratio-derived height ≤ 55vh.
+    const bed = css.match(/\.mobile-develop-bed\s*\{([^}]*)\}/s);
+    expect(bed?.[1]).toMatch(
+      /max-width:\s*min\(100%,\s*calc\(55vh \* var\(--bed-ar[^)]*\)\)\)\s*;/,
+    );
+    expect(bed?.[1]).toMatch(/margin-inline:\s*auto\s*;/);
+    expect(bed?.[1]).not.toMatch(/max-height\s*:/);
+
+    const app = readFileSync("src/mobile/MobileApp.vue", "utf8");
+    expect(app).toMatch(/--bed-ar/);
+  });
+});

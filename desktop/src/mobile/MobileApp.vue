@@ -2594,7 +2594,12 @@ onBeforeUnmount(() => {
             class="mobile-develop-bed"
             data-test="mobile-develop-bed"
             aria-hidden="true"
-            :style="{ aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}` }"
+            :style="{
+              aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}`,
+              // The 55vh height cap rides the width axis (see mobile.css) so a
+              // portrait bed shrinks instead of distorting its layered media.
+              '--bed-ar': `${activeGeneration.width / Math.max(1, activeGeneration.height)}`,
+            }"
           >
             <img
               class="mobile-develop-preview"
