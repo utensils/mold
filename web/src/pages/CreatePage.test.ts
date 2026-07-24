@@ -81,7 +81,12 @@ vi.mock("../api", () => ({
   thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
 }));
 
-vi.mock("../composables/useGenerateStream", () => ({
+vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
+  // Keep the real pure helpers (activeCanvasJob) — only the singleton
+  // stream is replaced.
+  ...(await importOriginal<
+    typeof import("../composables/useGenerateStream")
+  >()),
   useGenerateStream: () => ({
     jobs: { value: [] },
     submit: submitMock,

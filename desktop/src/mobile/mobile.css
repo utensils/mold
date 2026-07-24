@@ -1866,6 +1866,36 @@ button:disabled {
   font-size: var(--text-data);
 }
 
+/* Live develop bed — the active print forming over its latent preview.
+   Absolute layers inside an aspect-ratio box; no layout shift as frames
+   stream in, and the whole bed leaves the flow the moment the job settles. */
+.mobile-develop-bed {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  /* Cap the ratio-derived height at 55vh by capping WIDTH: a plain
+     max-height would clamp the aspect-ratio box while width stayed 100%,
+     distorting the layered preview/grain on portrait prints. The component
+     sets --bed-ar to the print's width/height ratio. */
+  max-width: min(100%, calc(55vh * var(--bed-ar, 1)));
+  margin-inline: auto;
+  margin-top: 16px;
+  background: var(--color-print-surface);
+  border-radius: var(--radius-media);
+}
+
+.mobile-develop-preview,
+.mobile-develop-grain {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mobile-develop-preview {
+  object-fit: cover;
+}
+
 .status-line {
   margin: 14px 0;
   color: var(--halide);

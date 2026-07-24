@@ -177,6 +177,43 @@ describe("ControlsAside", () => {
     expect(wrapper.getComponent(Stepper).props("max")).toBe(1);
   });
 
+  it("offers lock-last-seed while random once a run has completed", async () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ seedMode: "random", seed: null }),
+        family: "flux",
+        advCount: 0,
+        lastSeed: 184023,
+      },
+    });
+    const lock = wrapper.get("[data-test='lock-last-seed']");
+    expect(lock.text()).toContain("lock last (184023)");
+
+    await lock.trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.seedMode).toBe("static");
+    expect(next.seed).toBe(184023);
+  });
+
+  it("hides the lock control before any run completes", () => {
+    const wrapper = factory({ seedMode: "random", seed: null });
+    expect(wrapper.find("[data-test='lock-last-seed']").exists()).toBe(false);
+  });
+
+  it("hides the lock control while the seed is already fixed", () => {
+    const wrapper = mount(ControlsAside, {
+      props: {
+        modelValue: baseForm({ seedMode: "static", seed: 7 }),
+        family: "flux",
+        advCount: 0,
+        lastSeed: 184023,
+      },
+    });
+    expect(wrapper.find("[data-test='lock-last-seed']").exists()).toBe(false);
+  });
+
   it("reroll switches seed back to random", async () => {
     const wrapper = factory({ seedMode: "static", seed: 42 });
     await wrapper.get("[data-test='seed-reroll']").trigger("click");

@@ -8,6 +8,14 @@ reload so its server-side progress does not disappear from the workspace.
 On phone-sized web views, Create keeps every interactive target at least 44px
 high and editable fields at a zoom-safe 16px.
 
+While a print renders, the web canvas develops it live: for families that
+stream latent previews (FLUX.1, Flux.2, Z-Image) the forming image appears
+under the film-grain wash, its blur tightening step by step while the grain
+thins away, on a bed matching the print's aspect ratio. The progress ring and
+stage line cover the bed only until the first preview arrives. Once a run
+completes, the Seed section offers **lock last (seed)** to pin that print's
+seed for the next generate.
+
 ## Basic Usage
 
 ```bash

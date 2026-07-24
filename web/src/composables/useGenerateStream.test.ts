@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __testing__,
+  activeCanvasJob,
   isPrebuiltChainRequest,
   resolveChainRequest,
   useGenerateStream,
+  type Job,
 } from "./useGenerateStream";
 import type {
   ChainRequestWire,
@@ -524,6 +526,197 @@ describe("auto-remove completed jobs", () => {
     expect(stream.jobs.value.find((j) => j.id === id)?.state).toBe("done");
     vi.advanceTimersByTime(__testing__.AUTO_REMOVE_DONE_MS + 1);
     expect(stream.jobs.value.find((j) => j.id === id)).toBeUndefined();
+  });
+});
+
+// ── Live latent preview ─────────────────────────────────────────────────────
+//
+// The server emits `preview` progress events (small base64 PNG at latent
+// resolution) during denoising. The reducer folds them into the job as a
+// data URI — deliberately NOT a blob URL, so the persisted module-singleton
+// job list needs no revoke lifecycle — and drops them once the job settles.
+describe("live latent preview", () => {
+  beforeEach(() => {
+    lastSingleHandlers = null;
+    try {
+      localStorage.removeItem("mold.generate.jobs");
+    } catch {
+      /* ignore — happy-dom should have it */
+    }
+    const stream = useGenerateStream();
+    for (const j of stream.jobs.value) {
+      if (j.state === "running") stream.cancel(j.id);
+    }
+    stream.clearDone();
+  });
+
+  it("reduces a preview event into a data-URI preview with step/total", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.previewUrl).toBeNull();
+
+    expect(lastSingleHandlers).not.toBeNull();
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "UFJFVklFVw==",
+      step: 3,
+      total: 8,
+    });
+
+    expect(job.previewUrl).toBe("data:image/png;base64,UFJFVklFVw==");
+    expect(job.progress.step).toBe(3);
+    expect(job.progress.totalSteps).toBe(8);
+    // A preview only exists once denoising is underway — it proves work.
+    expect(job.workStarted).toBe(true);
+  });
+
+  it("clears the preview when the job completes", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "AAAA",
+      step: 1,
+      total: 4,
+    });
+    expect(job.previewUrl).not.toBeNull();
+
+    lastSingleHandlers!.onComplete(fakeCompleteEvent());
+    expect(job.state).toBe("done");
+    expect(job.previewUrl).toBeNull();
+  });
+
+  it("clears the preview when the job errors", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    lastSingleHandlers!.onProgress({
+      type: "preview",
+      image: "AAAA",
+      step: 1,
+      total: 4,
+    });
+    expect(job.previewUrl).not.toBeNull();
+
+    lastSingleHandlers!.onError({ kind: "http", status: 500, body: "boom" });
+    expect(job.state).toBe("error");
+    expect(job.previewUrl).toBeNull();
+  });
+
+  it("derives seedVisual from an explicit seed", () => {
+    const stream = useGenerateStream();
+    const id = stream.submit(singleGen({ frames: 1, seed: 42 }), {
+      kind: "single",
+    });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.seedVisual).toBe("42");
+  });
+
+  it("derives a stable model·prompt seedVisual when the seed is random", () => {
+    const stream = useGenerateStream();
+    const req = singleGen({ frames: 1 });
+    const id = stream.submit(req, { kind: "single" });
+    const job = stream.jobs.value.find((j) => j.id === id)!;
+    expect(job.seedVisual).toBe(`${req.model}·${req.prompt}`);
+  });
+
+  it("omits previewUrl from persistence and rehydrates it as null", async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = useGenerateStream();
+      const id = stream.submit(singleGen({ frames: 1 }), { kind: "single" });
+      lastSingleHandlers!.onProgress({
+        type: "preview",
+        image: "UFJFVklFVw==",
+        step: 3,
+        total: 8,
+      });
+      expect(stream.jobs.value.find((j) => j.id === id)?.previewUrl).not.toBe(
+        null,
+      );
+
+      // Let the deep watcher flush, then the 200 ms persist debounce fire.
+      await vi.advanceTimersByTimeAsync(300);
+      const raw = localStorage.getItem(__testing__.STORAGE_KEY);
+      expect(raw).not.toBeNull();
+      expect(raw!).not.toContain("previewUrl");
+      expect(raw!).not.toContain("UFJFVklFVw==");
+
+      const restored = __testing__.loadPersistedJobs(raw);
+      const back = restored.find((j) => j.id === id)!;
+      expect(back.previewUrl).toBeNull();
+      // seedVisual is recomputed from the persisted request.
+      expect(back.seedVisual).toBe(
+        `${back.request.model}·${(back.request as GenerateRequestWire).prompt}`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── Active-canvas job selection ─────────────────────────────────────────────
+//
+// With several jobs queued (prepared batch variations), the rail is
+// newest-first but the server denoises the EARLIEST submission — a naive
+// "first running" pick binds the canvas to a job that will sit previewless
+// while another one is actively developing.
+describe("activeCanvasJob", () => {
+  function runningJob(overrides: Partial<Job> = {}): Job {
+    return {
+      id: crypto.randomUUID(),
+      request: singleGen({ frames: 1 }),
+      startedAt: 0,
+      controller: new AbortController(),
+      progress: {
+        stage: "Starting",
+        step: null,
+        totalSteps: null,
+        weightBytesLoaded: null,
+        weightBytesTotal: null,
+        queuePosition: null,
+        gpu: null,
+        elapsedMs: null,
+      },
+      result: null,
+      error: null,
+      state: "running",
+      chain: null,
+      lastProgressAt: 0,
+      workStarted: false,
+      hostId: null,
+      hostLabel: null,
+      target: null,
+      serverId: null,
+      previewUrl: null,
+      seedVisual: "seed",
+      ...overrides,
+    };
+  }
+
+  it("returns undefined when nothing is running", () => {
+    expect(activeCanvasJob([])).toBeUndefined();
+    expect(activeCanvasJob([runningJob({ state: "done" })])).toBeUndefined();
+  });
+
+  it("prefers the running job that holds a live preview over a newer one", () => {
+    const newerIdle = runningJob({ id: "newer", startedAt: 200 });
+    const olderDeveloping = runningJob({
+      id: "older",
+      startedAt: 100,
+      previewUrl: "data:image/png;base64,AAAA",
+    });
+    // Rail order is newest-first.
+    expect(activeCanvasJob([newerIdle, olderDeveloping])?.id).toBe("older");
+  });
+
+  it("falls back to the earliest-submitted running job when none has a preview", () => {
+    const newer = runningJob({ id: "newer", startedAt: 200 });
+    const older = runningJob({ id: "older", startedAt: 100 });
+    const settled = runningJob({ id: "done", startedAt: 50, state: "done" });
+    expect(activeCanvasJob([newer, older, settled])?.id).toBe("older");
   });
 });
 

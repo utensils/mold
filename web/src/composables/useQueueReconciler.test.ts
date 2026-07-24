@@ -51,6 +51,8 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     hostLabel: null,
     target: null,
     serverId: "srv-1",
+    previewUrl: null,
+    seedVisual: "flux-dev:fp16·x",
     ...overrides,
   };
 }

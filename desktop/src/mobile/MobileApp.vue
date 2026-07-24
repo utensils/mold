@@ -69,11 +69,14 @@ import { applySourceFitPreprocess } from "../lib/sourceFitPreprocess";
 import { coerceSourceFitForMaskless } from "@studio/lib/sourceFit";
 import {
   isCancelledError,
+  jobPhase,
+  jobProgress,
   jobStatusCode,
   railOrder,
   useGenerationStore,
   type Job,
 } from "../stores/generation";
+import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
@@ -2580,6 +2583,43 @@ onBeforeUnmount(() => {
               </li>
             </ol>
           </section>
+          <!-- Live develop bed: once the host streams latent previews the
+               active print literally forms here — the preview's blur tightens
+               with denoise progress while the Develop grain thins over it.
+               Without previews the status line below stands alone, and the
+               grain's rAF loop stays parked (nothing mounts), which keeps the
+               WebKit compositor free during model load. -->
+          <div
+            v-if="activeGeneration && activeGeneration.previewUrl"
+            class="mobile-develop-bed"
+            data-test="mobile-develop-bed"
+            aria-hidden="true"
+            :style="{
+              aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}`,
+              // The 55vh height cap rides the width axis (see mobile.css) so a
+              // portrait bed shrinks instead of distorting its layered media.
+              '--bed-ar': `${activeGeneration.width / Math.max(1, activeGeneration.height)}`,
+            }"
+          >
+            <img
+              class="mobile-develop-preview"
+              data-test="mobile-develop-preview"
+              :src="activeGeneration.previewUrl"
+              alt=""
+              :style="{
+                filter: `blur(${Math.max(2, 14 - 12 * jobProgress(activeGeneration))}px)`,
+              }"
+            />
+            <DevelopCanvas
+              :seed="activeGeneration.visualSeed"
+              :progress="jobProgress(activeGeneration)"
+              :phase="jobPhase(activeGeneration)"
+              class="mobile-develop-grain"
+              :style="{
+                opacity: String(Math.max(0.18, 1 - jobProgress(activeGeneration) * 0.9)),
+              }"
+            />
+          </div>
           <div
             class="status-line"
             :class="{ 'error-text': generationStatusIsError }"
