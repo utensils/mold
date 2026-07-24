@@ -9,7 +9,7 @@ import {
 } from "../lib/generateModels";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
 import ProgressRing from "@ui/components/ProgressRing.vue";
-import DevelopCanvas from "../lib/develop/DevelopCanvas.vue";
+import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import StarterCards from "../components/generate/StarterCards.vue";
 import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";

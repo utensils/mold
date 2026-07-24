@@ -9,7 +9,7 @@
  */
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import DevelopCanvas from "../../lib/develop/DevelopCanvas.vue";
+import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
 import QueueEntryDrawer from "../jobs/QueueEntryDrawer.vue";
 import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../stores/generation";
 import { type HostView } from "../../stores/hosts";

@@ -50,10 +50,14 @@ export interface GrainParams {
  * Map denoise progress (0–1) to grain parameters. Monotonic on purpose:
  * amplitude only falls, cell only grows, warmth only rises.
  */
-export function grainParams(progress: number, phase: DevelopPhase): GrainParams {
+export function grainParams(
+  progress: number,
+  phase: DevelopPhase,
+): GrainParams {
   const p = Math.min(1, Math.max(0, progress));
   if (phase === "latent") return { amplitude: 0.9, cell: 2, warmth: 0 };
-  if (phase === "stopped") return { amplitude: 0.55, cell: 2 + 22 * p, warmth: 0 };
+  if (phase === "stopped")
+    return { amplitude: 0.55, cell: 2 + 22 * p, warmth: 0 };
   if (phase === "fixed") return { amplitude: 0, cell: 24, warmth: 1 };
   return {
     amplitude: 0.9 - 0.75 * p,
@@ -76,7 +80,10 @@ export function makeGrainTile(seed: number | string, size = 96): ImageData {
   return new ImageData(data, size, size);
 }
 
-export function tint(warmth: number, stopped = false): { r: number; g: number; b: number } {
+export function tint(
+  warmth: number,
+  stopped = false,
+): { r: number; g: number; b: number } {
   if (stopped) return GRAIN_STOP;
   const w = Math.min(1, Math.max(0, warmth));
   return {
