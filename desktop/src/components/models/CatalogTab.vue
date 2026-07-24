@@ -252,7 +252,15 @@ async function runSearch(reset: boolean) {
       );
       if (epoch !== searchEpoch) return;
       entries.value = [...entries.value, ...res.entries];
-      hasMore.value = res.entries.length === PAGE_SIZE;
+      // Exhaustion comes from the wire `total`, not page fullness: under
+      // source=All the server splits the page budget across sources, so a
+      // merged page is legitimately short whenever one source has no rows
+      // (e.g. ControlNet, which HF never carries). Older servers without a
+      // numeric total fall back to the full-page heuristic.
+      hasMore.value =
+        typeof res.total === "number"
+          ? entries.value.length < res.total
+          : res.entries.length === PAGE_SIZE;
       fetched += 1;
       // Under a media chip, keep paging (bounded) until something survives
       // the filter — otherwise the chip renders a blank, message-less grid.
