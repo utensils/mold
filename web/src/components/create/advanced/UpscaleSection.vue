@@ -2,24 +2,20 @@
 /*
  * "Upscale after generate" — the post-generation Real-ESRGAN pass.
  *
- * The switch is meaningless on its own: the wire contract is a single
- * `GenerateRequest.upscale_model` string, so "on" has to resolve to a concrete
- * checkpoint. Flipping it on therefore selects the host's best available
- * upscaler straight away and reveals the picker; flipping it off clears the
- * field. When the host publishes no upscaler at all we say so and point at
- * Models instead of leaving a switch that does nothing.
+ * The wire contract is a single `GenerateRequest.upscale_model` string, so the
+ * always-visible picker uses an explicit Off option followed by the host's
+ * available upscalers. This matches the desktop Advanced section exactly.
  *
  * The model list is fetched here (like LoraPicker owns its catalog fetch) so
  * the section is self-contained; a host-aware parent can pass `models` to skip
  * the fetch and scope it to the routed machine.
  */
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { RouterLink } from "vue-router";
 import AccordionSection from "@ui/components/AccordionSection.vue";
-import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import { fetchModels } from "../../../api";
 import type { ModelInfoExtended } from "../../../types";
-import { defaultUpscaler, selectUpscalers, upscaleFactor } from "./upscalers";
+import { selectUpscalers, upscaleFactor } from "./upscalers";
 
 const props = withDefaults(
   defineProps<{
@@ -67,31 +63,6 @@ const options = computed(() => {
 const none = computed(
   () => loaded.value && upscalers.value.length === 0 && !selected.value,
 );
-// "On" is intent, not just a non-empty value: the switch can be flipped before
-// the model list lands, in which case we select a default the moment it does.
-const on = ref(selected.value !== "");
-
-watch(selected, (next, previous) => {
-  if (next) on.value = true;
-  else if (previous) on.value = false; // parent cleared it (e.g. Reset)
-});
-
-watch([on, upscalers], () => {
-  if (!on.value || selected.value || upscalers.value.length === 0) return;
-  emit("update:modelValue", defaultUpscaler(upscalers.value));
-});
-
-function setOn(next: boolean) {
-  on.value = next;
-  if (!next) {
-    if (selected.value) emit("update:modelValue", "");
-    return;
-  }
-  if (!selected.value && upscalers.value.length > 0) {
-    emit("update:modelValue", defaultUpscaler(upscalers.value));
-  }
-}
-
 function optionLabel(model: {
   name: string;
   downloaded: boolean;
@@ -110,13 +81,9 @@ const factor = computed(() => {
 
 const summary = computed(() => {
   if (none.value) return "No upscalers on this server";
-  if (!on.value || !selected.value) return "Off";
+  if (!selected.value) return "Off";
   return factor.value ? `${selected.value} · ${factor.value}×` : selected.value;
 });
-
-// Body is visible whenever the pass is on (the header is a switch row, not a
-// disclosure) or when we need to explain why the switch is unavailable.
-const bodyOpen = computed(() => (on.value && loaded.value) || none.value);
 </script>
 
 <template>
@@ -125,19 +92,9 @@ const bodyOpen = computed(() => (on.value && loaded.value) || none.value);
     title="Upscale after generate"
     :summary="summary"
     :header-interactive="false"
-    :open="bodyOpen"
+    :open="true"
     data-test="section-upscale"
   >
-    <template #action>
-      <SwitchToggle
-        :model-value="on"
-        :disabled="none"
-        label="Upscale after generate"
-        data-test="upscale-toggle"
-        @update:model-value="setOn"
-      />
-    </template>
-
     <div v-if="none" class="up__empty" data-test="upscale-empty">
       <p class="up__note">
         {{
@@ -162,6 +119,7 @@ const bodyOpen = computed(() => (on.value && loaded.value) || none.value);
           emit('update:modelValue', ($event.target as HTMLSelectElement).value)
         "
       >
+        <option value="">Off</option>
         <option v-for="u in options" :key="u.name" :value="u.name">
           {{ optionLabel(u) }}
         </option>

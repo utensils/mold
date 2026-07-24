@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedControl.vue";
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
-import BadgePill from "@ui/components/BadgePill.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
   applyModelDefaults,
@@ -42,7 +40,6 @@ import ImagePickerModal from "../generate/ImagePickerModal.vue";
 
 const props = withDefaults(
   defineProps<{
-    open: boolean;
     form: GenerateForm;
     /** The picked model, used by Reset to restore its defaults. */
     selectedModel?: ModelEntry | null;
@@ -51,17 +48,11 @@ const props = withDefaults(
   { selectedModel: null, upscalers: () => [] },
 );
 
-const emit = defineEmits<{ close: []; "append-word": [word: string] }>();
+const emit = defineEmits<{ "append-word": [word: string] }>();
 
 const caps = computed(() => generationCapabilitiesForFamily(props.form.family));
 const formats = computed(() => outputFormatsForFamily(props.form.family));
 const advancedCount = computed(() => advancedActiveCount(props.form));
-
-// One section open at a time.
-const openSection = ref<string | null>(null);
-function toggle(id: string) {
-  openSection.value = openSection.value === id ? null : id;
-}
 
 // ── Scheduler & sampling ─────────────────────────────────────────────────────
 const schedulerLabels: Record<string, string> = {
@@ -157,7 +148,6 @@ function setCameraMode(mode: string) {
   }
 }
 
-const advancedOpen = ref(false);
 const keyframePickerOpen = ref(false);
 const pipelineOptions: Ltx2PipelineMode[] = [
   "one-stage",
@@ -245,18 +235,15 @@ function reset() {
 </script>
 
 <template>
-  <DrawerPanel :open="open" :width="560" title="Advanced" @close="emit('close')">
-    <template #header>
-      <div class="ms-adv__head">
-        <div>
-          <div class="ms-adv__title">Advanced</div>
-          <div class="ms-adv__subtitle">Fine controls, tucked away until you need them</div>
-        </div>
-        <BadgePill v-if="advancedCount > 0" tone="accent" data-test="advanced-active"
-          >{{ advancedCount }} active</BadgePill
-        >
-      </div>
-    </template>
+  <section class="ms-adv" data-test="inline-advanced">
+    <div class="ms-adv__toolbar">
+      <span class="ms-adv__summary">
+        {{ advancedCount > 0 ? `${advancedCount} active` : "Fine controls" }}
+      </span>
+      <button type="button" class="ms-adv__reset" data-test="advanced-reset" @click="reset">
+        Reset
+      </button>
+    </div>
 
     <div class="ms-adv__list">
       <!-- 1 · Scheduler & sampling -->
@@ -265,8 +252,8 @@ function reset() {
         icon="scheduler"
         title="Scheduler &amp; sampling"
         :summary="schedulerSummary"
-        :open="openSection === 'scheduler'"
-        @toggle="toggle('scheduler')"
+        :open="true"
+        :header-interactive="false"
       >
         <template v-if="caps.supportsScheduler">
           <label class="ms-label">Scheduler</label>
@@ -295,8 +282,8 @@ function reset() {
         icon="negative"
         title="Negative prompt"
         summary="What to steer away from"
-        :open="openSection === 'negative'"
-        @toggle="toggle('negative')"
+        :open="true"
+        :header-interactive="false"
       >
         <textarea
           v-model="form.negativePrompt"
@@ -323,8 +310,8 @@ function reset() {
         icon="image"
         title="Source image"
         summary="Image-to-image &amp; inpainting"
-        :open="openSection === 'source'"
-        @toggle="toggle('source')"
+        :open="true"
+        :header-interactive="false"
       >
         <SourceImageWell :form="form" />
       </AccordionSection>
@@ -335,8 +322,8 @@ function reset() {
         icon="layers"
         title="LoRA stack"
         summary="Style adapters"
-        :open="openSection === 'lora'"
-        @toggle="toggle('lora')"
+        :open="true"
+        :header-interactive="false"
       >
         <LoraStack :form="form" :model="form.model" @append-word="emit('append-word', $event)" />
       </AccordionSection>
@@ -347,8 +334,8 @@ function reset() {
         icon="upscale"
         title="Upscale after generate"
         :summary="form.upscaleModel || 'Off'"
-        :open="openSection === 'upscale'"
-        @toggle="toggle('upscale')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">Upscaler</label>
         <select v-model="form.upscaleModel" data-test="upscale-select" class="ms-select">
@@ -364,8 +351,8 @@ function reset() {
         icon="output"
         title="Output &amp; seed"
         summary="Format, exact size, reproducibility"
-        :open="openSection === 'output'"
-        @toggle="toggle('output')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">File format</label>
         <SegmentedControl
@@ -426,8 +413,8 @@ function reset() {
         icon="video"
         title="Video"
         summary="Frames, motion &amp; pipeline"
-        :open="openSection === 'video'"
-        @toggle="toggle('video')"
+        :open="true"
+        :header-interactive="false"
       >
         <label class="ms-label">Frames</label>
         <input
@@ -530,15 +517,6 @@ function reset() {
         <p v-if="audioFormatError" class="ms-error" role="alert">{{ audioFormatError }}</p>
 
         <template v-if="caps.supportsAdvancedVideo">
-          <button
-            type="button"
-            class="ms-disclosure"
-            data-test="ltx2-disclosure"
-            :aria-expanded="advancedOpen"
-            @click="advancedOpen = !advancedOpen"
-          >
-            {{ advancedOpen ? "▾" : "▸" }} LTX-2 pipeline
-          </button>
           <p
             v-if="advancedVideoError"
             data-test="ltx2-validation-error"
@@ -547,7 +525,7 @@ function reset() {
           >
             {{ advancedVideoError }}
           </p>
-          <div v-if="advancedOpen">
+          <div data-test="ltx2-controls">
             <label class="ms-label ms-label--mt">Pipeline</label>
             <select
               :value="form.pipeline ?? ''"
@@ -705,38 +683,25 @@ function reset() {
         </template>
       </AccordionSection>
     </div>
-
-    <template #footer>
-      <div class="ms-adv__footer">
-        <button type="button" class="ms-adv__reset" data-test="advanced-reset" @click="reset">
-          Reset
-        </button>
-        <div class="ms-adv__spacer" />
-        <button type="button" class="ms-adv__done" data-test="advanced-done" @click="emit('close')">
-          Done
-        </button>
-      </div>
-    </template>
-  </DrawerPanel>
+  </section>
 </template>
 
 <style scoped>
-.ms-adv__head {
+.ms-adv {
+  padding-top: 10px;
+}
+.ms-adv__toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex: 1;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
 }
-.ms-adv__title {
-  font-family: var(--f-display);
-  font-size: 16px;
-  font-weight: 700;
-}
-.ms-adv__subtitle {
+.ms-adv__summary {
   font-family: var(--f-mono);
   font-size: 9.5px;
   color: var(--ink-3);
-  margin-top: 1px;
+  letter-spacing: 0.04em;
 }
 .ms-adv__list {
   display: flex;
@@ -852,17 +817,6 @@ function reset() {
   font-size: 11px;
   color: var(--ink-2);
 }
-.ms-disclosure {
-  margin-top: 16px;
-  border: 0;
-  background: transparent;
-  color: var(--ink-3);
-  font-family: var(--f-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
 .ms-file {
   display: block;
   width: 100%;
@@ -924,33 +878,18 @@ function reset() {
   border: 0;
   cursor: pointer;
 }
-.ms-adv__footer {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-}
-.ms-adv__spacer {
-  flex: 1;
-}
 .ms-adv__reset {
   border: 1px solid var(--ce);
   background: transparent;
   color: var(--ink-2);
-  padding: 11px 16px;
-  border-radius: 10px;
-  font-size: 13px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
-.ms-adv__done {
-  border: 0;
-  background: var(--safelight);
-  color: var(--on-accent);
-  padding: 11px 26px;
-  border-radius: 10px;
-  font-size: 13.5px;
-  font-weight: 700;
-  cursor: pointer;
+.ms-adv__reset:hover {
+  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  color: var(--rebate);
 }
 </style>

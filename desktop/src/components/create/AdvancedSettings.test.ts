@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { reactive } from "vue";
-import AdvancedDrawer from "./AdvancedDrawer.vue";
+import AdvancedSettings from "./AdvancedSettings.vue";
 import AccordionSection from "@ui/components/AccordionSection.vue";
 import ImagePickerModal from "../generate/ImagePickerModal.vue";
 import { newGenerateForm, type GenerateForm } from "../../lib/generateForm";
@@ -32,21 +32,38 @@ function accordionTitles(wrapper: VueWrapper): string[] {
 
 async function openSection(wrapper: VueWrapper, title: string) {
   const acc = wrapper.findAllComponents(AccordionSection).find((a) => a.props("title") === title);
-  if (!acc) throw new Error(`accordion "${title}" not found`);
-  acc.vm.$emit("toggle");
+  if (!acc) throw new Error(`section "${title}" not found`);
+  expect(acc.props("open")).toBe(true);
+  expect(acc.props("headerInteractive")).toBe(false);
   await flushPromises();
 }
 
-function mountDrawer(form: GenerateForm, extra: Record<string, unknown> = {}) {
-  return mount(AdvancedDrawer, {
-    props: { open: true, form, ...extra },
+function mountSettings(form: GenerateForm, extra: Record<string, unknown> = {}) {
+  return mount(AdvancedSettings, {
+    props: { form, ...extra },
     attachTo: document.body,
   });
 }
 
-describe("AdvancedDrawer — capability matrix", () => {
+describe("AdvancedSettings — capability matrix", () => {
+  it("renders every applicable section open with an icon and no nested disclosure", () => {
+    const wrapper = mountSettings(formFor("sdxl"));
+    const sections = wrapper.findAllComponents(AccordionSection);
+
+    expect(sections.length).toBeGreaterThan(0);
+    for (const section of sections) {
+      expect(section.props("open")).toBe(true);
+      expect(section.props("headerInteractive")).toBe(false);
+      expect(section.props("icon")).toBeTruthy();
+    }
+    expect(wrapper.findAll(".ms-acc__plate svg")).toHaveLength(sections.length);
+    expect(wrapper.find(".ms-acc__chevron").exists()).toBe(false);
+    expect(wrapper.find("button.ms-acc__head").exists()).toBe(false);
+    expect(wrapper.find("input[aria-label='Width']").exists()).toBe(true);
+  });
+
   it("shows scheduler, negative, and no video for SDXL", () => {
-    const titles = accordionTitles(mountDrawer(formFor("sdxl")));
+    const titles = accordionTitles(mountSettings(formFor("sdxl")));
     expect(titles).toEqual([
       "Scheduler & sampling",
       "Negative prompt",
@@ -57,7 +74,7 @@ describe("AdvancedDrawer — capability matrix", () => {
   });
 
   it("hides scheduler and negative for FLUX", () => {
-    const titles = accordionTitles(mountDrawer(formFor("flux")));
+    const titles = accordionTitles(mountSettings(formFor("flux")));
     expect(titles).not.toContain("Scheduler & sampling");
     expect(titles).not.toContain("Negative prompt");
     expect(titles).toContain("Source image");
@@ -65,21 +82,21 @@ describe("AdvancedDrawer — capability matrix", () => {
   });
 
   it("exposes Video (and hides Upscale) for LTX-2", () => {
-    const titles = accordionTitles(mountDrawer(formFor("ltx2")));
+    const titles = accordionTitles(mountSettings(formFor("ltx2")));
     expect(titles).toContain("Video");
     expect(titles).not.toContain("Upscale after generate");
   });
 
   it("keeps qwen-edit free of scheduler, negative, and video", () => {
-    const titles = accordionTitles(mountDrawer(formFor("qwen-image-edit")));
+    const titles = accordionTitles(mountSettings(formFor("qwen-image-edit")));
     expect(titles).toEqual(["Source image", "LoRA stack", "Output & seed"]);
   });
 });
 
-describe("AdvancedDrawer — output & seed", () => {
+describe("AdvancedSettings — output & seed", () => {
   it("offers the family output formats and exact size override with a swap", async () => {
     const form = formFor("flux");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Output & seed");
     expect(wrapper.find("input[aria-label='Width']").exists()).toBe(true);
     expect(wrapper.find("input[aria-label='Height']").exists()).toBe(true);
@@ -92,7 +109,7 @@ describe("AdvancedDrawer — output & seed", () => {
 
   it("shows the fixed-seed value only when the seed is locked", async () => {
     const form = formFor("flux");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Output & seed");
     expect(wrapper.find("[data-test='advanced-seed-value']").exists()).toBe(false);
     form.seed = "42";
@@ -101,10 +118,10 @@ describe("AdvancedDrawer — output & seed", () => {
   });
 });
 
-describe("AdvancedDrawer — negative prompt", () => {
+describe("AdvancedSettings — negative prompt", () => {
   it("appends quick-add words to the negative prompt", async () => {
     const form = formFor("sdxl");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Negative prompt");
     await wrapper.get("[data-test='neg-add-blurry']").trigger("click");
     await wrapper.get("[data-test='neg-add-watermark']").trigger("click");
@@ -112,12 +129,12 @@ describe("AdvancedDrawer — negative prompt", () => {
   });
 });
 
-describe("AdvancedDrawer — upscale", () => {
+describe("AdvancedSettings — upscale", () => {
   const upscaler = { name: "real-esrgan-x4plus", downloaded: false } as ModelEntry;
 
   it("offers Off plus the known upscalers for image families", async () => {
     const form = formFor("flux");
-    const wrapper = mountDrawer(form, { upscalers: [upscaler] });
+    const wrapper = mountSettings(form, { upscalers: [upscaler] });
     await openSection(wrapper, "Upscale after generate");
     const select = wrapper.get("[data-test='upscale-select']");
     expect(select.findAll("option").map((o) => o.text())).toEqual([
@@ -129,18 +146,17 @@ describe("AdvancedDrawer — upscale", () => {
   });
 
   it("hides the upscale accordion for video families", () => {
-    expect(accordionTitles(mountDrawer(formFor("ltx2"), { upscalers: [upscaler] }))).not.toContain(
-      "Upscale after generate",
-    );
+    expect(
+      accordionTitles(mountSettings(formFor("ltx2"), { upscalers: [upscaler] })),
+    ).not.toContain("Upscale after generate");
   });
 });
 
-describe("AdvancedDrawer — video (LTX-2)", () => {
-  it("reveals the pipeline controls behind the LTX-2 disclosure", async () => {
-    const wrapper = mountDrawer(formFor("ltx2"));
+describe("AdvancedSettings — video (LTX-2)", () => {
+  it("shows the LTX-2 pipeline controls without another disclosure", async () => {
+    const wrapper = mountSettings(formFor("ltx2"));
     await openSection(wrapper, "Video");
-    expect(wrapper.find("[data-test='ltx2-disclosure']").exists()).toBe(true);
-    await wrapper.get("[data-test='ltx2-disclosure']").trigger("click");
+    expect(wrapper.find("[data-test='ltx2-disclosure']").exists()).toBe(false);
     expect(wrapper.find("[data-test='ltx2-pipeline']").exists()).toBe(true);
     expect(wrapper.find("[data-test='ltx2-spatial']").exists()).toBe(true);
     expect(wrapper.find("[data-test='ltx2-temporal']").exists()).toBe(true);
@@ -148,9 +164,8 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
 
   it("reveals retake range only when the pipeline is retake", async () => {
     const form = formFor("ltx2");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    await wrapper.get("[data-test='ltx2-disclosure']").trigger("click");
     expect(wrapper.find("[data-test='ltx2-retake-start']").exists()).toBe(false);
     await wrapper.get("[data-test='ltx2-pipeline']").setValue("retake");
     expect(form.pipeline).toBe("retake");
@@ -159,9 +174,8 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
 
   it("shows the a2vid conditioning-audio input only for that pipeline", async () => {
     const form = formFor("ltx2");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    await wrapper.get("[data-test='ltx2-disclosure']").trigger("click");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(false);
     await wrapper.get("[data-test='ltx2-pipeline']").setValue("a2vid");
     expect(wrapper.find("[data-test='ltx2-audio-file']").exists()).toBe(true);
@@ -169,11 +183,14 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
 
   it("adds a keyframe from the picker", async () => {
     const form = formFor("ltx2");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
-    await wrapper.get("[data-test='ltx2-disclosure']").trigger("click");
     await wrapper.get("[data-test='ltx2-add-keyframe']").trigger("click");
-    wrapper.findComponent(ImagePickerModal).vm.$emit("pick", [{ filename: "k.png", base64: "KB" }]);
+    const picker = wrapper
+      .findAllComponents(ImagePickerModal)
+      .find((candidate) => candidate.props("title") === "Keyframe image");
+    if (!picker) throw new Error("keyframe picker not found");
+    picker.vm.$emit("pick", [{ filename: "k.png", base64: "KB" }]);
     await flushPromises();
     expect(form.keyframes).toHaveLength(1);
     expect(form.keyframes[0]!.frame).toBe(0);
@@ -183,7 +200,7 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
     const form = formFor("ltx2");
     form.model = "ltx-2.3-22b-distilled:fp8";
     form.frames = 241;
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.get("[data-test='chain-cue']").text()).toContain("chained clips of 97 frames");
   });
@@ -192,7 +209,7 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
     const form = formFor("ltx2");
     form.model = "ltx-2-19b:fp8";
     form.frames = 241;
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     expect(wrapper.get("[data-test='chain-reject']").text()).toContain(
       "does not support chained video generation",
@@ -202,7 +219,7 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
   it("offers the seven camera presets, disabling them on LTX-2.3", async () => {
     const form = formFor("ltx2");
     form.model = "ltx-2.3-22b-distilled:fp8";
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     const options = wrapper.get("[data-test='camera-motion']").findAll("option");
     for (const o of options) {
@@ -215,7 +232,7 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
 
   it("reveals a custom camera-motion path input", async () => {
     const form = formFor("ltx2");
-    const wrapper = mountDrawer(form);
+    const wrapper = mountSettings(form);
     await openSection(wrapper, "Video");
     await wrapper.get("[data-test='camera-motion']").setValue("custom");
     await wrapper.get("[data-test='camera-motion-custom']").setValue("/loras/pan.safetensors");
@@ -223,7 +240,7 @@ describe("AdvancedDrawer — video (LTX-2)", () => {
   });
 });
 
-describe("AdvancedDrawer — reset and badge", () => {
+describe("AdvancedSettings — reset and summary", () => {
   const model: ModelEntry = {
     name: "sdxl:base",
     family: "sdxl",
@@ -240,7 +257,7 @@ describe("AdvancedDrawer — reset and badge", () => {
     form.negativePrompt = "blurry";
     form.steps = 12;
     form.batchSize = 4;
-    const wrapper = mountDrawer(form, { selectedModel: model });
+    const wrapper = mountSettings(form, { selectedModel: model });
     wrapper.get("[data-test='advanced-reset']").trigger("click");
     expect(form.prompt).toBe("a lighthouse at dusk");
     expect(form.negativePrompt).toBe("");
@@ -252,13 +269,7 @@ describe("AdvancedDrawer — reset and badge", () => {
     const form = formFor("sdxl");
     form.negativePrompt = "blurry";
     form.scheduler = "ddim";
-    const wrapper = mountDrawer(form);
-    expect(wrapper.find("[data-test='advanced-active']").text()).toContain("2 active");
-  });
-
-  it("emits close from Done", () => {
-    const wrapper = mountDrawer(formFor("flux"));
-    wrapper.get("[data-test='advanced-done']").trigger("click");
-    expect(wrapper.emitted("close")).toHaveLength(1);
+    const wrapper = mountSettings(form);
+    expect(wrapper.text()).toContain("2 active");
   });
 });

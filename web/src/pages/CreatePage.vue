@@ -106,10 +106,6 @@ const showExpand = ref(false);
 const showPicker = ref(false);
 const showMask = ref(false);
 const showAdvanced = ref(false);
-// Which advanced section to reveal when the drawer opens. "+ Add LoRA" jumps
-// straight to the LoRA picker; the plain Advanced button leaves it null so the
-// drawer opens on its first available section.
-const advOpenTo = ref<"lora" | null>(null);
 const showTemplates = ref(false);
 const templatesHost = ref<HTMLElement | null>(null);
 const composerError = ref<string | null>(null);
@@ -250,7 +246,7 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
   return reasons;
 }
 
-// Phone surface → the Advanced sheet instead of the side drawer.
+// Phone surface → the Advanced sheet instead of the inline power column.
 let phoneQuery: MediaQueryList | null =
   typeof window !== "undefined" && typeof window.matchMedia === "function"
     ? window.matchMedia("(max-width: 639px)")
@@ -1273,7 +1269,6 @@ async function handleDelete(item: GalleryImage) {
 }
 
 function openAdvanced() {
-  advOpenTo.value = null;
   showAdvanced.value = true;
 }
 
@@ -1542,7 +1537,6 @@ onBeforeUnmount(() => {
           v-model="form.state.value"
           :family="currentFamily"
           :adv-count="advCount"
-          :open-to="advOpenTo"
           :placement-gpus="gpuListForPlacement"
           :models="models"
           @open-picker="showPicker = true"
@@ -1563,7 +1557,6 @@ onBeforeUnmount(() => {
         v-model="form.state.value"
         :family="currentFamily"
         :adv-count="advCount"
-        :open-to="advOpenTo"
         :placement-gpus="gpuListForPlacement"
         :models="models"
         @close="showAdvanced = false"

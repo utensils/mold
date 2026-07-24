@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Desktop Advanced controls now expand inside the existing Create settings inspector.** The simplified essentials-only view remains the default; its Advanced toggle reveals capability-gated, icon-led sections directly below without dimming or covering the canvas. The nested section accordions are gone—every applicable control is immediately visible—and the web Create surface uses the same always-open icon treatment and explicit Off-or-upscaler picker.
 - **Mold Remote now publishes and links its privacy policy.** The website has a dedicated policy covering on-device storage, Keychain credentials, user-selected Mold server traffic, third-party model catalogs, TestFlight, and deletion choices; iPhone and desktop Settings → About open it in the external browser for an App Store-compliant in-app disclosure and cross-platform parity.
 
 - **Project attribution now consistently credits both core contributors.** Desktop, web, and iPhone About surfaces; native package metadata; Rust crate authors; website and README ownership copy; and AUR maintainer headers now name James Brink and Jeffrey Dilley, matching the MIT license.
@@ -67,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The web Library grid no longer changes size as lazy thumbnails load while scrolling.** Responsive tracks now ignore media intrinsic widths, and every print carries the same host badge plus hover/focus model and seed edge label as desktop Library.
 - **The desktop Create settings inspector is resizable again and no longer wraps its shape controls by default.** Its left-edge divider supports pointer and keyboard resizing from 280–480 px, committed widths persist across launches, and double-click resets to the new 340 px default that keeps all five ratios on one row.
 - **Repeated source-fit generations now reuse preprocessed images.** Desktop, web, and iPhone keep per-Create-form caches for the expensive Upscale then fit pass and the final canvas fit/mask. Prompt, seed, and generation-parameter iterations no longer rerun or retransmit unchanged source preprocessing; changing dimensions only invalidates the fit layer, while source, upscaler, fit-policy, and mask changes invalidate the layers they affect. Concurrent Batch siblings share an in-flight pass, and processed bytes stay request-local so the editable source remains intact.
-- Keep the desktop Advanced LoRA picker inside its accordion and ensure modal drawers cover floating workbench controls such as Templates.
+- Keep the desktop Advanced LoRA picker inside its always-open icon section and ensure modal drawers cover floating workbench controls such as Templates.
 
 ## [0.20.2] - 2026-07-21
 

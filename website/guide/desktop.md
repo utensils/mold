@@ -62,7 +62,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   retry; it never redirects away from the composer or hides prepared work. The
   right settings inspector resizes from its left divider across 280–480 px,
   persists committed widths, and defaults to 340 px so all five shape ratios
-  stay on one row; double-click the divider to restore that default.
+  stay on one row; double-click the divider to restore that default. The
+  essentials-only inspector stays compact by default. Toggle **Advanced** to
+  extend capability-gated, always-open icon sections below those essentials in the
+  same scrolling inspector; the canvas remains visible and edits apply
+  immediately.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed
   gallery), with NEW badges on fresh prints, a two-pane lightbox, and a History
   drawer holding Runs and Prompts. **Space** opens

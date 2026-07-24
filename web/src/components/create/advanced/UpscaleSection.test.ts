@@ -59,30 +59,18 @@ describe("UpscaleSection", () => {
     ]);
   });
 
-  it("starts off with no picker rendered", async () => {
+  it("renders the picker immediately with an explicit Off option", async () => {
     const wrapper = factory("", UPSCALERS);
     await flushPromises();
-    expect(wrapper.find("[data-test='upscale-model']").exists()).toBe(false);
-    expect(wrapper.text()).toContain("Off");
+    const select = wrapper.get("[data-test='upscale-model']");
+    expect(select.find("option").text()).toBe("Off");
+    expect((select.element as HTMLSelectElement).value).toBe("");
   });
 
-  it("selects a real upscaler when the switch is flipped on", async () => {
-    const wrapper = factory("", UPSCALERS);
-    await flushPromises();
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
-
-    // The toggle must produce a usable value — not leave the form empty.
-    expect(lastEmit(wrapper)).toBe("real-esrgan-x2plus:fp16");
-
-    await wrapper.setProps({ modelValue: "real-esrgan-x2plus:fp16" });
-    expect(wrapper.find("[data-test='upscale-model']").exists()).toBe(true);
-  });
-
-  it("clears the model when the switch is flipped off", async () => {
+  it("clears the model when Off is selected", async () => {
     const wrapper = factory("real-esrgan-x4plus:fp16", UPSCALERS);
     await flushPromises();
-    expect(wrapper.find("[data-test='upscale-model']").exists()).toBe(true);
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    await wrapper.get("[data-test='upscale-model']").setValue("");
     expect(lastEmit(wrapper)).toBe("");
   });
 
@@ -109,7 +97,7 @@ describe("UpscaleSection", () => {
     expect(wrapper.get("[data-test='upscale-factor']").text()).toContain("2");
   });
 
-  it("explains itself instead of offering a dead toggle when the host has none", async () => {
+  it("explains itself instead of offering a dead picker when the host has none", async () => {
     const wrapper = factory("", [model("flux-dev:q8", { family: "flux" })]);
     await flushPromises();
 
@@ -117,9 +105,7 @@ describe("UpscaleSection", () => {
     expect(empty.text().toLowerCase()).toContain("no upscalers");
     expect(wrapper.find("[data-test='upscale-browse']").exists()).toBe(true);
 
-    const toggle = wrapper.get("[data-test='upscale-toggle']");
-    expect((toggle.element as HTMLButtonElement).disabled).toBe(true);
-    await toggle.trigger("click");
+    expect(wrapper.find("[data-test='upscale-model']").exists()).toBe(false);
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
   });
 
@@ -135,7 +121,7 @@ describe("UpscaleSection", () => {
     expect((select.element as HTMLSelectElement).value).toBe(
       "real-esrgan-x4plus:fp16",
     );
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    await wrapper.get("[data-test='upscale-model']").setValue("");
     expect(lastEmit(wrapper)).toBe("");
   });
 
@@ -143,24 +129,7 @@ describe("UpscaleSection", () => {
     const wrapper = factory("", null);
     await flushPromises();
     expect(fetchModelsMock).toHaveBeenCalled();
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
-    expect(lastEmit(wrapper)).toBe("real-esrgan-x2plus:fp16");
-  });
-
-  it("still enables once the model list arrives after the switch is flipped", async () => {
-    let resolve: (v: ModelInfoExtended[]) => void = () => {};
-    fetchModelsMock.mockReturnValue(
-      new Promise<ModelInfoExtended[]>((r) => {
-        resolve = r;
-      }),
-    );
-    const wrapper = factory("", null);
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
-    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
-
-    resolve(UPSCALERS);
-    await flushPromises();
-    expect(lastEmit(wrapper)).toBe("real-esrgan-x2plus:fp16");
+    expect(wrapper.find("[data-test='upscale-model']").exists()).toBe(true);
   });
 
   it("reports an unreachable model list rather than pretending it is empty", async () => {

@@ -19,7 +19,6 @@ import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import InspectorPanel from "../components/create/InspectorPanel.vue";
-import AdvancedDrawer from "../components/create/AdvancedDrawer.vue";
 import { normalizeTargetHost, readyHostSignature } from "../lib/hosts";
 import { useAppPrefsStore } from "../stores/appPrefs";
 import { useHostModelsStore } from "../stores/hostModels";
@@ -69,7 +68,7 @@ import type { HostRoute } from "../stores/hosts";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { fetchHistoryAll, type HistoryHostTarget } from "../lib/api/history";
 import { randomSeed } from "../stores/generation";
-import type { GenerateRequest, ModelEntry, OutputMetadata } from "../lib/api/types";
+import type { GenerateRequest, OutputMetadata } from "../lib/api/types";
 import {
   metadataReferencesSource,
   restoreSourceImage,
@@ -200,7 +199,6 @@ async function pullMissingModel() {
 const formStore = useGenerateFormStore();
 const form = formStore.form;
 const composerRef = ref<InstanceType<typeof ComposerCard> | null>(null);
-const advancedOpen = ref(false);
 const templatesOpen = ref(false);
 const templatesEl = ref<HTMLDivElement | null>(null);
 /** Recent prompts for the composer's ↑/↓ history cycling. */
@@ -313,12 +311,6 @@ const chainReject = computed(() => {
 const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
 );
-// Falls back to the union entry so a model that only exists on an extra host
-// still populates params/defaults after being picked.
-const selectedModel = computed<ModelEntry | null>(() =>
-  findInstalledModel(installedModels.value, form.model),
-);
-
 const showStarterCards = computed(() =>
   shouldShowStarterCards({
     connectionReady: conn.ready,
@@ -1583,16 +1575,6 @@ onBeforeUnmount(() => {
     <InspectorPanel
       :form="form"
       :last-seed="generation.lastSeedUsed"
-      @open-advanced="advancedOpen = true"
-    />
-
-    <!-- Advanced drawer -->
-    <AdvancedDrawer
-      :open="advancedOpen"
-      :form="form"
-      :selected-model="selectedModel"
-      :upscalers="models.upscalers"
-      @close="advancedOpen = false"
       @append-word="appendPromptWord"
     />
 

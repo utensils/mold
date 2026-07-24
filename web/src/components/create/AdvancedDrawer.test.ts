@@ -78,6 +78,24 @@ describe("AdvancedDrawer capability matrix", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
 
+  it("matches desktop with always-open icon sections and no nested disclosure", () => {
+    const wrapper = factory("sdxl");
+    const sections = wrapper.findAll(".adv__sections > .ms-acc");
+
+    expect(sections.length).toBeGreaterThan(0);
+    expect(
+      wrapper.findAll(".adv__sections > .ms-acc .ms-acc__plate svg"),
+    ).toHaveLength(sections.length);
+    expect(wrapper.find(".adv__sections .ms-acc__chevron").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find(".adv__sections button.ms-acc__head").exists()).toBe(
+      false,
+    );
+    expect(wrapper.find("[data-test='negative-input']").exists()).toBe(true);
+    expect(wrapper.find("[data-test='exact-width']").exists()).toBe(true);
+  });
+
   it("sdxl exposes scheduler, negative, source and output", () => {
     const s = sections("sdxl");
     expect(s.scheduler).toBe(true);
@@ -159,37 +177,22 @@ describe("AdvancedDrawer capability matrix", () => {
   });
 });
 
-describe("AdvancedDrawer default-open section", () => {
+describe("AdvancedDrawer always-open sections", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
 
-  const expanded = (
-    wrapper: ReturnType<typeof factory>,
-    key: string,
-  ): string | undefined =>
-    wrapper
-      .find(`[data-test='section-${key}'] .ms-acc__head`)
-      .attributes("aria-expanded");
-
-  it("opens on the first available section, never a hidden one", () => {
-    // flux hides scheduler/negative, so the drawer must open on Source —
-    // not sit fully collapsed on a scheduler section that isn't rendered.
+  it("shows every available control without aria disclosure state", () => {
     const w = factory("flux");
-    expect(expanded(w, "source")).toBe("true");
-  });
-
-  it("reveals the LoRA picker when openTo is 'lora'", () => {
-    const w = factory("flux", {}, { openTo: "lora" });
-    expect(expanded(w, "lora")).toBe("true");
+    expect(w.find("[data-test='source-attach']").exists()).toBe(true);
     expect(w.find("[data-test='lora-picker-stub']").exists()).toBe(true);
+    expect(w.find("[data-test='exact-width']").exists()).toBe(true);
+    expect(w.find("[aria-expanded]").exists()).toBe(false);
   });
 
-  it("ignores openTo when that section is not available for the family", () => {
-    // sd3.5 has no LoRA section → openTo is dropped and the first visible
-    // section (Scheduler & sampling, for CFG++) opens instead.
-    const w = factory("sd3.5", {}, { openTo: "lora" });
+  it("still hides sections unavailable to the selected family", () => {
+    const w = factory("sd3.5");
     expect(w.find("[data-test='section-lora']").exists()).toBe(false);
-    expect(expanded(w, "scheduler")).toBe("true");
+    expect(w.find("[data-test='cfg-plus']").exists()).toBe(true);
   });
 });
 
@@ -379,14 +382,10 @@ describe("AdvancedDrawer interactions", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => __testing__.resetForTest());
 
-  it("opens one section at a time", async () => {
+  it("keeps scheduler and negative controls visible together", () => {
     const wrapper = factory("sdxl");
-    // scheduler starts open; open negative and the scheduler body should close.
-    await wrapper
-      .get("[data-test='section-negative'] .ms-acc__head")
-      .trigger("click");
     expect(wrapper.find("[data-test='negative-input']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='scheduler-select']").exists()).toBe(false);
+    expect(wrapper.find("[data-test='scheduler-select']").exists()).toBe(true);
   });
 
   it("adds negative-prompt quick chips", async () => {
@@ -458,8 +457,8 @@ describe("AdvancedDrawer interactions", () => {
   });
 
   it("round-trips 'Upscale after generate' into the generate request", async () => {
-    // The toggle is only honest if the chosen upscaler survives into the wire
-    // request as `upscale_model` — and disappears again when it is turned off.
+    // The always-visible picker must survive into the wire request and the
+    // explicit Off option must remove it again.
     const form = useGenerateForm();
     const wrapper = mount(AdvancedDrawer, {
       props: { open: true, modelValue: form.state.value, family: "flux" },
@@ -473,7 +472,9 @@ describe("AdvancedDrawer interactions", () => {
     });
     await flushPromises();
 
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    await wrapper
+      .get("[data-test='upscale-model']")
+      .setValue("real-esrgan-x4plus:fp16");
     let next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
       GenerateFormState | undefined;
     Object.assign(form.state.value, next);
@@ -481,7 +482,7 @@ describe("AdvancedDrawer interactions", () => {
     expect(form.toRequest().upscale_model).toBe("real-esrgan-x4plus:fp16");
 
     await wrapper.setProps({ modelValue: { ...form.state.value } });
-    await wrapper.get("[data-test='upscale-toggle']").trigger("click");
+    await wrapper.get("[data-test='upscale-model']").setValue("");
     next = wrapper.emitted("update:modelValue")!.at(-1)![0] as
       GenerateFormState | undefined;
     Object.assign(form.state.value, next);
