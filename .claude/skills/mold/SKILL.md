@@ -528,7 +528,9 @@ Single-file format detection is key-based (reads safetensors header only).
 / NSFW Civitai. Web Settings persists these to `mold.db` `settings`
 (`huggingface.token`, `civitai.token`).
 
-**Internals:** `mold-catalog::live` is the proxy + cache; `live::fetch_civitai_version`
+**Internals:** `mold-catalog::live` is the proxy + cache — HF and Civitai
+are fetched concurrently and cached per source/page, and Civitai paginates
+via its real cursor chain (deep pages past row 100 work); `live::fetch_civitai_version`
 and `live::fetch_hf_repo` resolve single ids to a `CatalogEntry` with a
 fully-rendered `DownloadRecipe`. Entries carry an additive `page_url`
 (HF repo page / Civitai `models/{modelId}?modelVersionId={vid}` page;

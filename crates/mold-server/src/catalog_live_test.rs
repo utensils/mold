@@ -210,8 +210,8 @@ async fn live_search_returns_normalized_civitai_rows() {
 /// Two Flux LoRAs so page 2 with page_size 1 has a distinct row to
 /// return. Served for every request regardless of paging params —
 /// exactly how the real Civitai API behaves (`page=` is ignored;
-/// pagination is cursor-only), which is why the proxy must widen
-/// `limit=` to the full window and slice locally.
+/// pagination is cursor-only), which is why the proxy walks a cursor
+/// chain and buffers leftover rows for the following pages.
 const TWO_FLUX_LORA_FIXTURE: &str = r#"{
     "items": [{
         "id": 9001,
@@ -310,8 +310,8 @@ async fn live_search_honors_page_size_and_reports_the_upstream_total() {
     );
     assert_eq!(
         query.get("limit").map(|value| value.as_ref()),
-        Some("2"),
-        "limit must cover the whole page window"
+        Some("1"),
+        "limit must be one page — deep pages ride the cursor chain, not a widened window"
     );
 }
 
