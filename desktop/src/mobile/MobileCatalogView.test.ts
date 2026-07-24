@@ -293,6 +293,75 @@ describe("MobileCatalogView", () => {
     expect(wrapper.text()).toContain("catalog-2-0");
   });
 
+  it("keeps paginating a merged All-source page that arrives short of the page size", async () => {
+    // Under source=All the server splits the page budget across sources, so
+    // a merged page is structurally short whenever one source has no rows
+    // (e.g. ControlNet: HF contributes zero). The wire `total` is the only
+    // honest exhaustion signal — a short page with total > fetched must keep
+    // the infinite scroll alive.
+    const halfPage = (page: number) =>
+      Array.from({ length: 12 }, (_, i) => entry(`catalog-${page}-${i}`));
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: halfPage(params.page ?? 1),
+        page: params.page ?? 1,
+        page_size: 24,
+        total: 103,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-catalog-sentinel']").exists()).toBe(true);
+
+    scrollToSentinel();
+    scrollPastSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as { page?: number }).page);
+    expect(pages).toEqual([1, 2]);
+    expect(wrapper.text()).toContain("catalog-2-0");
+  });
+
+  it("falls back to the server-echoed page_size when an older server omits total", async () => {
+    // No `total` on the wire and the server clamped the page to 12 rows: a
+    // full clamped page still means more results, even though it is short of
+    // the client's requested page size.
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: Array.from({ length: 12 }, (_, i) => entry(`catalog-${params.page ?? 1}-${i}`)),
+        page: params.page ?? 1,
+        page_size: 12,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='mobile-catalog-sentinel']").exists()).toBe(true);
+  });
+
+  it("stops paginating when the accumulated rows reach the wire total", async () => {
+    searchCatalog.mockImplementation((params: { page?: number }) =>
+      Promise.resolve({
+        entries: Array.from({ length: (params.page ?? 1) === 1 ? 12 : 5 }, (_, i) =>
+          entry(`catalog-${params.page ?? 1}-${i}`),
+        ),
+        page: params.page ?? 1,
+        page_size: 24,
+        total: 17,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    scrollToSentinel();
+    scrollPastSentinel();
+    await flushPromises();
+
+    // 12 + 5 = 17 = total — the feed is exhausted, the sentinel goes away.
+    expect(wrapper.find("[data-test='mobile-catalog-sentinel']").exists()).toBe(false);
+  });
+
   it("keeps fetching (bounded) while the sentinel stays visible after a page lands", async () => {
     // Height-less pages (dedup/filter-swallowed) emit no new intersection —
     // the chain watcher keeps digging up to the auto-fetch bound.

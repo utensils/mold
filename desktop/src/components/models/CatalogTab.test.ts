@@ -292,6 +292,67 @@ describe("CatalogTab media filter under pagination", () => {
     expect(wrapper.findAll("button").some((b) => b.text().includes("Load more"))).toBe(false);
   });
 
+  it("keeps paginating a merged All-source page that arrives short of PAGE_SIZE", async () => {
+    // Under source=All the server splits the page budget across sources, so
+    // a merged page is structurally short whenever one source has no rows
+    // (e.g. ControlNet: HF contributes zero). The wire `total` is the only
+    // honest exhaustion signal — a short page with total > fetched must keep
+    // the infinite scroll alive.
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1, 12),
+        page: params.page ?? 1,
+        page_size: PAGE_SIZE,
+        total: 103,
+      }),
+    );
+    const wrapper = await mountTab("all");
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
+
+    scrollToSentinel();
+    scrollPastSentinel();
+    await flushPromises();
+
+    const pages = searchCatalog.mock.calls.map((c) => (c[0] as CatalogSearchParams).page);
+    expect(pages).toEqual([1, 2]);
+    expect(wrapper.text()).toContain("image-2-0");
+  });
+
+  it("falls back to the server-echoed page_size when an older server omits total", async () => {
+    // No `total` on the wire and the server clamped the page to 12 rows: a
+    // full clamped page still means more results, even though it is short of
+    // the client's requested PAGE_SIZE.
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1, 12),
+        page: params.page ?? 1,
+        page_size: 12,
+      }),
+    );
+    const wrapper = await mountTab("all");
+
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(true);
+  });
+
+  it("stops paginating when the accumulated rows reach the wire total", async () => {
+    searchCatalog.mockImplementation((params: CatalogSearchParams) =>
+      Promise.resolve({
+        entries: imagePage(params.page ?? 1, params.page === 1 ? 12 : 5),
+        page: params.page ?? 1,
+        page_size: PAGE_SIZE,
+        total: 17,
+      }),
+    );
+    const wrapper = await mountTab("all");
+
+    scrollToSentinel();
+    scrollPastSentinel();
+    await flushPromises();
+
+    // 12 + 5 = 17 = total — the feed is exhausted, the sentinel goes away.
+    expect(wrapper.find("[data-test='catalog-scroll-sentinel']").exists()).toBe(false);
+  });
+
   it("keeps fetching (bounded) while the sentinel stays visible after a page lands", async () => {
     // A page whose rows get swallowed by dedup/filtering adds no height, so
     // the observer never re-fires — the chain watcher must keep digging, but

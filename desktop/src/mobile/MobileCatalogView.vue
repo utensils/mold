@@ -435,7 +435,18 @@ async function runSearch(reset: boolean): Promise<void> {
       );
       if (epoch !== searchEpoch) return;
       entries.value = [...entries.value, ...response.entries];
-      hasMore.value = response.entries.length === PAGE_SIZE;
+      // Exhaustion comes from the wire `total`, not page fullness: under
+      // source=All the server splits the page budget across sources, so a
+      // merged page is legitimately short whenever one source has no rows
+      // (e.g. ControlNet, which HF never carries). Older servers without a
+      // numeric total fall back to the full-page heuristic.
+      hasMore.value =
+        typeof response.total === "number"
+          ? entries.value.length < response.total
+          : response.entries.length ===
+            (typeof response.page_size === "number" && response.page_size > 0
+              ? response.page_size
+              : PAGE_SIZE);
       const filtered = combinedEntries.value.some(mediaMatches);
       if (mediaType.value === "all" || filtered || !hasMore.value || fetched + 1 >= MAX_AUTO_PAGES)
         break;
