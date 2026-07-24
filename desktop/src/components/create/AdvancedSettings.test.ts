@@ -93,6 +93,54 @@ describe("AdvancedSettings — capability matrix", () => {
   });
 });
 
+describe("AdvancedSettings — section ordering contract", () => {
+  // The canonical Advanced section order shared with the web drawer (which
+  // additionally renders a trailing placement section — desktop owns GPU
+  // placement in Settings instead).
+  const SECTION_ORDER = [
+    "scheduler",
+    "negative",
+    "source",
+    "lora",
+    "upscale",
+    "output",
+    "video",
+  ] as const;
+  const upscaler = { name: "real-esrgan-x4plus", downloaded: true } as ModelEntry;
+
+  function sectionIds(wrapper: VueWrapper): string[] {
+    return wrapper
+      .findAll("[data-test^='section-']")
+      .map((node) => node.attributes("data-test")!.replace("section-", ""));
+  }
+
+  it("renders still-image sections in the canonical order", () => {
+    const wrapper = mountSettings(formFor("sdxl"), { upscalers: [upscaler] });
+    expect(sectionIds(wrapper)).toEqual([
+      "scheduler",
+      "negative",
+      "source",
+      "lora",
+      "upscale",
+      "output",
+    ]);
+  });
+
+  it("renders video sections in the canonical order", () => {
+    const wrapper = mountSettings(formFor("ltx2"), { upscalers: [upscaler] });
+    expect(sectionIds(wrapper)).toEqual(["negative", "source", "lora", "output", "video"]);
+  });
+
+  it("keeps every family's rendered sections a subsequence of the canon", () => {
+    const families = ["sdxl", "sd15", "sd3.5", "flux", "qwen-image-edit", "ltx-video", "ltx2"];
+    for (const family of families) {
+      const rendered = sectionIds(mountSettings(formFor(family), { upscalers: [upscaler] }));
+      expect(rendered.length).toBeGreaterThan(0);
+      expect(rendered).toEqual(SECTION_ORDER.filter((id) => rendered.includes(id)));
+    }
+  });
+});
+
 describe("AdvancedSettings — output & seed", () => {
   it("offers the family output formats and exact size override with a swap", async () => {
     const form = formFor("flux");
