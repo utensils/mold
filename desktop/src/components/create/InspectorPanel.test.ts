@@ -177,6 +177,49 @@ describe("InspectorPanel — advanced", () => {
   });
 });
 
+describe("InspectorPanel — reset to model defaults", () => {
+  const model: ModelEntry = {
+    name: "sdxl:base",
+    family: "sdxl",
+    downloaded: true,
+    default_width: 1024,
+    default_height: 768,
+    default_steps: 30,
+    default_guidance: 7,
+  } as ModelEntry;
+
+  it("offers the reset without opening Advanced", () => {
+    const wrapper = mount(InspectorPanel, { props: { form: formFor("sdxl") } });
+    const reset = wrapper.get('[data-test="settings-reset"]');
+    expect(wrapper.find('[data-test="inline-advanced"]').exists()).toBe(false);
+    expect(reset.attributes("aria-label")).toBe("Reset settings to model defaults");
+  });
+
+  it("restores the model's defaults while preserving prompt, model, and batch", async () => {
+    useModelStore().all = [model];
+    const form = useGenerateFormStore().form;
+    form.model = model.name;
+    form.family = model.family;
+    form.prompt = "a lighthouse at dusk";
+    form.batchSize = 4;
+    form.negativePrompt = "blurry";
+    form.steps = 12;
+    form.seed = "1234";
+    const wrapper = mount(InspectorPanel, { props: { form }, attachTo: document.body });
+
+    await wrapper.get('[data-test="settings-reset"]').trigger("click");
+
+    expect(form.prompt).toBe("a lighthouse at dusk");
+    expect(form.model).toBe("sdxl:base");
+    expect(form.batchSize).toBe(4);
+    expect(form.negativePrompt).toBe("");
+    expect(form.seed).toBe("");
+    expect(form.steps).toBe(30);
+    expect(form.width).toBe(1024);
+    expect(form.height).toBe(768);
+  });
+});
+
 describe("InspectorPanel — model picker", () => {
   const model: ModelEntry = {
     name: "flux-dev:q8",

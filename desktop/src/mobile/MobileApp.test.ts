@@ -2878,6 +2878,31 @@ describe("MobileApp settings", () => {
   });
 });
 
+describe("MobileApp create settings reset", () => {
+  it("restores the model defaults from Create without discarding the prompt", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    await fieldControl("Prompt").setValue("a ship crossing violet lightning");
+    await fieldControl("Negative prompt").setValue("calm water");
+    await fieldControl("Steps").setValue("12");
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-settings-reset']").trigger("click");
+    await flushPromises();
+
+    expect((fieldControl("Prompt").element as HTMLTextAreaElement).value).toBe(
+      "a ship crossing violet lightning",
+    );
+    expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("");
+    // The selected model's defaults, not the bare form defaults.
+    expect((fieldControl("Steps").element as HTMLInputElement).value).toBe("30");
+    expect(wrapper.get("[data-test='mobile-settings-reset']").attributes("aria-label")).toBe(
+      "Reset settings to model defaults",
+    );
+  });
+});
+
 describe("MobileApp primary navigation", () => {
   it("starts each tab at the top instead of carrying another tab's scroll position", async () => {
     wrapper = mountMobileApp();
