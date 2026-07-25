@@ -26,6 +26,25 @@ describe("Toasts a11y roles", () => {
     expect(error.attributes("aria-live")).toBe("assertive");
   });
 
+  it("anchors the shelf to the top of the window, clear of the title bar", async () => {
+    const wrapper = mount(Toasts);
+    const classes = wrapper.get("[aria-label='Notifications']").classes();
+
+    expect(classes.some((c) => c.startsWith("top-"))).toBe(true);
+    expect(classes.some((c) => c.startsWith("bottom-"))).toBe(false);
+  });
+
+  it("renders the newest toast first so it slides in above the older ones", async () => {
+    const wrapper = mount(Toasts);
+    const toasts = useToastStore();
+    toasts.push("Older");
+    toasts.push("Newer");
+    await wrapper.vm.$nextTick();
+
+    const rendered = wrapper.findAll("[role='status']").map((row) => row.text());
+    expect(rendered).toEqual(["Newer", "Older"]);
+  });
+
   it("labels the toast region and dismisses on click", async () => {
     const wrapper = mount(Toasts);
     const toasts = useToastStore();

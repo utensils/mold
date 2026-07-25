@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import ToastShelf from "./ToastShelf.vue";
+import shelfSource from "./ToastShelf.vue?raw";
 import type { Toast } from "./types";
 
 const TOASTS: readonly Toast[] = [
@@ -32,17 +33,33 @@ describe("ToastShelf", () => {
     expect(alerts[0]!.text()).toContain("Host unreachable");
   });
 
+  it("renders the newest toast first", () => {
+    const wrapper = make();
+    const texts = wrapper.findAll(".ms-toast__text").map((t) => t.text());
+    expect(texts).toEqual([
+      "Host unreachable",
+      "Model pull started",
+      "Saved to library",
+    ]);
+  });
+
+  it("anchors the shelf to the top of the app frame", () => {
+    const rule = /\.ms-toasts\s*\{([^}]*)\}/.exec(shelfSource)?.[1] ?? "";
+    expect(rule).toMatch(/top:/);
+    expect(rule).not.toMatch(/bottom:/);
+  });
+
   it("renders the kind glyphs", () => {
     const wrapper = make();
     const glyphs = wrapper.findAll(".ms-toast__glyph").map((g) => g.text());
-    expect(glyphs).toEqual(["✓", "•", "✕"]);
+    expect(glyphs).toEqual(["✕", "•", "✓"]);
   });
 
   it("marks error toasts with the error class", () => {
     const wrapper = make();
     const toasts = wrapper.findAll(".ms-toast");
-    expect(toasts[2]!.classes()).toContain("ms-toast--error");
-    expect(toasts[0]!.classes()).not.toContain("ms-toast--error");
+    expect(toasts[0]!.classes()).toContain("ms-toast--error");
+    expect(toasts[2]!.classes()).not.toContain("ms-toast--error");
   });
 
   it("renders an action button only when actionLabel is set", () => {

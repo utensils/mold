@@ -18,7 +18,7 @@ vi.mock("../../lib/api/client", () => ({
 interface StreamCall {
   path: string;
   target?: { baseUrl: string } | null;
-  onEvent?: (event: string, data: string) => void;
+  onEvent?: ((event: string, data: string) => void) | undefined;
 }
 const streamCalls: StreamCall[] = [];
 vi.mock("../../lib/api/sse", () => ({
