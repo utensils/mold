@@ -145,6 +145,7 @@ const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
+const mobileContent = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsBackButton = ref<HTMLButtonElement | null>(null);
@@ -2132,6 +2133,14 @@ watch(
 );
 
 watch(tab, (next) => {
+  // The primary destinations share this one WebView scroller. Reset it after
+  // Vue swaps the destination so a long Library cannot open Models, Machines,
+  // or Create at the same inherited offset.
+  void nextTick(() => {
+    if (!mobileContent.value) return;
+    mobileContent.value.scrollTop = 0;
+    mobileContent.value.scrollLeft = 0;
+  });
   if (next === "gallery") void refreshGallery();
   if (next !== "hosts") hostDetailId.value = "";
 });
@@ -2258,7 +2267,7 @@ onBeforeUnmount(() => {
       {{ generationAnnouncement }}
     </p>
 
-    <section class="mobile-content">
+    <section ref="mobileContent" class="mobile-content">
       <MobileSettingsView
         v-if="settingsOpen"
         :settings="mobileSettings"
