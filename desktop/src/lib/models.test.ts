@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   groupInstalledModels,
+  mergeModelPresentationMetadata,
   modelDisplayName,
   modelDisplayNameForId,
   modelSizeLabels,
@@ -116,5 +117,44 @@ describe("modelDisplayName", () => {
     expect(
       modelDisplayNameForId("cv:1759168", [{ ...base, display_name: "Juggernaut XL - Ragnarok" }]),
     ).toBe("Juggernaut XL - Ragnarok");
+  });
+});
+
+describe("mergeModelPresentationMetadata", () => {
+  it.each(["Studio Model", "Studio Model by Catalog Author"])(
+    "replaces the synthetic preferred-host description %j with richer metadata",
+    (description) => {
+      const preferred = {
+        ...model("cv:42", "flux", 200_000_000),
+        display_name: "Studio Model",
+        description,
+      };
+      const supplement = {
+        ...model("cv:42", "flux", 200_000_000),
+        display_name: "Studio Model",
+        description: "A cinematic portrait adapter with controlled studio lighting.",
+      };
+
+      expect(mergeModelPresentationMetadata(preferred, supplement).description).toBe(
+        "A cinematic portrait adapter with controlled studio lighting.",
+      );
+    },
+  );
+
+  it("keeps a meaningful preferred-host description", () => {
+    const preferred = {
+      ...model("cv:42", "flux", 200_000_000),
+      display_name: "Studio Model",
+      description: "Preferred descriptive copy.",
+    };
+    const supplement = {
+      ...model("cv:42", "flux", 200_000_000),
+      display_name: "Studio Model",
+      description: "Supplement descriptive copy.",
+    };
+
+    expect(mergeModelPresentationMetadata(preferred, supplement).description).toBe(
+      "Preferred descriptive copy.",
+    );
   });
 });

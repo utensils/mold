@@ -80,7 +80,7 @@ function setLayout(layout: CatalogLayoutChoice) {
 
 <template>
   <div
-    class="bg-bench border border-edge flex flex-wrap items-center gap-2 rounded-3xl px-4 py-3 sm:gap-3 sm:px-5 sm:py-3.5"
+    class="bg-bench border border-edge flex max-w-full min-w-0 flex-wrap items-center gap-2 rounded-3xl px-4 py-3 sm:gap-3 sm:px-5 sm:py-3.5"
   >
     <!-- Modality chips — match TopBar's filter-pill pattern -->
     <nav
@@ -124,7 +124,7 @@ function setLayout(layout: CatalogLayoutChoice) {
 
     <!-- Kind chips -->
     <nav
-      class="flex items-center gap-0.5 rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
+      class="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-full border border-white/5 bg-white/5 p-0.5 text-[13px] font-medium text-ink-2"
       aria-label="Kind filter"
     >
       <button

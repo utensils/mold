@@ -14,6 +14,7 @@ import { describeTransportError } from "../lib/api/errors";
 import { fetchCatalogDetail, fetchCatalogFamilies, searchCatalog } from "../lib/api/catalog";
 import {
   catalogFetchCaption,
+  catalogIdentityKey,
   catalogPullLabel,
   catalogSizeInfo,
   catalogSizeLabel,
@@ -25,6 +26,7 @@ import {
   catalogActionLabel,
   downloadContentsTotalBytes,
   installedModelToEntry,
+  mergeCatalogSummaryDetail,
 } from "../lib/catalogDetail";
 import {
   CATALOG_KIND_OPTIONS,
@@ -32,10 +34,17 @@ import {
   type CatalogKindFilter,
   type CatalogSortOption,
 } from "../lib/catalogFilters";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
-import { isCatalogModelId, isUtilityModel, modelDisplayNameForId } from "../lib/models";
+import {
+  isCatalogModelId,
+  isUtilityModel,
+  mergeModelPresentationMetadata,
+  modelDisplayNameForId,
+} from "../lib/models";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
 import type { CatalogEntry, DownloadJob, ModelComponentStatus, ModelEntry } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
@@ -147,6 +156,7 @@ const installedEntries = computed<MobileCatalogEntry[]>(() => {
       if (!model.downloaded) continue;
       const found = byName.get(model.name);
       if (found) {
+        found.model = mergeModelPresentationMetadata(found.model, model);
         found.hostIds.push(host.id);
         found.hostLabels.push(host.name);
       } else {
@@ -213,9 +223,69 @@ function mediaMatches(entry: CatalogEntry): boolean {
   return isVideoFamily(entry.family) === (mediaType.value === "video");
 }
 
+const safeLiveEntries = computed(() => {
+  const knownRepos = new Set(
+    (modelsByHost.value[props.selectedHostId] ?? [])
+      .map((model) => model.hf_repo)
+      .filter((repo): repo is string => Boolean(repo)),
+  );
+  return entries.value.filter(
+    (entry) =>
+      !(
+        entry.source === "hf" &&
+        entry.kind === "checkpoint" &&
+        (entry.bundling === "separated" ||
+          Boolean(entry.source_id && knownRepos.has(entry.source_id)))
+      ),
+  );
+});
+
+/** Preserve installed identity/host state while a current live row fills
+ * presentation fields that an older `/api/models` response omitted. */
+function enrichInstalledEntry(
+  installed: MobileCatalogEntry,
+  live: CatalogEntry | undefined,
+): MobileCatalogEntry {
+  if (!live) return installed;
+  const installedDescription = installed.description?.trim();
+  const modality = installed.modality?.trim() ? installed.modality : live.modality;
+  return {
+    ...live,
+    ...installed,
+    author: installed.author ?? live.author ?? null,
+    display_name: installed.display_name ?? live.display_name ?? null,
+    kind: live.kind || installed.kind,
+    ...(modality ? { modality } : {}),
+    nsfw: installed.nsfw || live.nsfw,
+    description: installedDescription || live.description || null,
+    thumbnail_url: installed.thumbnail_url || live.thumbnail_url || null,
+    page_url: installed.page_url || live.page_url || null,
+    installed: true,
+  };
+}
+
+const enrichedInstalledEntries = computed(() => {
+  const liveById = new Map(safeLiveEntries.value.map((entry) => [entry.id, entry]));
+  const liveByIdentity = new Map(
+    safeLiveEntries.value.flatMap((entry) => {
+      const key = catalogIdentityKey(entry);
+      return key ? [[key, entry] as const] : [];
+    }),
+  );
+  return installedEntries.value.map((installed) =>
+    enrichInstalledEntry(
+      installed,
+      liveById.get(installed.id) ??
+        (catalogIdentityKey(installed)
+          ? liveByIdentity.get(catalogIdentityKey(installed)!)
+          : undefined),
+    ),
+  );
+});
+
 const filteredInstalled = computed(() => {
   const q = query.value.trim().toLowerCase();
-  return installedEntries.value
+  return enrichedInstalledEntries.value
     .filter(
       (entry) =>
         !q || entry.name.toLowerCase().includes(q) || entryTitle(entry).toLowerCase().includes(q),
@@ -229,26 +299,21 @@ const filteredInstalled = computed(() => {
 const combinedEntries = computed<MobileCatalogEntry[]>(() => {
   if (source.value === "installed") return filteredInstalled.value;
 
-  const knownRepos = new Set(
-    (modelsByHost.value[props.selectedHostId] ?? [])
-      .map((model) => model.hf_repo)
-      .filter((repo): repo is string => Boolean(repo)),
+  const safeLive = safeLiveEntries.value;
+  const installedById = new Set(filteredInstalled.value.map((entry) => entry.id));
+  const installedByIdentity = new Set(
+    filteredInstalled.value.map(catalogIdentityKey).filter((key): key is string => key != null),
   );
-  const safeLive = entries.value.filter(
-    (entry) =>
-      !(
-        entry.source === "hf" &&
-        entry.kind === "checkpoint" &&
-        (entry.bundling === "separated" ||
-          Boolean(entry.source_id && knownRepos.has(entry.source_id)))
-      ),
-  );
-  const installedByName = new Set(filteredInstalled.value.map((entry) => entry.name));
   const byId = new Map<string, MobileCatalogEntry>();
   for (const entry of [
     ...filteredInstalled.value,
     ...manifestEntries.value.filter(sourceMatches).filter(mediaMatches),
-    ...safeLive.filter((entry) => !installedByName.has(entry.name)).filter(mediaMatches),
+    ...safeLive
+      .filter((entry) => {
+        const key = catalogIdentityKey(entry);
+        return !installedById.has(entry.id) && !(key && installedByIdentity.has(key));
+      })
+      .filter(mediaMatches),
   ]) {
     if (!byId.has(entry.id)) byId.set(entry.id, entry);
   }
@@ -274,9 +339,7 @@ const downloadRows = computed<DownloadRow[]>(() => {
 const mergedDetail = computed<CatalogEntry | null>(() => {
   const summary = detailEntry.value;
   if (!summary) return null;
-  return detail.value
-    ? { ...summary, ...detail.value, installed: summary.installed || detail.value.installed }
-    : summary;
+  return detail.value ? mergeCatalogSummaryDetail(summary, detail.value) : summary;
 });
 
 const detailDownloadItems = computed(() =>
@@ -323,6 +386,29 @@ const detailVariants = computed(() => {
 /** Human title for announce/toast text; ids stay `entry.name` in API calls. */
 function entryTitle(entry: MobileCatalogEntry): string {
   return entry.display_name ?? entry.name;
+}
+
+function entryAccessibilityLabel(entry: MobileCatalogEntry): string {
+  const labels = [
+    entryTitle(entry),
+    modelKindLabel(modelKindValue(entry)),
+    ...(entry.nsfw ? ["18+ NSFW"] : []),
+    "view details",
+  ];
+  return labels.join(" — ");
+}
+
+function catalogSourceLabel(source: string): string {
+  switch (source.trim().toLowerCase()) {
+    case "hf":
+      return "Hugging Face";
+    case "civitai":
+      return "Civitai";
+    case "local":
+      return "Local";
+    default:
+      return source;
+  }
 }
 
 function variantLabel(entry: MobileCatalogEntry): string {
@@ -1136,7 +1222,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="mobile-catalog-card-open"
-            :aria-label="`${entry.display_name ?? entry.name} — view details`"
+            :aria-label="entryAccessibilityLabel(entry)"
             @click="openDetail(entry)"
           >
             <span class="mobile-catalog-card-preview">
@@ -1151,6 +1237,13 @@ onBeforeUnmount(() => {
             </span>
             <span class="mobile-catalog-card-body">
               <span class="mobile-catalog-card-title">{{ entry.display_name ?? entry.name }}</span>
+              <ModelMetadataBadges
+                class="mobile-catalog-card-badges"
+                :kind="entry.kind"
+                :family="entry.family"
+                :nsfw="entry.nsfw"
+                :show-modality="false"
+              />
               <span class="mobile-catalog-card-meta">
                 {{ entry.author ? `${entry.author} · ` : "" }}{{ entry.family }}
                 <template v-if="entry.download_count">
@@ -1198,7 +1291,7 @@ onBeforeUnmount(() => {
         class="mobile-catalog-detail"
         role="dialog"
         aria-modal="true"
-        :aria-labelledby="`mobile-catalog-detail-${detailEntry.id}`"
+        aria-labelledby="mobile-catalog-detail-heading mobile-catalog-detail-title"
         data-test="mobile-catalog-detail"
       >
         <header class="mobile-catalog-detail-header">
@@ -1210,7 +1303,7 @@ onBeforeUnmount(() => {
           >
             ‹ <span>Catalog</span>
           </button>
-          <strong :id="`mobile-catalog-detail-${detailEntry.id}`">Model details</strong>
+          <strong id="mobile-catalog-detail-heading">Model details</strong>
           <span aria-hidden="true" />
         </header>
 
@@ -1225,15 +1318,18 @@ onBeforeUnmount(() => {
           </div>
 
           <article class="mobile-catalog-detail-copy">
-            <span
-              v-if="mergedDetail.modality"
-              class="mobile-catalog-detail-badge"
-              data-test="mobile-catalog-detail-badge"
-              >{{ mergedDetail.modality }}</span
-            >
+            <ModelMetadataBadges
+              class="mobile-catalog-detail-badges"
+              :kind="mergedDetail.kind"
+              :family="mergedDetail.family"
+              :modality="mergedDetail.modality ?? null"
+              :nsfw="mergedDetail.nsfw"
+            />
             <div class="mobile-catalog-detail-title">
               <div>
-                <h2>{{ mergedDetail.display_name ?? mergedDetail.name }}</h2>
+                <h2 id="mobile-catalog-detail-title">
+                  {{ mergedDetail.display_name ?? mergedDetail.name }}
+                </h2>
                 <p v-if="mergedDetail.author">by {{ mergedDetail.author }}</p>
               </div>
               <span v-if="mergedDetail.installed">Installed</span>
@@ -1265,7 +1361,7 @@ onBeforeUnmount(() => {
 
             <div class="mobile-catalog-detail-tiles" data-test="mobile-catalog-detail-tiles">
               <div class="mobile-catalog-detail-tile">
-                <span>Checkpoint</span>
+                <span>{{ modelWeightsLabel(modelKindValue(mergedDetail)) }}</span>
                 <strong>{{
                   detailSize?.weightsBytes != null ? formatGB(detailSize.weightsBytes) : "—"
                 }}</strong>
@@ -1277,6 +1373,10 @@ onBeforeUnmount(() => {
             </div>
 
             <dl class="mobile-catalog-detail-meta">
+              <div>
+                <dt>Source</dt>
+                <dd>{{ catalogSourceLabel(mergedDetail.source) }}</dd>
+              </div>
               <div>
                 <dt>Family</dt>
                 <dd>{{ mergedDetail.family }}</dd>
@@ -1292,6 +1392,14 @@ onBeforeUnmount(() => {
               <div v-if="mergedDetail.rating != null">
                 <dt>Rating</dt>
                 <dd>★ {{ mergedDetail.rating.toFixed(1) }}</dd>
+              </div>
+              <div v-if="mergedDetail.download_count">
+                <dt>Downloads</dt>
+                <dd>{{ formatCount(mergedDetail.download_count) }}</dd>
+              </div>
+              <div v-if="mergedDetail.likes">
+                <dt>Likes</dt>
+                <dd>{{ formatCount(mergedDetail.likes) }}</dd>
               </div>
             </dl>
 

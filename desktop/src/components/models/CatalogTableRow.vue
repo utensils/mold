@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import ModelTableRow from "./ModelTableRow.vue";
 import { catalogPageUrl, catalogSizeInfo } from "../../lib/catalog";
 import { resolveEntrySize } from "../../lib/catalogSizes";
@@ -30,6 +32,13 @@ const glyphSource = computed<ModelSource>(() =>
   props.entry.source === "civitai" ? "civitai" : "hf",
 );
 const pageUrl = computed(() => catalogPageUrl(props.entry));
+const kindValue = computed(() => modelKindValue(props.entry));
+const accessibilityLabel = computed(
+  () =>
+    `${props.entry.display_name ?? props.entry.name} — ${modelKindLabel(kindValue.value)}${
+      props.entry.nsfw ? ", 18+ NSFW" : ""
+    } — view details`,
+);
 
 /** `undefined` = still resolving (skeleton); `number | null` = resolved. */
 const resolvedBytes = ref<number | null | undefined>(props.entry.size_bytes ?? undefined);
@@ -75,18 +84,20 @@ const counts = computed(() => {
     :page-url="pageUrl"
     :size-primary="sizePrimary"
     :size-secondary="sizeSecondary"
+    :accessibility-label="accessibilityLabel"
     clickable
     data-test="catalog-table-row"
     @open="emit('open', entry)"
   >
     <template #meta>
-      <span
-        v-if="entry.nsfw"
-        class="data-mono shrink-0 rounded-control border border-stop/50 px-1 text-caption text-stop"
-        data-test="nsfw-tag"
-      >
-        NSFW
-      </span>
+      <ModelMetadataBadges
+        :kind="entry.kind"
+        :family="entry.family"
+        :modality="entry.modality ?? null"
+        :nsfw="entry.nsfw"
+        :show-modality="false"
+        :data-test="entry.nsfw ? 'nsfw-tag' : undefined"
+      />
       <span v-if="entry.author" class="min-w-0 shrink truncate text-caption text-ink-3">
         {{ entry.author }}
       </span>

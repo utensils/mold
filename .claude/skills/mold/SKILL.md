@@ -133,9 +133,14 @@ models above the live catalog with **All / Images / Video** media chips, a
 model-kind chip row (Models / LoRAs / CLIP / Text encoders / VAEs / Tokenizers
 / ControlNet), a Downloads / Rating / Recent sort, and
 Grid / Table layouts; active downloads pin to the top with a source glyph and
-target host. The iPhone Models view shares the same kind/sort options. The Installed segment merges every ready host with host badges and
+target host. Cards, table rows, and details always name the model kind, and
+mature entries use the explicit `18+ NSFW` badge; details show descriptions,
+tags, license, source, format, and popularity only when the catalog provides
+them. The iPhone Models view shares the same metadata treatment and kind/sort
+options. The Installed segment merges every ready host with host badges and
 host-routed actions; host detail mirrors that host's active pulls. Rows label
-primary weights separately from the footprint including shared runtime files.
+the actual kind's weights separately from the footprint including shared
+runtime files.
 Curated manifest variants replace ambiguous multi-checkpoint Hugging Face
 repositories so Pull always targets one runnable model. Live Hugging Face LoRA
 collections also select one preferred adapter rather than pulling every

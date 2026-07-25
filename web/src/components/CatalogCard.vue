@@ -6,6 +6,8 @@
  * detail drawer; Pull enqueues the download straight into the shell.
  */
 import { computed, ref } from "vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import Icon from "@ui/components/Icon.vue";
 import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
@@ -85,6 +87,19 @@ const family = computed(() => {
 });
 
 const supported = computed(() => props.entry.supported);
+const kind = computed(() =>
+  modelKindValue({
+    kind: props.entry.kind,
+    family: props.entry.family,
+  }),
+);
+const description = computed(() => props.entry.description?.trim() ?? "");
+const accessibleName = computed(() => {
+  const classification = `${modelKindLabel(kind.value)} model`;
+  const mature = props.entry.nsfw ? " — 18+ NSFW" : "";
+  return `${props.entry.name} — ${classification}${mature}`;
+});
+const detailsAriaLabel = computed(() => `${accessibleName.value} — details`);
 const pullLabel = computed(() => {
   if (!supported.value) return "Unsupported";
   return props.entry.installed ? "Repair" : "Pull";
@@ -92,12 +107,17 @@ const pullLabel = computed(() => {
 </script>
 
 <template>
-  <article class="card" data-test="discover-card" :data-layout="props.layout">
+  <article
+    class="card"
+    data-test="discover-card"
+    :data-layout="props.layout"
+    :aria-label="accessibleName"
+  >
     <button
       v-if="props.layout === 'grid'"
       type="button"
       class="card__media"
-      :aria-label="`${props.entry.name} — details`"
+      :aria-label="detailsAriaLabel"
       @click="emit('open')"
     >
       <template v-if="showThumb">
@@ -131,7 +151,12 @@ const pullLabel = computed(() => {
     </button>
 
     <div class="card__top">
-      <span class="card__kind">{{ props.entry.kind }}</span>
+      <ModelMetadataBadges
+        :kind="props.entry.kind"
+        :family="props.entry.family"
+        :nsfw="props.entry.nsfw"
+        :show-modality="false"
+      />
       <span
         v-if="props.entry.installed"
         class="card__installed"
@@ -143,6 +168,7 @@ const pullLabel = computed(() => {
         type="button"
         class="card__details"
         data-test="details-btn"
+        :aria-label="detailsAriaLabel"
         @click="emit('open')"
       >
         Details ›
@@ -153,11 +179,19 @@ const pullLabel = computed(() => {
       type="button"
       class="card__nameline"
       data-test="card-open"
+      :aria-label="detailsAriaLabel"
       @click="emit('open')"
     >
       <span class="card__name">{{ props.entry.name }}</span>
       <span class="card__meta">
         {{ props.entry.family }} · {{ formatGB(props.entry.size_bytes) }}
+      </span>
+      <span
+        v-if="description"
+        class="card__description"
+        data-test="card-description"
+      >
+        {{ description }}
       </span>
     </button>
 
@@ -218,6 +252,14 @@ const pullLabel = computed(() => {
 
 .card[data-layout="list"] .card__meta {
   margin-bottom: 0;
+}
+
+.card[data-layout="list"] .card__nameline {
+  margin-bottom: 0;
+}
+
+.card[data-layout="list"] .card__description {
+  -webkit-line-clamp: 1;
 }
 
 /* Full-bleed preview: pulled out past the card padding, square-cornered where
@@ -311,18 +353,6 @@ const pullLabel = computed(() => {
   margin-bottom: 5px;
 }
 
-.card__kind {
-  font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--halide);
-  border: 1px solid color-mix(in srgb, var(--halide) 40%, transparent);
-  padding: 1px 7px;
-  border-radius: var(--radius-pill);
-  white-space: nowrap;
-}
-
 .card__installed {
   font-family: var(--f-mono);
   font-size: 9px;
@@ -361,6 +391,7 @@ const pullLabel = computed(() => {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+  margin-bottom: 14px;
 }
 
 .card__name {
@@ -376,7 +407,18 @@ const pullLabel = computed(() => {
 .card__meta {
   font-size: 11px;
   color: var(--ink-3);
-  margin-bottom: 14px;
+}
+
+.card__description {
+  display: -webkit-box;
+  width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: normal;
 }
 
 .card__pull {

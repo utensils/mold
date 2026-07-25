@@ -31,6 +31,8 @@ const props = withDefaults(
     barPercent?: number | null;
     /** Row and name become buttons that emit `open` (catalog detail drawer). */
     clickable?: boolean;
+    /** Rich accessible name when visible metadata adds context to the row. */
+    accessibilityLabel?: string | null;
   }>(),
   {
     loaded: undefined,
@@ -42,6 +44,7 @@ const props = withDefaults(
     sizeSecondary: null,
     barPercent: null,
     clickable: false,
+    accessibilityLabel: null,
   },
 );
 
@@ -67,7 +70,7 @@ function onRowKeydown(event: KeyboardEvent): void {
     "
     :role="clickable ? 'button' : undefined"
     :tabindex="clickable ? 0 : undefined"
-    :aria-label="clickable ? `${name} — view details` : undefined"
+    :aria-label="clickable ? (accessibilityLabel ?? `${name} — view details`) : undefined"
     data-test="model-table-row"
     @click="clickable && emit('open')"
     @keydown.enter="onRowKeydown"

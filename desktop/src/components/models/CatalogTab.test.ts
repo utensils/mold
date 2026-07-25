@@ -106,7 +106,16 @@ describe("CatalogTab media filter under pagination", () => {
   it("shows an installed model ONCE, host-tagged, when a live catalog copy also matches", async () => {
     setActivePinia(createPinia());
     searchCatalog.mockResolvedValue({
-      entries: [entry("flux-dev:q8", "flux")],
+      entries: [
+        {
+          ...entry("flux-dev:q8", "flux"),
+          id: "hf:org/repo",
+          source_id: "org/repo",
+          kind: "lora",
+          nsfw: true,
+          description: "Rich live catalog metadata.",
+        },
+      ],
       page: 1,
       page_size: PAGE_SIZE,
       total: 1,
@@ -146,6 +155,123 @@ describe("CatalogTab media filter under pagination", () => {
     const chips = wrapper.findAll("[data-test='installed-host']").map((c) => c.text());
     expect(chips).toContain("This device");
     expect(wrapper.text()).toContain("● installed");
+    expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
+    expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
+    expect(wrapper.get('[data-test="catalog-description"]').text()).toBe(
+      "Rich live catalog metadata.",
+    );
+  });
+
+  it("does not enrich or deduplicate unrelated models that only share a human name", async () => {
+    setActivePinia(createPinia());
+    searchCatalog.mockResolvedValue({
+      entries: [
+        {
+          ...entry("Shared title", "flux"),
+          id: "hf:other/repo",
+          source_id: "other/repo",
+          kind: "lora",
+          nsfw: true,
+          description: "Metadata that belongs only to the other repository.",
+        },
+      ],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "Shared title",
+            family: "flux",
+            size_gb: 12,
+            is_loaded: false,
+            hf_repo: "installed/repo",
+            default_steps: 4,
+            default_guidance: 1,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            hostIds: ["local"],
+          },
+        ],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='catalog-card']");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.get("[data-test='installed-host']").text()).toBe("This device");
+    expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("Checkpoint");
+    expect(cards[0]!.find("[data-test='model-nsfw-badge']").exists()).toBe(false);
+    expect(cards[0]!.text()).not.toContain("Metadata that belongs only");
+    expect(cards[1]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(cards[1]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+  });
+
+  it("enriches an installed Civitai id from the exact live id before dedup", async () => {
+    setActivePinia(createPinia());
+    searchCatalog.mockResolvedValue({
+      entries: [
+        {
+          ...entry("Legacy Adapter", "flux"),
+          id: "cv:4242",
+          source: "civitai",
+          source_id: "4242",
+          kind: "lora",
+          nsfw: true,
+          description: "Rich metadata from the exact live catalog version.",
+        },
+      ],
+      page: 1,
+      page_size: PAGE_SIZE,
+      total: 1,
+    });
+
+    const wrapper = mount(CatalogTab, {
+      props: {
+        query: "",
+        layout: "grid" as const,
+        installedEntries: [
+          {
+            name: "cv:4242",
+            display_name: "Legacy Adapter",
+            family: "flux",
+            size_gb: 0.2,
+            is_loaded: false,
+            hf_repo: "",
+            default_steps: 20,
+            default_guidance: 3.5,
+            default_width: 1024,
+            default_height: 1024,
+            description: "",
+            downloaded: true,
+            kind: null,
+            modality: null,
+            nsfw: null,
+            hostIds: ["local"],
+          },
+        ],
+      },
+      global: { plugins: [] },
+    });
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='catalog-card']");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.text()).toContain("Legacy Adapter");
+    expect(cards[0]!.get("[data-test='installed-host']").text()).toBe("This device");
+    expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(cards[0]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+    expect(cards[0]!.get("[data-test='catalog-description']").text()).toBe(
+      "Rich metadata from the exact live catalog version.",
+    );
   });
 
   it("offers safe manifest variants and hides aggregate HF rows for the same repo", async () => {
@@ -529,6 +655,9 @@ describe("CatalogTab kind and sort filters", () => {
 
     const options = wrapper.get("[data-test='catalog-sort']").findAll("option");
     expect(options.map((o) => o.text())).toEqual(["Downloads", "Rating", "Recent"]);
+    expect(wrapper.get('input[type="checkbox"]').element.closest("label")?.textContent).toContain(
+      "Include NSFW",
+    );
   });
 
   it("omits kind and sort from the search at their defaults", async () => {

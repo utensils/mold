@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetCatalogSingletonForTests, useCatalog } from "./useCatalog";
+import type { ModelInfoExtended } from "../types";
 
 const originalFetch = globalThis.fetch;
 
@@ -294,6 +295,117 @@ describe("useCatalog", () => {
     const cat = useCatalog();
     expect(cat.canDownload({ supported: true } as any)).toBe(true);
     expect(cat.canDownload({ supported: false } as any)).toBe(false);
+  });
+
+  it("enriches an installed catalog detail from its retained sidecar metadata", async () => {
+    const model: ModelInfoExtended = {
+      name: "cv:4242",
+      display_name: "Studio Adapter",
+      family: "flux",
+      size_gb: 0.2,
+      is_loaded: false,
+      last_used: null,
+      hf_repo: "",
+      downloaded: true,
+      default_steps: 20,
+      default_guidance: 3.5,
+      default_width: 1024,
+      default_height: 1024,
+      description: "",
+    };
+    const sidecar = {
+      ...makePageEntries(1, 1)[0],
+      id: "cv:4242",
+      source: "civitai",
+      source_id: "4242",
+      name: "Studio Adapter",
+      description: "Retained sidecar description.",
+      license: "apache-2.0",
+      tags: ["portrait"],
+      page_url: "https://civitai.com/models/42?modelVersionId=4242",
+    };
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/models/cv%3A4242/components")) {
+        return {
+          ok: true,
+          json: async () => ({ model: "cv:4242", components: [] }),
+        };
+      }
+      if (url.startsWith("/api/catalog/installed")) {
+        return {
+          ok: true,
+          json: async () => ({
+            entries: [sidecar],
+            page: 1,
+            page_size: 1,
+            total: 1,
+          }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const cat = useCatalog();
+    await cat.openInstalledDetail(model);
+
+    expect(cat.detail.value).toMatchObject({
+      kind: "installed",
+      model: { name: "cv:4242" },
+      catalogEntry: {
+        id: "cv:4242",
+        description: "Retained sidecar description.",
+        license: "apache-2.0",
+        tags: ["portrait"],
+      },
+    });
+  });
+
+  it("keeps the installed shelf and detail usable when sidecar enrichment fails", async () => {
+    const model: ModelInfoExtended = {
+      name: "cv:4242",
+      display_name: "Studio Adapter",
+      family: "flux",
+      size_gb: 0.2,
+      is_loaded: false,
+      last_used: null,
+      hf_repo: "",
+      downloaded: true,
+      default_steps: 20,
+      default_guidance: 3.5,
+      default_width: 1024,
+      default_height: 1024,
+      description: "",
+    };
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url === "/api/models") {
+        return { ok: true, json: async () => [model] };
+      }
+      if (url.startsWith("/api/models/cv%3A4242/components")) {
+        return {
+          ok: true,
+          json: async () => ({
+            model: "cv:4242",
+            components: [{ kind: "vae", name: "vae", present: true }],
+          }),
+        };
+      }
+      if (url.startsWith("/api/catalog/installed")) {
+        return { ok: false, status: 503 };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const cat = useCatalog();
+    await cat.refreshInstalled();
+    await cat.openInstalledDetail(model);
+
+    expect(cat.installed.value.map((entry) => entry.name)).toEqual(["cv:4242"]);
+    expect(cat.detail.value).toMatchObject({
+      kind: "installed",
+      model: { name: "cv:4242" },
+      components: [{ kind: "vae", name: "vae", present: true }],
+      catalogEntry: null,
+    });
   });
 });
 

@@ -1123,12 +1123,12 @@ pub(crate) fn sidecar_to_wire(
         download_count: 0,
         rating: None,
         likes: 0,
-        nsfw: false,
+        nsfw: sc.nsfw,
         thumbnail_url: sc.thumbnail_url,
-        description: None,
-        license: None,
+        description: sc.description,
+        license: sc.license,
         license_flags: None,
-        tags: Vec::new(),
+        tags: sc.tags,
         companions: Vec::new(),
         companion_details: Vec::new(),
         download_recipe: mold_core::catalog_wire::DownloadRecipeWire::default(),
@@ -1139,6 +1139,7 @@ pub(crate) fn sidecar_to_wire(
         updated_at: None,
         added_at: sc.written_at,
         trained_words: sc.trained_words,
+        page_url: sc.page_url,
     }
 }
 

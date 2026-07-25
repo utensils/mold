@@ -705,6 +705,9 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         }];
         let embed = format_model_list(&models);
@@ -737,6 +740,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
             ModelInfoExtended {
@@ -759,6 +765,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
             ModelInfoExtended {
@@ -781,6 +790,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
         ];

@@ -5,6 +5,7 @@
  * a family · size line, and a chevron. The whole row is one button that opens
  * the model detail drawer.
  */
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { ModelInfoExtended } from "../../types";
@@ -28,6 +29,12 @@ const emit = defineEmits<{ open: [] }>();
     <span class="row__body">
       <span class="row__head">
         <span class="row__name">{{ modelDisplayName(props.model) }}</span>
+        <ModelMetadataBadges
+          :kind="props.model.kind"
+          :family="props.model.family"
+          :nsfw="props.model.nsfw ?? false"
+          :show-modality="false"
+        />
         <BadgePill
           v-if="props.model.is_loaded"
           tone="accent"
@@ -97,11 +104,13 @@ const emit = defineEmits<{ open: [] }>();
 .row__head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
   min-width: 0;
 }
 
 .row__name {
+  flex: 1 1 160px;
   font-family: var(--f-mono);
   font-size: 13.5px;
   font-weight: 600;

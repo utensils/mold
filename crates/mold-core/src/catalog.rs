@@ -56,6 +56,9 @@ pub fn build_model_catalog(
             disk_usage_bytes,
             remaining_download_bytes: Some(remaining_download_bytes),
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         });
     }
@@ -97,6 +100,9 @@ pub fn build_model_catalog(
             disk_usage_bytes: Some(disk_usage_bytes),
             remaining_download_bytes: None,
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         });
     }
@@ -283,6 +289,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             }
         }

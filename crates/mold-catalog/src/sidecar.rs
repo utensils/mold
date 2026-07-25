@@ -46,6 +46,17 @@ pub struct CatalogSidecar {
     pub sub_family: Option<String>,
     pub kind: String,
     pub modality: String,
+    /// `None` means an older sidecar did not record the classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsfw: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_url: Option<String>,
     pub thumbnail_url: Option<String>,
     pub size_bytes: Option<u64>,
     #[serde(default = "default_true")]
@@ -84,6 +95,11 @@ pub fn sidecar_from_entry(entry: &CatalogEntry, primary_filename_rel: String) ->
         sub_family: entry.sub_family.clone(),
         kind: serde_kebab(&entry.kind),
         modality: serde_kebab(&entry.modality),
+        nsfw: Some(entry.nsfw),
+        description: entry.description.clone(),
+        tags: entry.tags.clone(),
+        license: entry.license.clone(),
+        page_url: entry.page_url.clone(),
         thumbnail_url: entry.thumbnail_url.clone(),
         size_bytes: entry.size_bytes,
         supported: entry.supported,
@@ -268,18 +284,54 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_from_entry_preserves_trigger_words() {
-        let entry = fixture_entry();
+    fn sidecar_from_entry_preserves_presentation_metadata() {
+        let mut entry = fixture_entry();
+        entry.nsfw = true;
+        entry.description = Some("A cinematic portrait adapter.".into());
+        entry.tags = vec!["portrait".into(), "cinematic".into()];
+        entry.license = Some("CreativeML Open RAIL-M".into());
+        entry.page_url = Some("https://civitai.com/models/8001".into());
         let sc = sidecar_from_entry(&entry, "flux/civitai/8001/test.safetensors".into());
         assert_eq!(sc.id, "cv:8001");
         assert_eq!(sc.source, "civitai");
         assert_eq!(sc.kind, "lora");
         assert_eq!(sc.family, "flux");
+        assert_eq!(sc.nsfw, Some(true));
+        assert_eq!(
+            sc.description.as_deref(),
+            Some("A cinematic portrait adapter.")
+        );
+        assert_eq!(sc.tags, vec!["portrait", "cinematic"]);
+        assert_eq!(sc.license.as_deref(), Some("CreativeML Open RAIL-M"));
+        assert_eq!(
+            sc.page_url.as_deref(),
+            Some("https://civitai.com/models/8001")
+        );
         assert_eq!(sc.trained_words, vec!["mold trigger", "extra"]);
         assert_eq!(
             sc.primary_filename_rel,
             "flux/civitai/8001/test.safetensors"
         );
+    }
+
+    #[test]
+    fn older_sidecars_leave_new_presentation_metadata_unknown() {
+        let entry = fixture_entry();
+        let sidecar = sidecar_from_entry(&entry, "test.safetensors".into());
+        let mut value = serde_json::to_value(sidecar).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("nsfw");
+        object.remove("description");
+        object.remove("tags");
+        object.remove("license");
+        object.remove("page_url");
+
+        let read: CatalogSidecar = serde_json::from_value(value).unwrap();
+        assert_eq!(read.nsfw, None);
+        assert_eq!(read.description, None);
+        assert!(read.tags.is_empty());
+        assert_eq!(read.license, None);
+        assert_eq!(read.page_url, None);
     }
 
     #[test]

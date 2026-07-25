@@ -16,6 +16,62 @@ export interface DisplayableModel {
   description?: string | null;
 }
 
+function hasText(value: string | null | undefined): value is string {
+  return Boolean(value?.trim());
+}
+
+function isSyntheticDescription(
+  description: string | null | undefined,
+  title: string | null | undefined,
+): boolean {
+  if (!hasText(description) || !hasText(title)) return false;
+  const normalized = description.trim().toLocaleLowerCase();
+  const normalizedTitle = title.trim().toLocaleLowerCase();
+  const bylinePrefix = `${normalizedTitle} by `;
+  return (
+    normalized === normalizedTitle ||
+    (normalized.startsWith(bylinePrefix) && normalized.length > bylinePrefix.length)
+  );
+}
+
+/**
+ * Keep the first host's runtime/default fields while filling presentation
+ * metadata that an older `/api/models` row omitted. Mature classification is
+ * monotonic: one host reporting NSFW must label the all-host row as NSFW.
+ */
+export function mergeModelPresentationMetadata<T extends ModelEntry>(
+  preferred: T,
+  supplement: ModelEntry,
+): T {
+  const displayName = hasText(preferred.display_name)
+    ? preferred.display_name
+    : supplement.display_name;
+  const title =
+    (hasText(displayName) ? displayName : null) ??
+    (!isCatalogModelId(preferred.name) ? preferred.name : null);
+  const preferredDescriptionIsUseful =
+    hasText(preferred.description) && !isSyntheticDescription(preferred.description, title);
+  const supplementDescriptionIsUseful =
+    hasText(supplement.description) && !isSyntheticDescription(supplement.description, title);
+  const description = preferredDescriptionIsUseful
+    ? preferred.description
+    : supplementDescriptionIsUseful
+      ? supplement.description
+      : (preferred.description ?? supplement.description);
+
+  return {
+    ...preferred,
+    display_name: displayName,
+    kind: hasText(preferred.kind) ? preferred.kind : supplement.kind,
+    modality: hasText(preferred.modality) ? preferred.modality : supplement.modality,
+    description,
+    nsfw:
+      preferred.nsfw === true || supplement.nsfw === true
+        ? true
+        : (preferred.nsfw ?? supplement.nsfw),
+  };
+}
+
 export function isUtilityModel(m: ModelEntry): boolean {
   return UTILITY_FAMILIES.has(m.family);
 }

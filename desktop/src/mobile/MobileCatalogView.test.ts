@@ -1078,7 +1078,287 @@ describe("MobileCatalogView", () => {
     expect(huggingFaceChip().attributes("aria-pressed")).toBe("true");
   });
 
-  it("renders a media badge and Checkpoint/Footprint size tiles in the detail sheet", async () => {
+  it("labels every card with a friendly model kind and explicitly marks NSFW entries", async () => {
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Portrait Base", { kind: "checkpoint" }),
+        entry("Spicy Adapter", { kind: "lora", nsfw: true }),
+      ]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='mobile-catalog-card']");
+    const safeCard = cards.find((candidate) => candidate.text().includes("Portrait Base"))!;
+    const nsfwCard = cards.find((candidate) => candidate.text().includes("Spicy Adapter"))!;
+
+    expect(safeCard.get("[data-test='model-kind-badge']").text()).toBe("Checkpoint");
+    expect(safeCard.find("[data-test='model-nsfw-badge']").exists()).toBe(false);
+    expect(safeCard.get(".mobile-catalog-card-open").attributes("aria-label")).toContain(
+      "Checkpoint",
+    );
+    expect(safeCard.get(".mobile-catalog-card-open").attributes("aria-label")).not.toContain(
+      "NSFW",
+    );
+
+    expect(nsfwCard.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(nsfwCard.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+    expect(nsfwCard.get(".mobile-catalog-card-open").attributes("aria-label")).toContain("LoRA");
+    expect(nsfwCard.get(".mobile-catalog-card-open").attributes("aria-label")).toContain(
+      "18+ NSFW",
+    );
+  });
+
+  it("preserves a mature summary classification when fetched detail reports false", async () => {
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Mature Adapter", {
+          kind: "lora",
+          nsfw: true,
+          author: "Summary author",
+          description: "Useful summary copy.",
+          license: "apache-2.0",
+          tags: ["portrait", "cinematic"],
+          download_count: 12_300,
+          likes: 456,
+        }),
+      ]),
+    );
+    fetchCatalogDetail.mockImplementation((id: string) =>
+      Promise.resolve({
+        ...entry("Mature Adapter"),
+        id,
+        kind: "lora",
+        nsfw: false,
+        author: null,
+        description: null,
+        license: null,
+        tags: [],
+        download_count: 0,
+        likes: 0,
+      }),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Mature Adapter"))!;
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.querySelector("[data-test='model-nsfw-badge']")?.textContent?.trim()).toBe(
+      "18+ NSFW",
+    );
+    expect(detail.textContent).toContain("Summary author");
+    expect(detail.textContent).toContain("Useful summary copy.");
+    expect(detail.textContent).toContain("apache-2.0");
+    expect(detail.textContent).toContain("portrait");
+    expect(detail.textContent).toContain("12.3k");
+    expect(detail.textContent).toContain("456");
+  });
+
+  it("conservatively merges presentation metadata from duplicate installed hosts", async () => {
+    searchCatalog.mockResolvedValue(searchResponse([]));
+    fetchCatalogDetail.mockRejectedValue(new Error("older host has no detail endpoint"));
+    apiFetchTo.mockImplementation((target: ApiTarget, path: string) => {
+      if (path !== "/api/models") {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(
+        jsonResponse(
+          target.baseUrl === studio.baseUrl
+            ? [
+                model("shared-adapter", "flux", true, {
+                  description: "",
+                  kind: null,
+                  modality: null,
+                  nsfw: null,
+                }),
+              ]
+            : [
+                model("shared-adapter", "flux", true, {
+                  description: "A mature portrait adapter.",
+                  kind: "lora",
+                  modality: "image",
+                  nsfw: true,
+                }),
+              ],
+        ),
+      );
+    });
+    wrapper = mountCatalog();
+    await flushPromises();
+
+    const cards = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .filter((candidate) => candidate.text().includes("shared-adapter"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(cards[0]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+
+    await cards[0]!.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.getAttribute("aria-labelledby")).toBe(
+      "mobile-catalog-detail-heading mobile-catalog-detail-title",
+    );
+    expect(document.getElementById("mobile-catalog-detail-heading")?.textContent).toContain(
+      "Model details",
+    );
+    expect(document.getElementById("mobile-catalog-detail-title")?.textContent).toContain(
+      "shared-adapter",
+    );
+    expect(detail.querySelector("[data-test='model-modality-badge']")?.textContent).toBe("Image");
+    expect(detail.textContent).toContain("A mature portrait adapter.");
+  });
+
+  it("enriches a legacy installed catalog row before kind filtering and id dedup", async () => {
+    vi.useFakeTimers();
+    const live = entry("Legacy Adapter", {
+      id: "cv:4242",
+      source: "civitai",
+      source_id: "4242",
+      kind: "lora",
+      modality: "image",
+      nsfw: true,
+      description: "Rich metadata from the live catalog.",
+    });
+    searchCatalog.mockResolvedValue(searchResponse([live]));
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) =>
+      path === "/api/models"
+        ? Promise.resolve(
+            jsonResponse([
+              model("cv:4242", "flux", true, {
+                hf_repo: "",
+                display_name: "Legacy Adapter",
+                description: "",
+                kind: null,
+                modality: null,
+                nsfw: null,
+              }),
+            ]),
+          )
+        : Promise.resolve(new Response(null, { status: 204 })),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const loraChip = wrapper
+      .get("[data-test='mobile-catalog-kind-chips']")
+      .findAll("button")
+      .find((candidate) => candidate.text() === "LoRAs")!;
+    await loraChip.trigger("click");
+    await vi.advanceTimersByTimeAsync(400);
+    await flushPromises();
+
+    const cards = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .filter((candidate) => candidate.text().includes("Legacy Adapter"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(cards[0]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+    expect(cards[0]!.text()).toContain("Installed");
+    expect(cards[0]!.text()).toContain("Studio");
+  });
+
+  it("does not enrich or hide unrelated models that only share a human name", async () => {
+    const live = entry("Shared title", {
+      id: "hf:other/repo",
+      source: "hf",
+      source_id: "other/repo",
+      kind: "lora",
+      modality: "image",
+      nsfw: true,
+      description: "Metadata that belongs only to the other repository.",
+    });
+    searchCatalog.mockResolvedValue(searchResponse([live]));
+    apiFetchTo.mockImplementation((_target: ApiTarget, path: string) =>
+      path === "/api/models"
+        ? Promise.resolve(
+            jsonResponse([
+              model("Shared title", "flux", true, {
+                hf_repo: "installed/repo",
+                description: "",
+                kind: null,
+                modality: null,
+                nsfw: null,
+              }),
+            ]),
+          )
+        : Promise.resolve(new Response(null, { status: 204 })),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const cards = wrapper.findAll("[data-test='mobile-catalog-card']");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]!.text()).toContain("Installed");
+    expect(cards[0]!.get("[data-test='model-kind-badge']").text()).toBe("Checkpoint");
+    expect(cards[0]!.find("[data-test='model-nsfw-badge']").exists()).toBe(false);
+    expect(cards[0]!.text()).not.toContain("Metadata that belongs only");
+    expect(cards[1]!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(cards[1]!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
+  });
+
+  it("classifies model details and labels weights, source, counts, and description accurately", async () => {
+    fetchCatalogDetail.mockImplementation((id: string) =>
+      Promise.resolve({
+        ...entry("detail"),
+        id,
+        name: "Spicy Adapter",
+        source: "civitai",
+        kind: "lora",
+        modality: "image",
+        nsfw: true,
+        size_bytes: 220_000_000,
+        download_count: 12_300,
+        likes: 456,
+        description: "A portrait adapter with controlled studio lighting.",
+      }),
+    );
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Spicy Adapter", {
+          source: "civitai",
+          kind: "lora",
+          modality: "image",
+          nsfw: true,
+        }),
+      ]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    const card = wrapper
+      .findAll("[data-test='mobile-catalog-card']")
+      .find((candidate) => candidate.text().includes("Spicy Adapter"))!;
+    await card.get(".mobile-catalog-card-open").trigger("click");
+    await flushPromises();
+
+    const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
+    expect(detail.querySelector("[data-test='model-modality-badge']")?.textContent).toBe("Image");
+    expect(detail.querySelector("[data-test='model-kind-badge']")?.textContent).toBe("LoRA");
+    expect(detail.querySelector("[data-test='model-nsfw-badge']")?.textContent?.trim()).toBe(
+      "18+ NSFW",
+    );
+
+    const tiles = detail.querySelector("[data-test='mobile-catalog-detail-tiles']")!;
+    expect(tiles.textContent).toContain("LoRA weights");
+    expect(tiles.textContent).not.toContain("Checkpoint weights");
+
+    const metadata = detail.querySelector(".mobile-catalog-detail-meta")!;
+    expect(metadata.textContent).toContain("Source");
+    expect(metadata.textContent).toContain("Civitai");
+    expect(metadata.textContent).toContain("Downloads");
+    expect(metadata.textContent).toContain("12.3k");
+    expect(metadata.textContent).toContain("Likes");
+    expect(metadata.textContent).toContain("456");
+    expect(detail.textContent).toContain("A portrait adapter with controlled studio lighting.");
+  });
+
+  it("renders classification badges and Checkpoint weights/Footprint tiles in the detail sheet", async () => {
     fetchCatalogDetail.mockImplementation((id: string) =>
       Promise.resolve({
         ...entry("detail"),
@@ -1099,11 +1379,9 @@ describe("MobileCatalogView", () => {
     await flushPromises();
 
     const detail = document.querySelector<HTMLElement>("[data-test='mobile-catalog-detail']")!;
-    expect(detail.querySelector("[data-test='mobile-catalog-detail-badge']")?.textContent).toBe(
-      "image",
-    );
+    expect(detail.querySelector("[data-test='model-modality-badge']")?.textContent).toBe("Image");
     const tiles = detail.querySelector("[data-test='mobile-catalog-detail-tiles']")!;
-    expect(tiles.textContent).toContain("Checkpoint");
+    expect(tiles.textContent).toContain("Checkpoint weights");
     expect(tiles.textContent).toContain("Footprint");
     expect(tiles.textContent).toContain("8.0 GB");
   });

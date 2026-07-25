@@ -694,6 +694,11 @@ async fn list_models_carries_display_name_for_catalog_rows() {
         sub_family: None,
         kind: "checkpoint".into(),
         modality: "image".into(),
+        nsfw: Some(true),
+        description: Some("A cinematic SDXL checkpoint.".into()),
+        tags: vec!["cinematic".into()],
+        license: Some("creativeml-openrail-m".into()),
+        page_url: Some("https://civitai.com/models/1759168".into()),
         thumbnail_url: None,
         // Must match the fixture file's real size or the partial-download
         // guard in `primary_path_if_present` hides the row.
@@ -716,6 +721,10 @@ async fn list_models_carries_display_name_for_catalog_rows() {
         .find(|m| m["name"] == "cv:1759168")
         .expect("installed catalog checkpoint listed");
     assert_eq!(row["display_name"], "Juggernaut XL - Ragnarok");
+    assert_eq!(row["kind"], "checkpoint");
+    assert_eq!(row["modality"], "image");
+    assert_eq!(row["nsfw"], true);
+    assert_eq!(row["description"], "A cinematic SDXL checkpoint.");
 
     let manifest_row = models
         .iter()
@@ -750,6 +759,11 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
         sub_family: None,
         kind: "lora".into(),
         modality: "image".into(),
+        nsfw: None,
+        description: None,
+        tags: vec![],
+        license: None,
+        page_url: None,
         thumbnail_url: None,
         size_bytes: None,
         supported: true,
@@ -776,6 +790,10 @@ async fn installed_endpoint_returns_only_kind_filtered_sidecars() {
     assert_eq!(entries[0]["id"], "cv:1");
     assert_eq!(entries[0]["installed"], true);
     assert_eq!(entries[0]["trained_words"][0], "trigger-A");
+    assert!(
+        entries[0]["nsfw"].is_null(),
+        "a legacy sidecar without a safety classification must stay unknown"
+    );
 }
 
 #[tokio::test]
@@ -878,6 +896,11 @@ fn write_lora_sidecar(root: &std::path::Path, idx: usize, family: &str, written_
         sub_family: None,
         kind: "lora".into(),
         modality: "image".into(),
+        nsfw: None,
+        description: None,
+        tags: vec![],
+        license: None,
+        page_url: None,
         thumbnail_url: None,
         size_bytes: Some(1),
         supported: true,
@@ -910,6 +933,11 @@ async fn installed_endpoint_marks_uninstalled_when_primary_missing() {
         sub_family: None,
         kind: "lora".into(),
         modality: "image".into(),
+        nsfw: None,
+        description: None,
+        tags: vec![],
+        license: None,
+        page_url: None,
         thumbnail_url: None,
         size_bytes: None,
         supported: true,
@@ -1009,6 +1037,11 @@ fn sidecar_to_wire_shape_is_pinned() {
         sub_family: Some("dev".into()),
         kind: "lora".into(),
         modality: "image".into(),
+        nsfw: Some(true),
+        description: Some("A portrait style adapter.".into()),
+        tags: vec!["portrait".into(), "style".into()],
+        license: Some("creativeml-openrail-m".into()),
+        page_url: Some("https://civitai.com/models/99".into()),
         thumbnail_url: Some("https://example.com/t.png".into()),
         size_bytes: Some(123_456),
         supported: true,
@@ -1039,12 +1072,12 @@ fn sidecar_to_wire_shape_is_pinned() {
         "download_count": 0,
         "rating": null,
         "likes": 0,
-        "nsfw": false,
+        "nsfw": true,
         "thumbnail_url": "https://example.com/t.png",
-        "description": null,
-        "license": null,
+        "description": "A portrait style adapter.",
+        "license": "creativeml-openrail-m",
         "license_flags": null,
-        "tags": [],
+        "tags": ["portrait", "style"],
         "companions": [],
         "companion_details": [],
         "download_recipe": { "files": [], "needs_token": null },
@@ -1055,6 +1088,7 @@ fn sidecar_to_wire_shape_is_pinned() {
         "updated_at": null,
         "added_at": 1_700_000_000,
         "trained_words": ["trigger"],
+        "page_url": "https://civitai.com/models/99",
     });
     assert_eq!(got, expected);
 }

@@ -29,6 +29,33 @@ describe("InstalledModelRow", () => {
     expect(w.text()).toContain("12.3 GB");
   });
 
+  it("shows the inferred model type", () => {
+    const checkpoint = mount(InstalledModelRow, {
+      props: { model: makeModel() },
+    });
+    expect(checkpoint.get("[data-test=model-kind-badge]").text()).toBe(
+      "Checkpoint",
+    );
+
+    const upscaler = mount(InstalledModelRow, {
+      props: { model: makeModel({ family: "upscaler" }) },
+    });
+    expect(upscaler.get("[data-test=model-kind-badge]").text()).toBe(
+      "Upscaler",
+    );
+  });
+
+  it("honors additive kind and NSFW metadata from newer servers", () => {
+    const model = {
+      ...makeModel(),
+      kind: "lora",
+      nsfw: true,
+    } as ModelInfoExtended;
+    const w = mount(InstalledModelRow, { props: { model } });
+    expect(w.get("[data-test=model-kind-badge]").text()).toBe("LoRA");
+    expect(w.get("[data-test=model-nsfw-badge]").text()).toBe("18+ NSFW");
+  });
+
   it("shows the ★ loaded badge only when the model is loaded", () => {
     const loaded = mount(InstalledModelRow, {
       props: { model: makeModel({ is_loaded: true }) },

@@ -57,7 +57,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="models">
+  <div class="models min-w-0 w-full">
     <header class="models__header">
       <h1 class="models__title">Models</h1>
       <div class="models__spacer" />
@@ -165,6 +165,7 @@ onMounted(() => {
 
 <style scoped>
 .models {
+  box-sizing: border-box;
   max-width: 1400px;
   margin: 0 auto;
   padding: 22px 20px 120px;

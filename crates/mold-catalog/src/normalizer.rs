@@ -315,6 +315,11 @@ pub struct CivitaiItem {
     pub kind: String,
     #[serde(default)]
     pub nsfw: bool,
+    /// Civitai returns HTML here. Normalize it to bounded plain text before
+    /// it reaches any client so cards do not expose markup or ingest an
+    /// unbounded model-card essay.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub creator: Option<CivitaiCreator>,
     #[serde(default)]
@@ -345,6 +350,10 @@ pub struct CivitaiVersion {
     pub id: u64,
     #[serde(default)]
     pub name: Option<String>,
+    /// Version detail responses carry their own HTML description (usually a
+    /// changelog) even when the embedded parent model omits its description.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(rename = "baseModel")]
     pub base_model: String,
     #[serde(default, rename = "baseModelType")]
@@ -518,7 +527,16 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
             .images
             .first()
             .map(|image| civitai_thumbnail_url(&image.url)),
-        description: None,
+        description: item
+            .description
+            .as_deref()
+            .and_then(plain_text_description)
+            .or_else(|| {
+                version
+                    .description
+                    .as_deref()
+                    .and_then(plain_text_description)
+            }),
         license: None,
         license_flags: LicenseFlags::default(),
         tags: item.tags.clone(),
@@ -531,6 +549,91 @@ fn from_civitai_version(item: &CivitaiItem, version: &CivitaiVersion) -> Option<
         trained_words,
         page_url,
     })
+}
+
+const MAX_DESCRIPTION_CHARS: usize = 1_200;
+
+/// Convert Civitai's model-description HTML into compact display text without
+/// adding an HTML parser to the inference binary's dependency tree. Vue still
+/// escapes the returned string; this normalization is about readable content
+/// and bounded catalog payloads, not trusting the upstream markup.
+fn plain_text_description(raw: &str) -> Option<String> {
+    let mut without_tags = String::with_capacity(raw.len().min(MAX_DESCRIPTION_CHARS * 2));
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                without_tags.push(' ');
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                without_tags.push(' ');
+            }
+            _ if !in_tag => without_tags.push(ch),
+            _ => {}
+        }
+    }
+
+    let decoded = decode_html_entities(&without_tags);
+    let compact = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    if compact.chars().count() <= MAX_DESCRIPTION_CHARS {
+        return Some(compact);
+    }
+    let mut bounded = compact
+        .chars()
+        .take(MAX_DESCRIPTION_CHARS)
+        .collect::<String>();
+    bounded.push('…');
+    Some(bounded)
+}
+
+fn decode_html_entities(raw: &str) -> String {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(raw.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '&' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let end = ((index + 1)..chars.len().min(index + 14)).find(|&i| chars[i] == ';');
+        let Some(end) = end else {
+            out.push('&');
+            index += 1;
+            continue;
+        };
+        let entity = chars[index + 1..end].iter().collect::<String>();
+        let decoded = match entity.as_str() {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" => Some(' '),
+            value if value.starts_with("#x") || value.starts_with("#X") => {
+                u32::from_str_radix(&value[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            value if value.starts_with('#') => {
+                value[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        if let Some(ch) = decoded {
+            out.push(ch);
+            index = end + 1;
+        } else {
+            out.extend(chars[index..=end].iter());
+            index = end + 1;
+        }
+    }
+    out
 }
 
 fn civitai_entry_name(model_name: &str, version_name: Option<&str>) -> String {

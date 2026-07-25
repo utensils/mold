@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { apiJsonTo } from "../lib/api/client";
 import type { ModelEntry } from "../lib/api/types";
+import { mergeModelPresentationMetadata } from "../lib/models";
 import { isGenerationModel } from "./models";
 import { useHostsStore } from "./hosts";
 
@@ -47,8 +48,14 @@ export const useHostModelsStore = defineStore("hostModels", {
       for (const host of hosts.all) {
         for (const m of this.installedOn(host.id)) {
           const existing = byName.get(m.name);
-          if (existing) existing.hostIds.push(host.id);
-          else byName.set(m.name, { ...m, hostIds: [host.id] });
+          if (existing) {
+            byName.set(m.name, {
+              ...mergeModelPresentationMetadata(existing, m),
+              hostIds: [...new Set([...existing.hostIds, host.id])],
+            });
+          } else {
+            byName.set(m.name, { ...m, hostIds: [host.id] });
+          }
         }
       }
       return [...byName.values()];

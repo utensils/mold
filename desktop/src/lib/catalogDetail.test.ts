@@ -5,6 +5,7 @@ import {
   catalogActionLabel,
   downloadContentsTotalBytes,
   installedModelToEntry,
+  mergeCatalogSummaryDetail,
 } from "./catalogDetail";
 import type { CatalogEntry, ModelEntry } from "./api/types";
 
@@ -72,6 +73,53 @@ describe("installedModelToEntry", () => {
     expect(installedModelToEntry(installedModel()).display_name).toBeNull();
   });
 
+  it("preserves additive installed metadata and derives built-in utility kinds", () => {
+    expect(
+      installedModelToEntry(
+        installedModel({
+          family: "flux",
+          kind: "lora",
+          modality: "image",
+          nsfw: true,
+        }),
+      ),
+    ).toMatchObject({ kind: "lora", modality: "image", nsfw: true });
+    expect(installedModelToEntry(installedModel({ family: "real-esrgan" })).kind).toBe("upscaler");
+    expect(installedModelToEntry(installedModel({ family: "qwen3-expand" })).kind).toBe(
+      "prompt-expander",
+    );
+  });
+
+  it("preserves unknown safety metadata instead of classifying it as safe", () => {
+    expect(installedModelToEntry(installedModel({ nsfw: null })).nsfw).toBeNull();
+    expect(installedModelToEntry(installedModel({ nsfw: true })).nsfw).toBe(true);
+  });
+
+  it("suppresses a description that merely repeats the derived display title", () => {
+    const entry = installedModelToEntry(
+      installedModel({
+        name: "cv:1759168",
+        hf_repo: "",
+        display_name: "Juggernaut XL - Ragnarok",
+        description: "  Juggernaut XL - Ragnarok  ",
+      }),
+    );
+    expect(entry.display_name).toBe("Juggernaut XL - Ragnarok");
+    expect(entry.description).toBeNull();
+  });
+
+  it("suppresses the legacy installed name-by-author placeholder", () => {
+    const entry = installedModelToEntry(
+      installedModel({
+        name: "cv:1759168",
+        hf_repo: "",
+        display_name: "Juggernaut XL - Ragnarok",
+        description: "Juggernaut XL - Ragnarok by KandooAI",
+      }),
+    );
+    expect(entry.description).toBeNull();
+  });
+
   it("keeps the repo id encoded in hf: catalog install names", () => {
     expect(
       installedModelToEntry(installedModel({ name: "hf:org/thing", hf_repo: "" })),
@@ -86,6 +134,79 @@ describe("installedModelToEntry", () => {
     expect(
       installedModelToEntry(installedModel({ name: "my-finetune", hf_repo: "" })),
     ).toMatchObject({ source: "local", source_id: null, page_url: null });
+  });
+});
+
+describe("mergeCatalogSummaryDetail", () => {
+  it("keeps useful summary metadata when a detail response omits or defaults it", () => {
+    const summaryEntry = entry({
+      author: "Summary author",
+      description: "A useful summary description.",
+      license: "apache-2.0",
+      tags: ["portrait", "cinematic"],
+      trained_words: ["studio portrait"],
+      page_url: "https://huggingface.co/author/model",
+      thumbnail_url: "https://cdn.example/listing.webp",
+      download_count: 12_300,
+      likes: 456,
+      rating: 4.7,
+      installed: true,
+      nsfw: true,
+    });
+    const detailEntry = entry({
+      author: null,
+      description: " ",
+      license: null,
+      tags: [],
+      trained_words: [],
+      page_url: null,
+      thumbnail_url: null,
+      download_count: 0,
+      likes: 0,
+      rating: null,
+      installed: false,
+      nsfw: false,
+    });
+
+    expect(mergeCatalogSummaryDetail(summaryEntry, detailEntry)).toMatchObject({
+      author: "Summary author",
+      description: "A useful summary description.",
+      license: "apache-2.0",
+      tags: ["portrait", "cinematic"],
+      trained_words: ["studio portrait"],
+      page_url: "https://huggingface.co/author/model",
+      thumbnail_url: "https://cdn.example/listing.webp",
+      download_count: 12_300,
+      likes: 456,
+      rating: 4.7,
+      installed: true,
+      nsfw: true,
+    });
+  });
+
+  it("uses meaningful detail metadata while retaining the clicked summary thumbnail", () => {
+    const summaryEntry = entry({
+      author: "Summary author",
+      description: "Summary copy.",
+      tags: ["summary"],
+      thumbnail_url: "https://cdn.example/listing.webp",
+      download_count: 100,
+    });
+    const detailEntry = entry({
+      author: "Detail author",
+      description: "Detailed copy.",
+      tags: ["detail"],
+      thumbnail_url: "https://cdn.example/detail.webp",
+      download_count: 200,
+    });
+
+    expect(mergeCatalogSummaryDetail(summaryEntry, detailEntry)).toMatchObject({
+      author: "Detail author",
+      description: "Detailed copy.",
+      tags: ["detail"],
+      thumbnail_url: "https://cdn.example/listing.webp",
+      download_count: 200,
+    });
   });
 });
 

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import {
@@ -41,6 +43,15 @@ const glyphSource = computed<ModelSource>(() =>
 );
 
 const pageUrl = computed(() => catalogPageUrl(props.entry));
+const displayName = computed(() => props.entry.display_name ?? props.entry.name);
+const kindValue = computed(() => modelKindValue(props.entry));
+const description = computed(() => props.entry.description?.trim() || null);
+const accessibilityLabel = computed(
+  () =>
+    `${displayName.value} — ${modelKindLabel(kindValue.value)}${
+      props.entry.nsfw ? ", 18+ NSFW" : ""
+    } — view details`,
+);
 const thumbnailUrl = computed(() =>
   props.entry.thumbnail_url ? catalogThumbnailUrl(props.entry.thumbnail_url) : null,
 );
@@ -97,7 +108,7 @@ function onCardKeydown(event: KeyboardEvent): void {
     tabindex="0"
     data-test="catalog-card"
     data-layout="grid"
-    :aria-label="`${entry.display_name ?? entry.name} — view details`"
+    :aria-label="accessibilityLabel"
     @click="emit('open', entry)"
     @keydown.enter="onCardKeydown"
     @keydown.space="onCardKeydown"
@@ -168,19 +179,29 @@ function onCardKeydown(event: KeyboardEvent): void {
         </span>
       </div>
 
-      <div v-if="entry.author || counts || entry.nsfw" class="flex items-center gap-2">
-        <span
-          v-if="entry.nsfw"
-          class="data-mono shrink-0 rounded-control border border-stop/50 px-1 text-caption text-stop"
-          data-test="nsfw-tag"
-        >
-          NSFW
-        </span>
+      <ModelMetadataBadges
+        :kind="entry.kind"
+        :family="entry.family"
+        :modality="entry.modality ?? null"
+        :nsfw="entry.nsfw"
+        :data-test="entry.nsfw ? 'nsfw-tag' : undefined"
+      />
+
+      <div v-if="entry.author || counts" class="flex items-center gap-2">
         <span v-if="entry.author" class="truncate text-caption text-ink-3">{{ entry.author }}</span>
         <span v-if="counts" class="data-mono ml-auto shrink-0 text-caption text-ink-3">
           {{ counts }}
         </span>
       </div>
+
+      <p
+        v-if="description"
+        class="line-clamp-2 text-caption leading-snug text-ink-2"
+        data-test="catalog-description"
+        :title="description"
+      >
+        {{ description }}
+      </p>
 
       <div v-if="hosts?.length" class="flex flex-wrap items-center gap-1">
         <span

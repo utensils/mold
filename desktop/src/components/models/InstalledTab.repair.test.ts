@@ -74,6 +74,30 @@ beforeEach(() => {
 });
 
 describe("InstalledTab model info drawer", () => {
+  it("labels installed rows with model kind and explicit mature classification", () => {
+    setActivePinia(createPinia());
+    const wrapper = mount(InstalledTab, {
+      props: {
+        entries: [
+          model({
+            name: "cv:8001",
+            family: "flux",
+            display_name: "Portrait adapter",
+            kind: "lora",
+            modality: "image",
+            nsfw: true,
+          }),
+        ],
+      },
+    });
+
+    expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
+    expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
+    expect(wrapper.get('[data-test="model-table-row"]').attributes("aria-label")).toContain(
+      "LoRA, 18+ NSFW",
+    );
+  });
+
   it("opens the shared detail drawer with the component listing from the owning host", async () => {
     const wrapper = await mountWithComponents([
       component({ name: "transformer", kind: "transformer", present: true }),

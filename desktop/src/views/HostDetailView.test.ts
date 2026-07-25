@@ -73,7 +73,11 @@ interface WireQueueEntry {
   metadata?: Record<string, unknown>;
 }
 
-function installApi(status: Partial<ServerStatus> = {}, queueEntries: WireQueueEntry[] = []) {
+function installApi(
+  status: Partial<ServerStatus> = {},
+  queueEntries: WireQueueEntry[] = [],
+  models: ModelEntry[] = [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
+) {
   apiJsonTo.mockImplementation((_target: unknown, path: string) => {
     if (path === "/api/status") {
       return Promise.resolve({
@@ -83,8 +87,7 @@ function installApi(status: Partial<ServerStatus> = {}, queueEntries: WireQueueE
         ...status,
       });
     }
-    if (path === "/api/models")
-      return Promise.resolve([model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")]);
+    if (path === "/api/models") return Promise.resolve(models);
     if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
     if (path === "/api/capabilities")
       return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
@@ -110,7 +113,10 @@ function model(name: string, family: string): ModelEntry {
 
 let router: Router;
 
-async function mountView(path = `/hosts/${REMOTE_ID}`) {
+async function mountView(
+  path = `/hosts/${REMOTE_ID}`,
+  entries: ModelEntry[] = [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
+) {
   router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -153,7 +159,7 @@ async function mountView(path = `/hosts/${REMOTE_ID}`) {
   // fetchedAt now → the view's hostModels.refresh() skips these (not stale).
   const hostModels = useHostModelsStore();
   hostModels.byHost[REMOTE_ID] = {
-    entries: [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
+    entries,
     fetchedAt: Date.now(),
     error: null,
   };
@@ -424,6 +430,25 @@ describe("HostDetailView models", () => {
     expect(rows[0]!.text()).toContain("flux-dev:q8");
     expect(rows[0]!.text()).toContain("flux");
     expect(rows[1]!.text()).toContain("z-image:q8");
+  });
+
+  it("repeats model kind and mature-content classification in the host inventory", async () => {
+    const matureLora = {
+      ...model("cv:8001", "flux2"),
+      display_name: "After Dark Portrait Adapter",
+      kind: "lora",
+      modality: "image",
+      nsfw: true,
+    };
+    installApi({}, [], [matureLora]);
+    const wrapper = await mountView(`/hosts/${REMOTE_ID}`, [matureLora]);
+    const row = wrapper.get("[data-test='model-row']");
+
+    expect(row.text()).toContain("LoRA");
+    expect(row.text()).toContain("18+ NSFW");
+    expect(row.get("[data-test='model-table-row']").attributes("aria-label")).toContain(
+      "LoRA, 18+ NSFW",
+    );
   });
 
   it("opens the shared model detail drawer from a model row", async () => {

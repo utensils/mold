@@ -650,6 +650,7 @@ async fn cache_keys_on_sort_so_sorts_do_not_cross_contaminate() {
 const CV_VERSION_DETAIL: &str = r#"{
     "id": 8001,
     "name": "v1",
+    "description": "<p>Portrait adapter &amp; lighting guide.</p>",
     "baseModel": "Flux.1 D",
     "baseModelType": "Standard",
     "trainedWords": ["mold trigger"],
@@ -690,6 +691,10 @@ async fn fetch_civitai_version_normalizes_single_id() {
     assert_eq!(entry.kind, Kind::Lora);
     assert_eq!(entry.family, Family::Flux);
     assert_eq!(entry.trained_words, vec!["mold trigger".to_string()]);
+    assert_eq!(
+        entry.description.as_deref(),
+        Some("Portrait adapter & lighting guide.")
+    );
     // Recipe carries one safetensors file with the right URL.
     assert_eq!(entry.download_recipe.files.len(), 1);
     assert_eq!(

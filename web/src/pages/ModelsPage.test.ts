@@ -69,6 +69,12 @@ beforeEach(() => {
 });
 
 describe("ModelsPage — Models workspace", () => {
+  it("lets the workspace shrink to the mobile viewport", () => {
+    const w = mountPage();
+    expect(w.get(".models").classes()).toContain("min-w-0");
+    expect(w.get(".models").classes()).toContain("w-full");
+  });
+
   it("refreshes installed models and the catalog on mount", () => {
     mountPage();
     expect(mock.refreshInstalled).toHaveBeenCalled();

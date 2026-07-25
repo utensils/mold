@@ -59,6 +59,40 @@ describe("CatalogCard", () => {
     expect(wrapper.get('[data-test="catalog-card"]').classes()).toContain("catalog-card-contained");
   });
 
+  it("labels the model kind and mature content, includes both in the accessible name", async () => {
+    const wrapper = mount(CatalogCard, {
+      props: {
+        entry: entry({
+          nsfw: true,
+          description: "  A portrait-focused style adapter.  ",
+        }),
+        pulling: false,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
+    expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
+    expect(wrapper.get('[data-test="catalog-description"]').text()).toBe(
+      "A portrait-focused style adapter.",
+    );
+    expect(wrapper.get('[data-test="catalog-description"]').classes()).toContain("line-clamp-2");
+    expect(wrapper.get('[data-test="catalog-card"]').attributes("aria-label")).toContain("LoRA");
+    expect(wrapper.get('[data-test="catalog-card"]').attributes("aria-label")).toContain(
+      "18+ NSFW",
+    );
+  });
+
+  it("omits blank descriptions and the mature-content badge for safe entries", async () => {
+    const wrapper = mount(CatalogCard, {
+      props: { entry: entry({ description: "   ", nsfw: false }), pulling: false },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="catalog-description"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="model-nsfw-badge"]').exists()).toBe(false);
+  });
+
   it("replaces a failed thumbnail with the family placeholder", async () => {
     const wrapper = mount(CatalogCard, { props: { entry: entry(), pulling: false } });
     await flushPromises();

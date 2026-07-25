@@ -235,6 +235,12 @@ export interface ModelInfoExtended extends ModelDefaults {
    * `cv:<id>` / `hf:<repo>` identifier. Additive — absent on older servers
    * and on manifest models. Display only: every API call keeps `name`. */
   display_name?: string | null;
+  /** Installed-catalog classification; absent on older servers and manifest rows. */
+  kind?: string | null;
+  /** Installed-catalog modality (`image` / `video`); absent when unknown. */
+  modality?: string | null;
+  /** Explicit mature-content classification; absent means unknown. */
+  nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
 }
@@ -795,7 +801,8 @@ export interface CatalogEntryWire {
   download_count: number;
   rating: number | null;
   likes: number;
-  nsfw: boolean;
+  /** `null` means an older installed sidecar did not classify the model. */
+  nsfw: boolean | null;
   thumbnail_url: string | null;
   description: string | null;
   license: string | null;

@@ -52,6 +52,19 @@ describe("CatalogTableRow", () => {
     expect(wrapper.text()).toContain("↓ 4.2k · ♥ 88");
   });
 
+  it("shows a friendly kind and explicit mature-content badge in its accessible name", async () => {
+    const wrapper = mount(CatalogTableRow, {
+      props: { entry: entry({ nsfw: true }), pulling: false },
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
+    expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
+    const row = wrapper.get("[data-test='catalog-table-row']");
+    expect(row.attributes("aria-label")).toContain("LoRA");
+    expect(row.attributes("aria-label")).toContain("18+ NSFW");
+  });
+
   it("shows SIZE and FETCH as the two size lines once resolved", async () => {
     const wrapper = mount(CatalogTableRow, {
       props: {

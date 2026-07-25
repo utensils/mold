@@ -37,12 +37,83 @@ const baseEntry: CatalogEntryWire = {
 };
 
 describe("CatalogCard (discover)", () => {
-  it("renders kind badge, name, and family · size", () => {
+  it("renders a friendly kind badge, name, and family · size", () => {
     const w = mount(CatalogCard, { props: { entry: baseEntry } });
-    expect(w.text()).toContain("checkpoint");
+    expect(w.get("[data-test=model-kind-badge]").text()).toBe("Checkpoint");
     expect(w.text()).toContain("Alpha");
     expect(w.text()).toContain("flux");
     expect(w.text()).toContain("6.0 GB");
+  });
+
+  it.each([
+    ["checkpoint", "Checkpoint"],
+    ["lora", "LoRA"],
+    ["vae", "VAE"],
+    ["text-encoder", "Text encoder"],
+    ["tokenizer", "Tokenizer"],
+    ["clip", "CLIP"],
+    ["control-net", "ControlNet"],
+  ] as const)("labels %s entries as %s", (kind, label) => {
+    const w = mount(CatalogCard, {
+      props: { entry: { ...baseEntry, kind } },
+    });
+    expect(w.get("[data-test=model-kind-badge]").text()).toBe(label);
+  });
+
+  it("shows a literal 18+ NSFW badge and includes it in accessible names", () => {
+    const entry: CatalogEntryWire = {
+      ...baseEntry,
+      kind: "lora",
+      nsfw: true,
+    };
+    const w = mount(CatalogCard, { props: { entry } });
+
+    expect(w.get("[data-test=model-nsfw-badge]").text()).toBe("18+ NSFW");
+    expect(w.get("[data-test=discover-card]").attributes("aria-label")).toMatch(
+      /Alpha.*LoRA.*18\+ NSFW/i,
+    );
+    expect(w.get("[data-test=card-open]").attributes("aria-label")).toMatch(
+      /Alpha.*LoRA.*18\+ NSFW/i,
+    );
+    expect(w.get("[data-test=details-btn]").attributes("aria-label")).toMatch(
+      /Alpha.*LoRA.*18\+ NSFW/i,
+    );
+  });
+
+  it("omits the mature-content badge for safe entries", () => {
+    const w = mount(CatalogCard, { props: { entry: baseEntry } });
+    expect(w.find("[data-test=model-nsfw-badge]").exists()).toBe(false);
+  });
+
+  it.each(["grid", "list"] as const)(
+    "shows a nonblank description cleanly in %s layout",
+    (layout) => {
+      const w = mount(CatalogCard, {
+        props: {
+          entry: {
+            ...baseEntry,
+            description:
+              "A cinematic portrait model with carefully tuned skin tones.",
+          },
+          layout,
+        },
+      });
+      expect(w.get("[data-test=card-description]").text()).toContain(
+        "A cinematic portrait model",
+      );
+      expect(w.get("[data-test=discover-card]").attributes("data-layout")).toBe(
+        layout,
+      );
+    },
+  );
+
+  it("omits empty and whitespace-only descriptions", () => {
+    const absent = mount(CatalogCard, { props: { entry: baseEntry } });
+    const blank = mount(CatalogCard, {
+      props: { entry: { ...baseEntry, description: "   " } },
+    });
+    expect(absent.find("[data-test=card-description]").exists()).toBe(false);
+    expect(blank.find("[data-test=card-description]").exists()).toBe(false);
   });
 
   it("Pull button emits pull", async () => {
