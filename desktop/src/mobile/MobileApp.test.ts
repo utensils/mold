@@ -2878,6 +2878,23 @@ describe("MobileApp settings", () => {
   });
 });
 
+describe("MobileApp primary navigation", () => {
+  it("starts each tab at the top instead of carrying another tab's scroll position", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+
+    const content = wrapper.get(".mobile-content").element as HTMLElement;
+    content.scrollTop = 420;
+
+    await wrapper.get("[data-test='mobile-tab-catalog']").trigger("click");
+    await flushPromises();
+
+    expect(content.scrollTop).toBe(0);
+  });
+});
+
 describe("MobileApp gallery", () => {
   it("defers completion refreshes until an open viewer closes", async () => {
     wrapper = mountMobileApp();
