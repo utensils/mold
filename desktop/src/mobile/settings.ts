@@ -6,11 +6,13 @@ export const MOBILE_SETTINGS_STORAGE_KEY = "mold.mobile.settings.v1";
 export interface MobileSettings {
   theme: Theme;
   themeFamily: ThemeFamily;
+  autoSavePhotos: boolean;
 }
 
 export const DEFAULT_MOBILE_SETTINGS: Readonly<MobileSettings> = {
   theme: "system",
   themeFamily: "safelight",
+  autoSavePhotos: true,
 };
 
 type SettingsStorage = Pick<Storage, "getItem" | "setItem">;
@@ -61,6 +63,10 @@ export function loadMobileSettings(
       themeFamily: isThemeFamily(parsed.themeFamily)
         ? parsed.themeFamily
         : DEFAULT_MOBILE_SETTINGS.themeFamily,
+      autoSavePhotos:
+        typeof parsed.autoSavePhotos === "boolean"
+          ? parsed.autoSavePhotos
+          : DEFAULT_MOBILE_SETTINGS.autoSavePhotos,
     };
   } catch {
     return { ...DEFAULT_MOBILE_SETTINGS };
@@ -116,6 +122,8 @@ export function updateMobileSettings(
   const next: MobileSettings = {
     theme: isTheme(patch.theme) ? patch.theme : current.theme,
     themeFamily: isThemeFamily(patch.themeFamily) ? patch.themeFamily : current.themeFamily,
+    autoSavePhotos:
+      typeof patch.autoSavePhotos === "boolean" ? patch.autoSavePhotos : current.autoSavePhotos,
   };
   saveMobileSettings(next, storage);
   applyMobileSettings(next, nativeInvoke);

@@ -951,7 +951,10 @@ without changing Create, and immediately shows Connecting → Starting → Queue
 
 Settings persists the Mold Studio families (Mold/Safelight) × System/Dark/Light, defaults fresh installs
 to Safelight + System while retaining valid saved choices, and synchronizes
-UIKit's appearance/status bar. Preserve safe areas, 44pt controls, 16px editable text,
+UIKit's appearance/status bar. Its default-on Photos option fetches completed
+stills from the authenticated host gallery and saves them through the native
+bridge; post-generation upscales save original and upscaled images, while
+videos remain remote. Preserve safe areas, 44pt controls, 16px editable text,
 disabled document zoom and overscroll bounce, plus the Library's scoped swipe.
 The TestFlight workflow runs after eligible successful iOS `main` CI (no cron),
 uploads a build eligible for internal groups and external Beta App Review,

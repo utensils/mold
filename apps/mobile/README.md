@@ -88,7 +88,10 @@ pushed screen opened from the header.
   unload, open-in-Models, and forget actions.
 - **Settings** persists the Mold Studio theme families (Mold or Safelight) and
   System, Dark, or Light appearance. Fresh installs start with Safelight +
-  System; valid saved choices remain authoritative. Settings also links to host
+  System; valid saved choices remain authoritative. Its default-on Photos
+  preference automatically fetches each completed still from its authenticated
+  host gallery and saves it through UIKit; post-generation upscales save both
+  images, while videos remain in Mold Library. Settings also links to host
   management and shows the app version, remote-only processing policy, and
   TestFlight update channel. About opens the public privacy policy at
   `https://utensils.io/mold/privacy` through the native external-browser opener.
@@ -132,7 +135,7 @@ WebView local storage contains non-secret mobile state:
 
 - `mold.mobile.hosts.v1` — host metadata with API keys removed
 - `mold.mobile.selected-host.v1` — selected generation host
-- `mold.mobile.settings.v1` — appearance and color family
+- `mold.mobile.settings.v1` — appearance, color family, and Photos auto-save preference
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
 - `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded
   per-host latest-print timestamps and the first-visit marker for New badges

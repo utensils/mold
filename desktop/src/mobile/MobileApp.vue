@@ -589,6 +589,26 @@ function completionSummary(result: CompleteEvent): string {
   return `${timing}seed ${result.seed_used}`;
 }
 
+async function saveCompletedStillToPhotos(result: CompleteEvent, target: ApiTarget): Promise<void> {
+  if (!mobileSettings.autoSavePhotos) return;
+  const filenames = [result.original_filename, result.filename].filter(
+    (filename, index, all): filename is string =>
+      !!filename && isStillImageFile(filename) && all.indexOf(filename) === index,
+  );
+  const saves = filenames.map(async (filename) => {
+    const response = await apiFetchTo(target, galleryMediaPath(filename, "host"));
+    await invoke("save_image_to_photos", {
+      dataB64: await blobToBase64(await response.blob()),
+    });
+  });
+  const settled = await Promise.allSettled(saves);
+  for (const save of settled) {
+    if (save.status === "rejected") {
+      console.warn("Unable to auto-save generated image to Photos", save.reason);
+    }
+  }
+}
+
 function routeForMobileHost(host: MobileHost): HostRoute {
   return {
     hostId: host.id,
@@ -1704,6 +1724,9 @@ async function generate(): Promise<void> {
     const completed = jobs.filter(
       (candidate) => candidate.status === "complete" && candidate.result,
     );
+    for (const candidate of completed) {
+      void saveCompletedStillToPhotos(candidate.result!, route.target);
+    }
     const latestCompleted = completed.at(-1);
     const unconfirmedCancellation = jobs.find((candidate) =>
       candidate.error?.includes("remote cancellation was not confirmed"),

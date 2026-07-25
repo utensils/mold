@@ -99,6 +99,32 @@ function openPrivacyPolicy(): void {
       </fieldset>
     </section>
 
+    <section class="mobile-settings-section" aria-labelledby="mobile-settings-photos-title">
+      <div class="mobile-settings-section-copy">
+        <h2 id="mobile-settings-photos-title">Photos</h2>
+        <p>Keep new generated images in your iPhone photo library as well as Mold Library.</p>
+      </div>
+      <fieldset class="mobile-settings-fieldset">
+        <legend>Generated images</legend>
+        <label class="mobile-photo-setting">
+          <span>
+            <strong>Save to Photos automatically</strong>
+            <small>Videos remain in Mold Library and can be streamed from their host.</small>
+          </span>
+          <input
+            name="mobile-auto-save-photos"
+            type="checkbox"
+            :checked="settings.autoSavePhotos"
+            @change="
+              emit('update', {
+                autoSavePhotos: ($event.target as HTMLInputElement).checked,
+              })
+            "
+          />
+        </label>
+      </fieldset>
+    </section>
+
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-hosts-title">
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-hosts-title">Remote hosts</h2>

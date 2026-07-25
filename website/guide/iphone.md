@@ -135,6 +135,11 @@ Tap a tile to open the full-screen viewer:
 - use **Use as prompt** to restore recorded generation settings, or **Use as
   source** to attach a still to the next compatible generation.
 
+New installs also save completed stills to the iPhone Photos library
+automatically. Disable **Settings → Photos → Save to Photos automatically** if
+you want outputs to remain only in Mold Library. Post-generation upscaling
+saves both the original and upscaled image; videos remain on their Mold host.
+
 Prints added since the prior Library visit carry a **New** badge. Images enlarged
 by post-generation or standalone upscaling carry an **Upscaled** badge on both
 iPhone and desktop.
@@ -197,13 +202,17 @@ cover:
 
 - **Color family:** the Mold Studio theme families, Mold or Safelight
 - **Appearance:** System, Dark, or Light
+- **Photos:** automatically save newly generated stills to the iPhone photo
+  library (on by default)
 - **Remote hosts:** saved-host count and a shortcut to manage them
 - **About:** app version, remote-only processing, TestFlight updates, and equal
   project-owner credit for core contributors James Brink and Jeffrey Dilley,
   plus an external link to the [Mold privacy policy](/privacy)
 
-Fresh installs start with the Safelight color family and System appearance.
-Existing users keep any valid Mold or Safelight choice they already saved.
+Fresh installs start with the Safelight color family, System appearance, and
+Photos auto-save enabled. Existing users keep any valid saved choices, with
+auto-save enabled when upgrading from a settings record that predates the
+option.
 
 The appearance choice updates both the WebView and native iOS system chrome so
 status-bar content remains readable. Themes change the app chrome but never

@@ -2056,6 +2056,136 @@ describe("MobileApp generation queue", () => {
     );
   });
 
+  it("auto-saves completed stills to Photos from the authenticated host gallery", async () => {
+    apiFetchTo.mockResolvedValueOnce({
+      blob: () => Promise.resolve(new Blob(["generated-image"], { type: "image/png" })),
+    } as Response);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("save this print");
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        filename: "saved print.png",
+        width: 768,
+        height: 512,
+        seed_used: 42,
+        generation_time_ms: 1_250,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved%20print.png");
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
+      dataB64: btoa("generated-image"),
+    });
+  });
+
+  it("auto-saves both post-upscale stills but never buffers a completed video", async () => {
+    apiFetchTo
+      .mockResolvedValueOnce({
+        blob: () => Promise.resolve(new Blob(["original-image"], { type: "image/png" })),
+      } as Response)
+      .mockResolvedValueOnce({
+        blob: () => Promise.resolve(new Blob(["upscaled-image"], { type: "image/png" })),
+      } as Response);
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await submitPrompt("save both versions");
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        original_filename: "saved-original.png",
+        filename: "saved-upscaled.png",
+        width: 1536,
+        height: 1024,
+        original_width: 768,
+        original_height: 512,
+        seed_used: 42,
+        generation_time_ms: 1_250,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-original.png");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/saved-upscaled.png");
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
+      dataB64: btoa("original-image"),
+    });
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
+      dataB64: btoa("upscaled-image"),
+    });
+
+    apiFetchTo.mockClear();
+    invoke.mockClear();
+    await submitPrompt("leave this video remote");
+    openStreams[1]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "mp4",
+        filename: "saved-video.mp4",
+        width: 768,
+        height: 512,
+        seed_used: 43,
+        generation_time_ms: 1_500,
+        model: model.name,
+        video_frames: 121,
+        video_fps: 30,
+      }),
+    );
+    openStreams[1]!.resolve();
+    await flushPromises();
+
+    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/gallery/image/saved-video.mp4");
+    expect(invoke).not.toHaveBeenCalledWith("save_image_to_photos", expect.anything());
+  });
+
+  it("does not fetch or save completed stills when Photos auto-save is off", async () => {
+    localStorage.setItem(
+      "mold.mobile.settings.v1",
+      JSON.stringify({
+        theme: "system",
+        themeFamily: "safelight",
+        autoSavePhotos: false,
+      }),
+    );
+    wrapper = mountMobileApp();
+    await flushPromises();
+    apiFetchTo.mockClear();
+    invoke.mockClear();
+    await submitPrompt("keep this remote");
+
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: "",
+        format: "png",
+        filename: "remote only.png",
+        width: 768,
+        height: 512,
+        seed_used: 42,
+        generation_time_ms: 1_250,
+        model: model.name,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    expect(apiFetchTo).not.toHaveBeenCalledWith(target, "/api/gallery/image/remote%20only.png");
+    expect(invoke).not.toHaveBeenCalledWith("save_image_to_photos", expect.anything());
+  });
+
   it("promotes the last of simultaneous completions before pruning older results", async () => {
     wrapper = mountMobileApp();
     await flushPromises();
@@ -2860,6 +2990,7 @@ describe("MobileApp settings", () => {
     expect(JSON.parse(localStorage.getItem("mold.mobile.settings.v1") ?? "{}")).toEqual({
       theme: "light",
       themeFamily: "safelight",
+      autoSavePhotos: true,
     });
 
     await wrapper.get('input[name="mobile-theme-appearance"][value="system"]').setValue(true);
