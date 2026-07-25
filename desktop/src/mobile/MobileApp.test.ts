@@ -1782,9 +1782,7 @@ describe("MobileApp generation queue", () => {
     wrapper.unmount();
     wrapper = null;
 
-    expect(unregister).toHaveBeenCalledWith(
-      "mobile-generate-00000000-0000-4000-8000-000000000000",
-    );
+    expect(unregister).toHaveBeenCalledWith("mobile-generate-00000000-0000-4000-8000-000000000000");
   });
 
   it("revokes a frozen pull and prevents a deferred retry from acting after unmount", async () => {
