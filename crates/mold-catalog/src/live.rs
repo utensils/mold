@@ -1323,6 +1323,7 @@ pub async fn fetch_civitai_version(
         name: detail.model.name,
         kind: detail.model.kind,
         nsfw: detail.model.nsfw,
+        description: None,
         creator: detail.model.creator,
         stats: detail.model.stats,
         tags: detail.model.tags,
@@ -2214,6 +2215,7 @@ mod tests {
     const VERSION_DETAIL_BODY: &str = r#"{
         "id": 8001,
         "name": "v1",
+        "description": "<p>Version notes &amp; guidance.</p>",
         "baseModel": "Flux.1 D",
         "baseModelType": "Standard",
         "files": [],
@@ -2231,6 +2233,10 @@ mod tests {
         let detail: CivitaiVersionDetail = serde_json::from_str(&body).expect("with modelId");
         assert_eq!(detail.model_id, Some(9001));
         assert_eq!(detail.version.id, 8001);
+        assert_eq!(
+            detail.version.description.as_deref(),
+            Some("<p>Version notes &amp; guidance.</p>")
+        );
     }
 
     #[test]

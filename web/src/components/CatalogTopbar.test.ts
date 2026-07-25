@@ -95,6 +95,13 @@ describe("CatalogTopbar", () => {
     expect(w.text()).toMatch(/Tokenizers/);
   });
 
+  it("bounds the long kind filter and lets it scroll on narrow viewports", () => {
+    const w = mount(CatalogTopbar);
+    const kinds = w.get('nav[aria-label="Kind filter"]');
+    expect(kinds.classes()).toContain("max-w-full");
+    expect(kinds.classes()).toContain("overflow-x-auto");
+  });
+
   it("clicking LoRAs chip filters catalog by kind=lora", async () => {
     const w = mount(CatalogTopbar);
     const loraBtn = w.findAll("button").find((b) => b.text() === "LoRAs");

@@ -41,7 +41,7 @@ import { useModelStore } from "../stores/models";
 import { useUiStore } from "../stores/ui";
 import type { DownloadJob } from "../lib/api/types";
 
-function model(name: string, family: string): ModelEntry {
+function model(name: string, family: string, overrides: Partial<ModelEntry> = {}): ModelEntry {
   return {
     name,
     family,
@@ -55,6 +55,7 @@ function model(name: string, family: string): ModelEntry {
     description: "",
     downloaded: true,
     disk_usage_bytes: 10_000_000_000,
+    ...overrides,
   };
 }
 
@@ -235,6 +236,47 @@ describe("ModelsView downloads and remote hosts", () => {
       wrapper.findAll("[data-test='installed-host']").some((chip) => chip.text() === "hal9000"),
     ).toBe(true);
     expect(wrapper.find("[aria-label='Downloading qwen-image:q4 on hal9000']").exists()).toBe(true);
+  });
+
+  it("keeps local defaults while merging richer metadata from a duplicate remote model", async () => {
+    const wrapper = await mountView();
+    const local = useModelStore().all.find((entry) => entry.name === "flux-dev:q8")!;
+    local.description = "";
+    local.kind = null;
+    local.modality = null;
+    local.nsfw = null;
+    local.default_steps = 4;
+
+    useHostsStore().extras.push({
+      id: "hal9000-7680",
+      label: "hal9000",
+      url: "http://hal9000:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useHostModelsStore().byHost["hal9000-7680"] = {
+      entries: [
+        model("flux-dev:q8", "flux", {
+          description: "A mature portrait adapter.",
+          kind: "lora",
+          modality: "image",
+          nsfw: true,
+          default_steps: 40,
+        }),
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    await flushPromises();
+
+    const row = wrapper
+      .findAll("[data-test='model-table-row']")
+      .find((candidate) => candidate.text().includes("flux-dev:q8"));
+    expect(row).toBeDefined();
+    expect(row!.get("[data-test='model-kind-badge']").text()).toBe("LoRA");
+    expect(row!.get("[data-test='model-nsfw-badge']").text()).toBe("18+ NSFW");
   });
 
   it("resubscribes a ready host's download stream when its API key changes", async () => {

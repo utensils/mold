@@ -102,7 +102,9 @@ The global chrome reports when the serving engine is offline, and its ranked
 command palette covers workspace sub-surfaces as well as models and themes.
 Models refreshes Installed as pulls complete, exposes missing component status
 with exact Repair actions, and explains that loaded models must be unloaded
-before deletion.
+before deletion. Every model row identifies its type; mature entries use an
+explicit `18+ NSFW` badge, and details include available description, source,
+license, tags, format, and popularity metadata without inventing missing data.
 Settings exposes the serving engine's complete configuration and profile
 surface with search, per-key provenance, environment-override locks, typed
 editors, and individual reset controls; prompt-expansion preferences are
@@ -121,8 +123,10 @@ filters and pinned downloads in Discover, offers List/Grid catalog layouts, and
 lets you choose which host receives a download. Its Installed segment merges
 every connected host with host badges, while both that segment and each host
 detail page show host-scoped pull progress. Size labels
-separate checkpoint weights from the larger footprint including shared runtime
-components.
+name the actual model type (checkpoint, LoRA, VAE, encoder, and so on) and
+separate its weights from the larger footprint including shared runtime
+components. Type badges and explicit `18+ NSFW` labels remain consistent
+between List, Grid, and the detail drawer.
 Curated built-in variants take precedence over ambiguous multi-checkpoint
 Hugging Face repositories, so a pull targets one runnable model instead of an
 entire aggregate repository.

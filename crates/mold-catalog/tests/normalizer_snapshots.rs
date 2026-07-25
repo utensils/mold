@@ -82,6 +82,7 @@ fn civitai_search_expands_public_versions_and_skips_early_access() {
         "name": "Miraclein NSFW [Generation & Edit] [Flux2Klein]",
         "type": "Checkpoint",
         "nsfw": true,
+        "description": "<p>Photorealistic <strong>Flux.2</strong> checkpoint<br>with editing support &amp; tuned skin.</p>",
         "creator": { "username": "m" },
         "stats": { "downloadCount": 10, "favoriteCount": 2 },
         "tags": [],
@@ -137,6 +138,11 @@ fn civitai_search_expands_public_versions_and_skips_early_access() {
     let entries = from_civitai_search_entries(item);
 
     assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry.nsfw));
+    assert!(entries.iter().all(|entry| {
+        entry.description.as_deref()
+            == Some("Photorealistic Flux.2 checkpoint with editing support & tuned skin.")
+    }));
     assert_eq!(entries[0].id.as_str(), "cv:2940538");
     assert_eq!(
         entries[0].download_recipe.files[0].url,
@@ -147,6 +153,46 @@ fn civitai_search_expands_public_versions_and_skips_early_access() {
         entries[1].download_recipe.files[0].sha256.as_deref(),
         Some("BF16")
     );
+}
+
+#[test]
+fn civitai_empty_model_descriptions_fall_back_to_version_description() {
+    for model_description in ["", " \n\t ", "<p><br></p>"] {
+        let item: CivitaiItem = serde_json::from_value(serde_json::json!({
+            "id": 42,
+            "name": "Version-described model",
+            "type": "Checkpoint",
+            "nsfw": false,
+            "description": model_description,
+            "tags": [],
+            "modelVersions": [{
+                "id": 99,
+                "name": "v1",
+                "description": "<p>Version notes &amp; guidance.</p>",
+                "baseModel": "Flux.1 D",
+                "baseModelType": "Standard",
+                "files": [{
+                    "id": 7,
+                    "name": "model.safetensors",
+                    "type": "Model",
+                    "sizeKB": 100,
+                    "downloadCount": 0,
+                    "metadata": { "format": "SafeTensor" },
+                    "downloadUrl": "https://civitai.example/model",
+                    "hashes": {}
+                }],
+                "images": []
+            }]
+        }))
+        .expect("parse Civitai fixture");
+
+        let entry = from_civitai(item).expect("normalize Civitai fixture");
+        assert_eq!(
+            entry.description.as_deref(),
+            Some("Version notes & guidance."),
+            "model description {model_description:?} should not suppress version notes"
+        );
+    }
 }
 
 #[test]

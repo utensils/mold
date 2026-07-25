@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   catalogFetchCaption,
+  catalogIdentityKey,
   catalogPageUrl,
   catalogPullLabel,
   catalogSizeInfo,
@@ -83,6 +84,27 @@ describe("isCatalogId", () => {
     expect(isCatalogId("cv:8001")).toBe(true);
     expect(isCatalogId("hf:author/model")).toBe(true);
     expect(isCatalogId("flux-dev:q8")).toBe(false);
+  });
+});
+
+describe("catalogIdentityKey", () => {
+  it("uses source plus a non-empty upstream identity", () => {
+    expect(
+      catalogIdentityKey(entry({ id: "legacy-row", source: "hf", source_id: " author/model " })),
+    ).toBe("hf:author/model");
+  });
+
+  it("does not treat a human name or an empty source id as model identity", () => {
+    expect(
+      catalogIdentityKey(
+        entry({
+          id: "legacy-row",
+          source: "civitai",
+          source_id: " ",
+          name: "Shared human title",
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

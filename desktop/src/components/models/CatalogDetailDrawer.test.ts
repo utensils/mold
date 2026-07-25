@@ -125,6 +125,41 @@ describe("CatalogDetailDrawer", () => {
     expect(wrapper.get("[data-test='stat-checkpoint']").text()).toContain("12.0");
   });
 
+  it("keeps rich summary metadata when fetched detail fields are empty defaults", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({
+        author: null,
+        description: null,
+        license: null,
+        tags: [],
+        page_url: null,
+        download_count: 0,
+        likes: 0,
+        rating: null,
+      }),
+    );
+    const wrapper = await mountDrawer(
+      summary({
+        author: "Summary author",
+        description: "Useful summary copy.",
+        license: "apache-2.0",
+        tags: ["portrait", "cinematic"],
+        page_url: "https://civitai.com/models/42?modelVersionId=8001",
+        download_count: 12_300,
+        likes: 456,
+        rating: 4.7,
+      }),
+    );
+
+    expect(wrapper.text()).toContain("Summary author");
+    expect(wrapper.text()).toContain("Useful summary copy.");
+    expect(wrapper.text()).toContain("apache-2.0");
+    expect(wrapper.text()).toContain("portrait");
+    expect(wrapper.text()).toContain("12.3k");
+    expect(wrapper.get("[data-test='drawer-likes']").text()).toContain("456");
+    expect(wrapper.get("[data-test='drawer-page-link']").text()).toContain("View on Civitai");
+  });
+
   it("lists on-disk component state with a presence summary for installed entries", async () => {
     fetchModelComponents.mockResolvedValue({
       model: "cv:8001",
@@ -196,8 +231,32 @@ describe("CatalogDetailDrawer", () => {
 
   it("renders modality and file format from the detail", async () => {
     const wrapper = await mountDrawer(summary());
-    expect(wrapper.text()).toContain("image");
+    expect(wrapper.get('[data-test="model-modality-badge"]').text()).toBe("Image");
     expect(wrapper.text()).toContain("safetensors");
+  });
+
+  it("keeps summary NSFW classification when detail enrichment reports false", async () => {
+    fetchCatalogDetail.mockResolvedValue(
+      detail({
+        kind: "lora",
+        modality: "image",
+        nsfw: false,
+        likes: 321,
+        trained_words: ["moody portrait"],
+        page_url: "https://civitai.com/models/42?modelVersionId=8001",
+        updated_at: 1_735_732_800,
+      }),
+    );
+    const wrapper = await mountDrawer(summary({ kind: "lora", nsfw: true }));
+
+    expect(wrapper.get('[data-test="model-modality-badge"]').text()).toBe("Image");
+    expect(wrapper.get('[data-test="model-kind-badge"]').text()).toBe("LoRA");
+    expect(wrapper.get('[data-test="model-nsfw-badge"]').text()).toBe("18+ NSFW");
+    expect(wrapper.get('[data-test="drawer-stat-tiles"]').text()).toContain("LoRA weights");
+    expect(wrapper.get('[data-test="drawer-likes"]').text()).toContain("321");
+    expect(wrapper.get('[data-test="drawer-trained-words"]').text()).toContain("moody portrait");
+    expect(wrapper.get('[data-test="drawer-page-link"]').text()).toContain("View on Civitai");
+    expect(wrapper.get('[data-test="drawer-updated"]').text()).toContain("2025");
   });
 
   it("itemizes download contents with per-file sizes and the computed total", async () => {
@@ -290,7 +349,7 @@ describe("CatalogDetailDrawer", () => {
 
   it("renders a media badge, source, and the checkpoint/footprint stat tiles", async () => {
     const wrapper = await mountDrawer(summary());
-    expect(wrapper.get("[data-test='drawer-media-badge']").text()).toBe("image");
+    expect(wrapper.get("[data-test='model-modality-badge']").text()).toBe("Image");
     expect(wrapper.get("[data-test='drawer-source']").text()).toBe("Civitai");
 
     const tiles = wrapper.get("[data-test='drawer-stat-tiles']");

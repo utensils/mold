@@ -179,7 +179,7 @@ describe("ModelDetailDrawer", () => {
       expect(w.text()).toContain("apache-2.0");
     });
 
-    it("renders SIZE checkpoint + FETCH footprint stat tiles", () => {
+    it("renders model weights + full footprint stat tiles", () => {
       mockDetail.value = catalogDetail(
         makeEntry({
           size_bytes: 6_000_000_000,
@@ -211,10 +211,22 @@ describe("ModelDetailDrawer", () => {
         }),
       );
       const w = mount(ModelDetailDrawer);
-      // Checkpoint weights = SIZE (weights only).
-      expect(w.find("[data-test=tile-checkpoint]").text()).toBe("6.0 GB");
+      // Model weights = SIZE (weights only).
+      expect(w.find("[data-test=tile-model-weights]").text()).toBe("6.0 GB");
+      expect(w.get("[data-test=tile-model-weights-label]").text()).toBe(
+        "Checkpoint weights",
+      );
       // Full footprint = FETCH (weights + companions).
       expect(w.find("[data-test=tile-footprint]").text()).toBe("24.2 GB");
+    });
+
+    it("uses the model kind in the weights heading", () => {
+      mockDetail.value = catalogDetail(makeEntry({ kind: "lora" }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=tile-model-weights-label]").text()).toBe(
+        "LoRA weights",
+      );
+      expect(w.text()).not.toContain("Checkpoint weights");
     });
 
     it("renders companion component chips", () => {
@@ -320,7 +332,34 @@ describe("ModelDetailDrawer", () => {
   });
 
   describe("catalog metadata", () => {
-    it("renders downloads, likes, rating, kind, format and updated date", () => {
+    it("prominently classifies modality, kind, and mature content", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          modality: "video",
+          kind: "lora",
+          nsfw: true,
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const classification = w.get("[data-test=model-classification]");
+      expect(
+        classification.get("[data-test=model-modality-badge]").text(),
+      ).toBe("Video");
+      expect(classification.get("[data-test=model-kind-badge]").text()).toBe(
+        "LoRA",
+      );
+      expect(classification.get("[data-test=model-nsfw-badge]").text()).toBe(
+        "18+ NSFW",
+      );
+    });
+
+    it("omits the mature-content classification for safe models", () => {
+      mockDetail.value = catalogDetail(makeEntry({ nsfw: false }));
+      const w = mount(ModelDetailDrawer);
+      expect(w.find("[data-test=model-nsfw-badge]").exists()).toBe(false);
+    });
+
+    it("renders downloads, likes, rating, format and updated date", () => {
       mockDetail.value = catalogDetail(
         makeEntry({
           kind: "lora",
@@ -340,10 +379,48 @@ describe("ModelDetailDrawer", () => {
       expect(rows).toContain("4.2k");
       expect(rows).toContain("Rating");
       expect(rows).toContain("4.7");
-      expect(rows).toContain("lora");
       expect(rows).toContain("safetensors");
       expect(rows).toContain("Updated");
       expect(rows).toContain("2025");
+    });
+
+    it("renders useful package metadata without duplicating the kind badge", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          kind: "control-net",
+          family_role: "finetune",
+          sub_family: "canny",
+          bundling: "single-file",
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const rows = w.get("[data-test=meta-rows]").text();
+      expect(rows).toContain("Role");
+      expect(rows).toContain("Fine-tune");
+      expect(rows).toContain("Variant");
+      expect(rows).toContain("canny");
+      expect(rows).toContain("Package");
+      expect(rows).toContain("Single file");
+      expect(rows).not.toContain("Kind");
+      expect(w.get("[data-test=model-kind-badge]").text()).toBe("ControlNet");
+    });
+
+    it("renders available catalog tags and omits the section when empty", () => {
+      mockDetail.value = catalogDetail(
+        makeEntry({
+          tags: ["portrait", "cinematic", " skin tones ", "portrait"],
+        }),
+      );
+      const w = mount(ModelDetailDrawer);
+      const tags = w.get("[data-test=model-tags]");
+      expect(tags.text()).toContain("portrait");
+      expect(tags.text()).toContain("cinematic");
+      expect(tags.text()).toContain("skin tones");
+      expect(tags.findAll(".md__chip")).toHaveLength(3);
+
+      mockDetail.value = catalogDetail(makeEntry({ tags: [] }));
+      const empty = mount(ModelDetailDrawer);
+      expect(empty.find("[data-test=model-tags]").exists()).toBe(false);
     });
 
     it("skips null fields instead of printing an em dash for each", () => {
@@ -406,6 +483,103 @@ describe("ModelDetailDrawer", () => {
   });
 
   describe("installed model", () => {
+    it.each(["Studio Model", "Studio Model by Catalog Author"])(
+      "suppresses legacy synthetic description %j",
+      (description) => {
+        mockDetail.value = {
+          kind: "installed",
+          model: makeModel({
+            display_name: "Studio Model",
+            description,
+          }),
+          components: [],
+        };
+        const w = mount(ModelDetailDrawer);
+        expect(w.get(".md__name").text()).toBe("Studio Model");
+        expect(w.find(".md__desc").exists()).toBe(false);
+      },
+    );
+
+    it("keeps a meaningful installed description", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({
+          display_name: "Studio Model",
+          description: "A fast portrait model tuned for natural light.",
+        }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get(".md__desc").text()).toContain(
+        "A fast portrait model tuned for natural light.",
+      );
+    });
+
+    it("renders retained catalog sidecar metadata for an installed model", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({
+          name: "cv:4242",
+          display_name: "Studio Adapter",
+          hf_repo: "",
+          description: "",
+        }),
+        components: [],
+        catalogEntry: makeEntry({
+          id: "cv:4242",
+          source: "civitai",
+          source_id: "4242",
+          name: "Studio Adapter",
+          author: "Catalog author",
+          description: "Retained sidecar description.",
+          license: "apache-2.0",
+          tags: ["portrait", "cinematic"],
+          page_url: "https://civitai.com/models/42?modelVersionId=4242",
+        }),
+      };
+      const w = mount(ModelDetailDrawer);
+
+      expect(w.get(".md__desc").text()).toContain(
+        "Retained sidecar description.",
+      );
+      expect(w.get("[data-test=model-tags]").text()).toContain("portrait");
+      expect(w.get("[data-test=meta-rows]").text()).toContain("Catalog author");
+      expect(w.get("[data-test=meta-rows]").text()).toContain("Civitai");
+      expect(w.get("[data-test=meta-rows]").text()).toContain("apache-2.0");
+      expect(w.get("[data-test=page-link]").attributes("href")).toContain(
+        "modelVersionId=4242",
+      );
+      expect(w.find("[data-test=load-btn]").exists()).toBe(true);
+    });
+
+    it("classifies installed models from their family", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({ family: "upscaler" }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=model-modality-badge]").text()).toBe("Image");
+      expect(w.get("[data-test=model-kind-badge]").text()).toBe("Upscaler");
+    });
+
+    it("prefers exact installed catalog metadata over family inference", () => {
+      mockDetail.value = {
+        kind: "installed",
+        model: makeModel({
+          family: "flux",
+          kind: "lora",
+          modality: "video",
+          nsfw: true,
+        }),
+        components: [],
+      };
+      const w = mount(ModelDetailDrawer);
+      expect(w.get("[data-test=model-modality-badge]").text()).toBe("Video");
+      expect(w.get("[data-test=model-kind-badge]").text()).toBe("LoRA");
+      expect(w.get("[data-test=model-nsfw-badge]").text()).toBe("18+ NSFW");
+    });
+
     it("renders Load, Unload and Delete actions", () => {
       mockDetail.value = {
         kind: "installed",

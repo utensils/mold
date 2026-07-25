@@ -11,7 +11,7 @@ import { useUiStore } from "../../stores/ui";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import { fetchCatalogFamilies, searchCatalog, startCatalogDownload } from "../../lib/api/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
-import { sortInstalledFirst } from "../../lib/catalog";
+import { catalogIdentityKey, sortInstalledFirst } from "../../lib/catalog";
 import {
   CATALOG_KIND_OPTIONS,
   CATALOG_SORT_OPTIONS,
@@ -109,7 +109,6 @@ const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })
     )
     .filter((m) => !family.value || m.family === family.value)
     .map((m) => ({ ...installedModelToEntry(m), hostIds: m.hostIds ?? [] }))
-    .filter((entry) => !kind.value || entry.kind === kind.value)
     .filter(
       (entry) =>
         source.value === "all" ||
@@ -117,6 +116,30 @@ const installedCatalogEntries = computed<(CatalogEntry & { hostIds?: string[] })
         (source.value === "civitai" && entry.source === "civitai"),
     );
 });
+
+/** Preserve installed identity/host state while filling older `/api/models`
+ * rows with richer metadata from the matching live catalog result. */
+function enrichInstalledEntry(
+  installed: CatalogEntry & { hostIds?: string[] },
+  live: CatalogEntry | undefined,
+): CatalogEntry & { hostIds?: string[] } {
+  if (!live) return installed;
+  const installedDescription = installed.description?.trim();
+  const modality = installed.modality ?? live.modality;
+  return {
+    ...live,
+    ...installed,
+    author: installed.author ?? live.author ?? null,
+    display_name: installed.display_name ?? live.display_name ?? null,
+    kind: live.kind || installed.kind,
+    ...(modality ? { modality } : {}),
+    nsfw: installed.nsfw || live.nsfw,
+    description: installedDescription || live.description || null,
+    thumbnail_url: installed.thumbnail_url || live.thumbnail_url || null,
+    page_url: installed.page_url || live.page_url || null,
+    installed: true,
+  };
+}
 
 /** Host chip labels for an installed row (host ids → display labels). */
 function hostLabelsFor(entry: CatalogEntry & { hostIds?: string[] }): string[] {
@@ -173,19 +196,39 @@ const combinedEntries = computed(() => {
       ),
   );
   const byId = new Map<string, CatalogEntry & { hostIds?: string[] }>();
+  const liveById = new Map(safeLive.map((entry) => [entry.id, entry]));
+  const liveByIdentity = new Map(
+    safeLive.flatMap((entry) => {
+      const key = catalogIdentityKey(entry);
+      return key ? [[key, entry] as const] : [];
+    }),
+  );
+  const enrichedInstalled = installedCatalogEntries.value.map((entry) =>
+    enrichInstalledEntry(
+      entry,
+      liveById.get(entry.id) ??
+        (catalogIdentityKey(entry) ? liveByIdentity.get(catalogIdentityKey(entry)!) : undefined),
+    ),
+  );
   // Installed rows win the dedup — a live-catalog copy of an installed
-  // model must not appear untagged next to it. Names only: a human title
-  // is not unique enough to be a dedup key (two models can share one),
-  // and the exact same catalog version already collapses by id below.
-  const installedByName = new Set(installedCatalogEntries.value.map((entry) => entry.name));
+  // model must not appear untagged next to it. Exact ids win; legacy rows
+  // may additionally match by source + non-empty upstream repo/version id.
+  // Human titles are deliberately never identity.
+  const installedById = new Set(enrichedInstalled.map((entry) => entry.id));
+  const installedByIdentity = new Set(
+    enrichedInstalled.map(catalogIdentityKey).filter((key): key is string => key != null),
+  );
   for (const entry of [
-    ...installedCatalogEntries.value,
+    ...enrichedInstalled,
     ...manifestEntries.value,
-    ...safeLive.filter((entry) => !installedByName.has(entry.name)),
+    ...safeLive.filter((entry) => {
+      const key = catalogIdentityKey(entry);
+      return !installedById.has(entry.id) && !(key && installedByIdentity.has(key));
+    }),
   ]) {
     if (!byId.has(entry.id)) byId.set(entry.id, entry);
   }
-  return [...byId.values()];
+  return [...byId.values()].filter((entry) => !kind.value || entry.kind === kind.value);
 });
 
 // What you already have surfaces first (host-tagged); the divider marks
@@ -490,7 +533,7 @@ onMounted(async () => {
 
       <label class="flex items-center gap-1 text-caption text-ink-2">
         <input v-model="includeNsfw" type="checkbox" class="accent-[var(--safelight)]" />
-        NSFW
+        Include NSFW
       </label>
 
       <!-- Grid/table toggle — Discover's secondary control (session-persisted

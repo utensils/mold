@@ -6,6 +6,8 @@ import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import CatalogDetailDrawer from "./CatalogDetailDrawer.vue";
 import ModelTableRow from "./ModelTableRow.vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { isVideoFamily } from "../../lib/capabilities";
 import { installedModelToEntry } from "../../lib/catalogDetail";
 import {
@@ -85,6 +87,11 @@ function hostLabels(m: LibraryModelEntry): string[] {
   return (m.hostIds ?? ["local"]).map(
     (id) => hosts.all.find((host) => host.id === id)?.label ?? id,
   );
+}
+
+function modelAccessibilityLabel(m: LibraryModelEntry): string {
+  const kind = modelKindLabel(modelKindValue(m));
+  return `${modelDisplayName(m)} — ${kind}${m.nsfw ? ", 18+ NSFW" : ""} — view details`;
 }
 
 async function refreshAfterAction(m: LibraryModelEntry) {
@@ -211,9 +218,18 @@ async function unload(m: LibraryModelEntry) {
                   : null
               "
               :bar-percent="percent(modelDiskBytes(m), groups.maxDiskBytes)"
+              :accessibility-label="modelAccessibilityLabel(m)"
               clickable
               @open="detailModel = m"
             >
+              <template #meta>
+                <ModelMetadataBadges
+                  :kind="m.kind ?? null"
+                  :family="m.family"
+                  :nsfw="m.nsfw ?? false"
+                  :show-modality="false"
+                />
+              </template>
               <template #actions>
                 <button
                   v-if="!m.is_loaded"

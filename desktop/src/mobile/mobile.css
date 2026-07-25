@@ -2580,6 +2580,16 @@ button:disabled {
   accent-color: var(--safelight);
 }
 
+@media (max-width: 430px) {
+  .mobile-catalog-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mobile-catalog-nsfw {
+    grid-column: 1 / -1;
+  }
+}
+
 .mobile-catalog-error {
   margin: 14px 0;
 }
@@ -2676,6 +2686,10 @@ button:disabled {
   line-height: 1.25;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.mobile-catalog-card-badges {
+  margin-top: 5px;
 }
 
 .mobile-catalog-card-meta,
@@ -2855,17 +2869,9 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.mobile-catalog-detail-badge {
+.mobile-catalog-detail-badges {
   justify-self: start;
   margin-bottom: -6px;
-  border: 1px solid color-mix(in srgb, var(--halide) 40%, transparent);
-  border-radius: 20px;
-  padding: 2px 10px;
-  color: var(--halide);
-  font-family: var(--font-utility);
-  font-size: var(--text-edge-code);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
 .mobile-catalog-variants h3 {
@@ -2948,13 +2954,12 @@ button:disabled {
 }
 
 .mobile-catalog-detail-meta dd {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   margin: 3px 0 0;
   color: var(--ink-2);
   font-family: var(--font-utility);
   font-size: var(--text-data);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .mobile-catalog-detail-description {

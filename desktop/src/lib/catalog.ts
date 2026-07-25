@@ -60,6 +60,19 @@ export function isCatalogId(id: string): boolean {
 }
 
 /**
+ * Stable upstream identity for rows whose local ids differ across server
+ * generations. Human-facing `name` is deliberately excluded: titles are
+ * neither unique nor immutable and must never merge unrelated models.
+ */
+export function catalogIdentityKey(
+  entry: Pick<CatalogEntry, "source" | "source_id">,
+): string | null {
+  const source = entry.source.trim().toLocaleLowerCase();
+  const sourceId = entry.source_id?.trim();
+  return source && sourceId ? `${source}:${sourceId}` : null;
+}
+
+/**
  * Human-facing model page for a catalog entry, or null when none exists.
  *
  * New servers send `page_url` on the wire; prefer it. For older servers the

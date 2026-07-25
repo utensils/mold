@@ -75,9 +75,10 @@ pushed screen opened from the header.
   upscaled images carry the shared Upscaled badge.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
-  sort, exposes model details and
-  components, and routes pull/load/unload/remove actions to the owning or
-  selected host. Detail-sheet variant chips select an exact manifest
+  sort, gives every card and detail sheet a model-kind badge, explicitly marks
+  mature entries `18+ NSFW`, surfaces available description/source/license/tags/
+  format/popularity and type-aware weights, and routes pull/load/unload/remove
+  actions to the owning or selected host. Detail-sheet variant chips select an exact manifest
   `base:tag` target before pulling. Pull actions progress through `Connecting...`, `Starting...`,
   `Queued`, and `Pulling N%`; active downloads can be cancelled.
 - **Machines** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and

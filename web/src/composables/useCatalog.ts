@@ -3,6 +3,7 @@ import {
   deleteModel,
   fetchCatalogEntry,
   fetchCatalogFamilies,
+  fetchCatalogInstalled,
   fetchCatalogSearch,
   fetchModelComponents,
   fetchModels,
@@ -37,6 +38,9 @@ export type ModelDetail =
       kind: "installed";
       model: ModelInfoExtended;
       components: ModelComponentStatus[];
+      /** Retained install sidecar metadata, when this model originated in
+       * the live catalog. Failure to load it is non-fatal. */
+      catalogEntry?: CatalogEntryWire | null;
     };
 
 export type ModelsTab = "installed" | "discover";
@@ -276,18 +280,48 @@ function build() {
    * from `/api/models/:model/components`; the drawer renders immediately and
    * fills the Components chips once the fetch resolves. */
   async function openInstalledDetail(model: ModelInfoExtended) {
-    detail.value = { kind: "installed", model, components: [] };
-    try {
-      const resp = await fetchModelComponents(model.name);
-      if (
-        detail.value?.kind === "installed" &&
-        detail.value.model.name === model.name
-      ) {
-        detail.value = { ...detail.value, components: resp.components };
+    detail.value = {
+      kind: "installed",
+      model,
+      components: [],
+      catalogEntry: null,
+    };
+
+    const loadComponents = async () => {
+      try {
+        const resp = await fetchModelComponents(model.name);
+        const current = detail.value;
+        if (
+          current?.kind === "installed" &&
+          current.model.name === model.name
+        ) {
+          detail.value = { ...current, components: resp.components };
+        }
+      } catch {
+        // Leave components empty — the tiles + name still render.
       }
-    } catch {
-      // Leave components empty — the tiles + name still render.
-    }
+    };
+    const loadSidecar = async () => {
+      if (!model.name.startsWith("cv:") && !model.name.startsWith("hf:"))
+        return;
+      try {
+        const response = await fetchCatalogInstalled({});
+        const catalogEntry =
+          response.entries.find((entry) => entry.id === model.name) ?? null;
+        const current = detail.value;
+        if (
+          current?.kind === "installed" &&
+          current.model.name === model.name
+        ) {
+          detail.value = { ...current, catalogEntry };
+        }
+      } catch {
+        // Sidecar enrichment is additive. Keep the installed shelf and
+        // immediately rendered detail usable on older/offline servers.
+      }
+    };
+
+    await Promise.all([loadComponents(), loadSidecar()]);
   }
 
   function closeDetail() {

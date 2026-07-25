@@ -795,6 +795,9 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         }
     }
@@ -905,6 +908,9 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         }];
         assert_eq!(
@@ -933,6 +939,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
             ModelInfoExtended {
@@ -949,6 +958,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
         ];
@@ -971,6 +983,9 @@ mod tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: None,
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         }];
         assert_eq!(resolve_default_model(&models), "flux-dev:q4");
@@ -998,6 +1013,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
             ModelInfoExtended {
@@ -1014,6 +1032,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
         ];
@@ -1037,6 +1058,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
             ModelInfoExtended {
@@ -1053,6 +1077,9 @@ mod tests {
                 disk_usage_bytes: None,
                 remaining_download_bytes: None,
                 display_name: None,
+                kind: None,
+                modality: None,
+                nsfw: None,
                 supports_audio: None,
             },
         ];

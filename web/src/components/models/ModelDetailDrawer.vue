@@ -8,6 +8,8 @@
  * app frame, never a fixed layer.
  */
 import { computed, markRaw, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import DrawerPanel from "@ui/components/DrawerPanel.vue";
 import SheetPanel from "@ui/components/SheetPanel.vue";
 import Icon from "@ui/components/Icon.vue";
@@ -53,6 +55,17 @@ const entry = computed<CatalogEntryWire | null>(() =>
   state.value === "catalog"
     ? (cat.detail.value as { entry: CatalogEntryWire }).entry
     : null,
+);
+const installedCatalogEntry = computed<CatalogEntryWire | null>(() =>
+  state.value === "installed"
+    ? ((cat.detail.value as { catalogEntry?: CatalogEntryWire | null })
+        .catalogEntry ?? null)
+    : null,
+);
+/** Catalog metadata used for presentation. Installed actions and component
+ * status remain keyed to the `/api/models` row. */
+const metadataEntry = computed(
+  () => entry.value ?? installedCatalogEntry.value,
 );
 
 // The drawer opens for content AND for the loading / error non-content states
@@ -114,9 +127,10 @@ const installedModel = computed<ModelInfoExtended | null>(() =>
 const isLoaded = computed(() => installedModel.value?.is_loaded ?? false);
 
 const mediaLabel = computed(() => {
-  if (entry.value) return entry.value.modality;
+  if (metadataEntry.value) return metadataEntry.value.modality;
   const m = installedModel.value;
   if (!m) return "";
+  if (m.modality?.trim()) return m.modality;
   return /ltx/i.test(m.family ?? "") ? "video" : "image";
 });
 
@@ -127,12 +141,43 @@ const name = computed(
 );
 
 const family = computed(
-  () => entry.value?.family ?? installedModel.value?.family ?? "",
+  () => metadataEntry.value?.family ?? installedModel.value?.family ?? "",
 );
 
-const description = computed(
-  () => entry.value?.description ?? installedModel.value?.description ?? "",
+const kind = computed(() =>
+  modelKindValue({
+    kind: metadataEntry.value?.kind ?? installedModel.value?.kind,
+    family: family.value,
+  }),
 );
+const nsfw = computed(
+  () => metadataEntry.value?.nsfw ?? installedModel.value?.nsfw ?? false,
+);
+const weightsLabel = computed(() => modelWeightsLabel(kind.value));
+const description = computed(() => {
+  const raw = (
+    metadataEntry.value?.description ??
+    installedModel.value?.description ??
+    ""
+  ).trim();
+  if (!raw || metadataEntry.value) return raw;
+
+  // Older servers synthesized installed catalog descriptions from the display
+  // title (`Title` / `Title by Author`). Repeating that directly under the
+  // title looks like broken metadata; preserve only genuinely descriptive
+  // copy while catalog entries continue to render their upstream description.
+  const title = name.value.trim().toLocaleLowerCase();
+  const normalized = raw.toLocaleLowerCase();
+  const bylinePrefix = `${title} by `;
+  if (
+    normalized === title ||
+    (normalized.startsWith(bylinePrefix) &&
+      normalized.length > bylinePrefix.length)
+  ) {
+    return "";
+  }
+  return raw;
+});
 
 // ── Hero preview ───────────────────────────────────────────────────────
 // Catalog thumbnails are public CDN URLs (the server has no proxy route), so
@@ -141,7 +186,7 @@ const description = computed(
 const VIDEO_URL_RE = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
 
 const heroUrl = computed<string | null>(() => {
-  const raw = entry.value?.thumbnail_url;
+  const raw = metadataEntry.value?.thumbnail_url;
   return typeof raw === "string" && raw.trim() !== "" ? raw : null;
 });
 const heroIsVideo = computed(() =>
@@ -152,8 +197,8 @@ watch(heroUrl, () => {
   heroFailed.value = false;
 });
 
-// Checkpoint weights = SIZE (model weights only, per catalog semantics).
-const checkpointBytes = computed<number | null>(() => {
+// Model weights = SIZE (primary weights only, per catalog semantics).
+const modelWeightsBytes = computed<number | null>(() => {
   const e = entry.value;
   if (e) return e.size_bytes ?? null;
   const m = installedModel.value;
@@ -206,18 +251,33 @@ const variants = computed(() =>
 
 /** Trigger phrases — Civitai LoRAs are unusable without them. */
 const trainedWords = computed<string[]>(() =>
-  (entry.value?.trained_words ?? []).filter(
+  (metadataEntry.value?.trained_words ?? []).filter(
     (w) => typeof w === "string" && w.trim() !== "",
   ),
 );
 
+/** Search tags are useful discovery context, but keep the panel scannable. */
+const tags = computed<string[]>(() => {
+  const unique = new Set<string>();
+  for (const raw of metadataEntry.value?.tags ?? []) {
+    if (typeof raw !== "string") continue;
+    const tag = raw.trim();
+    if (tag) unique.add(tag);
+  }
+  return [...unique];
+});
+const visibleTags = computed(() => tags.value.slice(0, 8));
+const hiddenTagCount = computed(() =>
+  Math.max(0, tags.value.length - visibleTags.value.length),
+);
+
 const pageUrl = computed<string | null>(() => {
-  const raw = entry.value?.page_url;
+  const raw = metadataEntry.value?.page_url;
   return typeof raw === "string" && /^https?:\/\//i.test(raw) ? raw : null;
 });
 
 const source = computed(() => {
-  const e = entry.value;
+  const e = metadataEntry.value;
   if (e) return e.source === "civitai" ? "Civitai" : "Hugging Face";
   return installedModel.value?.hf_repo || "local";
 });
@@ -232,10 +292,18 @@ interface MetaRow {
 
 const metaRows = computed<MetaRow[]>(() => {
   const rows: MetaRow[] = [];
-  const e = entry.value;
+  const e = metadataEntry.value;
   if (e) {
     if (e.author) rows.push({ key: "Author", val: e.author });
-    if (e.kind) rows.push({ key: "Kind", val: e.kind });
+    rows.push({
+      key: "Role",
+      val: e.family_role === "foundation" ? "Foundation" : "Fine-tune",
+    });
+    if (e.sub_family) rows.push({ key: "Variant", val: e.sub_family });
+    rows.push({
+      key: "Package",
+      val: e.bundling === "single-file" ? "Single file" : "Separated files",
+    });
     if (e.file_format) rows.push({ key: "Format", val: e.file_format });
     if (e.download_count)
       rows.push({ key: "Downloads", val: formatCount(e.download_count) });
@@ -435,16 +503,25 @@ function onRetry() {
           />
         </div>
 
-        <span class="md__media">{{ mediaLabel }}</span>
+        <div class="md__classification" data-test="model-classification">
+          <ModelMetadataBadges
+            :kind="kind"
+            :family="family"
+            :modality="mediaLabel"
+            :nsfw="nsfw"
+          />
+        </div>
         <div class="md__name">{{ name || "Untitled model" }}</div>
         <div v-if="family" class="md__fam">{{ family }}</div>
         <p v-if="description" class="md__desc">{{ description }}</p>
 
         <div class="md__tiles">
           <div class="md__tile">
-            <div class="md__tile-key">Checkpoint weights</div>
-            <div class="md__tile-val" data-test="tile-checkpoint">
-              {{ formatGB(checkpointBytes) }}
+            <div class="md__tile-key" data-test="tile-model-weights-label">
+              {{ weightsLabel }}
+            </div>
+            <div class="md__tile-val" data-test="tile-model-weights">
+              {{ formatGB(modelWeightsBytes) }}
             </div>
           </div>
           <div class="md__tile">
@@ -512,6 +589,18 @@ function onRetry() {
           <div class="md__chips" data-test="trained-words">
             <span v-for="w in trainedWords" :key="w" class="md__chip">
               {{ w }}
+            </span>
+          </div>
+        </template>
+
+        <template v-if="visibleTags.length">
+          <div class="md__kicker">Tags</div>
+          <div class="md__chips" data-test="model-tags">
+            <span v-for="tag in visibleTags" :key="tag" class="md__chip">
+              {{ tag }}
+            </span>
+            <span v-if="hiddenTagCount" class="md__chip">
+              +{{ hiddenTagCount }} more
             </span>
           </div>
         </template>
@@ -649,16 +738,8 @@ function onRetry() {
   display: block;
 }
 
-.md__media {
-  display: inline-block;
-  font-family: var(--f-mono);
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--halide);
-  border: 1px solid color-mix(in srgb, var(--halide) 40%, transparent);
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
+.md__classification {
+  display: flex;
   margin-bottom: 12px;
 }
 

@@ -61,8 +61,10 @@ pub struct InstalledCatalogEntry {
     pub rating: Option<f64>,
     #[serde(default)]
     pub likes: u64,
+    /// `None` means the legacy sidecar did not record a safety classification.
+    /// Keep it distinct from an explicit `Some(false)` on the JSON wire.
     #[serde(default)]
-    pub nsfw: bool,
+    pub nsfw: Option<bool>,
     #[serde(default)]
     pub thumbnail_url: Option<String>,
     #[serde(default)]
@@ -93,6 +95,8 @@ pub struct InstalledCatalogEntry {
     pub added_at: i64,
     #[serde(default)]
     pub trained_words: Vec<String>,
+    #[serde(default)]
+    pub page_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,4 +105,24 @@ pub struct DownloadRecipeWire {
     pub files: Vec<serde_json::Value>,
     #[serde(default)]
     pub needs_token: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InstalledCatalogEntry;
+
+    #[test]
+    fn installed_catalog_entry_round_trips_unknown_nsfw_as_null() {
+        let entry: InstalledCatalogEntry = serde_json::from_value(serde_json::json!({
+            "id": "cv:1",
+            "name": "Legacy install",
+            "family": "flux",
+            "kind": "lora",
+            "nsfw": null
+        }))
+        .expect("null is a valid unknown safety classification");
+
+        let wire = serde_json::to_value(entry).unwrap();
+        assert_eq!(wire["nsfw"], serde_json::Value::Null);
+    }
 }

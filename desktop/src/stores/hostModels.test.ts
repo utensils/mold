@@ -134,6 +134,50 @@ describe("hostModels store", () => {
     expect(union.some((m) => m.name === "real-esrgan-x4plus")).toBe(false);
   });
 
+  it("conservatively fills missing presentation metadata from duplicate host rows", () => {
+    addExtra("hal9000-7680", "http://hal9000:7680");
+    const store = useHostModelsStore();
+    store.byHost["local"] = {
+      entries: [
+        model("shared-adapter", {
+          description: "",
+          kind: null,
+          modality: null,
+          nsfw: null,
+          default_steps: 22,
+        }),
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    store.byHost["hal9000-7680"] = {
+      entries: [
+        model("shared-adapter", {
+          description: "A mature portrait adapter.",
+          kind: "lora",
+          modality: "image",
+          nsfw: true,
+          default_steps: 40,
+        }),
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+
+    expect(store.unionInstalled).toEqual([
+      expect.objectContaining({
+        name: "shared-adapter",
+        hostIds: ["local", "hal9000-7680"],
+        description: "A mature portrait adapter.",
+        kind: "lora",
+        modality: "image",
+        nsfw: true,
+        // Runtime defaults still come from the preferred first host.
+        default_steps: 22,
+      }),
+    ]);
+  });
+
   it("hostsFor() answers per-model availability", async () => {
     addExtra("hal9000-7680", "http://hal9000:7680");
     const store = useHostModelsStore();

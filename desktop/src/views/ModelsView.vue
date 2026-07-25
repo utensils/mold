@@ -12,6 +12,7 @@ import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
 import { primaryModifierPressed } from "../lib/platform";
 import { mediaTypeFromQuery, type MediaType } from "../lib/modelAvailability";
+import { mergeModelPresentationMetadata } from "../lib/models";
 
 const conn = useConnectionStore();
 const models = useModelStore();
@@ -58,8 +59,14 @@ const installedModels = computed(() => {
   );
   for (const entry of hostModels.unionInstalled) {
     const existing = byName.get(entry.name);
-    if (existing) existing.hostIds = [...new Set([...existing.hostIds, ...entry.hostIds])];
-    else byName.set(entry.name, { ...entry, hostIds: [...entry.hostIds] });
+    if (existing) {
+      byName.set(entry.name, {
+        ...mergeModelPresentationMetadata(existing, entry),
+        hostIds: [...new Set([...existing.hostIds, ...entry.hostIds])],
+      });
+    } else {
+      byName.set(entry.name, { ...entry, hostIds: [...entry.hostIds] });
+    }
   }
   return [...byName.values()];
 });

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The desktop status popover now shows every GPU on a multi-GPU host.** It previously rendered only the first GPU from the resources stream, so a job denoising on any other ordinal looked like an idle machine (e.g. one L40S at 0.4 GB while another carried the model). The popover lists one VRAM row per GPU (ordinal-labelled when there is more than one) and the sidebar mini-bar aggregates used/total VRAM across all GPUs, turning critical if any single GPU crosses the threshold.
+- Made model identity legible across web, desktop, and iPhone: Installed and Discover rows now show a consistent model-type badge, mature entries carry an explicit `18+ NSFW` label, and model details use type-aware weight labels while surfacing available descriptions, tags, license, source, format, and popularity metadata. Civitai descriptions and presentation metadata now survive normalization and installation sidecars instead of disappearing after a pull.
 - Aligned desktop and web Settings cards to the full content column, removed narrow-web overflow, and gave All settings groups clearer token-based color hierarchy with shared halide icon headers and summaries.
 
 ### Added

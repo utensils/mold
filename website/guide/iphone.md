@@ -153,7 +153,11 @@ Models combines installed models with live Hugging Face and Civitai results.
 You can search, filter All/Images/Video, filter by source, family, or model
 kind (Models, LoRAs, CLIP, text encoders, VAEs, tokenizers, ControlNet), sort
 by downloads, rating, or recency, inspect download contents and installed
-components, and include NSFW entries explicitly. When a manifest model has multiple quantizations, its detail sheet
+components, and include NSFW entries explicitly. Every card identifies the
+model kind; mature results carry an **18+ NSFW** badge. The detail sheet repeats
+those classifications, uses a kind-specific weights label, and shows available
+description, source, license, tags, format, and popularity metadata. When a
+manifest model has multiple quantizations, its detail sheet
 shows variant chips with checkpoint sizes; the selected chip is the exact model
 the Pull action downloads.
 

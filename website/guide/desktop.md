@@ -94,7 +94,12 @@ surface powers it, so anything the app does maps to a documented endpoint.
   the pull. The desktop reuses cacheable 512 px Civitai thumbnails across both
   layouts, lazily decodes them, and contains each card's layout and paint
   work. Missing previews use a local model-family mark, with no additional
-  image request. The catalog renders **SIZE vs FETCH** honestly. With several
+  image request. Grid cards and table rows carry the same kind badge, and
+  mature entries use an explicit **18+ NSFW** label. The detail drawer repeats
+  those classifications and surfaces available description, tags, license,
+  source, format, and popularity metadata. The catalog renders **SIZE vs
+  FETCH** honestly, with the primary weight label named for the actual kind
+  instead of assuming every entry is a checkpoint. With several
   hosts connected, Pull asks which host should store the model, and each
   host's installed-model inventory refreshes when its pull completes. The
   Installed segment merges every ready host with per-host badges and routes its

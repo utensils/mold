@@ -29,7 +29,8 @@ Examples include text encoders, tokenizers, VAEs, and LTX-2 companion assets.
 1. Start the server with `mold serve`.
 2. Open `http://localhost:7680/models`.
 3. Search or filter by family, kind, source, rating, and downloads. Catalog
-   searches include NSFW rows by default.
+   searches include NSFW rows by default; every mature result is explicitly
+   labeled `18+ NSFW`.
 4. Click **Install** on the entry you want.
 
 The downloads drawer tracks queued jobs and up to two concurrent transfers.
@@ -43,6 +44,10 @@ The web and native apps merge installed models with the live Hugging
 Face/Civitai catalog, keep installed entries first, expose All/Images/Video and
 source filters, and show download contents before a Pull or Repair. Web and
 desktop also share the compact List/Grid layout control for Discover results.
+Every row identifies its model kind. Details use kind-specific weight labels
+and show descriptions, tags, license, source, format, and popularity only when
+the upstream catalog supplied them. Pulled Civitai entries retain that
+presentation metadata in their install sidecar.
 
 The iPhone Catalog browses one selected host while allowing Pull to target any
 ready saved host. Choosing a pull target does not change the host selected in

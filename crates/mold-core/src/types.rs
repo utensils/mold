@@ -886,6 +886,17 @@ pub struct ModelInfoExtended {
     /// every API call still addresses the model by `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Catalog classification for installed models. Absent for older servers
+    /// and manifest rows whose family is sufficient for client-side inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Catalog modality for installed models (`image` / `video`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
+    /// Explicit mature-content classification. `None` means unknown; clients
+    /// must never render an unclassified older sidecar as known-safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsfw: Option<bool>,
     /// Model-specific LTX-2 audio-output capability. `None` preserves
     /// compatibility with older servers that only advertised family support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -996,6 +1007,9 @@ mod model_display_name_tests {
             disk_usage_bytes: None,
             remaining_download_bytes: None,
             display_name: display_name.map(str::to_string),
+            kind: None,
+            modality: None,
+            nsfw: None,
             supports_audio: None,
         }
     }

@@ -7,6 +7,7 @@
  */
 import { modelSource } from "./modelSource";
 import { modelDisplayName } from "./models";
+import { modelKindValue } from "@studio/lib/modelMetadata";
 import type { CatalogEntry, ModelEntry } from "./api/types";
 
 /**
@@ -24,6 +25,12 @@ export function installedModelToEntry(m: ModelEntry): CatalogEntry {
   const sourceId = catalogNamed ? m.name.slice(3) : m.hf_repo || null;
   const hfRepo = m.name.startsWith("hf:") ? m.name.slice(3) : m.hf_repo || null;
   const displayName = modelDisplayName(m);
+  const description = m.description?.trim() ?? "";
+  const repeatsDisplayName =
+    description.length > 0 &&
+    (description.localeCompare(displayName.trim(), undefined, { sensitivity: "accent" }) === 0 ||
+      description.toLocaleLowerCase().startsWith(`${displayName.trim().toLocaleLowerCase()} by `));
+  const modality = m.modality?.trim();
   return {
     id: m.name,
     source: modelSource(m),
@@ -33,13 +40,67 @@ export function installedModelToEntry(m: ModelEntry): CatalogEntry {
     name: m.name,
     display_name: displayName !== m.name ? displayName : null,
     family: m.family,
-    kind: "checkpoint",
-    nsfw: false,
+    kind: modelKindValue({ kind: m.kind ?? null, family: m.family }),
+    ...(modality ? { modality } : {}),
+    nsfw: m.nsfw ?? null,
     installed: true,
     size_bytes: m.size_gb > 0 ? Math.round(m.size_gb * 1_000_000_000) : null,
     page_url: hfRepo ? `https://huggingface.co/${hfRepo}` : null,
-    description: m.description || null,
+    description: description && !repeatsDisplayName ? description : null,
     thumbnail_url: null,
+  };
+}
+
+function nonEmptyText(
+  detail: string | null | undefined,
+  summary: string | null | undefined,
+): string | null {
+  if (detail?.trim()) return detail;
+  if (summary?.trim()) return summary;
+  return detail ?? summary ?? null;
+}
+
+function nonEmptyList<T>(detail: T[] | null | undefined, summary: T[] | null | undefined): T[] {
+  if (detail?.length) return detail;
+  if (summary?.length) return summary;
+  return detail ?? summary ?? [];
+}
+
+function nonZeroCount(
+  detail: number | null | undefined,
+  summary: number | null | undefined,
+): number | null {
+  if (detail != null && detail > 0) return detail;
+  if (summary != null && summary > 0) return summary;
+  return detail ?? summary ?? null;
+}
+
+/**
+ * Overlay a fetched catalog detail onto the clicked/search summary without
+ * letting sparse/default detail fields erase metadata the summary already
+ * knew. The clicked thumbnail intentionally remains authoritative because
+ * upstream detail endpoints may select a different preview for the same
+ * model version.
+ */
+export function mergeCatalogSummaryDetail(
+  summary: CatalogEntry,
+  detail: CatalogEntry,
+): CatalogEntry {
+  return {
+    ...summary,
+    ...detail,
+    installed: summary.installed || detail.installed,
+    nsfw: summary.nsfw === true || detail.nsfw === true ? true : (detail.nsfw ?? summary.nsfw),
+    author: nonEmptyText(detail.author, summary.author),
+    description: nonEmptyText(detail.description, summary.description),
+    license: nonEmptyText(detail.license, summary.license),
+    page_url: nonEmptyText(detail.page_url, summary.page_url),
+    thumbnail_url: nonEmptyText(summary.thumbnail_url, detail.thumbnail_url),
+    tags: nonEmptyList(detail.tags, summary.tags),
+    trained_words: nonEmptyList(detail.trained_words, summary.trained_words),
+    download_count: nonZeroCount(detail.download_count, summary.download_count),
+    likes: nonZeroCount(detail.likes, summary.likes),
+    rating: detail.rating ?? summary.rating ?? null,
   };
 }
 

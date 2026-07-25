@@ -490,10 +490,14 @@ fn installed_catalog_models(
             .and_then(|cfg| cfg.default_guidance)
             .unwrap_or(defaults.guidance);
 
-        let description = match &sidecar.author {
-            Some(a) if !a.is_empty() => format!("{} by {a}", sidecar.name),
-            _ => sidecar.name.clone(),
-        };
+        let description = sidecar
+            .description
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| match &sidecar.author {
+                Some(a) if !a.is_empty() => format!("{} by {a}", sidecar.name),
+                _ => sidecar.name.clone(),
+            });
 
         out.push(ModelInfoExtended {
             downloaded: true,
@@ -515,6 +519,9 @@ fn installed_catalog_models(
             disk_usage_bytes: sidecar.size_bytes,
             remaining_download_bytes: Some(0),
             display_name: Some(sidecar.name.clone()),
+            kind: Some(sidecar.kind.clone()),
+            modality: Some(sidecar.modality.clone()),
+            nsfw: sidecar.nsfw,
             supports_audio: (sidecar.family == "ltx2")
                 .then(|| mold_inference::ltx2::checkpoint_supports_audio_output(&primary_path)),
         });
@@ -1391,6 +1398,11 @@ mod tests {
             sub_family: Some("v2.3".into()),
             kind: "checkpoint".into(),
             modality: "video".into(),
+            nsfw: None,
+            description: None,
+            tags: vec![],
+            license: None,
+            page_url: None,
             thumbnail_url: None,
             size_bytes: None,
             supported: true,

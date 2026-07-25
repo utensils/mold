@@ -4,6 +4,8 @@ import { RouterLink, useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -48,6 +50,14 @@ const hosts = useHostsStore();
 const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
 const toasts = useToastStore();
+
+function modelAccessibilityLabel(model: ModelEntry): string {
+  const classification = [
+    modelKindLabel(modelKindValue({ kind: model.kind ?? null, family: model.family })),
+    ...(model.nsfw ? ["18+ NSFW"] : []),
+  ].join(", ");
+  return `${modelDisplayName(model)} — ${classification}, view details`;
+}
 
 const hostId = computed(() => String(route.params.id ?? ""));
 const host = computed(() => hosts.all.find((h) => h.id === hostId.value) ?? null);
@@ -709,10 +719,20 @@ async function forget() {
                         : null
                     "
                     :bar-percent="percent(modelDiskBytes(m), maxModelDiskBytes)"
+                    :accessibility-label="modelAccessibilityLabel(m)"
                     clickable
                     class="px-4 py-2"
                     @open="detailModel = m"
-                  />
+                  >
+                    <template #meta>
+                      <ModelMetadataBadges
+                        :kind="m.kind ?? null"
+                        :family="m.family"
+                        :nsfw="m.nsfw ?? null"
+                        :show-modality="false"
+                      />
+                    </template>
+                  </ModelTableRow>
                 </li>
               </ul>
               <p v-else class="px-4 pb-4 pt-2 text-caption text-ink-3">

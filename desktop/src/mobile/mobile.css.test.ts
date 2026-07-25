@@ -202,6 +202,23 @@ describe("mobile safe areas", () => {
     expect(selected?.[1]).toMatch(/color:\s*var\(--safelight\)/);
   });
 
+  it("keeps catalog filters readable on narrow iPhones", () => {
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*430px\)[\s\S]*?\.mobile-catalog-filters\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)\s*;/,
+    );
+    expect(css).toMatch(
+      /@media\s*\(max-width:\s*430px\)[\s\S]*?\.mobile-catalog-nsfw\s*\{[^}]*grid-column:\s*1\s*\/\s*-1\s*;/,
+    );
+  });
+
+  it("wraps full catalog metadata values instead of hiding them behind ellipses", () => {
+    const value = css.match(/\.mobile-catalog-detail-meta dd\s*\{([^}]*)\}/s);
+    expect(value?.[1]).toMatch(/overflow-wrap:\s*anywhere\s*;/);
+    expect(value?.[1]).toMatch(/white-space:\s*normal\s*;/);
+    expect(value?.[1]).not.toMatch(/overflow:\s*hidden\s*;/);
+    expect(value?.[1]).not.toMatch(/text-overflow:\s*ellipsis\s*;/);
+  });
+
   it("gives aspect choices a proportional visual frame inside a uniform touch tile", () => {
     const aspects = css.match(/\.mobile-resolution-aspects\s*\{([^}]*)\}/s);
     const choice = css.match(/\.mobile-resolution-aspect\s*\{([^}]*)\}/s);

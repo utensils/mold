@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import { modelKindValue, modelWeightsLabel } from "@studio/lib/modelMetadata";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import ModelFamilyPlaceholder from "./ModelFamilyPlaceholder.vue";
 import { fetchCatalogDetail, startCatalogDownload } from "../../lib/api/catalog";
@@ -9,11 +11,13 @@ import {
   canDownloadEntry,
   catalogActionLabel,
   downloadContentsTotalBytes,
+  mergeCatalogSummaryDetail,
 } from "../../lib/catalogDetail";
-import { catalogSizeInfo } from "../../lib/catalog";
+import { catalogPageUrl, catalogSizeInfo } from "../../lib/catalog";
 import { isVideoFamily } from "../../lib/capabilities";
 import { catalogThumbnailUrl } from "../../lib/catalogThumbnails";
 import { formatCount, formatGB } from "../../lib/format";
+import { openExternal } from "../../lib/openExternal";
 import { useToastStore } from "../../stores/toasts";
 import { ApiError, type ApiTarget } from "../../lib/api/client";
 import type { ModelSource } from "../../lib/modelSource";
@@ -62,14 +66,7 @@ const loading = ref(false);
  *  picked, so letting it overlay would show a different image than the card
  *  the user just clicked. The detail's preview only fills a listing gap. */
 const merged = computed<CatalogEntry>(() =>
-  detail.value
-    ? {
-        ...props.entry,
-        ...detail.value,
-        installed: props.entry.installed || detail.value.installed,
-        thumbnail_url: props.entry.thumbnail_url || detail.value.thumbnail_url || null,
-      }
-    : props.entry,
+  detail.value ? mergeCatalogSummaryDetail(props.entry, detail.value) : props.entry,
 );
 
 /** Same staleness guard for the descriptive detail fetch. */
@@ -196,6 +193,8 @@ const pullLabel = computed(() => {
 const mediaBadge = computed(
   () => merged.value.modality ?? (isVideoFamily(merged.value.family) ? "video" : "image"),
 );
+const kindValue = computed(() => modelKindValue(merged.value));
+const weightsHeading = computed(() => modelWeightsLabel(kindValue.value));
 
 /** SIZE = checkpoint weights; FETCH = full footprint (weights + shared
  *  components). FETCH ≥ SIZE always (project SIZE/FETCH semantics). */
@@ -214,6 +213,32 @@ const SOURCE_LABEL: Record<string, string> = {
   local: "Local file",
 };
 const sourceLabel = computed(() => SOURCE_LABEL[merged.value.source] ?? merged.value.source);
+const detailPageUrl = computed(() => catalogPageUrl(merged.value));
+
+const catalogDate = computed(() => {
+  const value = merged.value.updated_at ?? merged.value.created_at ?? merged.value.added_at;
+  if (value == null || !Number.isFinite(value)) return null;
+  const milliseconds = Math.abs(value) < 100_000_000_000 ? value * 1_000 : value;
+  const date = new Date(milliseconds);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    label:
+      merged.value.updated_at != null
+        ? "Updated"
+        : merged.value.created_at != null
+          ? "Created"
+          : "Added",
+    value: new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    }).format(date),
+  };
+});
+
+function openModelPage(): void {
+  if (detailPageUrl.value) void openExternal(detailPageUrl.value);
+}
 
 /**
  * Which variant a Pull targets. Defaults to the entry's own id, so a drawer
@@ -303,15 +328,15 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       </div>
 
       <div class="flex flex-col gap-3 p-4">
-        <!-- Media kind -->
-        <div>
-          <span
-            class="data-mono inline-block rounded-full border border-halide/40 px-2 py-0.5 text-caption uppercase text-halide"
-            data-test="drawer-media-badge"
-          >
-            {{ mediaBadge }}
-          </span>
-        </div>
+        <!-- Classification stays together: what it is, what it creates, and
+             whether it contains mature material. -->
+        <ModelMetadataBadges
+          :kind="kindValue"
+          :family="merged.family"
+          :modality="mediaBadge"
+          :nsfw="merged.nsfw"
+          data-test="drawer-classification"
+        />
 
         <!-- State chips -->
         <div v-if="merged.installed || unsupported" class="flex flex-wrap gap-1.5">
@@ -330,6 +355,13 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           </span>
         </div>
 
+        <!-- Description belongs with identity/classification rather than
+             being buried after the technical metadata grid. -->
+        <p v-if="merged.description" class="text-caption leading-relaxed text-ink-2">
+          {{ merged.description }}
+        </p>
+        <p v-else-if="loading" class="text-caption text-ink-3">Loading details…</p>
+
         <!-- Meta grid -->
         <dl class="grid grid-cols-2 gap-x-3 gap-y-2">
           <div v-if="merged.author" class="min-w-0">
@@ -344,10 +376,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <dt class="text-caption text-ink-3">Source</dt>
             <dd class="text-body text-ink-2" data-test="drawer-source">{{ sourceLabel }}</dd>
           </div>
-          <div v-if="merged.modality">
-            <dt class="text-caption text-ink-3">Modality</dt>
-            <dd class="text-body text-ink-2 capitalize">{{ merged.modality }}</dd>
-          </div>
           <div v-if="merged.file_format">
             <dt class="text-caption text-ink-3">Format</dt>
             <dd class="data-mono text-body text-ink-2">{{ merged.file_format }}</dd>
@@ -360,6 +388,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             <dt class="text-caption text-ink-3">Downloads</dt>
             <dd class="data-mono text-body text-ink-2">{{ formatCount(merged.download_count) }}</dd>
           </div>
+          <div v-if="merged.likes" data-test="drawer-likes">
+            <dt class="text-caption text-ink-3">Likes</dt>
+            <dd class="data-mono text-body text-ink-2">♥ {{ formatCount(merged.likes) }}</dd>
+          </div>
           <div v-if="merged.rating != null">
             <dt class="text-caption text-ink-3">Rating</dt>
             <dd class="data-mono text-body text-ink-2">★ {{ merged.rating.toFixed(1) }}</dd>
@@ -370,15 +402,26 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               {{ merged.license }}
             </dd>
           </div>
+          <div v-if="catalogDate" data-test="drawer-updated">
+            <dt class="text-caption text-ink-3">{{ catalogDate.label }}</dt>
+            <dd class="text-body text-ink-2">{{ catalogDate.value }}</dd>
+          </div>
+          <div v-if="detailPageUrl" class="col-span-2 min-w-0">
+            <dt class="text-caption text-ink-3">Model page</dt>
+            <dd>
+              <button
+                type="button"
+                class="text-body text-safelight hover:underline"
+                data-test="drawer-page-link"
+                @click="openModelPage"
+              >
+                View on {{ sourceLabel }}
+              </button>
+            </dd>
+          </div>
         </dl>
 
-        <!-- Description -->
-        <p v-if="merged.description" class="text-caption leading-relaxed text-ink-2">
-          {{ merged.description }}
-        </p>
-        <p v-else-if="loading" class="text-caption text-ink-3">Loading details…</p>
-
-        <!-- Footprint tiles: checkpoint weights (SIZE) vs full footprint (FETCH,
+        <!-- Footprint tiles: model weights (SIZE) vs full footprint (FETCH,
              which includes shared components and is always ≥ SIZE). -->
         <div
           v-if="sizeInfo.weightsBytes != null"
@@ -386,7 +429,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           data-test="drawer-stat-tiles"
         >
           <div class="border-edge flex-1 rounded-card border bg-bath p-3">
-            <div class="edge-code uppercase">Checkpoint weights</div>
+            <div class="edge-code uppercase">{{ weightsHeading }}</div>
             <div class="data-mono mt-1 text-body-lg text-ink" data-test="stat-checkpoint">
               {{ checkpointLabel }}
             </div>
@@ -492,6 +535,24 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
               </button>
             </li>
           </ul>
+        </section>
+
+        <!-- Civitai trigger phrases are high-value authoring metadata. -->
+        <section
+          v-if="merged.trained_words?.length"
+          class="border-edge border-t pt-3"
+          data-test="drawer-trained-words"
+        >
+          <div class="edge-code mb-1.5 uppercase">Trigger words</div>
+          <div class="flex flex-wrap gap-1">
+            <span
+              v-for="word in merged.trained_words"
+              :key="word"
+              class="border-edge data-mono rounded-full border px-2 py-0.5 text-caption text-ink-2"
+            >
+              {{ word }}
+            </span>
+          </div>
         </section>
 
         <!-- Tags -->
