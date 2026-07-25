@@ -294,6 +294,127 @@ describe("useGenerateForm", () => {
     expect(form.state.value.fps).toBe(30);
   });
 
+  it("resetSettings restores the selected model's defaults", () => {
+    const form = useGenerateForm();
+    const model = makeModel({
+      name: "sdxl:fp16",
+      family: "sdxl",
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 30,
+      default_guidance: 7.5,
+    });
+    form.applyModelDefaults(model);
+    Object.assign(form.state.value, {
+      width: 512,
+      height: 512,
+      steps: 4,
+      guidance: 11,
+      seedMode: "static",
+      seed: 42,
+      strength: 0.3,
+      negativePrompt: "blurry",
+      loras: [{ path: "a.safetensors", scale: 0.8 }],
+      upscaleModel: "real-esrgan-x4plus:fp16",
+      scheduler: "ddim",
+      cfgPlus: true,
+      outputFormat: "webp",
+      sourceFitPolicy: { mode: "crop-fill" },
+      imageAttachments: [
+        { kind: "upload", filename: "src.png", base64: "AAAA" },
+      ],
+      gifPreview: true,
+    });
+
+    form.resetSettings(model);
+
+    expect(form.state.value.width).toBe(1024);
+    expect(form.state.value.height).toBe(1024);
+    expect(form.state.value.steps).toBe(30);
+    expect(form.state.value.guidance).toBe(7.5);
+    expect(form.state.value.seedMode).toBe("random");
+    expect(form.state.value.seed).toBeNull();
+    expect(form.state.value.strength).toBe(0.75);
+    expect(form.state.value.negativePrompt).toBe("");
+    expect(form.state.value.loras).toEqual([]);
+    expect(form.state.value.upscaleModel).toBe("");
+    expect(form.state.value.scheduler).toBeNull();
+    expect(form.state.value.cfgPlus).toBe(false);
+    expect(form.state.value.outputFormat).toBe("png");
+    expect(form.state.value.sourceFitPolicy).toEqual({ mode: "pad-repaint" });
+    expect(form.state.value.imageAttachments).toEqual([]);
+    expect(form.state.value.gifPreview).toBe(false);
+  });
+
+  it("resetSettings preserves the prompt, style, model and batch size", () => {
+    const form = useGenerateForm();
+    const model = makeModel({ name: "sdxl:fp16", family: "sdxl" });
+    form.applyModelDefaults(model);
+    Object.assign(form.state.value, {
+      prompt: "a lighthouse in a storm",
+      stylePreset: "cinematic",
+      // Prepared batch work is never silently resized (CLAUDE.md), so the
+      // batch stepper survives a settings reset.
+      batchSize: 4,
+      steps: 3,
+    });
+
+    form.resetSettings(model);
+
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+    expect(form.state.value.stylePreset).toBe("cinematic");
+    expect(form.state.value.model).toBe("sdxl:fp16");
+    expect(form.state.value.modelFamily).toBe("sdxl");
+    expect(form.state.value.batchSize).toBe(4);
+    expect(form.state.value.steps).toBe(20);
+  });
+
+  it("resetSettings falls back to plain defaults with no resolved model row", () => {
+    const form = useGenerateForm();
+    Object.assign(form.state.value, {
+      model: "mystery:fp16",
+      modelFamily: "flux",
+      prompt: "a cat",
+      steps: 3,
+      guidance: 11,
+    });
+
+    form.resetSettings(null);
+
+    expect(form.state.value.model).toBe("mystery:fp16");
+    expect(form.state.value.modelFamily).toBe("flux");
+    expect(form.state.value.prompt).toBe("a cat");
+    expect(form.state.value.steps).toBe(20);
+    expect(form.state.value.guidance).toBe(3.5);
+  });
+
+  it("resetSettings restores video defaults for video families", () => {
+    const form = useGenerateForm();
+    const model = makeModel({ name: "ltx2:fp8", family: "ltx2" });
+    form.applyModelDefaults(model);
+    Object.assign(form.state.value, {
+      frames: 97,
+      fps: 30,
+      pipeline: "two-stage",
+      spatialUpscale: "x2",
+      keyframes: [
+        {
+          frame: 8,
+          image: { kind: "upload", filename: "k.png", base64: "AA" },
+        },
+      ],
+    });
+
+    form.resetSettings(model);
+
+    expect(form.state.value.frames).toBe(25);
+    expect(form.state.value.fps).toBe(24);
+    expect(form.state.value.pipeline).toBeNull();
+    expect(form.state.value.spatialUpscale).toBeNull();
+    expect(form.state.value.keyframes).toEqual([]);
+    expect(form.state.value.outputFormat).toBe("mp4");
+  });
+
   it("toRequest maps camelCase state to snake_case wire payload", () => {
     const form = useGenerateForm();
     Object.assign(form.state.value, {

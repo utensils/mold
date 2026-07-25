@@ -558,6 +558,30 @@ describe("AdvancedDrawer interactions", () => {
     expect(form.toRequest().upscale_model).toBeUndefined();
   });
 
+  it("puts Reset at the top of the phone sheet, above the sections", async () => {
+    // SheetPanel's full variant has no header slot, so the reset has to lead
+    // the sheet body — buried under every advanced section it is unreachable
+    // without scrolling the whole sheet.
+    const wrapper = factory(
+      "sdxl",
+      { prompt: "a lighthouse in a storm", negativePrompt: "blurry" },
+      { mobile: true },
+    );
+    const reset = wrapper.get("[data-test='advanced-reset']");
+    const sections = wrapper.get("[data-test='section-negative']");
+    expect(
+      reset.element.compareDocumentPosition(sections.element) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await reset.trigger("click");
+    const [next] = wrapper.emitted("update:modelValue")!.at(-1) as [
+      GenerateFormState,
+    ];
+    expect(next.prompt).toBe("a lighthouse in a storm");
+    expect(next.negativePrompt).toBe("");
+  });
+
   it("emits close from Done in the phone sheet", async () => {
     // Inline (desktop) has no Done — it's always visible. The Done button
     // lives only in the phone Advanced sheet (mobile: true).

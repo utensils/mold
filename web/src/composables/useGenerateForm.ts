@@ -219,6 +219,35 @@ function modelDefaultsPatch(
   return next;
 }
 
+/**
+ * "Reset settings to defaults" (Create rail): every generation knob returns to
+ * the factory default, then to the selected model's own defaults on top.
+ *
+ * What survives is what the reset is *for* — the user is re-tuning a print they
+ * are still composing: the prompt, the style preset, the selected model/family,
+ * and the batch size (prepared batch work is never silently resized, see
+ * CLAUDE.md). Everything else — shape, resolution, detail, prompt strength,
+ * seed, and every advanced field including source media, LoRAs and the video
+ * suite — goes back to defaults.
+ */
+export function settingsResetPatch(
+  current: GenerateFormState,
+  model: ModelInfoExtended | null,
+): GenerateFormState {
+  const base: GenerateFormState = {
+    ...defaultForm(),
+    prompt: current.prompt,
+    stylePreset: current.stylePreset,
+    model: current.model,
+    modelFamily: current.modelFamily,
+    batchSize: current.batchSize,
+  };
+  // With a resolved catalog row the model's own defaults (and its capability
+  // gates) win over the generic ones; without it the generic defaults stand and
+  // the model name is left alone.
+  return model ? modelDefaultsPatch(base, model) : base;
+}
+
 export interface ApplyMetadataOptions {
   models?: ModelInfoExtended[];
   format?: OutputFormat | null;
@@ -435,6 +464,9 @@ function persist(state: GenerateFormState) {
 export interface UseGenerateForm {
   state: Ref<GenerateFormState>;
   reset: () => void;
+  /** Restore every generation setting to the selected model's defaults while
+   * keeping the prompt, style, model and batch size (`settingsResetPatch`). */
+  resetSettings: (model: ModelInfoExtended | null) => void;
   applyModelDefaults: (model: ModelInfoExtended) => void;
   /** Replace the entire LoRA stack. Pass `[]` to clear. */
   setLoras: (loras: LoraSelection[]) => void;
@@ -483,6 +515,9 @@ export function useGenerateForm(): UseGenerateForm {
     state,
     reset: () => {
       state.value = defaultForm();
+    },
+    resetSettings: (model) => {
+      state.value = settingsResetPatch(state.value, model);
     },
     setLoras: (loras) => {
       state.value.loras = loras.slice(0, MAX_LORA_STACK);

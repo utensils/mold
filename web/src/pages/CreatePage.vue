@@ -7,7 +7,7 @@ import {
   ref,
   watch,
 } from "vue";
-import { requestChoice, toast } from "../lib/toasts";
+import { requestChoice, toast, undoableAction } from "../lib/toasts";
 import { useRoute } from "vue-router";
 import ComposerCard from "../components/create/ComposerCard.vue";
 import ResultCanvas from "../components/create/ResultCanvas.vue";
@@ -557,6 +557,26 @@ function onNewPrint() {
   composerError.value = null;
   preprocessingStatus.value = null;
   void nextTick(() => composerCardRef.value?.focus?.());
+}
+
+// Controls rail "Reset" (spec §06): put every generation setting back to the
+// current model's defaults. The prompt, style, model and batch size stay —
+// this re-tunes the print being composed, it does not start a new one, and
+// prepared batch work is never silently resized. Nothing leaves the browser,
+// so an undo toast is enough; a blocking confirm would be heavier than the
+// action deserves.
+function onResetSettings() {
+  // resetSettings swaps in a freshly built state object, so the previous one is
+  // never mutated and can be handed straight back on undo.
+  const previous = form.state.value;
+  form.resetSettings(currentModel.value ?? null);
+  undoableAction({
+    text: "Settings reset to model defaults",
+    undo: () => {
+      form.state.value = previous;
+    },
+    commit: () => {},
+  });
 }
 
 // ── Shape / summary projections ───────────────────────────────────────
@@ -1488,6 +1508,7 @@ onBeforeUnmount(() => {
                   :mobile="true"
                   :last-seed="lastSeedUsed"
                   @open-advanced="openAdvanced"
+                  @reset-settings="onResetSettings"
                 />
               </div>
             </template>
@@ -1576,6 +1597,7 @@ onBeforeUnmount(() => {
           :mobile="false"
           :last-seed="lastSeedUsed"
           @open-advanced="openAdvanced"
+          @reset-settings="onResetSettings"
         />
         <!-- Tablet+ : inline, always-visible Advanced column. -->
         <AdvancedDrawer

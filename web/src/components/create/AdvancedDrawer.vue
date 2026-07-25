@@ -290,8 +290,11 @@ function resetAdvanced() {
       >
     </template>
 
-    <div v-if="inline" class="adv__inline-head">
-      <span class="adv__kicker">Advanced</span>
+    <!-- Same head on both surfaces. SheetPanel's full variant has no header
+         slot, so on phones this row leads the sheet body — a Reset parked
+         under every section would need a full scroll to reach. -->
+    <div class="adv__inline-head">
+      <span v-if="inline" class="adv__kicker">Advanced</span>
       <BadgePill v-if="advCount > 0" data-test="advanced-active"
         >{{ advCount }} on</BadgePill
       >
@@ -300,9 +303,10 @@ function resetAdvanced() {
         type="button"
         class="adv__inline-reset"
         data-test="advanced-reset"
+        aria-label="Reset advanced settings"
         @click="resetAdvanced"
       >
-        Reset
+        ↺ Reset
       </button>
     </div>
 
@@ -703,14 +707,6 @@ function resetAdvanced() {
     </div>
 
     <div v-if="mobile" class="adv__footer">
-      <button
-        type="button"
-        class="adv__reset"
-        data-test="advanced-reset-sheet"
-        @click="resetAdvanced"
-      >
-        Reset
-      </button>
       <div class="adv__spacer" />
       <button
         type="button"
@@ -955,16 +951,6 @@ function resetAdvanced() {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--edge);
-}
-.adv__reset {
-  border: 1px solid var(--ce);
-  background: transparent;
-  color: var(--ink-2);
-  padding: 11px 16px;
-  border-radius: var(--radius-control-lg);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
 }
 .adv__spacer {
   flex: 1;

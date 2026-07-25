@@ -8,6 +8,7 @@ import {
 } from "../composables/useGenerateForm";
 import {
   resetNotifications,
+  runToastAction,
   settleConfirm,
   useNotifications,
 } from "../lib/toasts";
@@ -301,6 +302,59 @@ describe("CreatePage layout and behavior", () => {
       "real-esrgan-x4plus:fp16",
     );
     globalThis.fetch = originalFetch;
+  });
+
+  it("resets the rail settings to the model defaults, undoably", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "sdxl:fp16",
+        family: "sdxl",
+        size_gb: 6,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 30,
+        default_guidance: 7.5,
+        default_width: 1024,
+        default_height: 1024,
+        description: "SDXL",
+      },
+    ]);
+    const stubs: Record<string, Component> = pageStubs();
+    stubs.ControlsAside = defineComponent({
+      name: "ControlsAside",
+      template:
+        "<aside data-test='controls-stub'><button data-test='controls-reset' @click=\"$emit('reset-settings')\">reset</button></aside>",
+    });
+    const wrapper = mount(CreatePage, { global: { stubs } });
+    await flushPromises();
+
+    const form = useGenerateForm();
+    form.state.value.prompt = "a lighthouse in a storm";
+    form.state.value.steps = 3;
+    form.state.value.guidance = 11;
+    form.state.value.seedMode = "static";
+    form.state.value.seed = 42;
+    form.state.value.negativePrompt = "blurry";
+
+    await wrapper.get("[data-test='controls-reset']").trigger("click");
+    expect(form.state.value.steps).toBe(30);
+    expect(form.state.value.guidance).toBe(7.5);
+    expect(form.state.value.seedMode).toBe("random");
+    expect(form.state.value.negativePrompt).toBe("");
+    expect(form.state.value.prompt).toBe("a lighthouse in a storm");
+    expect(form.state.value.model).toBe("sdxl:fp16");
+
+    const notifications = useNotifications();
+    const settingsToast = notifications.toasts.find((t) =>
+      /settings/i.test(t.text),
+    );
+    expect(settingsToast?.actionLabel).toBe("Undo");
+    runToastAction(settingsToast!.id);
+    expect(form.state.value.steps).toBe(3);
+    expect(form.state.value.seed).toBe(42);
+    expect(form.state.value.negativePrompt).toBe("blurry");
   });
 
   it("guides a first pull when no models are installed (cold start)", async () => {
