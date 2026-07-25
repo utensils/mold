@@ -1725,7 +1725,9 @@ dependencies = [
 name = "mold-mobile"
 version = "0.20.2"
 dependencies = [
+ "base64 0.22.1",
  "libc",
+ "objc2-foundation",
  "objc2-ui-kit",
  "security-framework",
  "security-framework-sys",

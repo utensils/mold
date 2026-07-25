@@ -10,6 +10,8 @@
   <array>
     <string>_mold._tcp</string>
   </array>
+  <key>NSPhotoLibraryAddUsageDescription</key>
+  <string>Save generated images from Mold to your photo library.</string>
   <key>UIViewControllerBasedStatusBarAppearance</key>
   <true/>
   <key>NSAppTransportSecurity</key>

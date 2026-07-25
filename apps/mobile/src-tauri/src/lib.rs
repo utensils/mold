@@ -4,6 +4,7 @@
 mod appearance;
 mod discovery;
 mod keychain;
+mod media;
 
 fn app_context() -> tauri::Context<tauri::Wry> {
     tauri::generate_context!()
@@ -18,6 +19,8 @@ pub fn run() {
             keychain::keychain_set_api_key,
             keychain::keychain_get_api_key,
             keychain::keychain_delete_api_key,
+            media::copy_image_to_clipboard,
+            media::save_image_to_photos,
         ])
         .run(app_context())
         .expect("error while running mold-mobile");
@@ -60,5 +63,12 @@ mod tests {
             plist.contains("<key>UIViewControllerBasedStatusBarAppearance</key>\n  <true/>"),
             "iOS must let the Tauri view controller update status-bar appearance"
         );
+    }
+
+    #[test]
+    fn ios_declares_add_only_photos_access_for_explicit_saves() {
+        let plist = include_str!("../Info.ios.plist");
+        assert!(plist.contains("<key>NSPhotoLibraryAddUsageDescription</key>"));
+        assert!(plist.contains("Save generated images"));
     }
 }

@@ -935,7 +935,10 @@ independently cancellable batch queue, source/edit/mask/ControlNet/LoRA inputs,
 resolution/seed controls, estimates, a full-screen Advanced sheet, prompt style
 presets that compose at submit, and image/video parameters. Library merges
 all saved hosts, streams native video through short-lived exact-path media
-tickets, swipes between full-screen prints, and exposes Use as prompt/source.
+tickets, swipes between full-screen prints, exposes native Copy image / Save
+photo plus Use as prompt/source, and opens generated stills in the same viewer.
+Its persistent New markers mirror desktop Library visits; both shells badge
+upscaled images from saved output provenance.
 Host detail shows telemetry, models-disk, queue, downloads, and installed
 models. Models merges installed/live results, lets Pull target a different host
 without changing Create, and immediately shows Connecting → Starting → Queued

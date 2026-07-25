@@ -359,6 +359,26 @@ describe("LibraryView header + NEW badges", () => {
     expect(gallery.libraryVisited).toBe(true);
     wrapper.unmount();
   });
+
+  it("badges upscaled image tiles without relying only on their filename", async () => {
+    const { wrapper } = await mountView(undefined, (gallery) => {
+      const first = gallery.buckets.local?.items[0];
+      if (first) {
+        first.filename = "renamed.png";
+        first.metadata = {
+          ...first.metadata,
+          width: 2048,
+          height: 2048,
+          generation_width: 512,
+          generation_height: 512,
+          upscale_model: "real-esrgan-x4plus",
+        };
+      }
+    });
+
+    expect(wrapper.get('[data-test="upscaled-badge"]').text()).toBe("Upscaled");
+    wrapper.unmount();
+  });
 });
 
 describe("LibraryView history drawer", () => {

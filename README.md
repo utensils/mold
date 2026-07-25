@@ -196,6 +196,9 @@ stale, or superseded outcomes without discarding the recovery record.
 Saved results stream from the host instead of crossing the iPhone WebView as
 encoded media; full-screen images swipe between prints, videos retain native
 playback controls, and a still can become the next generation's source image.
+Generated images expand into that viewer on tap, where explicit native Copy
+image and Save photo actions replace long-press handling. Library matches
+desktop's persistent New markers, and both shells badge upscaled images.
 Settings offers Mold or Safelight color families in System, Dark, or Light
 appearance and keeps native iOS chrome in sync. The app prevents input-focus and
 double-tap page zoom, removes rubber-band overscroll, and preserves the

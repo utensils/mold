@@ -128,10 +128,16 @@ are reported without hiding media from hosts that did respond.
 Tap a tile to open the full-screen viewer:
 
 - images are shown uncropped;
+- generated images open this same viewer when tapped;
 - videos stream from their owning host with native playback and seeking;
 - swipe left or right to move through the loaded prints; and
+- use **Copy image** or **Save photo** instead of the system long-press menu;
 - use **Use as prompt** to restore recorded generation settings, or **Use as
   source** to attach a still to the next compatible generation.
+
+Prints added since the prior Library visit carry a **New** badge. Images enlarged
+by post-generation or standalone upscaling carry an **Upscaled** badge on both
+iPhone and desktop.
 
 Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies

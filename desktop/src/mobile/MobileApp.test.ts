@@ -3009,6 +3009,70 @@ describe("MobileApp gallery", () => {
     expect(fieldControl("FPS").element).toHaveProperty("value", "30");
   });
 
+  it("opens the latest generated image in the full-screen print viewer when tapped", async () => {
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("expand this result");
+    await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+    await flushPromises();
+    openStreams[0]!.options.onEvent(
+      "complete",
+      JSON.stringify({
+        image: btoa("generated image"),
+        format: "png",
+        filename: "expand-this-result.png",
+        width: 768,
+        height: 512,
+        seed_used: 9,
+        generation_time_ms: 500,
+        model: model.name,
+        metadata: print.metadata,
+      }),
+    );
+    openStreams[0]!.resolve();
+    await flushPromises();
+
+    await wrapper.get("[data-test='mobile-generated-result']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("[data-test='gallery-viewer']").exists()).toBe(true);
+    expect(wrapper.get("[data-test='gallery-viewer-image']").attributes("src")).toContain("blob:");
+  });
+
+  it("shows New and Upscaled indicators on mobile Library tiles", async () => {
+    localStorage.setItem("mold.mobile.library-seen.v1", JSON.stringify(["studio-id:old.png"]));
+    localStorage.setItem("mold.mobile.library-visited.v1", "true");
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") {
+        return Promise.resolve([
+          {
+            ...print,
+            filename: "new-upscaled.png",
+            format: "png",
+            metadata: {
+              ...print.metadata,
+              upscale_model: "real-esrgan-x4plus",
+              generation_width: 384,
+              generation_height: 256,
+            },
+          },
+        ]);
+      }
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await wrapper.get("[data-test='mobile-tab-gallery']").trigger("click");
+    await flushPromises();
+
+    const tile = wrapper.get("[data-test='gallery-item']");
+    expect(tile.get("[data-test='new-badge']").text()).toBe("New");
+    expect(tile.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
+  });
+
   it("uses a still gallery print as the selected model's source image", async () => {
     const still = { ...print, filename: "source print.png", format: "png" as const };
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {

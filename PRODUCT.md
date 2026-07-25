@@ -31,6 +31,9 @@ Avoid generic AI dashboards, decorative glass panels, neon-on-black cyberpunk sh
 - On iPhone, respect safe areas and 44pt touch targets, keep host/queue/pull
   state visible, and prevent accidental page zoom or rubber-band movement from
   making the interface feel unstable.
+- Treat image export as an explicit action on iPhone: tapping generated work
+  opens the full viewer, while Copy image and Save photo replace fragile
+  long-press behavior. New and Upscaled state cues stay aligned with desktop.
 
 ## Accessibility & Inclusion
 

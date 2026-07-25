@@ -35,6 +35,7 @@ import {
 } from "../lib/generateForm";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
 import { galleryMediaPath, isVideoItem } from "../lib/gallery/media";
+import { isUpscaledImage } from "../lib/gallery/upscaled";
 import { percent } from "../lib/format";
 import { composeStyle, mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
@@ -144,6 +145,8 @@ interface MobileExpansionPullAttempt {
 
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
+const LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
+const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
 const mobileContent = ref<HTMLElement | null>(null);
@@ -253,6 +256,7 @@ const galleryLoadingMore = ref(false);
 const galleryError = ref("");
 const galleryRemaining = ref(0);
 const selectedPrint = ref<GalleryPrint | null>(null);
+const generatedViewerOpen = ref(false);
 const reusingPrint = ref(false);
 const usingPrintAsSource = ref(false);
 const reusePrintError = ref("");
@@ -276,6 +280,20 @@ const hostProbes = new Map<
 >();
 const generation = useGenerationStore();
 const mobileDownloads = useMobileDownloadsStore();
+function loadLibrarySeen(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LIBRARY_SEEN_KEY) ?? "[]");
+    return new Set(
+      Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === "string")
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+let librarySeenBaseline = loadLibrarySeen();
+let libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
 
 // Ephemeral per-host telemetry from the /api/status probe (VRAM + queue), kept
 // out of the persisted host identity so the Machines cards can mirror the host
@@ -446,6 +464,30 @@ const latestResultJob = computed(() => {
 });
 const resultUrl = computed(() => latestResultJob.value?.resultUrl ?? "");
 const resultIsVideo = computed(() => latestResultJob.value?.result?.format === "mp4");
+const generatedPreviewItem = computed<GalleryImage | null>(() => {
+  const job = latestResultJob.value;
+  const result = job?.result;
+  if (!job || !result || !resultUrl.value) return null;
+  return {
+    filename: result.filename ?? `generated-${result.seed_used}.${result.format}`,
+    timestamp: Math.floor(job.submittedAtUnixMs / 1000),
+    format: result.format,
+    metadata: result.metadata ?? {
+      prompt: job.prompt,
+      model: result.model,
+      seed: result.seed_used,
+      steps: job.total,
+      guidance: job.guidance,
+      width: result.width,
+      height: result.height,
+    },
+  };
+});
+const generatedPreviewTarget = computed<ApiTarget>(() => {
+  const job = latestResultJob.value;
+  const host = hosts.value.find((candidate) => candidate.id === job?.hostId) ?? selectedHost.value;
+  return host ? mobileHostTarget(host) : { baseUrl: "", apiKey: null };
+});
 const resultPreviewError = computed(() => {
   const job = latestResultJob.value;
   return job?.resultError ? describeTransportError(job.resultError, job.hostLabel) : "";
@@ -1928,6 +1970,7 @@ async function loadMoreGalleryPage(): Promise<void> {
       ...batch.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
     );
   }
+  markMobileLibrarySeen(gallery.value);
   galleryRemaining.value = pendingGallery.length;
   galleryLoadingMore.value = false;
 }
@@ -2010,6 +2053,21 @@ async function useSelectedPrintAsSource(): Promise<void> {
 function openPrint(print: GalleryPrint): void {
   reusePrintError.value = "";
   selectedPrint.value = print;
+}
+
+function gallerySeenKey(print: Pick<GalleryPrint, "hostId" | "filename">): string {
+  return `${print.hostId}:${print.filename}`;
+}
+
+function isFreshMobilePrint(print: GalleryPrint): boolean {
+  return libraryPreviouslyVisited && !librarySeenBaseline.has(gallerySeenKey(print));
+}
+
+function markMobileLibrarySeen(prints: GalleryPrint[]): void {
+  const seen = new Set(librarySeenBaseline);
+  for (const print of prints) seen.add(gallerySeenKey(print));
+  localStorage.setItem(LIBRARY_SEEN_KEY, JSON.stringify([...seen]));
+  localStorage.setItem(LIBRARY_VISITED_KEY, "true");
 }
 
 function navigateSelectedPrint(delta: -1 | 1): void {
@@ -2149,7 +2207,11 @@ watch(tab, (next) => {
     mobileContent.value.scrollTop = 0;
     mobileContent.value.scrollLeft = 0;
   });
-  if (next === "gallery") void refreshGallery();
+  if (next === "gallery") {
+    librarySeenBaseline = loadLibrarySeen();
+    libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
+    void refreshGallery();
+  }
   if (next !== "hosts") hostDetailId.value = "";
 });
 
@@ -2681,15 +2743,25 @@ onBeforeUnmount(() => {
             @loadedmetadata="generatedMediaReady"
             @error="recoverGeneratedMedia"
           />
-          <img
+          <button
             v-else-if="resultUrl"
-            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-            class="result-media"
-            :src="resultUrl"
-            alt="Generated print"
-            @load="generatedMediaReady"
-            @error="recoverGeneratedMedia"
-          />
+            class="result-media-button"
+            type="button"
+            data-test="mobile-generated-result"
+            aria-label="Expand generated print"
+            @click="generatedViewerOpen = true"
+          >
+            <img
+              :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+              class="result-media"
+              :src="resultUrl"
+              alt="Generated print"
+              draggable="false"
+              @load="generatedMediaReady"
+              @error="recoverGeneratedMedia"
+              @contextmenu.prevent
+            />
+          </button>
         </template>
       </template>
 
@@ -2714,6 +2786,20 @@ onBeforeUnmount(() => {
               loading="lazy"
             />
             <span v-if="isVideoItem(print)" class="gallery-video-badge" aria-hidden="true">▶</span>
+            <span
+              v-if="isFreshMobilePrint(print)"
+              class="gallery-new-badge"
+              data-test="new-badge"
+            >
+              New
+            </span>
+            <span
+              v-if="isUpscaledImage(print)"
+              class="gallery-upscaled-badge"
+              data-test="upscaled-badge"
+            >
+              Upscaled
+            </span>
           </button>
         </div>
         <div v-else class="empty-state">No prints found.</div>
@@ -2881,6 +2967,19 @@ onBeforeUnmount(() => {
       @use-source="useSelectedPrintAsSource"
       @previous="navigateSelectedPrint(-1)"
       @next="navigateSelectedPrint(1)"
+    />
+
+    <MobileGalleryViewer
+      v-if="generatedViewerOpen && generatedPreviewItem && resultUrl"
+      :item="generatedPreviewItem"
+      :target="generatedPreviewTarget"
+      :cache-key="latestResultJob?.hostId ?? 'generated'"
+      :host-name="latestResultJob?.hostLabel ?? selectedHost?.name ?? 'Mold host'"
+      :thumbnail-url="resultUrl"
+      :media-url-override="resultUrl"
+      :generation-announcement="generationAnnouncement"
+      @close="generatedViewerOpen = false"
+      @reuse="generatedViewerOpen = false"
     />
 
     <nav v-if="!settingsOpen" class="mobile-tabs" aria-label="Primary">

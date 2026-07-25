@@ -26,6 +26,7 @@ import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu } from "../lib/shortcuts";
 import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
+import { isUpscaledImage } from "../lib/gallery/upscaled";
 
 const GAP = 8;
 const PAD = 16;
@@ -809,6 +810,13 @@ onUnmounted(() => {
               New
             </span>
             <span
+              v-if="!selectMode && isUpscaledImage(laid.item)"
+              data-test="upscaled-badge"
+              class="ms-lib-upscaled absolute top-2 right-2"
+            >
+              Upscaled
+            </span>
+            <span
               v-if="isVideo(laid.item)"
               class="absolute top-1.5 right-1.5 rounded-control bg-black/60 px-1 text-caption text-on-media"
             >
@@ -946,6 +954,18 @@ onUnmounted(() => {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   background: var(--safelight);
+  color: var(--on-accent);
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+
+.ms-lib-upscaled {
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--rebate) 88%, black);
   color: var(--on-accent);
   padding: 2px 6px;
   border-radius: 5px;

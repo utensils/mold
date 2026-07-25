@@ -15,6 +15,7 @@ import { modelDisplayNameForId } from "../../lib/models";
 import { useHostModelsStore } from "../../stores/hostModels";
 import type { ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
+import { isUpscaledImage } from "../../lib/gallery/upscaled";
 
 const props = withDefaults(
   defineProps<{
@@ -68,6 +69,7 @@ onMounted(() => {
 onBeforeUnmount(() => restoreFocusEl?.focus?.());
 
 const meta = computed(() => props.item.metadata);
+const upscaled = computed(() => isUpscaledImage(props.item));
 
 /** Full LoRA stack; a legacy single `lora`/`lora_scale` pair becomes one row. */
 const loraStack = computed(() => {
@@ -201,6 +203,13 @@ async function download() {
             :alt="meta.prompt"
             class="!object-contain"
           />
+          <span
+            v-if="upscaled"
+            data-test="upscaled-badge"
+            class="ms-lib-upscaled absolute top-2 left-2"
+          >
+            Upscaled
+          </span>
         </div>
         <button
           type="button"
@@ -438,5 +447,17 @@ async function download() {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink-3);
+}
+
+.ms-lib-upscaled {
+  font-family: var(--f-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--rebate) 88%, black);
+  color: var(--on-accent);
+  padding: 2px 6px;
+  border-radius: 5px;
 }
 </style>
