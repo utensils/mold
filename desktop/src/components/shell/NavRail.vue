@@ -14,9 +14,11 @@ import { useComposerStore } from "../../stores/composer";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { useGalleryStore } from "../../stores/gallery";
 import { useHostsStore } from "../../stores/hosts";
+import { useHostModelsStore } from "../../stores/hostModels";
 import { useToastStore } from "../../stores/toasts";
 import { badgeCount } from "../../lib/notifications";
 import { shortcutLabel } from "../../lib/platform";
+import { modelDisplayNameForId } from "../../lib/models";
 
 const route = useRoute();
 const router = useRouter();
@@ -25,6 +27,7 @@ const generation = useGenerationStore();
 const composer = useComposerStore();
 const contextMenu = useContextMenuStore();
 const hosts = useHostsStore();
+const hostModels = useHostModelsStore();
 const gallery = useGalleryStore();
 const toasts = useToastStore();
 
@@ -98,6 +101,7 @@ const railJobs = computed<Job[]>(() => {
     .reverse();
   return [...live, ...done];
 });
+const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
 
 function jobRunning(job: Job): boolean {
   return job.status === "denoising" || job.status === "finishing" || job.status === "loading";
@@ -231,7 +235,8 @@ function jobMenu(job: Job): MenuEntry[] {
           </span>
           <span class="min-w-0 flex-1">
             <span class="block truncate text-[11.5px] text-ink-2" :title="job.prompt">
-              {{ job.model }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
+              {{ modelLabel(job.model)
+              }}<template v-if="job.hostLabel"> · {{ job.hostLabel }}</template>
             </span>
             <span
               class="block font-utility text-[9.5px]"

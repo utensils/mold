@@ -15,6 +15,7 @@ defineProps<{
   hostLabel: string;
   stateCode: string;
   elapsed: string | null;
+  modelLabel: string;
 }>();
 const emit = defineEmits<{
   (e: "close"): void;
@@ -41,7 +42,7 @@ function seedLabel(entry: EnrichedQueueEntry): string {
     class="border-edge fixed inset-y-0 right-0 z-40 flex w-96 max-w-full flex-col border-l bg-bench shadow-raised"
     role="dialog"
     aria-modal="false"
-    :aria-label="`Queued job — ${entry.model}`"
+    :aria-label="`Queued job — ${modelLabel}`"
     data-test="queue-entry-drawer"
   >
     <!-- Header -->
@@ -51,8 +52,8 @@ function seedLabel(entry: EnrichedQueueEntry): string {
         :class="entry.state === 'running' ? 'bg-safelight' : 'bg-halide'"
         aria-hidden="true"
       />
-      <h2 class="min-w-0 flex-1 truncate text-body font-semibold text-ink" :title="entry.model">
-        {{ entry.model }}
+      <h2 class="min-w-0 flex-1 truncate text-body font-semibold text-ink" :title="modelLabel">
+        {{ modelLabel }}
       </h2>
       <button
         type="button"

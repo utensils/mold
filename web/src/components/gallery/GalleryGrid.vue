@@ -17,11 +17,14 @@ import { getHost } from "../../lib/hostRegistry";
 import { resolveThumbnailSrc } from "../../lib/galleryMedia";
 import { printKey } from "../../lib/multiHostGallery";
 import type { GalleryImage } from "../../types";
+import type { ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
+import { modelDisplayNameForId } from "../../lib/modelName";
 
 const props = withDefaults(
   defineProps<{
     entries: GalleryImage[];
+    models?: ModelInfoExtended[];
     loading: boolean;
     selectMode?: boolean;
     /** Selected print keys — `hostId|filename`, never a bare filename. */
@@ -33,8 +36,10 @@ const props = withDefaults(
     selectMode: false,
     selection: () => new Set<string>(),
     fresh: () => new Set<string>(),
+    models: () => [],
   },
 );
+const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
 
 const emit = defineEmits<{
   (e: "open", item: GalleryImage): void;
@@ -326,9 +331,9 @@ onBeforeUnmount(() => {
           <span
             class="gg__metadata"
             data-test="print-metadata"
-            :title="`${entry.metadata.model} · Seed ${entry.metadata.seed}`"
+            :title="`${modelLabel(entry.metadata.model)} · Seed ${entry.metadata.seed}`"
           >
-            {{ entry.metadata.model }} · S {{ entry.metadata.seed }}
+            {{ modelLabel(entry.metadata.model) }} · S {{ entry.metadata.seed }}
           </span>
 
           <!-- Selection hit layer (select mode only). Sits above the tile so a

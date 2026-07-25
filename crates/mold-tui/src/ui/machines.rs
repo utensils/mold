@@ -248,7 +248,10 @@ fn build_local_detail(app: &App, lines: &mut Vec<Line>) {
             Span::styled(
                 format!(
                     "{} · {}",
-                    app.generate.params.model,
+                    mold_core::ModelInfoExtended::human_name_for(
+                        &app.generate.params.model,
+                        &app.models.catalog,
+                    ),
                     running_time_label(
                         app.generate.progress.denoise_step,
                         app.generate.progress.denoise_total,
@@ -261,18 +264,15 @@ fn build_local_detail(app: &App, lines: &mut Vec<Line>) {
     }
     for entry in app.history.recent(5) {
         any = true;
+        let model_name = if entry.model.is_empty() {
+            "—".to_string()
+        } else {
+            mold_core::ModelInfoExtended::human_name_for(&entry.model, &app.models.catalog)
+        };
         lines.push(Line::from(vec![
             Span::styled("✓ ", theme.success()),
             Span::styled(
-                format!(
-                    "{} · {}",
-                    if entry.model.is_empty() {
-                        "—"
-                    } else {
-                        &entry.model
-                    },
-                    relative_time(entry.timestamp)
-                ),
+                format!("{} · {}", model_name, relative_time(entry.timestamp)),
                 theme.dim(),
             ),
             Span::styled(format!("  {}", prompt_preview(&entry.prompt)), theme.dim()),
@@ -328,7 +328,14 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             let loaded = if status.models_loaded.is_empty() {
                 "none".to_string()
             } else {
-                status.models_loaded.join(", ")
+                status
+                    .models_loaded
+                    .iter()
+                    .map(|name| {
+                        mold_core::ModelInfoExtended::human_name_for(name, &app.models.catalog)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             lines.push(kv_owned(theme, "Loaded", loaded, false));
             lines.push(kv_owned(
@@ -358,12 +365,21 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                 let selected = st.focus == MachinesFocus::Detail && i == st.queue_selected;
                 let text = if job.state == "running" {
                     running_lane(
-                        &job.model,
+                        &mold_core::ModelInfoExtended::human_name_for(
+                            &job.model,
+                            &app.models.catalog,
+                        ),
                         &queue_elapsed_label(job.started_at_unix_ms, now_ms),
                         job.gpu,
                     )
                 } else {
-                    queued_lane(&job.model, job.position)
+                    queued_lane(
+                        &mold_core::ModelInfoExtended::human_name_for(
+                            &job.model,
+                            &app.models.catalog,
+                        ),
+                        job.position,
+                    )
                 };
                 let style = if selected {
                     theme.list_selected()

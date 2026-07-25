@@ -24,7 +24,7 @@ import {
   resolveStreamableSrc,
   resolveThumbnailSrc,
 } from "../../lib/galleryMedia";
-import type { GalleryImage } from "../../types";
+import type { GalleryImage, ModelInfoExtended } from "../../types";
 import { mediaKind } from "../../types";
 import { formatResolution, shortModel } from "../../util/format";
 
@@ -37,6 +37,7 @@ const props = defineProps<{
   hasNext: boolean;
   // Global audio preference; native controls still let the user override.
   muted: boolean;
+  models?: ModelInfoExtended[] | undefined;
 }>();
 
 const emit = defineEmits<{
@@ -139,7 +140,7 @@ const blockedTitle = computed(() =>
 
 const prompt = computed(() => props.item?.metadata.prompt ?? "");
 const modelLabel = computed(() =>
-  props.item ? shortModel(props.item.metadata.model) : "",
+  props.item ? shortModel(props.item.metadata.model, props.models ?? []) : "",
 );
 const dimensions = computed(() =>
   props.item ? formatResolution(props.item.metadata) : "",

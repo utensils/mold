@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isCatalogModelId, modelDisplayName } from "./modelName";
+import {
+  isCatalogModelId,
+  modelDisplayName,
+  modelDisplayNameForId,
+} from "./modelName";
 
 describe("isCatalogModelId", () => {
   it("recognizes opaque catalog install ids", () => {
@@ -29,9 +33,9 @@ describe("modelDisplayName", () => {
     ).toBe("Juggernaut XL - Ragnarok by KandooAI");
   });
 
-  it("keeps the raw name for catalog ids with no readable metadata", () => {
+  it("uses a readable fallback for catalog ids with no title metadata", () => {
     expect(modelDisplayName({ name: "cv:1759168", description: "" })).toBe(
-      "cv:1759168",
+      "Civitai model #1759168",
     );
   });
 
@@ -39,5 +43,13 @@ describe("modelDisplayName", () => {
     expect(
       modelDisplayName({ name: "flux-dev:q8", description: "The dev model." }),
     ).toBe("flux-dev:q8");
+  });
+
+  it("resolves queue and download ids through the current model list", () => {
+    expect(
+      modelDisplayNameForId("cv:1759168", [
+        { name: "cv:1759168", display_name: "Pony Diffusion V6 XL" },
+      ]),
+    ).toBe("Pony Diffusion V6 XL");
   });
 });

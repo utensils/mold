@@ -5,13 +5,16 @@
  * (pullResume store) instead of surfacing a raw HTTP error.
  */
 import { onMounted, ref } from "vue";
+import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
 
-defineProps<{
+const props = defineProps<{
   model: string;
   hostLabel: string;
   /** Known weights size, when the model exists on another host. */
   sizeGb?: number | null;
+  models?: DisplayableModel[] | undefined;
 }>();
+const modelLabel = () => modelDisplayNameForId(props.model, props.models ?? []);
 const emit = defineEmits<{ (e: "confirm"): void; (e: "close"): void }>();
 
 // Move focus into the teleported overlay so Esc works immediately
@@ -36,7 +39,7 @@ onMounted(() => cancelBtn.value?.focus());
       >
         <h2 class="text-body-lg font-semibold text-ink">Model not on {{ hostLabel }}</h2>
         <p class="mt-2 text-body text-ink-2">
-          <span class="data-mono text-ink">{{ model }}</span>
+          <span class="data-mono text-ink">{{ modelLabel() }}</span>
           isn't installed on {{ hostLabel
           }}<template v-if="sizeGb"> ({{ sizeGb.toFixed(1) }} GB)</template>. Download it there and
           run this generation automatically once it's ready?

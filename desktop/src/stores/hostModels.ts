@@ -28,6 +28,9 @@ export const useHostModelsStore = defineStore("hostModels", {
     loading: false,
   }),
   getters: {
+    modelsOn(state) {
+      return (hostId: string): ModelEntry[] => state.byHost[hostId]?.entries ?? [];
+    },
     /** Downloaded generation models on one host — mirrors `useModelStore.installed`. */
     installedOn(state) {
       return (hostId: string): ModelEntry[] =>

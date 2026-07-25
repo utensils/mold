@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { ExpansionPullView } from "../../lib/expansionPull";
 import { formatBytes, formatEta, percent } from "../../lib/format";
+import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
 
 const props = defineProps<{
   model: string;
@@ -9,7 +10,9 @@ const props = defineProps<{
   error: string;
   status: ExpansionPullView;
   etaSeconds: number | null;
+  models?: DisplayableModel[] | undefined;
 }>();
+const modelLabel = computed(() => modelDisplayNameForId(props.model, props.models ?? []));
 
 defineEmits<{
   (e: "pull"): void;
@@ -36,17 +39,17 @@ const stateLabel = computed(() => {
     case "missing":
       return props.error;
     case "connecting":
-      return `Connecting to ${props.hostLabel} to pull ${props.model}…`;
+      return `Connecting to ${props.hostLabel} to pull ${modelLabel.value}…`;
     case "starting":
-      return `Starting ${props.model} on ${props.hostLabel}…`;
+      return `Starting ${modelLabel.value} on ${props.hostLabel}…`;
     case "queued":
-      return `${props.model} queued on ${props.hostLabel}`;
+      return `${modelLabel.value} queued on ${props.hostLabel}`;
     case "pulling":
-      return `Pulling ${props.model} on ${props.hostLabel}`;
+      return `Pulling ${modelLabel.value} on ${props.hostLabel}`;
     case "ready":
-      return `${props.model} ready on ${props.hostLabel}`;
+      return `${modelLabel.value} ready on ${props.hostLabel}`;
     case "failed":
-      return `${props.model} pull failed on ${props.hostLabel}`;
+      return `${modelLabel.value} pull failed on ${props.hostLabel}`;
     case "cancelled":
       return `${props.model} pull cancelled on ${props.hostLabel}`;
   }
@@ -90,7 +93,7 @@ const stateLabel = computed(() => {
         v-else-if="status.kind === 'ready'"
         type="button"
         data-test="retry-expansion"
-        :aria-label="`Retry expansion with ${model} on ${hostLabel}`"
+        :aria-label="`Retry expansion with ${modelLabel} on ${hostLabel}`"
         class="min-h-8 rounded-control bg-safelight px-2.5 text-caption font-semibold text-on-accent transition-[filter] duration-100 hover:brightness-105"
         @click="$emit('retry-expansion')"
       >
@@ -103,7 +106,7 @@ const stateLabel = computed(() => {
         class="border-stop/60 min-h-8 rounded-control border px-2.5 text-caption font-semibold text-ink transition-colors duration-100 hover:border-stop"
         @click="$emit('pull')"
       >
-        Retry {{ model }} pull on {{ hostLabel }}
+        Retry {{ modelLabel }} pull on {{ hostLabel }}
       </button>
     </div>
 
@@ -114,7 +117,7 @@ const stateLabel = computed(() => {
         aria-valuemin="0"
         aria-valuemax="100"
         :aria-valuenow="pullPercent"
-        :aria-label="`Pulling ${model} on ${hostLabel}`"
+        :aria-label="`Pulling ${modelLabel} on ${hostLabel}`"
       >
         <div
           class="h-full bg-safelight transition-[width] duration-300 motion-reduce:transition-none"

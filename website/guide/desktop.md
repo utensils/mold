@@ -45,7 +45,8 @@ surface powers it, so anything the app does maps to a documented endpoint.
 - **Create** — a capability-driven inspector that shows only the
   controls a model's family supports (negative prompt, scheduler, CFG++, LoRA
   stack, img2img source/mask/control, video frames/fps/audio). Models are
-  selected by their human-readable catalog names even when their stable
+  selected and shown throughout queues, downloads, Library metadata, and
+  machine details by their human-readable catalog names even when their stable
   internal generation ids are `cv:` or `hf:`. For video-only LTX-2 community
   checkpoints, Mold disables
   generated audio when the installed files lack an audio VAE or vocoder while

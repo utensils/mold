@@ -15,10 +15,12 @@ import { useGenerationStore, jobPhase, jobProgress, type Job } from "../../store
 import { type HostView } from "../../stores/hosts";
 import { enrichQueueEntries, useJobsStore, type EnrichedQueueEntry } from "../../stores/jobs";
 import { useHostsStore } from "../../stores/hosts";
+import { useHostModelsStore } from "../../stores/hostModels";
 import { useComposerStore } from "../../stores/composer";
 import { useToastStore } from "../../stores/toasts";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { formatEta } from "../../lib/format";
+import { modelDisplayNameForId } from "../../lib/models";
 import {
   computeQueueLanes,
   laneForEntry,
@@ -51,6 +53,7 @@ const props = withDefaults(
 const router = useRouter();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
+const hostModels = useHostModelsStore();
 const jobs = useJobsStore();
 const composer = useComposerStore();
 const toasts = useToastStore();
@@ -70,6 +73,8 @@ const lanes = computed(() => {
 });
 
 const hasEntries = computed(() => lanes.value.some((lane) => lane.entries.length > 0));
+const modelLabel = (name: string) =>
+  modelDisplayNameForId(name, hostModels.modelsOn(props.host.id));
 
 /** This app's job behind a queue row, for thumbnails and live progress. */
 function ownJob(entry: EnrichedQueueEntry): Job | null {
@@ -270,7 +275,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
             class="border-edge flex cursor-pointer items-center gap-3 rounded-control border bg-bench px-3 py-2 transition-colors hover:bg-bath"
             :class="canDragEntry(entry) ? 'active:cursor-grabbing' : ''"
             :draggable="canDragEntry(entry)"
-            :aria-label="`Show details for ${entry.model}`"
+            :aria-label="`Show details for ${modelLabel(entry.model)}`"
             @dragstart="onDragStart(entry, $event)"
             @dragend="dragged = null"
             @contextmenu="openEntryMenu(entry, $event)"
@@ -303,7 +308,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
             />
             <div class="min-w-0 flex-1">
               <div class="truncate text-body text-ink" :title="ownJob(entry)?.prompt">
-                {{ ownJob(entry)?.prompt ?? entry.model }}
+                {{ ownJob(entry)?.prompt ?? modelLabel(entry.model) }}
               </div>
               <div class="mt-0.5 flex items-center gap-2">
                 <span class="edge-code">{{ entryCode(entry) }}</span>
@@ -316,7 +321,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
                 >
                   AUTO
                 </span>
-                <span class="truncate text-caption text-ink-3">{{ entry.model }}</span>
+                <span class="truncate text-caption text-ink-3">{{ modelLabel(entry.model) }}</span>
                 <span v-if="!entry.mine" class="edge-code shrink-0 text-ink-3">OTHER CLIENT</span>
                 <span v-if="entryElapsed(entry)" class="data-mono shrink-0 text-ink-3">
                   {{ entryElapsed(entry) }}
@@ -348,6 +353,7 @@ function loadQueueSettings(metadata: OutputMetadata) {
     <QueueEntryDrawer
       v-if="queueDetail"
       :entry="queueDetail"
+      :model-label="modelLabel(queueDetail.model)"
       :host-label="host.label"
       :state-code="entryCode(queueDetail)"
       :elapsed="entryElapsed(queueDetail)"

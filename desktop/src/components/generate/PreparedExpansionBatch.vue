@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { hostSelectionLabel, type PreparedExpansionBatch } from "../../lib/preparedExpansion";
 import type { ExpansionPullView } from "../../lib/expansionPull";
 import ExpansionPullStatus from "./ExpansionPullStatus.vue";
+import type { DisplayableModel } from "../../lib/models";
 
 const props = defineProps<{
   batch: PreparedExpansionBatch;
@@ -15,6 +16,7 @@ const props = defineProps<{
   pullEtaSeconds: number | null;
   activeHostLabel: string | null;
   submitting: boolean;
+  models?: DisplayableModel[] | undefined;
 }>();
 
 const emit = defineEmits<{
@@ -189,6 +191,7 @@ function confirmCollapse() {
       :error="error"
       :status="pullStatus"
       :eta-seconds="pullEtaSeconds"
+      :models="models"
       @pull="emit('pull')"
       @retry-expansion="emit('retry-expansion')"
     />

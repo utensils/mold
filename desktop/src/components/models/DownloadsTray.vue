@@ -2,15 +2,18 @@
 import { computed, ref } from "vue";
 import { useDownloadsStore, type HostedDownloadJob } from "../../stores/downloads";
 import { useHostsStore } from "../../stores/hosts";
+import { useHostModelsStore } from "../../stores/hostModels";
 import { useToastStore } from "../../stores/toasts";
 import { modelSource } from "../../lib/modelSource";
 import { formatEta, formatGB, percent } from "../../lib/format";
 import { PLATFORM_UI } from "../../lib/platform";
+import { modelDisplayNameForId } from "../../lib/models";
 import SourceGlyph from "../generate/SourceGlyph.vue";
 import type { DownloadJobStatus } from "../../lib/api/types";
 
 const downloads = useDownloadsStore();
 const hosts = useHostsStore();
+const hostModels = useHostModelsStore();
 const toasts = useToastStore();
 const props = defineProps<{ hostId?: string }>();
 
@@ -36,6 +39,9 @@ const retrying = ref<string[]>([]);
 function hostLabel(label: string | null): string {
   return label ?? hosts.primaryHost?.label ?? PLATFORM_UI.deviceLabel;
 }
+
+const modelLabel = (row: HostedDownloadJob) =>
+  modelDisplayNameForId(row.job.model, hostModels.modelsOn(row.hostId));
 
 /** Safelight chip palette per download status. */
 const STATUS_CHIP: Record<DownloadJobStatus, string> = {
@@ -87,8 +93,8 @@ async function retry(row: HostedDownloadJob) {
         <div class="flex items-center gap-3">
           <span class="flex w-52 shrink-0 items-center gap-1.5">
             <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-ink-3" />
-            <span class="min-w-0 truncate text-body text-ink" :title="row.job.model">
-              {{ row.job.model }}
+            <span class="min-w-0 truncate text-body text-ink" :title="modelLabel(row)">
+              {{ modelLabel(row) }}
             </span>
             <span class="edge-code shrink-0" data-test="download-host">
               · {{ hostLabel(row.hostLabel) }}
@@ -107,7 +113,7 @@ async function retry(row: HostedDownloadJob) {
             aria-valuemin="0"
             aria-valuemax="100"
             :aria-valuenow="percent(row.job.bytes_done, row.job.bytes_total)"
-            :aria-label="`Downloading ${row.job.model} on ${hostLabel(row.hostLabel)}`"
+            :aria-label="`Downloading ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
           >
             <div
               class="h-full bg-safelight transition-[width] duration-300"
@@ -121,7 +127,7 @@ async function retry(row: HostedDownloadJob) {
             type="button"
             class="text-ink-3 hover:text-stop active:translate-y-px"
             title="Cancel download"
-            :aria-label="`Cancel download of ${row.job.model} on ${hostLabel(row.hostLabel)}`"
+            :aria-label="`Cancel download of ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
             :disabled="downloads.isCancelling(row.hostId, row.job.id)"
             @click="downloads.cancel(row.job.id, row.hostId)"
           >
@@ -177,8 +183,8 @@ async function retry(row: HostedDownloadJob) {
           </span>
           <span class="flex min-w-0 items-center gap-1.5">
             <SourceGlyph :source="modelSource({ name: row.job.model })" class="text-ink-3" />
-            <span class="min-w-0 truncate text-body text-ink" :title="row.job.model">
-              {{ row.job.model }}
+            <span class="min-w-0 truncate text-body text-ink" :title="modelLabel(row)">
+              {{ modelLabel(row) }}
             </span>
             <span class="edge-code shrink-0" data-test="download-host">
               · {{ hostLabel(row.hostLabel) }}
@@ -196,7 +202,7 @@ async function retry(row: HostedDownloadJob) {
             v-if="row.job.status === 'failed'"
             type="button"
             class="border-edge shrink-0 rounded-full border px-2 text-caption text-ink-2 hover:border-safelight hover:text-safelight active:translate-y-px"
-            :aria-label="`Retry download of ${row.job.model} on ${hostLabel(row.hostLabel)}`"
+            :aria-label="`Retry download of ${modelLabel(row)} on ${hostLabel(row.hostLabel)}`"
             :disabled="isRetrying(row)"
             data-test="download-retry"
             @click="retry(row)"

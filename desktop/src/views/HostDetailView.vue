@@ -17,7 +17,12 @@ import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
-import { modelDiskBytes, modelDisplayName, modelSizeLabels } from "../lib/models";
+import {
+  modelDiskBytes,
+  modelDisplayName,
+  modelDisplayNameForId,
+  modelSizeLabels,
+} from "../lib/models";
 import { modelSource } from "../lib/modelSource";
 import { ipc } from "../lib/ipc";
 import type { GpuSnapshot, ModelEntry, ResourceSnapshot, ServerStatus } from "../lib/api/types";
@@ -230,6 +235,7 @@ const queueCapacity = computed(
 );
 const modelsLoaded = computed(() => telemetry.value?.modelsLoaded ?? []);
 const installedModels = computed(() => hostModels.installedOn(hostId.value));
+const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
@@ -655,15 +661,15 @@ async function forget() {
                   <span
                     class="data-mono min-w-0 flex-1 truncate text-caption text-ink-2"
                     data-test="loaded-model-name"
-                    >{{ m }}</span
+                    >{{ modelLabel(m) }}</span
                   >
                   <button
                     type="button"
                     data-test="unload-chip"
                     class="shrink-0 text-caption transition-colors hover:text-stop disabled:opacity-40"
                     :class="unloadPending === m ? 'font-semibold text-stop' : 'text-ink-3'"
-                    :aria-label="`Unload ${m}`"
-                    :title="`Unload ${m} from this host's GPU`"
+                    :aria-label="`Unload ${modelLabel(m)}`"
+                    :title="`Unload ${modelLabel(m)} from this host's GPU`"
                     :disabled="unloading.has(m)"
                     @click="unloadChip(m)"
                     @blur="unloadPending = null"

@@ -1372,7 +1372,7 @@ onBeforeUnmount(() => {
             v-if="templatesOpen"
             class="border-edge absolute right-0 mt-1 w-72 rounded-chrome border bg-bench p-3 shadow-raised"
           >
-            <TemplatesPanel :form="form" @load="loadTemplate" />
+            <TemplatesPanel :form="form" :models="hostModels.unionInstalled" @load="loadTemplate" />
           </div>
         </div>
 
@@ -1391,6 +1391,7 @@ onBeforeUnmount(() => {
             :pull-eta-seconds="expansionPullEtaSeconds"
             :active-host-label="expansionAttemptHostLabel"
             :submitting="preparedSubmitting"
+            :models="hostModels.unionInstalled"
             class="ms-fade-up w-full max-w-2xl"
             @edit="editPreparedPrompt"
             @remove="removePreparedPrompt"
@@ -1540,6 +1541,7 @@ onBeforeUnmount(() => {
           :error="expansionError"
           :status="expansionPullStatus"
           :eta-seconds="expansionPullEtaSeconds"
+          :models="hostModels.unionInstalled"
           class="mx-5 mb-2"
           @pull="pullExpansionModel"
           @retry-expansion="retryExpansionAfterPull"
@@ -1583,6 +1585,7 @@ onBeforeUnmount(() => {
       :model="missingModel.model"
       :host-label="missingModelHostLabel"
       :size-gb="missingModelSizeGb"
+      :models="hostModels.unionInstalled"
       @confirm="pullMissingModel"
       @close="missingModel = null"
     />

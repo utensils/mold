@@ -893,6 +893,55 @@ pub struct ModelInfoExtended {
 }
 
 impl ModelInfoExtended {
+    /// Human-readable presentation label. The stable `name` remains the value
+    /// used for API requests, persistence, and model identity.
+    pub fn human_name(&self) -> String {
+        if let Some(display_name) = self
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return display_name.to_string();
+        }
+        if (self.name.starts_with("cv:") || self.name.starts_with("hf:"))
+            && !self.defaults.description.trim().is_empty()
+        {
+            return self.defaults.description.trim().to_string();
+        }
+        if let Some(id) = self.name.strip_prefix("cv:") {
+            return format!("Civitai model #{id}");
+        }
+        if let Some(repo) = self.name.strip_prefix("hf:") {
+            let title = repo
+                .rsplit('/')
+                .next()
+                .unwrap_or(repo)
+                .replace(['-', '_'], " ");
+            return title;
+        }
+        self.name.clone()
+    }
+
+    /// Resolve a model id carried by queue/status/history records through an
+    /// inventory fetched from `/api/models`.
+    pub fn human_name_for(name: &str, models: &[Self]) -> String {
+        if let Some(model) = models.iter().find(|model| model.name == name) {
+            return model.human_name();
+        }
+        if let Some(id) = name.strip_prefix("cv:") {
+            return format!("Civitai model #{id}");
+        }
+        if let Some(repo) = name.strip_prefix("hf:") {
+            return repo
+                .rsplit('/')
+                .next()
+                .unwrap_or(repo)
+                .replace(['-', '_'], " ");
+        }
+        name.to_string()
+    }
+
     /// True if this is an upscaler model (Real-ESRGAN, etc.) not a diffusion generator.
     pub fn is_upscaler(&self) -> bool {
         crate::manifest::UPSCALER_FAMILIES.contains(&self.family.as_str())
@@ -919,6 +968,53 @@ impl std::ops::Deref for ModelInfoExtended {
 
     fn deref(&self) -> &Self::Target {
         &self.info
+    }
+}
+
+#[cfg(test)]
+mod model_display_name_tests {
+    use super::{ModelDefaults, ModelInfo, ModelInfoExtended};
+
+    fn model(name: &str, display_name: Option<&str>, description: &str) -> ModelInfoExtended {
+        ModelInfoExtended {
+            info: ModelInfo {
+                name: name.to_string(),
+                family: "sdxl".to_string(),
+                size_gb: 1.0,
+                is_loaded: false,
+                last_used: None,
+                hf_repo: String::new(),
+            },
+            defaults: ModelDefaults {
+                default_steps: 20,
+                default_guidance: 7.0,
+                default_width: 1024,
+                default_height: 1024,
+                description: description.to_string(),
+            },
+            downloaded: true,
+            disk_usage_bytes: None,
+            remaining_download_bytes: None,
+            display_name: display_name.map(str::to_string),
+            supports_audio: None,
+        }
+    }
+
+    #[test]
+    fn resolves_wire_ids_to_human_readable_inventory_names() {
+        let models = vec![model(
+            "cv:1759168",
+            Some("Juggernaut XL - Ragnarok"),
+            "legacy title",
+        )];
+        assert_eq!(
+            ModelInfoExtended::human_name_for("cv:1759168", &models),
+            "Juggernaut XL - Ragnarok"
+        );
+        assert_eq!(
+            ModelInfoExtended::human_name_for("cv:999", &models),
+            "Civitai model #999"
+        );
     }
 }
 

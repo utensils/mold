@@ -12,10 +12,13 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import type { QueueEntry } from "../../types";
+import type { ModelInfoExtended } from "../../types";
+import { modelDisplayNameForId } from "../../lib/modelName";
 
 const props = withDefaults(
   defineProps<{
     entries: QueueEntry[];
+    models?: ModelInfoExtended[];
     gpuCount: number;
     canReorder?: boolean;
     canPause?: boolean;
@@ -30,8 +33,10 @@ const props = withDefaults(
     canCancelAll: false,
     paused: false,
     dimmed: false,
+    models: () => [],
   },
 );
+const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
 
 const emit = defineEmits<{
   cancel: [id: string];
@@ -122,7 +127,7 @@ function queuedIndexOf(id: string): number {
           >
             {{ entry.state }}
           </BadgePill>
-          <span class="qc__model">{{ entry.model }}</span>
+          <span class="qc__model">{{ modelLabel(entry.model) }}</span>
 
           <select
             v-if="gpuCount > 1"
@@ -130,7 +135,7 @@ function queuedIndexOf(id: string): number {
             data-test="queue-lane"
             :disabled="dimmed || entry.state !== 'queued'"
             :value="laneValue(entry)"
-            :aria-label="`GPU lane for ${entry.model}`"
+            :aria-label="`GPU lane for ${modelLabel(entry.model)}`"
             @change="onLane(entry, $event)"
           >
             <option value="">Auto</option>
@@ -170,7 +175,7 @@ function queuedIndexOf(id: string): number {
             class="qc__icon qc__icon--danger"
             data-test="queue-cancel"
             :disabled="dimmed"
-            :aria-label="`Cancel ${entry.model}`"
+            :aria-label="`Cancel ${modelLabel(entry.model)}`"
             @click="emit('cancel', entry.id)"
           >
             <Icon name="trash" :size="14" />

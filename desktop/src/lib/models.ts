@@ -10,6 +10,12 @@ import { formatGB } from "./format";
  * bottom of the Installed tab. Mirrors `stores/models.ts`'s exclusion set. */
 export const UTILITY_FAMILIES = new Set(["real-esrgan", "upscaler", "qwen3-expand", "controlnet"]);
 
+export interface DisplayableModel {
+  name: string;
+  display_name?: string | null;
+  description?: string | null;
+}
+
 export function isUtilityModel(m: ModelEntry): boolean {
   return UTILITY_FAMILIES.has(m.family);
 }
@@ -34,12 +40,21 @@ export function quantTag(name: string): string | null {
  * `display_name`, and older servers still embed it in `description`. Display
  * only — selection, keys, and API calls must keep using `name`.
  */
-export function modelDisplayName(
-  m: Pick<ModelEntry, "name"> & Partial<Pick<ModelEntry, "display_name" | "description">>,
-): string {
-  if (m.display_name) return m.display_name;
-  if (isCatalogModelId(m.name) && m.description) return m.description;
+export function modelDisplayName(m: DisplayableModel): string {
+  const displayName = m.display_name?.trim();
+  if (displayName) return displayName;
+  const description = m.description?.trim();
+  if (isCatalogModelId(m.name) && description) return description;
+  if (m.name.startsWith("cv:")) return `Civitai model #${m.name.slice(3)}`;
+  if (m.name.startsWith("hf:")) {
+    const repo = m.name.slice(3).split("/").pop() ?? m.name.slice(3);
+    return repo.replaceAll("-", " ").replaceAll("_", " ");
+  }
   return m.name;
+}
+
+export function modelDisplayNameForId(name: string, models: readonly DisplayableModel[]): string {
+  return modelDisplayName(models.find((model) => model.name === name) ?? { name });
 }
 
 export function modelDiskBytes(m: ModelEntry): number {

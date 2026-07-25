@@ -13,7 +13,7 @@ import type {
 import { formatGB, formatUptime, percent } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import { unloadModel } from "../lib/api/models";
-import { modelDisplayName, modelSizeLabels } from "../lib/models";
+import { modelDisplayName, modelDisplayNameForId, modelSizeLabels } from "../lib/models";
 import { applyDownloadEvent, emptyDownloadsState, type DownloadsState } from "../stores/downloads";
 import type { QueueEntry } from "../stores/jobs";
 import { mobileHostTarget, type MobileHost } from "./hosts";
@@ -63,6 +63,7 @@ const uptime = computed(() => status.value?.uptime_secs ?? null);
 const queueDepth = computed(() =>
   queueApiAvailable.value ? queue.value.length : (status.value?.queue_depth ?? queue.value.length),
 );
+const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value);
 
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value?.gpus.length) return snapshot.value.gpus;
@@ -379,7 +380,7 @@ onBeforeUnmount(() => {
         <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
           <li v-for="entry in queue" :key="entry.id">
             <div>
-              <strong>{{ entry.model }}</strong>
+              <strong>{{ modelLabel(entry.model) }}</strong>
               <span>{{ queueCode(entry) }}</span>
             </div>
           </li>
@@ -388,11 +389,11 @@ onBeforeUnmount(() => {
 
         <div v-if="loadedModels.length" class="mobile-chip-list" aria-label="Loaded models">
           <span v-for="model in loadedModels" :key="model" class="mobile-model-chip">
-            <span>{{ model }}</span>
+            <span>{{ modelLabel(model) }}</span>
             <button
               type="button"
               :disabled="unloading.has(model)"
-              :aria-label="`Unload ${model}`"
+              :aria-label="`Unload ${modelLabel(model)}`"
               @click="unload(model)"
             >
               {{ unloading.has(model) ? "…" : "×" }}
@@ -414,7 +415,7 @@ onBeforeUnmount(() => {
         <ul class="mobile-data-list">
           <li v-for="job in inFlightDownloads" :key="job.id">
             <div class="download-row-copy">
-              <strong>{{ job.model }}</strong>
+              <strong>{{ modelLabel(job.model) }}</strong>
               <span>{{
                 job.status === "queued" ? "Waiting" : `${job.files_done}/${job.files_total} files`
               }}</span>
@@ -422,7 +423,7 @@ onBeforeUnmount(() => {
                 v-if="job.status === 'active'"
                 class="meter"
                 role="meter"
-                :aria-label="`Download progress for ${job.model}`"
+                :aria-label="`Download progress for ${modelLabel(job.model)}`"
                 :aria-valuenow="downloadPercent(job.bytes_done, job.bytes_total)"
                 aria-valuemin="0"
                 aria-valuemax="100"

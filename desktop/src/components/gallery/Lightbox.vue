@@ -11,6 +11,8 @@ import { useUiStore } from "../../stores/ui";
 import { useContextMenuStore, type MenuEntry } from "../../stores/contextMenu";
 import { copyImageBytesToClipboard } from "../../lib/clipboard";
 import { formatBytes, formatScheduler } from "../../lib/format";
+import { modelDisplayNameForId } from "../../lib/models";
+import { useHostModelsStore } from "../../stores/hostModels";
 import type { ApiTarget } from "../../lib/api/client";
 import type { GalleryImage } from "../../lib/api/types";
 
@@ -38,6 +40,10 @@ const composer = useComposerStore();
 const toasts = useToastStore();
 const ui = useUiStore();
 const contextMenu = useContextMenuStore();
+const hostModels = useHostModelsStore();
+const modelLabel = computed(() =>
+  modelDisplayNameForId(props.item.metadata.model, hostModels.unionInstalled),
+);
 
 // ⇧⌘C copies the seed while the lightbox is open.
 watch(
@@ -273,7 +279,7 @@ async function download() {
           <dl class="mt-4 space-y-2.5 font-utility">
             <div class="flex justify-between gap-2">
               <dt class="text-caption text-ink-3">Model</dt>
-              <dd class="data-mono truncate text-caption text-ink">{{ meta.model }}</dd>
+              <dd class="data-mono truncate text-caption text-ink">{{ modelLabel }}</dd>
             </div>
             <div class="flex justify-between gap-2">
               <dt class="text-caption text-ink-3">Seed</dt>

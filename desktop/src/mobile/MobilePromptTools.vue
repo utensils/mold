@@ -4,6 +4,8 @@ import type { ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { fetchHistoryFrom, type HistoryEntry } from "../lib/api/history";
 import type { GenerateForm } from "../lib/generateForm";
+import type { ModelEntry } from "../lib/api/types";
+import { modelDisplayNameForId } from "../lib/models";
 
 const props = defineProps<{
   form: GenerateForm;
@@ -11,7 +13,9 @@ const props = defineProps<{
   running: boolean;
   canUndo: boolean;
   blocked: boolean;
+  models?: ModelEntry[];
 }>();
+const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);
 
 defineEmits<{ expand: []; undo: [] }>();
 
@@ -114,7 +118,7 @@ watch(
           @click="useHistory(entry)"
         >
           <span>{{ entry.prompt }}</span>
-          <span>{{ entry.model }}</span>
+          <span>{{ modelLabel(entry.model) }}</span>
         </button>
       </div>
     </div>
