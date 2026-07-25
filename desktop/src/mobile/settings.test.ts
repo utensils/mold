@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 describe("mobile settings persistence", () => {
-  it("defaults new and corrupt installs to Safelight with system appearance", () => {
+  it("defaults new and corrupt installs to Safelight, system appearance, and Photos auto-save", () => {
     expect(DEFAULT_MOBILE_SETTINGS).toEqual({
       theme: "system",
       themeFamily: "safelight",

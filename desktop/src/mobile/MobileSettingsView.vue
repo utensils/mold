@@ -102,7 +102,7 @@ function openPrivacyPolicy(): void {
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-photos-title">
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-photos-title">Photos</h2>
-        <p>Keep new generated images in your iPhone photo library as well as Mold Library.</p>
+        <p>Keep newly generated images in your iPhone photo library as well as Mold Library.</p>
       </div>
       <fieldset class="mobile-settings-fieldset">
         <legend>Generated images</legend>

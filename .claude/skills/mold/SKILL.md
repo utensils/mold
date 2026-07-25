@@ -949,9 +949,10 @@ models. Models merges installed/live results, lets Pull target a different host
 without changing Create, and immediately shows Connecting → Starting → Queued
 → Pulling N% while preventing duplicate/racing requests.
 
-Settings persists the Mold Studio families (Mold/Safelight) × System/Dark/Light, defaults fresh installs
-to Safelight + System while retaining valid saved choices, and synchronizes
-UIKit's appearance/status bar. Its default-on Photos option fetches completed
+Settings persists the Mold Studio families (Mold/Safelight) × System/Dark/Light,
+defaults fresh installs to Safelight + System with Photos auto-save enabled
+while retaining valid saved choices, and synchronizes UIKit's appearance/status
+bar. Its default-on Photos option fetches completed
 stills from the authenticated host gallery and saves them through the native
 bridge; post-generation upscales save original and upscaled images, while
 videos remain remote. Preserve safe areas, 44pt controls, 16px editable text,
