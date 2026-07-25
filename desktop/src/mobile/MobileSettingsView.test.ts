@@ -13,13 +13,13 @@ describe("MobileSettingsView", () => {
   it("offers accessible theme choices and emits immediate updates", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "mold" },
+        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
         hostCount: 2,
         appVersion: "0.18.0",
       },
     });
 
-    expect(wrapper.findAll("fieldset")).toHaveLength(2);
+    expect(wrapper.findAll("fieldset")).toHaveLength(3);
     expect(wrapper.text()).toContain("Change the chrome without changing the color of your prints");
     expect(wrapper.text()).toContain("2 hosts saved");
     expect(wrapper.text()).toContain("0.18.0");
@@ -29,17 +29,19 @@ describe("MobileSettingsView", () => {
 
     await wrapper.get('input[name="mobile-theme-family"][value="safelight"]').setValue(true);
     await wrapper.get('input[name="mobile-theme-appearance"][value="light"]').setValue(true);
+    await wrapper.get('input[name="mobile-auto-save-photos"]').setValue(false);
 
     expect(wrapper.emitted("update")).toEqual([
       [{ themeFamily: "safelight" }],
       [{ theme: "light" }],
+      [{ autoSavePhotos: false }],
     ]);
   });
 
   it("routes host management through an explicit action", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "dark", themeFamily: "mold" },
+        settings: { theme: "dark", themeFamily: "mold", autoSavePhotos: true },
         hostCount: 0,
         appVersion: "Development build",
       },
@@ -53,7 +55,7 @@ describe("MobileSettingsView", () => {
   it("opens the public privacy policy from About", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
-        settings: { theme: "system", themeFamily: "safelight" },
+        settings: { theme: "system", themeFamily: "safelight", autoSavePhotos: true },
         hostCount: 1,
         appVersion: "0.20.2",
       },

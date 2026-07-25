@@ -415,6 +415,48 @@ button {
   color: var(--safelight);
 }
 
+.mobile-photo-setting {
+  display: grid;
+  min-height: 64px;
+  box-sizing: border-box;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background: var(--bench);
+}
+
+.mobile-photo-setting strong,
+.mobile-photo-setting small {
+  display: block;
+}
+
+.mobile-photo-setting strong {
+  color: var(--rebate);
+  font-size: var(--text-body);
+}
+
+.mobile-photo-setting small {
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: var(--text-caption);
+  line-height: 1.35;
+}
+
+.mobile-photo-setting input {
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--safelight);
+}
+
+.mobile-photo-setting:has(input:focus-visible) {
+  outline: 2px solid var(--safelight);
+  outline-offset: 2px;
+}
+
 .mobile-settings-manage {
   width: 100%;
 }

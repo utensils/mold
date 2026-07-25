@@ -204,7 +204,9 @@ Generated images expand into that viewer on tap, where explicit native Copy
 image and Save photo actions replace long-press handling. Library matches
 desktop's persistent New markers, and both shells badge upscaled images.
 Settings offers Mold or Safelight color families in System, Dark, or Light
-appearance and keeps native iOS chrome in sync. The app prevents input-focus and
+appearance, plus a default-on option that automatically saves newly generated
+stills to Photos (including both original and upscaled copies). Videos remain
+streamable in Mold Library. Settings keeps native iOS chrome in sync. The app prevents input-focus and
 double-tap page zoom, removes rubber-band overscroll, and preserves the
 gallery's horizontal swipe gesture. Settings links to the public
 [Mold privacy policy](https://utensils.io/mold/privacy), which describes local
