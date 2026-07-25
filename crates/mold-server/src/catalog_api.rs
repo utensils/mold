@@ -105,13 +105,6 @@ fn credential_candidates(server: Option<String>, forwarded: Option<&str>) -> Vec
     }
 }
 
-fn env_catalog_token(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn is_auth_error(error: &mold_catalog::live::LiveSearchError) -> bool {
     matches!(
         error,
@@ -158,7 +151,10 @@ async fn fetch_civitai_version_with_fallback(
     forwarded: Option<&str>,
 ) -> Result<(mold_catalog::entry::CatalogEntry, Option<String>), mold_catalog::live::LiveSearchError>
 {
-    let candidates = credential_candidates(env_catalog_token("CIVITAI_TOKEN"), forwarded);
+    let candidates = credential_candidates(
+        crate::catalog_credentials::resolved_civitai_token(),
+        forwarded,
+    );
     let mut last_error = None;
     for (index, token) in candidates.iter().enumerate() {
         match mold_catalog::live::fetch_civitai_version(
@@ -183,7 +179,8 @@ async fn fetch_hf_repo_with_fallback(
     forwarded: Option<&str>,
 ) -> Result<(mold_catalog::entry::CatalogEntry, Option<String>), mold_catalog::live::LiveSearchError>
 {
-    let candidates = credential_candidates(env_catalog_token("HF_TOKEN"), forwarded);
+    let candidates =
+        credential_candidates(crate::catalog_credentials::resolved_hf_token(), forwarded);
     let mut last_error = None;
     for (index, token) in candidates.iter().enumerate() {
         match mold_catalog::live::fetch_hf_repo("https://huggingface.co", repo_id, token.as_deref())
@@ -230,10 +227,11 @@ pub(crate) async fn enqueue_catalog_primary_repair(
             }
         }
 
+        let civitai_token = crate::catalog_credentials::resolved_civitai_token();
         let entry = mold_catalog::live::fetch_civitai_version(
             state.catalog_live_civitai_base.as_str(),
             version_id,
-            std::env::var("CIVITAI_TOKEN").ok().as_deref(),
+            civitai_token.as_deref(),
         )
         .await
         .map_err(|e| match e {
@@ -245,10 +243,14 @@ pub(crate) async fn enqueue_catalog_primary_repair(
         })?;
 
         let auth = match entry.download_recipe.needs_token {
-            Some(mold_catalog::entry::TokenKind::Civitai) => {
-                mold_core::download::civitai_auth_or_error(id)
-                    .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?
-            }
+            Some(mold_catalog::entry::TokenKind::Civitai) => civitai_token
+                .map(mold_core::download::RecipeAuth::Bearer)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        format!("{id} requires a Civitai token saved in Settings or CIVITAI_TOKEN"),
+                    )
+                })?,
             _ => mold_core::download::RecipeAuth::None,
         };
         let (author, name) = match entry.source_id.split_once('/') {
@@ -299,7 +301,7 @@ pub(crate) async fn enqueue_catalog_primary_repair(
         let entry = mold_catalog::live::fetch_hf_repo(
             "https://huggingface.co",
             repo_id,
-            std::env::var("HF_TOKEN").ok().as_deref(),
+            crate::catalog_credentials::resolved_hf_token().as_deref(),
         )
         .await
         .map_err(|e| match e {
@@ -475,6 +477,52 @@ pub async fn post_catalog_download(
             .into_response();
     }
 
+    // Validate the primary route and its credential before enqueueing any
+    // companions. Otherwise a tokenless Civitai POST could return 401 while
+    // leaving real companion jobs running, which made the UI truthfully show
+    // a download despite reporting that the requested model had failed.
+    use mold_catalog::entry::{Kind, Source};
+    let recipe_auth = match entry.source {
+        Source::Hf => {
+            if mold_core::manifest::find_manifest(&entry.source_id).is_some() {
+                None
+            } else if entry.kind == Kind::Lora {
+                Some(match entry.download_recipe.needs_token {
+                    Some(mold_catalog::entry::TokenKind::Hf) => match resolved_token.clone() {
+                        Some(token) => mold_core::download::RecipeAuth::Bearer(token),
+                        None => {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                "this Hugging Face repository requires an HF token",
+                            )
+                                .into_response();
+                        }
+                    },
+                    _ => mold_core::download::RecipeAuth::None,
+                })
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "this Hugging Face catalog entry is not a supported built-in model or LoRA",
+                )
+                    .into_response();
+            }
+        }
+        Source::Civitai => Some(match entry.download_recipe.needs_token {
+            Some(mold_catalog::entry::TokenKind::Civitai) => match resolved_token.clone() {
+                Some(token) => mold_core::download::RecipeAuth::Bearer(token),
+                None => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        "this Civitai model requires a token saved in Settings or CIVITAI_TOKEN",
+                    )
+                        .into_response();
+                }
+            },
+            _ => mold_core::download::RecipeAuth::None,
+        }),
+    };
+
     // Companions auto-pull before the primary entry. Civitai
     // single-file checkpoints commonly strip their text encoders + VAE,
     // so the catalog records `companions: ["clip-l", ...]` on those
@@ -482,12 +530,14 @@ pub async fn post_catalog_download(
     // in `mold-core` so the queue can enqueue them by name.
     let models_dir = state.config.read().await.resolved_models_dir();
     let entry_id = entry.id.as_str().to_string();
+    let hf_fallback =
+        crate::catalog_credentials::resolved_hf_token().or_else(|| forwarded.hf.clone());
     let companion_jobs = enqueue_missing_companions(
         &entry.companions,
         &models_dir,
         &state.downloads,
         Some(&entry_id),
-        forwarded.hf.clone(),
+        hf_fallback,
     )
     .await;
 
@@ -495,7 +545,6 @@ pub async fn post_catalog_download(
     // LoRA rows use the normalized single-file recipe, just like Civitai rows,
     // so remote hosts can pull catalog-only adapters. Unsupported HF repos now
     // return a real error instead of a successful response with no queued job.
-    use mold_catalog::entry::{Kind, Source};
     let primary_job_id: Option<String> = match entry.source {
         Source::Hf => {
             if let Some(manifest) = mold_core::manifest::find_manifest(&entry.source_id) {
@@ -512,19 +561,9 @@ pub async fn post_catalog_download(
                     Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
                 }
             } else if entry.kind == Kind::Lora {
-                let auth = match entry.download_recipe.needs_token {
-                    Some(mold_catalog::entry::TokenKind::Hf) => match resolved_token.clone() {
-                        Some(token) => mold_core::download::RecipeAuth::Bearer(token),
-                        None => {
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                "this Hugging Face repository requires an HF token",
-                            )
-                                .into_response();
-                        }
-                    },
-                    _ => mold_core::download::RecipeAuth::None,
-                };
+                let auth = recipe_auth
+                    .clone()
+                    .expect("HF LoRA auth was preflighted before companion enqueue");
                 let (author, name) = match entry.source_id.split_once('/') {
                     Some((a, n)) => (a.to_string(), n.to_string()),
                     None => (String::new(), entry.source_id.clone()),
@@ -571,26 +610,11 @@ pub async fn post_catalog_download(
                     Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
                 }
             } else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "this Hugging Face catalog entry is not a supported built-in model or LoRA",
-                )
-                    .into_response();
+                unreachable!("unsupported HF entries return before companion enqueue")
             }
         }
         Source::Civitai => {
-            let auth = match entry.download_recipe.needs_token {
-                Some(mold_catalog::entry::TokenKind::Civitai) => match resolved_token {
-                    Some(token) => mold_core::download::RecipeAuth::Bearer(token),
-                    None => match mold_core::download::civitai_auth_or_error(&entry_id) {
-                        Ok(auth) => auth,
-                        Err(e) => {
-                            return (StatusCode::UNAUTHORIZED, e.to_string()).into_response();
-                        }
-                    },
-                },
-                _ => mold_core::download::RecipeAuth::None,
-            };
+            let auth = recipe_auth.expect("Civitai auth was preflighted before companion enqueue");
             let (author, name) = match entry.source_id.split_once('/') {
                 Some((a, n)) => (a.to_string(), n.to_string()),
                 None => (String::new(), entry.source_id.clone()),
@@ -721,8 +745,8 @@ pub async fn live_search_catalog(
         None => mold_catalog::live::CatalogSort::default(),
     };
 
-    let server_civitai = env_catalog_token("CIVITAI_TOKEN");
-    let server_hf = env_catalog_token("HF_TOKEN");
+    let server_civitai = crate::catalog_credentials::resolved_civitai_token();
+    let server_hf = crate::catalog_credentials::resolved_hf_token();
     let mut opts = mold_catalog::live::LiveSearchOpts {
         q: q.q.clone(),
         family,

@@ -23,7 +23,6 @@ import type {
   QueueListing,
 } from "./types";
 import { postSseJsonStream, type StreamError } from "./lib/apiStream";
-import { catalogAuthHeaders } from "./lib/accountsStore";
 
 // Relative URLs keep the SPA portable: in dev Vite's proxy forwards to the
 // mold server; in prod the SPA is served by the same server, same origin.
@@ -495,9 +494,7 @@ export async function fetchCatalogSearch(
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/search?${sp.toString()}`, {
-    headers: catalogAuthHeaders(),
-  });
+  const r = await fetch(`/api/catalog/search?${sp.toString()}`);
   if (!r.ok) throw new Error(`/api/catalog/search ${r.status}`);
   return r.json();
 }
@@ -514,25 +511,19 @@ export async function fetchCatalogInstalled(params: {
     if (v === undefined || v === null) continue;
     sp.set(k, String(v));
   }
-  const r = await fetch(`/api/catalog/installed?${sp.toString()}`, {
-    headers: catalogAuthHeaders(),
-  });
+  const r = await fetch(`/api/catalog/installed?${sp.toString()}`);
   if (!r.ok) throw new Error(`/api/catalog/installed ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogEntry(id: string): Promise<CatalogEntryWire> {
-  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`, {
-    headers: catalogAuthHeaders(),
-  });
+  const r = await fetch(`/api/catalog/${encodeURIComponent(id)}`);
   if (!r.ok) throw new Error(`/api/catalog/${id} ${r.status}`);
   return r.json();
 }
 
 export async function fetchCatalogFamilies(): Promise<CatalogFamiliesResponse> {
-  const r = await fetch(`/api/catalog/families`, {
-    headers: catalogAuthHeaders(),
-  });
+  const r = await fetch(`/api/catalog/families`);
   if (!r.ok) throw new Error(`/api/catalog/families ${r.status}`);
   return r.json();
 }
@@ -557,10 +548,76 @@ export async function postCatalogDownload(
 ): Promise<CatalogDownloadResponse> {
   const r = await fetch(`/api/catalog/${encodeURIComponent(id)}/download`, {
     method: "POST",
-    headers: catalogAuthHeaders(),
   });
-  if (!r.ok) throw new Error(`/api/catalog/${id}/download ${r.status}`);
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(detail || `/api/catalog/${id}/download ${r.status}`);
+  }
   return r.json();
+}
+
+export type CatalogCredentialProvider = "hf" | "civitai";
+export type CatalogCredentialSource = "environment" | "server" | null;
+
+export interface CatalogCredentialState {
+  configured: boolean;
+  source: CatalogCredentialSource;
+  masked: string | null;
+}
+
+export interface CatalogCredentialStatus {
+  hf: CatalogCredentialState;
+  civitai: CatalogCredentialState;
+}
+
+async function catalogCredentialResponse(
+  response: Response,
+  action: string,
+): Promise<CatalogCredentialStatus> {
+  if (response.ok) return response.json();
+  const body = await response.text().catch(() => "");
+  if (body) {
+    try {
+      const parsed = JSON.parse(body) as { error?: string };
+      throw new Error(parsed.error || body);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error(body);
+      throw error;
+    }
+  }
+  throw new Error(`${action} failed: ${response.status}`);
+}
+
+export async function getCatalogCredentialStatus(): Promise<CatalogCredentialStatus> {
+  return catalogCredentialResponse(
+    await fetch("/api/catalog/credentials"),
+    "Loading catalog credentials",
+  );
+}
+
+export async function putCatalogCredential(
+  provider: CatalogCredentialProvider,
+  token: string,
+): Promise<CatalogCredentialStatus> {
+  return catalogCredentialResponse(
+    await fetch(`/api/catalog/credentials/${provider}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    }),
+    "Saving catalog credential",
+  );
+}
+
+export async function deleteCatalogCredential(
+  provider: CatalogCredentialProvider,
+): Promise<CatalogCredentialStatus> {
+  return catalogCredentialResponse(
+    await fetch(`/api/catalog/credentials/${provider}`, {
+      method: "DELETE",
+    }),
+    "Removing catalog credential",
+  );
 }
 
 /// True for values that have the structural shape of a catalog id

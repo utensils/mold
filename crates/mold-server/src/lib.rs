@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod catalog_api;
+pub mod catalog_credentials;
 pub mod chain_job_runner;
 pub mod chain_limits;
 pub mod test_support;

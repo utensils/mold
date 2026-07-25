@@ -37,11 +37,12 @@ Cancelling a queued or running job remains visible until the server confirms it
 has stopped. Installed LoRAs then appear in compatible LoRA pickers in Generate,
 and installed models appear in the model picker and `mold list`.
 
-### Desktop and iPhone
+### App surfaces
 
-Both native apps merge installed models with the live Hugging Face/Civitai
-catalog, keep installed entries first, expose All/Images/Video and source
-filters, and show download contents before a Pull or Repair.
+The web and native apps merge installed models with the live Hugging
+Face/Civitai catalog, keep installed entries first, expose All/Images/Video and
+source filters, and show download contents before a Pull or Repair. Web and
+desktop also share the compact List/Grid layout control for Discover results.
 
 The iPhone Catalog browses one selected host while allowing Pull to target any
 ready saved host. Choosing a pull target does not change the host selected in
@@ -101,8 +102,11 @@ clients can apply Image/Video filtering without sending an unsupported query.
 | `CIVITAI_TOKEN` | Civitai bearer token for gated, early-access, and NSFW rows |
 
 Set tokens in the server environment before `mold serve`, or save them in the
-web Settings panel. The web settings persist to `mold.db` as
-`huggingface.token` and `civitai.token`.
+web Settings panel. Web saves them in the owner-only
+`$MOLD_HOME/catalog-credentials.json` file on the serving host and receives
+only masked status in response; raw values are not retained in browser storage.
+`HF_TOKEN` and `CIVITAI_TOKEN` take precedence over saved values and are
+read-only in web Settings.
 
 The desktop app can forward its locally stored Hugging Face or Civitai token as
 a request-scoped fallback to a remote host; the host's own credential remains

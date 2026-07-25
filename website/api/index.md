@@ -5,7 +5,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 ## Endpoints
 
 | Method   | Path                                      | Description                                                                                                       |
-| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------ | ------- |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `POST`   | `/api/generate`                           | Generate images from prompt                                                                                       |
 | `POST`   | `/api/generate/stream`                    | Generate with SSE progress streaming                                                                              |
 | `POST`   | `/api/generate/estimate`                  | Estimate request-sensitive peak memory for a generation request                                                   |
@@ -40,8 +40,11 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `DELETE` | `/api/downloads/:id`                      | Cancel a queued or active download                                                                                |
 | `GET`    | `/api/downloads/stream`                   | Download queue updates as SSE                                                                                     |
 | `GET`    | `/api/catalog/families`                   | Live catalog family/kind metadata                                                                                 |
-| `GET`    | `/api/catalog/search`                     | Search the live HF/Civitai catalog; `sort=downloads                                                               | recent | rating` |
+| `GET`    | `/api/catalog/search`                     | Search the live HF/Civitai catalog; sort by downloads, recent additions, or rating                                |
 | `GET`    | `/api/catalog/installed`                  | List installed catalog entries and LoRAs                                                                          |
+| `GET`    | `/api/catalog/credentials`                | Return masked status for server-owned HF/Civitai credentials                                                      |
+| `PUT`    | `/api/catalog/credentials/:provider`      | Save an `hf` or `civitai` credential on the serving host                                                          |
+| `DELETE` | `/api/catalog/credentials/:provider`      | Remove a server-owned credential (environment-managed credentials are read-only)                                  |
 | `GET`    | `/api/catalog/:id`                        | Resolve one `hf:` or `cv:` catalog entry                                                                          |
 | `POST`   | `/api/catalog/:id/download`               | Queue a catalog entry plus missing companions                                                                     |
 | `POST`   | `/api/upscale`                            | Upscale image with Real-ESRGAN                                                                                    |

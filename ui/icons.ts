@@ -24,6 +24,8 @@ export const ICONS = {
     '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  list: '<path d="M5 6h14M5 12h14M5 18h14"/>',
+  grid: '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>',
   sliders: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   "chevron-down": '<path d="M6 9l6 6 6-6"/>',
   "chevron-up": '<path d="M6 15l6-6 6 6"/>',

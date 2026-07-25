@@ -1,5 +1,6 @@
 import type { HostRoute } from "../stores/hosts";
 import { resolveStyleId, stylePresetLabel } from "./stylePresets";
+import { createUuid } from "@studio/lib/id";
 
 export type HostSelectionPolicy = string | null;
 
@@ -117,8 +118,7 @@ export function createPreparedExpansionBatch(
 }
 
 function createDurableBatchId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `prepared-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return createUuid();
 }
 
 export function hostSelectionLabel(

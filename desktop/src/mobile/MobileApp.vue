@@ -6,6 +6,7 @@ import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
+import { createUuid } from "@studio/lib/id";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName } from "../lib/models";
@@ -231,11 +232,7 @@ let expansionRecoveryId = 0;
 let submissionUiId = 0;
 let recoveryRetryId = 0;
 let unmounted = false;
-const downloadConsumerId = `mobile-generate-${
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-}`;
+const downloadConsumerId = `mobile-generate-${createUuid()}`;
 const progress = ref("Ready");
 /** Whether the status line under Develop currently shows a failure. Set with
  * `setGenerationStatus` so error styling never depends on string sniffing. */

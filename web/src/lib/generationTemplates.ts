@@ -1,5 +1,6 @@
 import type { GenerateFormState, SourceImageState } from "../types";
 import { cloneTemplateForm } from "../composables/useGenerateForm";
+import { createUuid } from "@studio/lib/id";
 
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.generation.templates.v1";
 
@@ -36,10 +37,7 @@ function now(): number {
 }
 
 function templateId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `tpl-${now()}-${Math.random().toString(36).slice(2)}`;
+  return createUuid();
 }
 
 function normalizeName(name: string): string {

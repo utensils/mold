@@ -2,11 +2,11 @@
 /*
  * Settings workspace (spec §04/§06, prototype desktop Settings). Appearance
  * (theme family + dark/light on the shared lib/theme refs), account tokens
- * (browser-stored, forwarded per catalog request — see accountsStore), and an
+ * (stored by the connected server and returned only as masked status), and an
  * About card sourced from GET /api/status. Set-once prefs only; per-generation
  * knobs stay in Create's Advanced.
  */
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
 import SegmentedControl, {
@@ -16,13 +16,11 @@ import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
-  clearCivitaiToken,
-  clearHfToken,
-  getAccountTokens,
-  maskToken,
-  setCivitaiToken,
-  setHfToken,
-} from "../lib/accountsStore";
+  deleteCatalogCredential,
+  getCatalogCredentialStatus,
+  putCatalogCredential,
+  type CatalogCredentialStatus,
+} from "../api";
 
 const familyOptions: SegmentOption<ThemeFamily>[] = [
   { value: "mold", label: "Mold" },
@@ -41,11 +39,20 @@ function setAppearance(value: Theme) {
   theme.value = value;
 }
 
-// ── Account tokens (browser-stored, forwarded per catalog request) ──────
-// The saved (masked) state, reflected on load and after every save/clear.
-const saved = ref(getAccountTokens());
-const hfMasked = computed(() => maskToken(saved.value.hfToken));
-const civitaiMasked = computed(() => maskToken(saved.value.civitaiToken));
+// ── Account tokens (owned by the connected server) ─────────────────────
+const emptyCredentialStatus = (): CatalogCredentialStatus => ({
+  hf: { configured: false, source: null, masked: null },
+  civitai: { configured: false, source: null, masked: null },
+});
+const saved = ref<CatalogCredentialStatus>(emptyCredentialStatus());
+const hfMasked = computed(() => saved.value.hf.masked);
+const civitaiMasked = computed(() => saved.value.civitai.masked);
+const hfEnvironmentManaged = computed(
+  () => saved.value.hf.source === "environment",
+);
+const civitaiEnvironmentManaged = computed(
+  () => saved.value.civitai.source === "environment",
+);
 
 // Draft inputs, only shown while entering/replacing a token.
 const hfDraft = ref("");
@@ -53,57 +60,66 @@ const civitaiDraft = ref("");
 const editingHf = ref(false);
 const editingCivitai = ref(false);
 
-// Storage can refuse a write (quota, private mode, blocked by policy). The
-// store reports that honestly, so we only empty the field and claim a save
-// when the token really landed — otherwise the draft stays put and the user
-// is told what happened instead of quietly losing the token.
-const BLOCKED_SAVE = "This browser blocked storage — the token wasn't saved.";
-const BLOCKED_CLEAR =
-  "This browser blocked storage — the token wasn't removed.";
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
-function saveHf() {
+async function loadCredentials() {
+  try {
+    saved.value = await getCatalogCredentialStatus();
+  } catch (error) {
+    toast("error", `Could not load server credentials: ${errorMessage(error)}`);
+  }
+}
+
+onMounted(() => {
+  void loadCredentials();
+});
+
+async function saveHf() {
   const value = hfDraft.value.trim();
   if (!value) return;
-  if (!setHfToken(value)) {
-    toast("error", BLOCKED_SAVE);
-    return;
+  try {
+    saved.value = await putCatalogCredential("hf", value);
+    hfDraft.value = "";
+    editingHf.value = false;
+    toast("success", "Hugging Face token saved on this server");
+  } catch (error) {
+    toast("error", `Hugging Face token was not saved: ${errorMessage(error)}`);
   }
-  saved.value = getAccountTokens();
-  hfDraft.value = "";
-  editingHf.value = false;
-  toast("success", "Hugging Face token saved in this browser");
 }
-function removeHf() {
-  const cleared = clearHfToken();
-  saved.value = getAccountTokens();
-  if (!cleared) {
-    toast("error", BLOCKED_CLEAR);
-    return;
+async function removeHf() {
+  try {
+    saved.value = await deleteCatalogCredential("hf");
+    hfDraft.value = "";
+    editingHf.value = false;
+  } catch (error) {
+    toast(
+      "error",
+      `Hugging Face token was not removed: ${errorMessage(error)}`,
+    );
   }
-  hfDraft.value = "";
-  editingHf.value = false;
 }
-function saveCivitai() {
+async function saveCivitai() {
   const value = civitaiDraft.value.trim();
   if (!value) return;
-  if (!setCivitaiToken(value)) {
-    toast("error", BLOCKED_SAVE);
-    return;
+  try {
+    saved.value = await putCatalogCredential("civitai", value);
+    civitaiDraft.value = "";
+    editingCivitai.value = false;
+    toast("success", "Civitai token saved on this server");
+  } catch (error) {
+    toast("error", `Civitai token was not saved: ${errorMessage(error)}`);
   }
-  saved.value = getAccountTokens();
-  civitaiDraft.value = "";
-  editingCivitai.value = false;
-  toast("success", "Civitai token saved in this browser");
 }
-function removeCivitai() {
-  const cleared = clearCivitaiToken();
-  saved.value = getAccountTokens();
-  if (!cleared) {
-    toast("error", BLOCKED_CLEAR);
-    return;
+async function removeCivitai() {
+  try {
+    saved.value = await deleteCatalogCredential("civitai");
+    civitaiDraft.value = "";
+    editingCivitai.value = false;
+  } catch (error) {
+    toast("error", `Civitai token was not removed: ${errorMessage(error)}`);
   }
-  civitaiDraft.value = "";
-  editingCivitai.value = false;
 }
 
 // About — server version + processing summary.
@@ -147,6 +163,7 @@ const version = computed(() => status.value?.version ?? "—");
         <div v-if="hfMasked && !editingHf" class="field" data-test="hf-saved">
           <code class="token-mask" data-test="hf-mask">{{ hfMasked }}</code>
           <button
+            v-if="!hfEnvironmentManaged"
             type="button"
             class="btn"
             data-test="replace-hf"
@@ -155,6 +172,7 @@ const version = computed(() => status.value?.version ?? "—");
             Replace
           </button>
           <button
+            v-if="!hfEnvironmentManaged"
             type="button"
             class="btn btn--ghost"
             data-test="clear-hf"
@@ -162,6 +180,7 @@ const version = computed(() => status.value?.version ?? "—");
           >
             Clear
           </button>
+          <span v-if="hfEnvironmentManaged" class="env-badge">Environment</span>
         </div>
         <div v-else class="field">
           <input
@@ -174,6 +193,7 @@ const version = computed(() => status.value?.version ?? "—");
             class="input"
           />
           <button
+            v-if="!civitaiEnvironmentManaged"
             type="button"
             class="btn"
             data-test="save-hf"
@@ -205,6 +225,7 @@ const version = computed(() => status.value?.version ?? "—");
             civitaiMasked
           }}</code>
           <button
+            v-if="!civitaiEnvironmentManaged"
             type="button"
             class="btn"
             data-test="replace-civitai"
@@ -220,6 +241,9 @@ const version = computed(() => status.value?.version ?? "—");
           >
             Clear
           </button>
+          <span v-if="civitaiEnvironmentManaged" class="env-badge"
+            >Environment</span
+          >
         </div>
         <div v-else class="field">
           <input
@@ -252,8 +276,8 @@ const version = computed(() => status.value?.version ?? "—");
       </div>
 
       <p class="settings__note">
-        Tokens are stored in this browser only and sent solely with catalog
-        (model discovery) requests — never placed in a URL.
+        Tokens are stored privately on this server and used only for catalog
+        discovery and downloads. Environment variables take precedence.
       </p>
     </CardSurface>
 
@@ -330,6 +354,14 @@ const version = computed(() => status.value?.version ?? "—");
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.env-badge {
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .input {

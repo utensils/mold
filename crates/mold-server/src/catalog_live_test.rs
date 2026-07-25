@@ -549,6 +549,67 @@ async fn catalog_download_enqueues_manual_component_companion() {
 }
 
 #[tokio::test]
+async fn catalog_download_rejects_missing_token_before_enqueuing_companions() {
+    if std::env::var("CIVITAI_TOKEN").is_ok() {
+        // This regression exercises the no-credential server path. Environments
+        // that deliberately inject a token cannot represent that state.
+        return;
+    }
+    let server = MockServer::start().await;
+    let version = r#"{
+        "id": 8001,
+        "modelId": 9001,
+        "name": "v1",
+        "baseModel": "SDXL 1.0",
+        "baseModelType": "Standard",
+        "trainedWords": [],
+        "files": [{
+            "id": 1,
+            "name": "x.safetensors",
+            "sizeKB": 100,
+            "downloadCount": 1,
+            "metadata": { "format": "SafeTensor" },
+            "downloadUrl": "https://civitai.example/x.safetensors",
+            "hashes": { "SHA256": "deadbeef" }
+        }],
+        "images": [],
+        "model": {
+            "name": "Token-gated SDXL",
+            "type": "Checkpoint",
+            "nsfw": false,
+            "tags": []
+        }
+    }"#;
+    Mock::given(method("GET"))
+        .and(wm_path("/api/v1/model-versions/8001"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(version))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = AppState::for_tests().with_civitai_base(server.uri());
+    {
+        let mut cfg = state.config.write().await;
+        cfg.models_dir = tmp.path().to_string_lossy().into_owned();
+    }
+    let router = create_router(state);
+
+    let (status, body) = post(router.clone(), "/api/catalog/cv%3A8001/download").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(body.contains("saved in Settings"), "{body}");
+
+    let (downloads_status, downloads_body) = get(router, "/api/downloads").await;
+    assert_eq!(downloads_status, StatusCode::OK, "{downloads_body}");
+    let downloads: serde_json::Value = serde_json::from_str(&downloads_body).unwrap();
+    assert!(
+        downloads["active"].is_null()
+            && downloads["queued"].as_array().is_some_and(Vec::is_empty)
+            && downloads["history"].as_array().is_some_and(Vec::is_empty),
+        "a rejected primary must not leave partial companion jobs: {downloads_body}"
+    );
+}
+
+#[tokio::test]
 async fn live_search_marks_installed_when_sidecar_and_file_present() {
     let (state, _server, tmp) = build_state().await;
 

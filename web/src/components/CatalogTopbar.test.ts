@@ -4,13 +4,17 @@ import { ref } from "vue";
 import CatalogTopbar from "./CatalogTopbar.vue";
 
 const mockSetFilter = vi.fn();
+const mockSetLayout = vi.fn();
 const mockFilter = ref<Record<string, unknown>>({});
+const mockLayout = ref<"grid" | "list">("grid");
 
 vi.mock("../composables/useCatalog", () => {
   return {
     useCatalog: () => ({
       filter: mockFilter,
       setFilter: mockSetFilter,
+      layout: mockLayout,
+      setLayout: mockSetLayout,
       loading: ref(false),
     }),
   };
@@ -20,6 +24,7 @@ describe("CatalogTopbar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockFilter.value = {};
+    mockLayout.value = "grid";
   });
 
   it("renders modality chips", () => {
@@ -56,6 +61,30 @@ describe("CatalogTopbar", () => {
     const w = mount(CatalogTopbar);
     const input = w.find("input[type=search]");
     expect(input.exists()).toBe(true);
+  });
+
+  it("offers the shared List and Grid layout control", async () => {
+    const w = mount(CatalogTopbar);
+    const group = w.find('[aria-label="Catalog layout"]');
+    expect(group.exists()).toBe(true);
+    expect(group.findAll("[role=radio]").map((radio) => radio.text())).toEqual([
+      "List",
+      "Grid",
+    ]);
+    await group.get("[data-test='layout-list']").trigger("click");
+    expect(mockSetLayout).toHaveBeenCalledWith("list");
+  });
+
+  it("uses theme text tokens for inactive chip hover states", () => {
+    const w = mount(CatalogTopbar);
+    const buttons = w
+      .findAll("nav button")
+      .filter((button) => !button.classes().includes("bg-safelight"));
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const button of buttons) {
+      expect(button.classes()).toContain("hover:text-rebate");
+      expect(button.classes()).not.toContain("hover:text-white");
+    }
   });
 
   it("renders kind chips for models, LoRAs, and components", () => {

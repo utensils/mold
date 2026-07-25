@@ -3,8 +3,11 @@ import {
   fetchCatalogEntry,
   fetchCatalogFamilies,
   fetchCatalogSearch,
+  getCatalogCredentialStatus,
   looksLikeCatalogId,
   postCatalogDownload,
+  putCatalogCredential,
+  deleteCatalogCredential,
 } from "../api";
 
 const originalFetch = globalThis.fetch;
@@ -32,7 +35,7 @@ describe("catalog api", () => {
     expect(call).toContain("page=2");
   });
 
-  it("forwards stored account tokens as catalog auth headers", async () => {
+  it("does not forward legacy browser tokens now that credentials belong to the server", async () => {
     localStorage.setItem(
       "mold.web.accounts.v1",
       JSON.stringify({ hfToken: "hf_x1234", civitaiToken: "cv_y5678" }),
@@ -43,9 +46,8 @@ describe("catalog api", () => {
     });
     await fetchCatalogSearch({ q: "flux" });
     const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
-      .calls[0][1] as { headers: Record<string, string> };
-    expect(opts.headers["x-mold-hf-token"]).toBe("hf_x1234");
-    expect(opts.headers["x-mold-civitai-token"]).toBe("cv_y5678");
+      .calls[0][1];
+    expect(opts?.headers).toBeUndefined();
     localStorage.clear();
   });
 
@@ -57,9 +59,8 @@ describe("catalog api", () => {
     });
     await fetchCatalogSearch({ q: "flux" });
     const opts = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
-      .calls[0][1] as { headers: Record<string, string> };
-    expect(opts.headers["x-mold-hf-token"]).toBeUndefined();
-    expect(opts.headers["x-mold-civitai-token"]).toBeUndefined();
+      .calls[0][1];
+    expect(opts?.headers).toBeUndefined();
   });
 
   it("fetchCatalogSearch passes component kind filters as query params", async () => {
@@ -120,5 +121,38 @@ describe("catalog api", () => {
     expect(out.companion_jobs).toHaveLength(2);
     expect(out.companion_jobs[0].name).toBe("clip-l");
     expect(out.companion_jobs[0].job_id).toBe("c1");
+  });
+
+  it("reads, saves, and clears server-owned catalog credentials", async () => {
+    const status = {
+      hf: { configured: false, source: null, masked: null },
+      civitai: {
+        configured: true,
+        source: "server",
+        masked: "cv_••••5678",
+      },
+    };
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => status,
+    });
+
+    await expect(getCatalogCredentialStatus()).resolves.toEqual(status);
+    await putCatalogCredential("civitai", "cv_secret5678");
+    await deleteCatalogCredential("civitai");
+
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0]).toBe("/api/catalog/credentials");
+    expect(calls[1]).toEqual([
+      "/api/catalog/credentials/civitai",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ token: "cv_secret5678" }),
+      }),
+    ]);
+    expect(calls[2]).toEqual([
+      "/api/catalog/credentials/civitai",
+      expect.objectContaining({ method: "DELETE" }),
+    ]);
   });
 });

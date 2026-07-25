@@ -371,6 +371,15 @@ pub fn create_router(state: AppState) -> Router {
             get(crate::catalog_api::list_installed_catalog),
         )
         .route(
+            "/api/catalog/credentials",
+            get(crate::catalog_credentials::get_catalog_credentials),
+        )
+        .route(
+            "/api/catalog/credentials/:provider",
+            axum::routing::put(crate::catalog_credentials::put_catalog_credential)
+                .delete(crate::catalog_credentials::delete_catalog_credential),
+        )
+        .route(
             "/api/catalog/*id",
             get(crate::catalog_api::get_catalog_entry)
                 .post(crate::catalog_api::post_catalog_dispatch),
