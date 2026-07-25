@@ -102,6 +102,12 @@ On a phone, Create follows one vertical workflow: prompt and style, model and
 core controls, Generate, the developing/result canvas, then recent prints.
 Advanced options remain in the mobile sheet so the primary flow stays compact.
 
+On every surface, a **↺ Reset** in the Create settings header restores the
+generation settings to the selected model's defaults — shape, resolution,
+detail, prompt strength, seed, and the Advanced groups — while keeping your
+prompt, model choice, and batch. On the web it is undoable from the toast it
+raises.
+
 ## Video Generation
 
 mold supports text-to-video generation with the LTX Video model family. Video

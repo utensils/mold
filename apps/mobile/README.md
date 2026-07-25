@@ -52,6 +52,10 @@ pushed screen opened from the header.
   target-host estimates, proportional resolution choices, and explicit Random
   or Fixed seeds. Deeper options open in a full-screen **Advanced** sheet, and
   prompt **style** presets compose at submit without rewriting the prompt text.
+  A **↺ Reset** beside the Advanced trigger restores every generation setting
+  to the selected model's defaults while preserving the prompt, model choice,
+  and any prepared batch size; the Advanced sheet keeps its narrower
+  advanced-only Reset.
   For LTX-2 checkpoints, the sheet honors additive `supports_audio` model
   metadata: video-only community checkpoints disable generated audio with an
   explanation while source-image video remains available.

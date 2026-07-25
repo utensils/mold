@@ -72,7 +72,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   essentials-only inspector stays compact by default. Toggle **Advanced** to
   extend capability-gated, always-open icon sections below those essentials in the
   same scrolling inspector; the canvas remains visible and edits apply
-  immediately.
+  immediately. A **↺ Reset** beside the Settings header restores every
+  generation setting to the selected model's defaults while keeping the
+  prompt, the model choice, and any prepared batch size.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed
   gallery), with NEW badges on fresh prints, a two-pane lightbox, and a History
   drawer holding Runs and Prompts. **Space** opens

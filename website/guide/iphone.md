@@ -51,7 +51,9 @@ Choose a host and one of its installed generation models. The form adapts to
 the selected model family and uses the same request contract and model defaults
 as desktop. The primary controls stay on the main screen; deeper options open in
 a full-screen **Advanced** sheet, and prompt **style** presets compose at submit
-without rewriting your prompt text.
+without rewriting your prompt text. A **↺ Reset** beside the Advanced trigger
+restores every generation setting to the selected model's defaults, keeping
+your prompt, model choice, and any prepared batch.
 
 The mobile composer includes:
 
