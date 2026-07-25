@@ -3040,7 +3040,10 @@ describe("MobileApp gallery", () => {
   });
 
   it("shows New and Upscaled indicators on mobile Library tiles", async () => {
-    localStorage.setItem("mold.mobile.library-seen.v1", JSON.stringify(["studio-id:old.png"]));
+    localStorage.setItem(
+      "mold.mobile.library-seen-at.v1",
+      JSON.stringify({ "studio-id": print.timestamp - 1 }),
+    );
     localStorage.setItem("mold.mobile.library-visited.v1", "true");
     apiJsonTo.mockImplementation((_target: unknown, path: string) => {
       if (path === "/api/status") return Promise.resolve(status);
@@ -3071,6 +3074,10 @@ describe("MobileApp gallery", () => {
     const tile = wrapper.get("[data-test='gallery-item']");
     expect(tile.get("[data-test='new-badge']").text()).toBe("New");
     expect(tile.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
+    expect(JSON.parse(localStorage.getItem("mold.mobile.library-seen-at.v1") ?? "{}")).toEqual({
+      "studio-id": print.timestamp,
+    });
+    expect(localStorage.getItem("mold.mobile.library-seen.v1")).toBeNull();
   });
 
   it("uses a still gallery print as the selected model's source image", async () => {

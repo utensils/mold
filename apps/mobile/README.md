@@ -133,8 +133,8 @@ WebView local storage contains non-secret mobile state:
 - `mold.mobile.selected-host.v1` — selected generation host
 - `mold.mobile.settings.v1` — appearance and color family
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
-- `mold.mobile.library-seen.v1` / `mold.mobile.library-visited.v1` — New-badge
-  visit baseline
+- `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded
+  per-host latest-print timestamps and the first-visit marker for New badges
 
 Per-host API keys live in the iOS Keychain under
 `com.utensils.mold.remote-api-key`. Never move them into local storage, query

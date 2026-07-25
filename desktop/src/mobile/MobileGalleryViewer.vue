@@ -280,7 +280,7 @@ async function performImageAction(action: "copy" | "save"): Promise<void> {
     await invoke(action === "copy" ? "copy_image_to_clipboard" : "save_image_to_photos", {
       dataB64: await fullImageBase64(),
     });
-    actionStatus.value = action === "copy" ? "Image copied" : "Saved to Photos";
+    actionStatus.value = action === "copy" ? "Image copied" : "Sent to Photos";
   } catch (error) {
     actionStatus.value = error instanceof Error ? error.message : `Couldn’t ${action} this image.`;
   } finally {

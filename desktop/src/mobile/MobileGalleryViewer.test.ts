@@ -134,7 +134,7 @@ describe("MobileGalleryViewer", () => {
     expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
       dataB64: "AQID",
     });
-    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Saved to Photos");
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Sent to Photos");
   });
 
   it("uses an expanded generated-result URL without refetching gallery media", async () => {

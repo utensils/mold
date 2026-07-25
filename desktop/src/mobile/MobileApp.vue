@@ -145,7 +145,8 @@ interface MobileExpansionPullAttempt {
 
 const STORAGE_KEY = "mold.mobile.hosts.v1";
 const SELECTED_KEY = "mold.mobile.selected-host.v1";
-const LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
+const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
+const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
@@ -280,19 +281,21 @@ const hostProbes = new Map<
 >();
 const generation = useGenerationStore();
 const mobileDownloads = useMobileDownloadsStore();
-function loadLibrarySeen(): Set<string> {
+function loadLibrarySeenAt(): Record<string, number> {
   try {
-    const parsed = JSON.parse(localStorage.getItem(LIBRARY_SEEN_KEY) ?? "[]");
-    return new Set(
-      Array.isArray(parsed)
-        ? parsed.filter((value): value is string => typeof value === "string")
-        : [],
+    const parsed = JSON.parse(localStorage.getItem(LIBRARY_SEEN_AT_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0,
+      ),
     );
   } catch {
-    return new Set();
+    return {};
   }
 }
-let librarySeenBaseline = loadLibrarySeen();
+let librarySeenAtBaseline = loadLibrarySeenAt();
 let libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
 
 // Ephemeral per-host telemetry from the /api/status probe (VRAM + queue), kept
@@ -2055,18 +2058,18 @@ function openPrint(print: GalleryPrint): void {
   selectedPrint.value = print;
 }
 
-function gallerySeenKey(print: Pick<GalleryPrint, "hostId" | "filename">): string {
-  return `${print.hostId}:${print.filename}`;
-}
-
 function isFreshMobilePrint(print: GalleryPrint): boolean {
-  return libraryPreviouslyVisited && !librarySeenBaseline.has(gallerySeenKey(print));
+  const seenAt = librarySeenAtBaseline[print.hostId];
+  return libraryPreviouslyVisited && seenAt != null && print.timestamp > seenAt;
 }
 
 function markMobileLibrarySeen(prints: GalleryPrint[]): void {
-  const seen = new Set(librarySeenBaseline);
-  for (const print of prints) seen.add(gallerySeenKey(print));
-  localStorage.setItem(LIBRARY_SEEN_KEY, JSON.stringify([...seen]));
+  const seenAt = { ...librarySeenAtBaseline };
+  for (const print of prints) {
+    seenAt[print.hostId] = Math.max(seenAt[print.hostId] ?? 0, print.timestamp);
+  }
+  localStorage.setItem(LIBRARY_SEEN_AT_KEY, JSON.stringify(seenAt));
+  localStorage.removeItem(LEGACY_LIBRARY_SEEN_KEY);
   localStorage.setItem(LIBRARY_VISITED_KEY, "true");
 }
 
@@ -2208,7 +2211,7 @@ watch(tab, (next) => {
     mobileContent.value.scrollLeft = 0;
   });
   if (next === "gallery") {
-    librarySeenBaseline = loadLibrarySeen();
+    librarySeenAtBaseline = loadLibrarySeenAt();
     libraryPreviouslyVisited = localStorage.getItem(LIBRARY_VISITED_KEY) === "true";
     void refreshGallery();
   }
