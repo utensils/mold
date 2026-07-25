@@ -200,7 +200,12 @@ describe("StatusPopover host-aware display", () => {
             vram_used: 41_500_000_000,
           },
         ],
-        system_ram: { total: 512_000_000_000, used: 455_900_000_000, used_by_mold: 0, used_by_other: 0 },
+        system_ram: {
+          total: 512_000_000_000,
+          used: 455_900_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
       }),
     );
     await openPopover(wrapper);
@@ -236,7 +241,12 @@ describe("StatusPopover host-aware display", () => {
             vram_used: 41_500_000_000,
           },
         ],
-        system_ram: { total: 512_000_000_000, used: 455_900_000_000, used_by_mold: 0, used_by_other: 0 },
+        system_ram: {
+          total: 512_000_000_000,
+          used: 455_900_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
       }),
     );
     await flushPromises();
@@ -262,7 +272,12 @@ describe("StatusPopover host-aware display", () => {
             vram_used: 32_800_000_000,
           },
         ],
-        system_ram: { total: 196_600_000_000, used: 64_000_000_000, used_by_mold: 0, used_by_other: 0 },
+        system_ram: {
+          total: 196_600_000_000,
+          used: 64_000_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
       }),
     );
     await openPopover(wrapper);
