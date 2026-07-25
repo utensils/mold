@@ -195,7 +195,7 @@ function jobMenu(job: Job): MenuEntry[] {
     </div>
 
     <!-- now developing -->
-    <template v-if="!collapsed">
+    <div v-if="!collapsed" data-test="developing-region" class="flex min-h-0 flex-1 flex-col">
       <div class="mt-5 mb-1.5 flex items-center gap-2 px-3">
         <span class="rail-kicker">Now developing</span>
         <span v-if="generation.pending.length > 1" class="rail-kicker ml-auto">
@@ -204,7 +204,8 @@ function jobMenu(job: Job): MenuEntry[] {
       </div>
       <div
         v-if="railJobs.length > 0"
-        class="flex max-h-44 min-h-0 flex-col gap-2 overflow-y-auto px-2"
+        data-test="developing-jobs"
+        class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2"
       >
         <a
           v-for="job in railJobs"
@@ -248,9 +249,8 @@ function jobMenu(job: Job): MenuEntry[] {
         </a>
       </div>
       <p v-else class="px-3 text-caption text-ink-3">nothing developing</p>
-    </template>
-
-    <div class="flex-1" />
+    </div>
+    <div v-else class="flex-1" />
 
     <!-- status + settings -->
     <StatusPopover :collapsed="collapsed" />

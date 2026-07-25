@@ -98,6 +98,30 @@ describe("NavRail collapse", () => {
   });
 });
 
+describe("NavRail developing jobs", () => {
+  it("uses the remaining rail height before scrolling queued jobs", async () => {
+    const wrapper = await mountAt("/create");
+    const generation = useGenerationStore();
+    generation.jobs = [
+      {
+        clientId: 1,
+        model: "flux-dev:q8",
+        prompt: "queued print",
+        status: "queued",
+      } as never,
+    ];
+    await flushPromises();
+
+    const region = wrapper.get("[data-test='developing-region']");
+    const jobs = wrapper.get("[data-test='developing-jobs']");
+    expect(region.classes()).toEqual(expect.arrayContaining(["min-h-0", "flex-1"]));
+    expect(jobs.classes()).toEqual(
+      expect.arrayContaining(["min-h-0", "flex-1", "overflow-y-auto"]),
+    );
+    expect(jobs.classes()).not.toContain("max-h-44");
+  });
+});
+
 describe("NavRail workspace badges (G11)", () => {
   it("shows a stop dot on Machines when a connected host is offline", async () => {
     const wrapper = await mountAt("/create");
