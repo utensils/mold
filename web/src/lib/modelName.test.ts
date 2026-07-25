@@ -33,7 +33,7 @@ describe("modelDisplayName", () => {
     ).toBe("Juggernaut XL - Ragnarok by KandooAI");
   });
 
-  it("keeps the raw name for catalog ids with no readable metadata", () => {
+  it("uses a readable fallback for catalog ids with no title metadata", () => {
     expect(modelDisplayName({ name: "cv:1759168", description: "" })).toBe(
       "Civitai model #1759168",
     );

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { GalleryImage } from "../types";
+import type { GalleryImage, ModelInfoExtended } from "../types";
 import { printKey } from "../lib/multiHostGallery";
 import GalleryCard from "./GalleryCard.vue";
 
@@ -18,11 +18,13 @@ const props = withDefaults(
     /** Selected print keys — `hostId|filename`, never a bare filename. */
     selection?: Set<string>;
     showRecreate?: boolean;
+    models?: ModelInfoExtended[];
   }>(),
   {
     selectMode: false,
     selection: () => new Set<string>(),
     showRecreate: false,
+    models: () => [],
   },
 );
 
@@ -294,6 +296,7 @@ onBeforeUnmount(() => {
         v-for="entry in visibleEntries"
         :key="keyOf(entry)"
         :item="entry"
+        :models="models"
         :muted="muted"
         variant="feed"
         :select-mode="selectMode"
@@ -315,6 +318,7 @@ onBeforeUnmount(() => {
         v-for="entry in visibleEntries"
         :key="keyOf(entry)"
         :item="entry"
+        :models="models"
         :muted="muted"
         variant="grid"
         :select-mode="selectMode"

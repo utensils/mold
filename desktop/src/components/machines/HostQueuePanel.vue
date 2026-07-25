@@ -74,7 +74,7 @@ const lanes = computed(() => {
 
 const hasEntries = computed(() => lanes.value.some((lane) => lane.entries.length > 0));
 const modelLabel = (name: string) =>
-  modelDisplayNameForId(name, hostModels.installedOn(props.host.id));
+  modelDisplayNameForId(name, hostModels.modelsOn(props.host.id));
 
 /** This app's job behind a queue row, for thumbnails and live progress. */
 function ownJob(entry: EnrichedQueueEntry): Job | null {

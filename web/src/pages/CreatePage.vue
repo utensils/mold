@@ -1652,6 +1652,7 @@ onBeforeUnmount(() => {
 
     <Lightbox
       :item="selected"
+      :models="models"
       :has-prev="selectedIndex > 0"
       :has-next="
         selectedIndex >= 0 && selectedIndex < galleryEntries.length - 1

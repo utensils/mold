@@ -2380,6 +2380,7 @@ onBeforeUnmount(() => {
             :error="expansionError"
             :status="expansionPullStatus"
             :eta-seconds="expansionPullEtaSeconds"
+            :models="generationModels"
             @pull="pullExpansionModel"
             @retry-expansion="retryExpansionAfterPull"
           />

@@ -857,6 +857,7 @@ onBeforeUnmount(() => {
         <GalleryFeed
           v-else
           :entries="filtered"
+          :models="models"
           :loading="loading"
           :view="'feed'"
           :muted="muted"
@@ -977,6 +978,7 @@ onBeforeUnmount(() => {
 
     <Lightbox
       :item="selected"
+      :models="models"
       :index="selectedIndex"
       :total="filtered.length"
       :has-prev="selectedIndex > 0"

@@ -9,7 +9,7 @@ import {
   resolveStreamableSrc,
   resolveThumbnailSrc,
 } from "../lib/galleryMedia";
-import type { GalleryImage } from "../types";
+import type { GalleryImage, ModelInfoExtended } from "../types";
 import { mediaKind } from "../types";
 import {
   formatRelativeTime,
@@ -35,6 +35,7 @@ const props = withDefaults(
     showRecreate?: boolean;
     /** Composite `hostId|filename` identity, stamped for marquee selection. */
     printKey?: string;
+    models?: ModelInfoExtended[];
   }>(),
   {
     variant: "grid",
@@ -43,6 +44,7 @@ const props = withDefaults(
     selected: false,
     showRecreate: false,
     printKey: undefined,
+    models: () => [],
   },
 );
 
@@ -196,7 +198,9 @@ const videoSrc = computed(() => fullSrc.value);
 const videoPoster = computed(() => thumbSrc.value);
 
 const relative = computed(() => formatRelativeTime(props.item.timestamp));
-const modelLabel = computed(() => shortModel(props.item.metadata.model));
+const modelLabel = computed(() =>
+  shortModel(props.item.metadata.model, props.models),
+);
 const resolution = computed(() => formatResolution(props.item.metadata));
 
 function onImgError() {

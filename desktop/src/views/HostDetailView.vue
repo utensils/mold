@@ -235,7 +235,7 @@ const queueCapacity = computed(
 );
 const modelsLoaded = computed(() => telemetry.value?.modelsLoaded ?? []);
 const installedModels = computed(() => hostModels.installedOn(hostId.value));
-const modelLabel = (name: string) => modelDisplayNameForId(name, installedModels.value);
+const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);

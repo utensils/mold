@@ -1,4 +1,4 @@
-import type { OutputMetadata } from "../types";
+import type { ModelInfoExtended, OutputMetadata } from "../types";
 import { modelDisplayNameForId } from "../lib/modelName";
 
 /** Decimal gigabytes, matching server and storage-vendor reporting. */
@@ -26,7 +26,10 @@ export function formatResolution(meta: OutputMetadata): string {
   return "";
 }
 
-/** Trim `flux-dev:q8` → `flux-dev` when we only want the family name. */
-export function shortModel(model: string): string {
-  return model ? modelDisplayNameForId(model, []) : "unknown model";
+/** Compact human-readable label for model metadata surfaces. */
+export function shortModel(
+  model: string,
+  models: readonly ModelInfoExtended[] = [],
+): string {
+  return model ? modelDisplayNameForId(model, models) : "unknown model";
 }

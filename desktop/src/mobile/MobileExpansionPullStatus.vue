@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { ExpansionPullView } from "../lib/expansionPull";
+import type { ModelEntry } from "../lib/api/types";
 import { formatBytes, formatEta, percent } from "../lib/format";
 import { modelDisplayNameForId } from "../lib/models";
 
@@ -10,8 +11,9 @@ const props = defineProps<{
   error: string;
   status: ExpansionPullView;
   etaSeconds: number | null;
+  models?: ModelEntry[] | undefined;
 }>();
-const modelLabel = computed(() => modelDisplayNameForId(props.model, []));
+const modelLabel = computed(() => modelDisplayNameForId(props.model, props.models ?? []));
 defineEmits<{ pull: []; "retry-expansion": [] }>();
 
 const amount = computed(() =>
