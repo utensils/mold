@@ -1766,6 +1766,27 @@ describe("MobileApp generation queue", () => {
     expect(newStream.options.signal.aborted).toBe(false);
   });
 
+  it("uses an RFC 4122 consumer id when native randomUUID is unavailable", async () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(0);
+        return bytes;
+      },
+    });
+    const pinia = createPinia();
+    const downloads = useMobileDownloadsStore(pinia);
+    const unregister = vi.spyOn(downloads, "unregisterConsumer");
+
+    wrapper = mountMobileApp(pinia);
+    await flushPromises();
+    wrapper.unmount();
+    wrapper = null;
+
+    expect(unregister).toHaveBeenCalledWith(
+      "mobile-generate-00000000-0000-4000-8000-000000000000",
+    );
+  });
+
   it("revokes a frozen pull and prevents a deferred retry from acting after unmount", async () => {
     const pinia = createPinia();
     const downloads = useMobileDownloadsStore(pinia);

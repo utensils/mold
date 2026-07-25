@@ -7,7 +7,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use axum::extract::Path as AxumPath;
 use axum::http::StatusCode;
@@ -18,6 +18,7 @@ use crate::routes::ApiError;
 
 const CREDENTIALS_FILE: &str = "catalog-credentials.json";
 static CREDENTIALS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static SERVER_CREDENTIALS_CACHE: OnceLock<RwLock<CatalogCredentialsCache>> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CatalogCredentials {
@@ -25,6 +26,27 @@ pub struct CatalogCredentials {
     pub hf_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub civitai_token: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CatalogCredentialsCache {
+    path: Option<PathBuf>,
+    credentials: CatalogCredentials,
+}
+
+impl CatalogCredentialsCache {
+    fn get_or_load(&mut self, path: &Path) -> anyhow::Result<CatalogCredentials> {
+        if self.path.as_deref() != Some(path) {
+            self.credentials = load_from_path(path)?;
+            self.path = Some(path.to_path_buf());
+        }
+        Ok(self.credentials.clone())
+    }
+
+    fn replace(&mut self, path: PathBuf, credentials: CatalogCredentials) {
+        self.path = Some(path);
+        self.credentials = credentials;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -141,13 +163,25 @@ fn save_to_path_unlocked(path: &Path, credentials: &CatalogCredentials) -> anyho
 }
 
 fn mask_token(token: &str) -> String {
-    let prefix = token.split_once('_').map(|(head, _)| head).unwrap_or("");
-    let suffix = token.chars().rev().take(4).collect::<Vec<_>>();
-    let suffix = suffix.into_iter().rev().collect::<String>();
-    if prefix.is_empty() {
-        format!("••••{suffix}")
+    let (prefix, secret) = match token.split_once('_') {
+        Some((prefix, secret)) => (Some(prefix), secret),
+        None => (None, token),
+    };
+    let suffix = if secret.chars().count() <= 4 {
+        String::new()
     } else {
-        format!("{prefix}_••••{suffix}")
+        secret
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    };
+    match prefix {
+        Some(prefix) => format!("{prefix}_••••{suffix}"),
+        None => format!("••••{suffix}"),
     }
 }
 
@@ -189,7 +223,20 @@ fn load_server_credentials() -> CatalogCredentials {
     let Some(path) = mold_core::Config::mold_dir().map(|dir| dir.join(CREDENTIALS_FILE)) else {
         return CatalogCredentials::default();
     };
-    match load_from_path(&path) {
+    let cache =
+        SERVER_CREDENTIALS_CACHE.get_or_init(|| RwLock::new(CatalogCredentialsCache::default()));
+    {
+        let guard = cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.path.as_deref() == Some(path.as_path()) {
+            return guard.credentials.clone();
+        }
+    }
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.get_or_load(&path) {
         Ok(credentials) => credentials,
         Err(error) => {
             tracing::warn!(
@@ -201,6 +248,14 @@ fn load_server_credentials() -> CatalogCredentials {
             CatalogCredentials::default()
         }
     }
+}
+
+fn update_server_credentials_cache(path: PathBuf, credentials: &CatalogCredentials) {
+    SERVER_CREDENTIALS_CACHE
+        .get_or_init(|| RwLock::new(CatalogCredentialsCache::default()))
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .replace(path, credentials.clone());
 }
 
 pub(crate) fn resolved_hf_token() -> Option<String> {
@@ -216,6 +271,7 @@ pub async fn get_catalog_credentials() -> Result<Json<CatalogCredentialStatus>, 
     let credentials = load_from_path(&path).map_err(|error| {
         ApiError::internal(format!("failed to read catalog credentials: {error:#}"))
     })?;
+    update_server_credentials_cache(path, &credentials);
     Ok(Json(current_status(&credentials)))
 }
 
@@ -251,6 +307,7 @@ pub async fn put_catalog_credential(
     save_to_path_unlocked(&path, &credentials).map_err(|error| {
         ApiError::internal(format!("failed to persist catalog credentials: {error:#}"))
     })?;
+    update_server_credentials_cache(path, &credentials);
     Ok(Json(current_status(&credentials)))
 }
 
@@ -281,6 +338,7 @@ pub async fn delete_catalog_credential(
     save_to_path_unlocked(&path, &credentials).map_err(|error| {
         ApiError::internal(format!("failed to persist catalog credentials: {error:#}"))
     })?;
+    update_server_credentials_cache(path, &credentials);
     Ok(Json(current_status(&credentials)))
 }
 
@@ -326,6 +384,41 @@ mod tests {
         assert_eq!(status.hf.source, Some("environment"));
         assert_eq!(status.hf.masked.as_deref(), Some("••••v-hf"));
         assert_eq!(status.civitai.source, Some("server"));
+    }
+
+    #[test]
+    fn short_tokens_never_expose_their_secret_characters() {
+        assert_eq!(mask_token("abc"), "••••");
+        assert_eq!(mask_token("1234"), "••••");
+        assert_eq!(mask_token("hf_x"), "hf_••••");
+        assert_eq!(mask_token("cv_abcd"), "cv_••••");
+    }
+
+    #[test]
+    fn credential_cache_reuses_a_loaded_path_until_an_api_write_updates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog-credentials.json");
+        let first = CatalogCredentials {
+            hf_token: Some("first".into()),
+            civitai_token: None,
+        };
+        let second = CatalogCredentials {
+            hf_token: Some("second".into()),
+            civitai_token: None,
+        };
+        save_to_path(&path, &first).unwrap();
+
+        let mut cache = CatalogCredentialsCache::default();
+        assert_eq!(cache.get_or_load(&path).unwrap(), first);
+        save_to_path(&path, &second).unwrap();
+        assert_eq!(
+            cache.get_or_load(&path).unwrap(),
+            first,
+            "hot-path reads should use the in-memory value"
+        );
+
+        cache.replace(path, second.clone());
+        assert_eq!(cache.credentials, second);
     }
 
     #[test]
