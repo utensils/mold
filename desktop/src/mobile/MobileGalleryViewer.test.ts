@@ -6,11 +6,20 @@ const { streamableMediaUrl, evictMedia } = vi.hoisted(() => ({
   streamableMediaUrl: vi.fn(),
   evictMedia: vi.fn(),
 }));
+const { invoke, apiFetchTo } = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  apiFetchTo: vi.fn(),
+}));
 
 vi.mock("../lib/gallery/media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/gallery/media")>()),
   streamableMediaUrl,
   evictMedia,
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
+  apiFetchTo,
 }));
 
 import MobileGalleryViewer from "./MobileGalleryViewer.vue";
@@ -59,6 +68,10 @@ function mountViewer(
 beforeEach(() => {
   streamableMediaUrl.mockReset().mockResolvedValue("https://studio/media/full");
   evictMedia.mockReset();
+  invoke.mockReset().mockResolvedValue(undefined);
+  apiFetchTo.mockReset().mockResolvedValue({
+    blob: () => Promise.resolve(new Blob([Uint8Array.from([1, 2, 3])])),
+  } as Response);
 });
 
 afterEach(() => {
@@ -102,6 +115,53 @@ describe("MobileGalleryViewer", () => {
     await view.setProps({ item: { ...image, filename: "clip.mp4", format: "mp4" } });
     await flushPromises();
     expect(view.find("[data-test='gallery-viewer-use-source']").exists()).toBe(false);
+  });
+
+  it("copies and saves the authenticated full-resolution still through native iOS actions", async () => {
+    const view = mountViewer();
+    await flushPromises();
+
+    await view.get("[data-test='gallery-viewer-copy']").trigger("click");
+    await flushPromises();
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/image/print%20one.png");
+    expect(invoke).toHaveBeenCalledWith("copy_image_to_clipboard", {
+      dataB64: "AQID",
+    });
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Image copied");
+
+    await view.get("[data-test='gallery-viewer-save']").trigger("click");
+    await flushPromises();
+    expect(invoke).toHaveBeenCalledWith("save_image_to_photos", {
+      dataB64: "AQID",
+    });
+    expect(view.get("[data-test='gallery-viewer-action-status']").text()).toBe("Sent to Photos");
+  });
+
+  it("uses an expanded generated-result URL without refetching gallery media", async () => {
+    const view = mountViewer();
+    await view.setProps({ mediaUrlOverride: "blob:generated-result" });
+    await flushPromises();
+
+    expect(view.get("[data-test='gallery-viewer-image']").attributes("src")).toBe(
+      "blob:generated-result",
+    );
+    expect(streamableMediaUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks upscaled stills with the shared print badge", async () => {
+    const view = mountViewer({
+      ...image,
+      filename: "print one-upscaled.png",
+      metadata: {
+        ...image.metadata,
+        upscale_model: "real-esrgan-x4plus",
+        generation_width: 512,
+        generation_height: 512,
+      },
+    });
+    await flushPromises();
+
+    expect(view.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
   });
 
   it("renders MP4 gallery items with native inline playback controls", async () => {

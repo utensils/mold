@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ApiTarget } from "../lib/api/client";
+import { invoke } from "@tauri-apps/api/core";
+import { apiFetchTo, type ApiTarget } from "../lib/api/client";
 import type { GalleryImage } from "../lib/api/types";
+import { blobToBase64 } from "../lib/image";
 import {
   evictMedia,
   galleryMediaPath,
   isVideoItem,
   streamableMediaUrl,
 } from "../lib/gallery/media";
+import { isUpscaledImage } from "../lib/gallery/upscaled";
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +28,7 @@ const props = withDefaults(
     hasNext?: boolean | null;
     canUseAsSource?: boolean;
     usingSource?: boolean;
+    mediaUrlOverride?: string;
   }>(),
   {
     reusing: false,
@@ -36,6 +40,7 @@ const props = withDefaults(
     hasNext: null,
     canUseAsSource: false,
     usingSource: false,
+    mediaUrlOverride: "",
   },
 );
 
@@ -80,6 +85,9 @@ const preparedPosition = computed(() => {
     : "";
 });
 const originalPrompt = computed(() => props.item.metadata.original_prompt?.trim() ?? "");
+const upscaled = computed(() => isUpscaledImage(props.item));
+const actionStatus = ref("");
+const actionBusy = ref<"copy" | "save" | null>(null);
 
 let restoreFocusElement: HTMLElement | null = null;
 let loadEpoch = 0;
@@ -119,6 +127,11 @@ async function loadMedia(load = currentMediaLoad()): Promise<void> {
   loadError.value = "";
   mediaUrl.value = "";
   mediaLoadKey.value += 1;
+  if (props.mediaUrlOverride) {
+    mediaUrl.value = props.mediaUrlOverride;
+    loading.value = false;
+    return;
+  }
   try {
     const url = await streamableMediaUrl(load.path, {
       target: load.target,
@@ -245,11 +258,35 @@ watch(
     props.target.baseUrl,
     props.target.apiKey,
     props.cacheKey,
+    props.mediaUrlOverride,
   ],
   () => {
     if (mounted) reloadMedia();
   },
 );
+
+async function fullImageBase64(): Promise<string> {
+  const response = props.mediaUrlOverride
+    ? await fetch(props.mediaUrlOverride)
+    : await apiFetchTo(props.target, galleryMediaPath(props.item.filename, "host"));
+  return blobToBase64(await response.blob());
+}
+
+async function performImageAction(action: "copy" | "save"): Promise<void> {
+  if (video.value || actionBusy.value) return;
+  actionBusy.value = action;
+  actionStatus.value = "";
+  try {
+    await invoke(action === "copy" ? "copy_image_to_clipboard" : "save_image_to_photos", {
+      dataB64: await fullImageBase64(),
+    });
+    actionStatus.value = action === "copy" ? "Image copied" : "Sent to Photos";
+  } catch (error) {
+    actionStatus.value = error instanceof Error ? error.message : `Couldn’t ${action} this image.`;
+  } finally {
+    actionBusy.value = null;
+  }
+}
 
 onMounted(() => {
   mounted = true;
@@ -356,7 +393,11 @@ onBeforeUnmount(() => {
         draggable="false"
         @load="mediaReady"
         @error="mediaFailed"
+        @contextmenu.prevent
       />
+      <span v-if="upscaled" data-test="upscaled-badge" class="gallery-upscaled-badge">
+        Upscaled
+      </span>
 
       <div v-if="loading" class="gallery-viewer-loading" role="status">
         Loading full resolution…
@@ -404,6 +445,26 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="gallery-viewer-actions">
+        <template v-if="!video">
+          <button
+            class="secondary-button gallery-viewer-copy"
+            type="button"
+            data-test="gallery-viewer-copy"
+            :disabled="!!actionBusy"
+            @click="performImageAction('copy')"
+          >
+            {{ actionBusy === "copy" ? "Copying…" : "Copy image" }}
+          </button>
+          <button
+            class="secondary-button gallery-viewer-save"
+            type="button"
+            data-test="gallery-viewer-save"
+            :disabled="!!actionBusy"
+            @click="performImageAction('save')"
+          >
+            {{ actionBusy === "save" ? "Saving…" : "Save photo" }}
+          </button>
+        </template>
         <button
           v-if="canUseSource"
           class="secondary-button gallery-viewer-source"
@@ -426,6 +487,14 @@ onBeforeUnmount(() => {
           {{ actionLabel }}
         </button>
       </div>
+      <p
+        v-if="actionStatus"
+        class="gallery-viewer-action-status"
+        role="status"
+        data-test="gallery-viewer-action-status"
+      >
+        {{ actionStatus }}
+      </p>
     </footer>
   </dialog>
 </template>
@@ -436,6 +505,14 @@ onBeforeUnmount(() => {
   touch-action: pan-y;
   user-select: none;
   -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+}
+
+.gallery-upscaled-badge {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
 }
 
 .gallery-viewer-position {

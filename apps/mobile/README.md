@@ -68,8 +68,11 @@ pushed screen opened from the header.
   aspect ratio; without previews the plain status line remains.
 - **Library** merges saved media from every configured host. Its full-screen
   viewer shows uncropped images, streams videos with native controls, swipes
-  horizontally between prints, restores recorded prompt settings, and can use
-  a still as the next source or Qwen edit target.
+  horizontally between prints, explicitly copies or saves full-resolution
+  stills through UIKit, restores recorded prompt settings, and can use a still
+  as the next source or Qwen edit target. Generated stills open the same viewer
+  on tap. Persistent New badges match desktop Library visits, and post-generation
+  upscaled images carry the shared Upscaled badge.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
   sort, exposes model details and
@@ -130,6 +133,8 @@ WebView local storage contains non-secret mobile state:
 - `mold.mobile.selected-host.v1` — selected generation host
 - `mold.mobile.settings.v1` — appearance and color family
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
+- `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded
+  per-host latest-print timestamps and the first-visit marker for New badges
 
 Per-host API keys live in the iOS Keychain under
 `com.utensils.mold.remote-api-key`. Never move them into local storage, query

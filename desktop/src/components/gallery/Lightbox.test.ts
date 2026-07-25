@@ -143,6 +143,23 @@ describe("Lightbox metadata panel", () => {
     expect(loras[0]!.text()).toContain("old.safetensors");
     expect(loras[0]!.text()).toContain("0.70");
   });
+
+  it("identifies an upscaled print using its persisted generation dimensions", () => {
+    const wrapper = mountLightbox({
+      ...item,
+      filename: "renamed-output.png",
+      metadata: {
+        ...item.metadata,
+        width: 4096,
+        height: 4096,
+        generation_width: 1024,
+        generation_height: 1024,
+        upscale_model: "real-esrgan-x4plus",
+      },
+    });
+
+    expect(wrapper.get("[data-test='upscaled-badge']").text()).toBe("Upscaled");
+  });
 });
 
 describe("Lightbox a11y", () => {
