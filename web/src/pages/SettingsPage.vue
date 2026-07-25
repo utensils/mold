@@ -307,7 +307,9 @@ const version = computed(() => status.value?.version ?? "—");
 
 <style scoped>
 .settings {
+  width: 100%;
   max-width: 900px;
+  box-sizing: border-box;
   margin: 0 auto;
   padding: 24px 20px 96px;
 }

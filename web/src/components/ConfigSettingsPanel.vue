@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import Icon from "@ui/components/Icon.vue";
+import type { IconName } from "@ui/icons";
 import { toast } from "../lib/toasts";
 import {
   CONFIG_SECTIONS,
@@ -24,6 +26,28 @@ const search = ref("");
 const unavailableMessage = ref("");
 const drafts = reactive<Record<string, ConfigValue>>({});
 const saving = ref<string | null>(null);
+
+const sectionPresentation: Record<
+  (typeof CONFIG_SECTIONS)[number],
+  { icon: IconName; summary: string }
+> = {
+  "Storage & server": {
+    icon: "machines",
+    summary: "Paths and connection defaults for this engine",
+  },
+  Generation: {
+    icon: "image",
+    summary: "Defaults for new image and video jobs",
+  },
+  "Prompt expansion": {
+    icon: "sparkle",
+    summary: "Rewrite behavior, model, and sampling controls",
+  },
+  Advanced: {
+    icon: "settings",
+    summary: "Uncommon and newly discovered engine options",
+  },
+};
 
 async function load() {
   try {
@@ -185,9 +209,20 @@ onMounted(load);
         v-for="group in grouped"
         :key="group.section"
         class="config-group"
+        data-test="config-group"
       >
-        <h3>{{ group.section }}</h3>
-        <CardSurface class="config-card" :padded="false">
+        <div class="config-group__heading">
+          <span class="config-group__plate" aria-hidden="true">
+            <Icon :name="sectionPresentation[group.section].icon" :size="17" />
+          </span>
+          <div>
+            <h3>{{ group.section }}</h3>
+            <p class="config-group__summary">
+              {{ sectionPresentation[group.section].summary }}
+            </p>
+          </div>
+        </div>
+        <CardSurface class="config-card config-card--accented" :padded="false">
           <div
             v-for="{ row, schema } in group.rows"
             :key="row.key"
@@ -306,10 +341,36 @@ onMounted(load);
 .config-card {
   margin-bottom: 18px;
 }
-.config-group h3 {
-  margin: 0 0 8px;
-  color: var(--ink-2);
-  font: 600 12px var(--f-body);
+.config-group__heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 9px;
+}
+.config-group__heading h3 {
+  margin: 0;
+  color: var(--rebate);
+  font: 600 13px var(--f-body);
+}
+.config-group__plate {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--halide) 16%, transparent);
+  color: var(--halide);
+}
+.config-group__summary {
+  margin: 2px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.config-card--accented {
+  background: color-mix(in srgb, var(--halide) 3%, var(--bench));
+  border-color: color-mix(in srgb, var(--halide) 22%, var(--edge));
 }
 .config-row {
   display: grid;

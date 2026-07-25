@@ -63,6 +63,19 @@ describe("ConfigSettingsPanel", () => {
     expect(wrapper.text()).toContain("MOLD_DEFAULT_WIDTH");
   });
 
+  it("uses the shared icon-led, accented treatment for every All settings group", async () => {
+    const wrapper = mount(ConfigSettingsPanel);
+    await flushPromises();
+
+    const groups = wrapper.findAll("[data-test='config-group']");
+    expect(groups).toHaveLength(4);
+    for (const group of groups) {
+      expect(group.find(".config-group__plate").exists()).toBe(true);
+      expect(group.find(".config-group__summary").text()).not.toBe("");
+      expect(group.find(".config-card--accented").exists()).toBe(true);
+    }
+  });
+
   it("searches labels, help, and raw keys", async () => {
     const wrapper = mount(ConfigSettingsPanel);
     await flushPromises();

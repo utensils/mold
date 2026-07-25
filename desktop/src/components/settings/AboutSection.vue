@@ -47,7 +47,7 @@ function openPrivacyPolicy(): void {
 </script>
 
 <template>
-  <div class="max-w-md">
+  <div class="w-full" data-test="about-section-content">
     <SettingRow label="Mold" help="Desktop app version.">
       <span class="data-mono text-body text-ink-2">{{ appVersion ?? "dev" }}</span>
     </SettingRow>

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Aligned desktop and web Settings cards to the full content column, removed narrow-web overflow, and gave All settings groups clearer token-based color hierarchy with shared halide icon headers and summaries.
+
 ### Added
 
 - **Live latent previews now develop on the web and iPhone Create canvases**, matching the desktop: during denoising the server's `preview` SSE frames render under the shared Develop grain, the blur tightening and the grain thinning as the print forms, with the develop bed adopting the submitted print's aspect ratio. Web keeps the progress ring + stage line until the first preview arrives and drops the preview the moment a job settles (nothing heavy is ever persisted); the iPhone bed appears above the existing status line only while a preview exists, so WebKit does no extra compositing during model load.

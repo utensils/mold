@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPage from "./SettingsPage.vue";
+import settingsPageSource from "./SettingsPage.vue?raw";
 import { theme, themeFamily } from "../lib/theme";
 import { resetNotifications, useNotifications } from "../lib/toasts";
 import type { ServerStatus } from "../types";
@@ -14,6 +15,13 @@ vi.mock("../composables/useStatusPoll", () => ({
 const originalFetch = globalThis.fetch;
 
 describe("SettingsPage", () => {
+  it("keeps its padded content inside narrow web viewports", () => {
+    const settingsRule = settingsPageSource.match(/\.settings\s*\{([^}]*)\}/s);
+
+    expect(settingsRule?.[1]).toMatch(/width:\s*100%/);
+    expect(settingsRule?.[1]).toMatch(/box-sizing:\s*border-box/);
+  });
+
   beforeEach(() => {
     statusRef.value = null;
     resetNotifications();

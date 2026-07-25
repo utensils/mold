@@ -146,6 +146,9 @@ function toggle(id: SectionId): void {
               :key="s.id"
               :data-test="`accordion-${s.id}`"
               :title="s.label"
+              :summary="s.summary"
+              :icon="s.icon"
+              tone="halide"
               :open="isOpen(s.id)"
               @toggle="toggle(s.id)"
             >

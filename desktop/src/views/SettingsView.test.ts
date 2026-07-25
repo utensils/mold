@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
+import AccordionSection from "@ui/components/AccordionSection.vue";
 
 // The top cards and accordion bodies pull in stores and IPC that aren't the
 // subject here — stub them to identifiable markers so this suite tests the
@@ -63,6 +64,18 @@ describe("SettingsView shell", () => {
       "advanced",
     ]) {
       expect(wrapper.find(`[data-test="accordion-${id}"]`).exists()).toBe(true);
+    }
+  });
+
+  it("renders icon-led, accented All settings groups with explanatory summaries", async () => {
+    const wrapper = await mountView();
+    const accordions = wrapper.findAllComponents(AccordionSection);
+
+    expect(accordions).toHaveLength(6);
+    for (const accordion of accordions) {
+      expect(accordion.props("icon")).toBeTruthy();
+      expect(accordion.props("summary")).toBeTruthy();
+      expect(accordion.props("tone")).toBe("halide");
     }
   });
 

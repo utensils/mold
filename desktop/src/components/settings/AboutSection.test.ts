@@ -24,6 +24,8 @@ describe("AboutSection", () => {
   it("credits both core contributors", () => {
     const wrapper = mount(AboutSection);
 
+    expect(wrapper.get("[data-test='about-section-content']").classes()).toContain("w-full");
+    expect(wrapper.get("[data-test='about-section-content']").classes()).not.toContain("max-w-md");
     expect(wrapper.text()).toContain("Core contributors");
     expect(wrapper.text()).toContain("James Brink");
     expect(wrapper.text()).toContain("Jeffrey Dilley");
