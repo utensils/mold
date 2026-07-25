@@ -17,9 +17,11 @@ const originalFetch = globalThis.fetch;
 describe("SettingsPage", () => {
   it("keeps its padded content inside narrow web viewports", () => {
     const settingsRule = settingsPageSource.match(/\.settings\s*\{([^}]*)\}/s);
+    expect(settingsRule).not.toBeNull();
 
-    expect(settingsRule?.[1]).toMatch(/width:\s*100%/);
-    expect(settingsRule?.[1]).toMatch(/box-sizing:\s*border-box/);
+    const settingsDeclarations = settingsRule?.[1] ?? "";
+    expect(settingsDeclarations).toMatch(/width:\s*100%/);
+    expect(settingsDeclarations).toMatch(/box-sizing:\s*border-box/);
   });
 
   beforeEach(() => {
