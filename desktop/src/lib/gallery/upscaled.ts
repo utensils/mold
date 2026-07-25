@@ -9,7 +9,5 @@ export function isUpscaledImage(item: GalleryImage): boolean {
   if (!metadata.upscale_model || !metadata.generation_width || !metadata.generation_height) {
     return false;
   }
-  return (
-    metadata.width > metadata.generation_width || metadata.height > metadata.generation_height
-  );
+  return metadata.width > metadata.generation_width || metadata.height > metadata.generation_height;
 }

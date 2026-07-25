@@ -2786,11 +2786,7 @@ onBeforeUnmount(() => {
               loading="lazy"
             />
             <span v-if="isVideoItem(print)" class="gallery-video-badge" aria-hidden="true">▶</span>
-            <span
-              v-if="isFreshMobilePrint(print)"
-              class="gallery-new-badge"
-              data-test="new-badge"
-            >
+            <span v-if="isFreshMobilePrint(print)" class="gallery-new-badge" data-test="new-badge">
               New
             </span>
             <span
