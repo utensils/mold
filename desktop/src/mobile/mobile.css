@@ -1402,6 +1402,35 @@ button.mobile-generate-disclosure {
 }
 
 /* Full-screen Advanced trigger + sheet (Mold Studio iOS spec). */
+.mobile-advanced-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.mobile-settings-reset {
+  flex: 0 0 auto;
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  margin: 4px 0 2px;
+  padding: 0 12px;
+  border: 1px solid var(--control-edge);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mobile-settings-reset:active {
+  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+}
+
 .mobile-advanced-trigger {
   display: flex;
   width: 100%;
@@ -1430,6 +1459,12 @@ button.mobile-generate-disclosure {
 
 .mobile-advanced-trigger:active {
   background: color-mix(in srgb, var(--rebate) 6%, transparent);
+}
+
+/* Placed after the base rule so the 44pt CSS guard still reads that block. */
+.mobile-advanced-row .mobile-advanced-trigger {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .mobile-advanced-trigger-badge,

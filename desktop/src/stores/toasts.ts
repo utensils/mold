@@ -31,7 +31,7 @@ let nextId = 1;
 /** Default lifetime; the undo window overrides it (§08 G12). */
 const DEFAULT_DURATION_MS = 4000;
 
-/** Toasts rise from the Bench rail; 4 s, max 3 on screen (design spec §6). */
+/** Toasts drop in at the top right, newest first; 4 s, max 3 on screen (design spec §6). */
 export const useToastStore = defineStore("toasts", {
   state: () => ({ items: [] as Toast[] }),
   getters: {

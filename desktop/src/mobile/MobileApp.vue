@@ -30,6 +30,7 @@ import {
   cloneGenerateForm,
   newGenerateForm,
   reconcileModelCapabilities,
+  resetFormToModelDefaults,
   type GenerateForm,
 } from "../lib/generateForm";
 import { formatTemplateMediaReferences, type GenerationTemplate } from "../lib/generationTemplates";
@@ -190,6 +191,13 @@ function openAdvancedSheet(): void {
 
 function closeAdvancedSheet(): void {
   advancedSheetOpen.value = false;
+}
+
+/** Restore every generation knob to the selected model's defaults, keeping the
+ * prompt, the model, and any prepared batch size. Same contract as the desktop
+ * inspector's Reset — the sheet's scoped reset below is deliberately narrower. */
+function resetCreateSettings(): void {
+  resetFormToModelDefaults(form, selectedGenerationModel.value);
 }
 
 /** Restore only the advanced-tier fields to their defaults; prompt, model,
@@ -2464,23 +2472,34 @@ onBeforeUnmount(() => {
             @validity-change="seedValid = $event"
           />
 
-          <button
-            class="mobile-advanced-trigger"
-            type="button"
-            data-test="mobile-open-advanced"
-            @click="openAdvancedSheet"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-            <span>Advanced (sampler, LoRA, source)</span>
-            <span
-              v-if="advancedActiveCount > 0"
-              class="mobile-advanced-trigger-badge"
-              data-test="mobile-advanced-trigger-count"
-              >{{ advancedActiveCount }}</span
+          <div class="mobile-advanced-row">
+            <button
+              class="mobile-advanced-trigger"
+              type="button"
+              data-test="mobile-open-advanced"
+              @click="openAdvancedSheet"
             >
-          </button>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+              <span>Advanced (sampler, LoRA, source)</span>
+              <span
+                v-if="advancedActiveCount > 0"
+                class="mobile-advanced-trigger-badge"
+                data-test="mobile-advanced-trigger-count"
+                >{{ advancedActiveCount }}</span
+              >
+            </button>
+            <button
+              class="mobile-settings-reset"
+              type="button"
+              data-test="mobile-settings-reset"
+              aria-label="Reset settings to model defaults"
+              @click="resetCreateSettings"
+            >
+              ↺ Reset
+            </button>
+          </div>
 
           <MobileAdvancedSheet
             :open="advancedSheetOpen"

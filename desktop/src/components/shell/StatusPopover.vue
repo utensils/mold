@@ -58,18 +58,29 @@ const telemetryGpu = computed(() => {
   };
 });
 
-const gpu = computed(() => snapshot.value?.gpus[0] ?? telemetryGpu.value);
-const vramPct = computed(() =>
-  gpu.value ? percent(gpu.value.vram_used, gpu.value.vram_total) : 0,
-);
-const vramCritical = computed(
-  () => gpu.value !== null && vramLevel(gpu.value.vram_used, gpu.value.vram_total) === "critical",
+/** Every GPU on the display host — the popover gets one VRAM row per GPU and
+ *  the trigger mini-bar aggregates them, so a job denoising on any ordinal is
+ *  visible (jobs land on whichever worker is free, not GPU 0). */
+const gpus = computed(() => {
+  if (snapshot.value?.gpus.length) return snapshot.value.gpus;
+  const t = telemetryGpu.value;
+  return t ? [{ ordinal: 0, ...t }] : [];
+});
+const vramUsed = computed(() => gpus.value.reduce((sum, g) => sum + g.vram_used, 0));
+const vramTotal = computed(() => gpus.value.reduce((sum, g) => sum + g.vram_total, 0));
+const vramPct = computed(() => (gpus.value.length ? percent(vramUsed.value, vramTotal.value) : 0));
+const vramCritical = computed(() =>
+  gpus.value.some((g) => vramLevel(g.vram_used, g.vram_total) === "critical"),
 );
 /** Halide when idle/latent, safelight while a job develops, stop past 92%. */
 const vramTone = computed(() => {
   if (vramCritical.value) return "danger";
   return anyJobRunning.value ? "accent" : "info";
 });
+function gpuTone(used: number, total: number) {
+  if (vramLevel(used, total) === "critical") return "danger";
+  return anyJobRunning.value ? "accent" : "info";
+}
 
 const engineChip = computed(() => {
   if (conn.status === "starting") return "⌁ starting…";
@@ -240,14 +251,31 @@ onUnmounted(() => {
         </span>
       </div>
 
-      <template v-if="gpu">
-        <div class="mb-1 truncate text-caption text-ink-2" :title="gpu.name">{{ gpu.name }}</div>
-        <ProgressBar :value="vramPct" :tone="vramTone" :height="6" label="VRAM in use" />
-        <div class="mt-1.5 flex items-center justify-between">
-          <span class="edge-code">vram</span>
-          <span class="data-mono text-ink-3">
-            {{ formatGB(gpu.vram_used) }} / {{ formatGB(gpu.vram_total) }}
-          </span>
+      <template v-if="gpus.length">
+        <div
+          v-for="(g, i) in gpus"
+          :key="g.ordinal"
+          data-test="gpu-row"
+          :class="i > 0 ? 'mt-2.5' : ''"
+        >
+          <div class="mb-1 flex min-w-0 items-baseline gap-2">
+            <span v-if="gpus.length > 1" class="edge-code shrink-0">GPU {{ g.ordinal }}</span>
+            <span class="min-w-0 truncate text-caption text-ink-2" :title="g.name">{{
+              g.name
+            }}</span>
+          </div>
+          <ProgressBar
+            :value="percent(g.vram_used, g.vram_total)"
+            :tone="gpuTone(g.vram_used, g.vram_total)"
+            :height="6"
+            :label="`VRAM in use on ${g.name}`"
+          />
+          <div class="mt-1.5 flex items-center justify-between">
+            <span class="edge-code">vram</span>
+            <span class="data-mono text-ink-3">
+              {{ formatGB(g.vram_used) }} / {{ formatGB(g.vram_total) }}
+            </span>
+          </div>
         </div>
       </template>
       <p v-else class="text-caption text-ink-3">no gpu telemetry</p>
@@ -283,7 +311,7 @@ onUnmounted(() => {
     >
       <span class="h-[7px] w-[7px] shrink-0 rounded-full" :class="dotClass" />
       <template v-if="!collapsed">
-        <span v-if="gpu" class="min-w-0 flex-1">
+        <span v-if="gpus.length" class="min-w-0 flex-1">
           <ProgressBar :value="vramPct" :tone="vramTone" :height="4" label="VRAM in use" />
         </span>
         <span v-else class="flex-1 text-left text-caption text-ink-3">status</span>

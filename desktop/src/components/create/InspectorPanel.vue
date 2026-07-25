@@ -9,7 +9,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { nearestMp } from "@ui/lib/resolution";
 import type { GenerateForm } from "../../lib/generateForm";
-import { seedMode } from "../../lib/generateForm";
+import { resetFormToModelDefaults, seedMode } from "../../lib/generateForm";
 import type { ModelEntry } from "../../lib/api/types";
 import {
   filterModelsForTarget,
@@ -209,6 +209,12 @@ function rerollSeed() {
 }
 
 const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
+
+// Same contract as the Advanced pane's Reset, surfaced without opening it:
+// the prompt, the model, and any prepared batch size survive.
+function resetSettings() {
+  resetFormToModelDefaults(props.form, selectedModel.value);
+}
 </script>
 
 <template>
@@ -221,7 +227,19 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
       @reset="onInspectorReset"
     />
     <div class="ms-inspector__scroll">
-      <div class="ms-inspector__kicker">Settings</div>
+      <div class="ms-inspector__head">
+        <span class="ms-inspector__kicker">Settings</span>
+        <button
+          type="button"
+          class="ms-inspector__reset"
+          data-test="settings-reset"
+          title="Reset settings to model defaults"
+          aria-label="Reset settings to model defaults"
+          @click="resetSettings"
+        >
+          ↺ Reset
+        </button>
+      </div>
 
       <!-- Model -->
       <div class="ms-field">
@@ -460,13 +478,37 @@ const batchMax = computed(() => (caps.value.forcesBatchSizeOne ? 1 : 8));
   overflow-y: auto;
   padding: 20px 18px;
 }
+.ms-inspector__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+}
 .ms-inspector__kicker {
   font-family: var(--f-mono);
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ink-3);
-  margin-bottom: 16px;
+}
+.ms-inspector__reset {
+  flex-shrink: 0;
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.ms-inspector__reset:hover {
+  background: color-mix(in srgb, var(--rebate) 6%, transparent);
+  color: var(--rebate);
 }
 .ms-field {
   margin-bottom: 20px;

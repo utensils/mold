@@ -165,6 +165,24 @@ describe("ControlsAside", () => {
     expect(wrapper.find("[data-test='open-advanced']").exists()).toBe(false);
   });
 
+  it("offers a settings reset in the rail header", async () => {
+    const wrapper = factory();
+    const reset = wrapper.get("[data-test='settings-reset']");
+    expect(reset.attributes("aria-label")).toBe(
+      "Reset settings to model defaults",
+    );
+    await reset.trigger("click");
+    expect(wrapper.emitted("reset-settings")).toHaveLength(1);
+  });
+
+  it("offers the same settings reset on phones", async () => {
+    const wrapper = mount(ControlsAside, {
+      props: { modelValue: baseForm(), family: "flux", mobile: true },
+    });
+    await wrapper.get("[data-test='settings-reset']").trigger("click");
+    expect(wrapper.emitted("reset-settings")).toHaveLength(1);
+  });
+
   it("locks batch to 1 for edit families", () => {
     const wrapper = mount(ControlsAside, {
       props: {

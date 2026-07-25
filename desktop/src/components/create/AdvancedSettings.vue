@@ -5,9 +5,8 @@ import SegmentedControl, { type SegmentOption } from "@ui/components/SegmentedCo
 import SwitchToggle from "@ui/components/SwitchToggle.vue";
 import Chip from "@ui/components/Chip.vue";
 import {
-  applyModelDefaults,
   buildRequest,
-  newGenerateForm,
+  resetFormToModelDefaults,
   seedMode,
   type GenerateForm,
   type PickedImage,
@@ -220,18 +219,7 @@ function snapFramesField() {
 
 // ── Reset — restore the model's defaults, preserve prompt + prepared state ────
 function reset() {
-  const { prompt, originalPrompt, batchSize, model, family } = props.form;
-  Object.assign(props.form, newGenerateForm());
-  if (props.selectedModel) applyModelDefaults(props.form, props.selectedModel);
-  else {
-    props.form.model = model;
-    props.form.family = family;
-  }
-  props.form.prompt = prompt;
-  props.form.originalPrompt = originalPrompt;
-  props.form.batchSize = generationCapabilitiesForFamily(props.form.family).forcesBatchSizeOne
-    ? 1
-    : batchSize;
+  resetFormToModelDefaults(props.form, props.selectedModel);
 }
 </script>
 

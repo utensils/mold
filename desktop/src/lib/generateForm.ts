@@ -274,6 +274,33 @@ export function reconcileModelCapabilities(form: GenerateForm, m: ModelEntry): v
 }
 
 /**
+ * Restore every generation knob to the selected model's defaults. The prompt
+ * (with its expand provenance), the model/family, and the batch size survive:
+ * the prompt is the user's authored work, and prepared batch siblings must
+ * never be silently resized by an unrelated control.
+ *
+ * With no `ModelEntry` — an uninstalled or not-yet-resolved model — the named
+ * model and family are kept and the form falls back to `newGenerateForm()`
+ * scalars.
+ */
+export function resetFormToModelDefaults(
+  form: GenerateForm,
+  m: ModelEntry | null | undefined,
+): void {
+  const { prompt, originalPrompt, batchSize, model, family } = form;
+  Object.assign(form, newGenerateForm());
+  if (m) {
+    applyModelDefaults(form, m);
+  } else {
+    form.model = model;
+    form.family = family;
+  }
+  form.prompt = prompt;
+  form.originalPrompt = originalPrompt;
+  form.batchSize = generationCapabilitiesForFamily(form.family).forcesBatchSizeOne ? 1 : batchSize;
+}
+
+/**
  * Assemble the wire request from the form, honoring the family's capabilities.
  * `pruneRequestForFamily` is the final guard so no unsupported field ever
  * ships even if the form retained a stale value.

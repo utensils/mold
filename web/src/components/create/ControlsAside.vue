@@ -42,6 +42,9 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
   "open-advanced": [];
+  /* The rail only knows the form, not the catalog row behind it, so the page
+   * owns the actual reset (model defaults + the undo offer). */
+  "reset-settings": [];
 }>();
 
 const capabilities = computed(() =>
@@ -126,7 +129,19 @@ function lockLastSeed() {
 
 <template>
   <aside class="controls" data-test="controls-aside">
-    <div class="controls__kicker">Settings</div>
+    <div class="controls__head">
+      <span class="controls__kicker">Settings</span>
+      <button
+        type="button"
+        class="controls__reset"
+        data-test="settings-reset"
+        aria-label="Reset settings to model defaults"
+        title="Reset settings to model defaults"
+        @click="emit('reset-settings')"
+      >
+        ↺ Reset
+      </button>
+    </div>
 
     <div class="controls__group">
       <div class="controls__label">Shape</div>
@@ -263,13 +278,40 @@ function lockLastSeed() {
   padding: 18px;
 }
 
+.controls__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  margin-bottom: 16px;
+}
+
 .controls__kicker {
   font-family: var(--f-mono);
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ink-3);
-  margin-bottom: 16px;
+}
+
+/* Matches the Advanced card's inline Reset pill so the two read as one
+ * family of "put this section back" actions. */
+.controls__reset {
+  border: 1px solid var(--ce);
+  background: transparent;
+  color: var(--ink-2);
+  padding: 4px 11px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-quick) var(--ease),
+    color var(--dur-quick) var(--ease);
+}
+.controls__reset:hover {
+  border-color: var(--safelight);
+  color: var(--rebate);
 }
 
 .controls__group {

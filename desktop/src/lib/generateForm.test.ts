@@ -6,6 +6,7 @@ import {
   buildRequest,
   cloneGenerateForm,
   newGenerateForm,
+  resetFormToModelDefaults,
   seedMode,
 } from "./generateForm";
 import { MAX_LORA_STACK } from "./capabilities";
@@ -776,6 +777,100 @@ describe("source image provenance (Reuse-settings restore)", () => {
     applyModelDefaults(form, qwenEditModel());
     expect(form.imageAttachments).toEqual(["SRC"]);
     expect(form.sourceImageName).toBeNull();
+  });
+});
+
+describe("resetFormToModelDefaults", () => {
+  const sdxl: ModelEntry = {
+    name: "sdxl:base",
+    family: "sdxl",
+    size_gb: 7,
+    is_loaded: false,
+    hf_repo: "r",
+    default_steps: 30,
+    default_guidance: 7,
+    default_width: 1024,
+    default_height: 768,
+    description: "",
+    downloaded: true,
+  };
+
+  function dirtyForm() {
+    const form = newGenerateForm();
+    form.prompt = "a lighthouse at dusk";
+    form.originalPrompt = "a lighthouse";
+    form.model = "sdxl:base";
+    form.family = "sdxl";
+    form.batchSize = 4;
+    form.negativePrompt = "blurry";
+    form.scheduler = "ddim";
+    form.cfgPlus = true;
+    form.steps = 12;
+    form.guidance = 1.5;
+    form.width = 512;
+    form.height = 512;
+    form.seed = "1234";
+    form.strength = 0.2;
+    form.upscaleModel = "esrgan";
+    form.stylePreset = "cinematic";
+    form.sourceImage = "SRC";
+    form.sourceImageName = "pic.png";
+    form.loras = [{ path: "/l.safetensors", name: "l", scale: 0.8, trainedWords: [] }];
+    return form;
+  }
+
+  it("preserves the prompt, its expand provenance, the model, and the prepared batch size", () => {
+    const form = dirtyForm();
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.prompt).toBe("a lighthouse at dusk");
+    expect(form.originalPrompt).toBe("a lighthouse");
+    expect(form.model).toBe("sdxl:base");
+    expect(form.family).toBe("sdxl");
+    expect(form.batchSize).toBe(4);
+  });
+
+  it("restores every other field to its default", () => {
+    const form = dirtyForm();
+    const defaults = newGenerateForm();
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.negativePrompt).toBe(defaults.negativePrompt);
+    expect(form.scheduler).toBe(defaults.scheduler);
+    expect(form.cfgPlus).toBe(defaults.cfgPlus);
+    expect(form.seed).toBe(defaults.seed);
+    expect(form.strength).toBe(defaults.strength);
+    expect(form.upscaleModel).toBe(defaults.upscaleModel);
+    expect(form.stylePreset).toBe(defaults.stylePreset);
+    expect(form.sourceImage).toBeNull();
+    expect(form.sourceImageName).toBeNull();
+    expect(form.loras).toEqual([]);
+  });
+
+  it("applies the selected model's dimension, step, and guidance defaults", () => {
+    const form = dirtyForm();
+    resetFormToModelDefaults(form, sdxl);
+    expect(form.width).toBe(1024);
+    expect(form.height).toBe(768);
+    expect(form.steps).toBe(30);
+    expect(form.guidance).toBe(7);
+  });
+
+  it("keeps the named model and family when no model entry is available", () => {
+    const form = dirtyForm();
+    const defaults = newGenerateForm();
+    resetFormToModelDefaults(form, null);
+    expect(form.model).toBe("sdxl:base");
+    expect(form.family).toBe("sdxl");
+    expect(form.prompt).toBe("a lighthouse at dusk");
+    expect(form.batchSize).toBe(4);
+    expect(form.steps).toBe(defaults.steps);
+    expect(form.negativePrompt).toBe("");
+  });
+
+  it("locks batch to one for a family that renders a single print at a time", () => {
+    const form = dirtyForm();
+    const editModel: ModelEntry = { ...sdxl, name: "qwen-image-edit", family: "qwen-image-edit" };
+    resetFormToModelDefaults(form, editModel);
+    expect(form.batchSize).toBe(1);
   });
 });
 

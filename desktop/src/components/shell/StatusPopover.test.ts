@@ -18,11 +18,18 @@ vi.mock("../../lib/api/client", () => ({
 interface StreamCall {
   path: string;
   target?: { baseUrl: string } | null;
+  onEvent?: ((event: string, data: string) => void) | undefined;
 }
 const streamCalls: StreamCall[] = [];
 vi.mock("../../lib/api/sse", () => ({
-  sseStream: (path: string, opts: { target?: { baseUrl: string } | null }) => {
-    streamCalls.push({ path, target: opts.target ?? null });
+  sseStream: (
+    path: string,
+    opts: {
+      target?: { baseUrl: string } | null;
+      onEvent?: (event: string, data: string) => void;
+    },
+  ) => {
+    streamCalls.push({ path, target: opts.target ?? null, onEvent: opts.onEvent });
     return Promise.resolve();
   },
 }));
@@ -167,6 +174,116 @@ describe("StatusPopover host-aware display", () => {
     await flushPromises();
     await openPopover(wrapper);
     expect(wrapper.text()).toContain("Apple M3 Ultra");
+  });
+
+  it("renders one VRAM row per GPU from a multi-GPU snapshot", async () => {
+    const wrapper = mountPopover();
+    await flushPromises();
+    streamCalls.at(-1)?.onEvent?.(
+      "snapshot",
+      JSON.stringify({
+        hostname: "plato",
+        timestamp: 0,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA L40S",
+            backend: "cuda",
+            vram_total: 46_100_000_000,
+            vram_used: 400_000_000,
+          },
+          {
+            ordinal: 1,
+            name: "NVIDIA L40S",
+            backend: "cuda",
+            vram_total: 46_100_000_000,
+            vram_used: 41_500_000_000,
+          },
+        ],
+        system_ram: {
+          total: 512_000_000_000,
+          used: 455_900_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
+      }),
+    );
+    await openPopover(wrapper);
+    const rows = wrapper.findAll("[data-test='gpu-row']");
+    expect(rows).toHaveLength(2);
+    expect(wrapper.text()).toContain("GPU 0");
+    expect(wrapper.text()).toContain("GPU 1");
+    expect(rows[0]!.text()).toContain("0.4 GB / 46.1 GB");
+    expect(rows[1]!.text()).toContain("41.5 GB / 46.1 GB");
+  });
+
+  it("aggregates the trigger mini-bar VRAM across all GPUs", async () => {
+    const wrapper = mountPopover();
+    await flushPromises();
+    streamCalls.at(-1)?.onEvent?.(
+      "snapshot",
+      JSON.stringify({
+        hostname: "plato",
+        timestamp: 0,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA L40S",
+            backend: "cuda",
+            vram_total: 46_100_000_000,
+            vram_used: 400_000_000,
+          },
+          {
+            ordinal: 1,
+            name: "NVIDIA L40S",
+            backend: "cuda",
+            vram_total: 46_100_000_000,
+            vram_used: 41_500_000_000,
+          },
+        ],
+        system_ram: {
+          total: 512_000_000_000,
+          used: 455_900_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
+      }),
+    );
+    await flushPromises();
+    // (0.4 + 41.5) / (46.1 + 46.1) ≈ 45% — not GPU 0's near-zero usage.
+    const bar = wrapper.get("[data-test='status-trigger'] [role='progressbar']");
+    expect(bar.attributes("aria-valuenow")).toBe("45");
+  });
+
+  it("keeps a single unlabelled row for single-GPU hosts", async () => {
+    const wrapper = mountPopover();
+    await flushPromises();
+    streamCalls.at(-1)?.onEvent?.(
+      "snapshot",
+      JSON.stringify({
+        hostname: "halcyon",
+        timestamp: 0,
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Apple M3 Ultra",
+            backend: "metal",
+            vram_total: 196_600_000_000,
+            vram_used: 32_800_000_000,
+          },
+        ],
+        system_ram: {
+          total: 196_600_000_000,
+          used: 64_000_000_000,
+          used_by_mold: 0,
+          used_by_other: 0,
+        },
+      }),
+    );
+    await openPopover(wrapper);
+    expect(wrapper.findAll("[data-test='gpu-row']")).toHaveLength(1);
+    expect(wrapper.text()).toContain("Apple M3 Ultra");
+    expect(wrapper.text()).not.toContain("GPU 0");
   });
 
   it("falls back to telemetry VRAM when the remote resources stream is silent", async () => {
