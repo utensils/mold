@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { modelDisplayName } from "./modelDisplay";
+import { modelDisplayName, modelDisplayNameForId } from "./modelDisplay";
 
 describe("modelDisplayName", () => {
   it("prefers the server-provided display name", () => {
@@ -21,7 +21,7 @@ describe("modelDisplayName", () => {
     ).toBe("RealVisXL V5.0 by SG161222");
   });
 
-  it("keeps stable built-in names and falls back when catalog metadata is missing", () => {
+  it("keeps stable built-in names and uses a readable catalog fallback", () => {
     expect(
       modelDisplayName({
         name: "flux-schnell:q8",
@@ -29,7 +29,22 @@ describe("modelDisplayName", () => {
       }),
     ).toBe("flux-schnell:q8");
     expect(modelDisplayName({ name: "cv:23423432", description: "  " })).toBe(
-      "cv:23423432",
+      "Civitai model #23423432",
     );
+    expect(modelDisplayName({ name: "hf:black-forest-labs/FLUX.1-dev" })).toBe(
+      "FLUX.1 dev",
+    );
+  });
+
+  it("resolves a wire model id through the model inventory", () => {
+    expect(
+      modelDisplayNameForId("cv:23423432", [
+        {
+          name: "cv:23423432",
+          display_name: "Juggernaut XL - Ragnarok",
+        },
+      ]),
+    ).toBe("Juggernaut XL - Ragnarok");
+    expect(modelDisplayNameForId("flux-dev:q8", [])).toBe("flux-dev:q8");
   });
 });

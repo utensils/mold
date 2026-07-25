@@ -9,7 +9,7 @@ import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
-import { modelDisplayName } from "../lib/models";
+import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   CompleteEvent,
   DownloadJob,
@@ -383,6 +383,7 @@ const quickStaleReasons = computed(() => {
 const generationModels = computed(() =>
   models.value.filter((model) => model.downloaded && isGenerationModel(model)),
 );
+const modelLabel = (name: string) => modelDisplayNameForId(name, generationModels.value);
 const upscalers = computed(() =>
   models.value.filter((model) => model.family === "upscaler" || model.family === "real-esrgan"),
 );
@@ -2302,7 +2303,7 @@ onBeforeUnmount(() => {
                 {{ loadingModels ? "Loading models…" : "No generation models available" }}
               </option>
               <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
-                {{ form.model }} · not installed
+                {{ modelLabel(form.model) }} · not installed
               </option>
               <option v-for="model in generationModels" :key="model.name" :value="model.name">
                 {{ modelDisplayName(model) }}
@@ -2352,6 +2353,7 @@ onBeforeUnmount(() => {
             :running="expansionRunning"
             :can-undo="quickExpansionOriginal !== null"
             :blocked="!!preparedBatch"
+            :models="generationModels"
             @expand="expandForCurrentBatch()"
             @undo="restoreQuickExpansion"
           />
@@ -2523,7 +2525,12 @@ onBeforeUnmount(() => {
             >
           </MobileAdvancedSheet>
 
-          <MobileTemplates :form="form" :host-id="selectedHost.id" @load="loadTemplate" />
+          <MobileTemplates
+            :form="form"
+            :host-id="selectedHost.id"
+            :models="generationModels"
+            @load="loadTemplate"
+          />
 
           <div class="mobile-estimate">
             <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
@@ -2567,7 +2574,7 @@ onBeforeUnmount(() => {
               >
                 <div class="mobile-generation-job-copy">
                   <p>{{ job.prompt }}</p>
-                  <span>{{ job.model }} · {{ job.hostLabel }}</span>
+                  <span>{{ modelLabel(job.model) }} · {{ job.hostLabel }}</span>
                 </div>
                 <div class="mobile-generation-job-action">
                   <span data-test="mobile-generation-status">{{ jobStatusCode(job) }}</span>

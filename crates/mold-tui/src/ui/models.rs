@@ -98,7 +98,7 @@ fn render_details_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     let lines = vec![
         Line::from(Span::styled(
-            model.name.clone(),
+            model.human_name(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -215,7 +215,7 @@ fn render_model_table(
             let marker = if m.is_loaded { "\u{2605} " } else { "  " };
             let dim = format!("{}\u{00b2}", m.defaults.default_width,);
             Row::new(vec![
-                Cell::from(format!("{marker}{}", m.name)),
+                Cell::from(format!("{marker}{}", m.human_name())),
                 Cell::from(m.family.to_uppercase()),
                 Cell::from(format!("{:.1}G", m.size_gb)),
                 Cell::from(m.defaults.default_steps.to_string()),

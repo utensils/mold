@@ -2,10 +2,14 @@
 import { reactive, ref } from "vue";
 import { useChainJobsStore } from "../../stores/chainJobs";
 import { useToastStore } from "../../stores/toasts";
+import { useHostModelsStore } from "../../stores/hostModels";
 import type { ChainJobState, ChainJobSummary, RetakeMode } from "../../lib/api/types";
+import { modelDisplayNameForId } from "../../lib/models";
 
 const chains = useChainJobsStore();
 const toasts = useToastStore();
+const hostModels = useHostModelsStore();
+const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.unionInstalled);
 
 // State color follows the development-temperature rule (design spec §2.1).
 const STATE_CLASS: Record<ChainJobState, string> = {
@@ -77,7 +81,9 @@ async function runGc() {
     >
       <div class="flex items-center gap-2">
         <span class="edge-code uppercase" :class="STATE_CLASS[job.state]">{{ job.state }}</span>
-        <span class="truncate text-body text-ink" :title="job.model">{{ job.model }}</span>
+        <span class="truncate text-body text-ink" :title="modelLabel(job.model)">{{
+          modelLabel(job.model)
+        }}</span>
         <span class="data-mono ml-auto text-caption text-ink-3">
           stage {{ Math.min(job.current_stage + 1, job.stage_count) }}/{{ job.stage_count }}
         </span>

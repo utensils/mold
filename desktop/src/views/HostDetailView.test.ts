@@ -683,6 +683,21 @@ describe("HostDetailView layout", () => {
     expect(chips.map((c) => c.text())).toEqual(["flux-dev:q8"]);
   });
 
+  it("uses the installed model title for an opaque loaded-model id", async () => {
+    const wrapper = await mountView();
+    useHostModelsStore().byHost[REMOTE_ID]!.entries = [
+      {
+        ...model("cv:1759168", "sdxl"),
+        display_name: "Juggernaut XL - Ragnarok",
+      },
+    ];
+    useHostsStore().telemetry[REMOTE_ID]!.modelsLoaded = ["cv:1759168"];
+    await flushPromises();
+
+    expect(wrapper.get("[data-test='loaded-model-name']").text()).toBe("Juggernaut XL - Ragnarok");
+    expect(wrapper.text()).not.toContain("cv:1759168");
+  });
+
   it("places the downloads tray in its own card below the telemetry panel", async () => {
     const wrapper = await mountView();
     const stream = lastStream("/api/downloads/stream");

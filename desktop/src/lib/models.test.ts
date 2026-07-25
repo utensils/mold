@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { groupInstalledModels, modelDisplayName, modelSizeLabels, quantTag } from "./models";
+import {
+  groupInstalledModels,
+  modelDisplayName,
+  modelDisplayNameForId,
+  modelSizeLabels,
+  quantTag,
+} from "./models";
 import type { ModelEntry } from "./api/types";
 
 function model(
@@ -99,10 +105,16 @@ describe("modelDisplayName", () => {
   });
 
   it("keeps the raw name for catalog ids with no readable metadata", () => {
-    expect(modelDisplayName({ ...base, description: "" })).toBe("cv:1759168");
+    expect(modelDisplayName({ ...base, description: "" })).toBe("Civitai model #1759168");
   });
 
   it("never swaps manifest names for their marketing description", () => {
     expect(modelDisplayName(model("flux-dev:q8", "flux", 1))).toBe("flux-dev:q8");
+  });
+
+  it("resolves raw status and job ids through inventory metadata", () => {
+    expect(
+      modelDisplayNameForId("cv:1759168", [{ ...base, display_name: "Juggernaut XL - Ragnarok" }]),
+    ).toBe("Juggernaut XL - Ragnarok");
   });
 });

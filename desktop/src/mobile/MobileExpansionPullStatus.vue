@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { ExpansionPullView } from "../lib/expansionPull";
 import { formatBytes, formatEta, percent } from "../lib/format";
+import { modelDisplayNameForId } from "../lib/models";
 
 const props = defineProps<{
   model: string;
@@ -10,6 +11,7 @@ const props = defineProps<{
   status: ExpansionPullView;
   etaSeconds: number | null;
 }>();
+const modelLabel = computed(() => modelDisplayNameForId(props.model, []));
 defineEmits<{ pull: []; "retry-expansion": [] }>();
 
 const amount = computed(() =>
@@ -25,17 +27,17 @@ const label = computed(() => {
     case "missing":
       return props.error;
     case "connecting":
-      return `Connecting to ${props.hostLabel} to pull ${props.model}…`;
+      return `Connecting to ${props.hostLabel} to pull ${modelLabel.value}…`;
     case "starting":
-      return `Starting ${props.model} on ${props.hostLabel}…`;
+      return `Starting ${modelLabel.value} on ${props.hostLabel}…`;
     case "queued":
-      return `${props.model} queued on ${props.hostLabel}`;
+      return `${modelLabel.value} queued on ${props.hostLabel}`;
     case "pulling":
-      return `Pulling ${props.model} on ${props.hostLabel}`;
+      return `Pulling ${modelLabel.value} on ${props.hostLabel}`;
     case "ready":
-      return `${props.model} ready on ${props.hostLabel}`;
+      return `${modelLabel.value} ready on ${props.hostLabel}`;
     case "failed":
-      return `${props.model} pull failed on ${props.hostLabel}`;
+      return `${modelLabel.value} pull failed on ${props.hostLabel}`;
     case "cancelled":
       return `${props.model} pull cancelled on ${props.hostLabel}`;
   }
@@ -105,7 +107,7 @@ const label = computed(() => {
       data-test="mobile-retry-expansion-pull"
       @click="$emit('pull')"
     >
-      Retry {{ model }} pull on {{ hostLabel }}
+      Retry {{ modelLabel }} pull on {{ hostLabel }}
     </button>
   </section>
 </template>

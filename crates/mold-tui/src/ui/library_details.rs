@@ -50,7 +50,8 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let idx = app.gallery.selected;
     let prompt = entry.metadata.prompt.clone();
     let negative = entry.metadata.negative_prompt.clone();
-    let model = entry.metadata.model.clone();
+    let model =
+        mold_core::ModelInfoExtended::human_name_for(&entry.metadata.model, &app.models.catalog);
     let seed = entry.metadata.seed.to_string();
     let dims = format!("{}×{}", entry.metadata.width, entry.metadata.height);
     let machine = entry.machine_label();

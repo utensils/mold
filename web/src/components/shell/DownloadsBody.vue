@@ -9,7 +9,8 @@
  */
 import Icon from "@ui/components/Icon.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
-import type { DownloadJobWire } from "../../types";
+import type { DownloadJobWire, ModelInfoExtended } from "../../types";
+import { modelDisplayNameForId } from "../../lib/modelName";
 
 const props = defineProps<{
   active: DownloadJobWire[];
@@ -19,7 +20,10 @@ const props = defineProps<{
   etaByJob: Record<string, number | null>;
   /** Bytes/sec, keyed by job id. */
   rateByJob: Record<string, number | null>;
+  models?: ModelInfoExtended[];
 }>();
+const modelLabel = (name: string) =>
+  modelDisplayNameForId(name, props.models ?? []);
 
 const emit = defineEmits<{
   (e: "cancel", id: string): void;
@@ -79,13 +83,13 @@ const isEmpty = () =>
       >
         <div class="dl-active__head">
           <span class="dl-dot dl-dot--active" />
-          <span class="dl-active__name">{{ job.model }}</span>
+          <span class="dl-active__name">{{ modelLabel(job.model) }}</span>
           <span class="dl-active__pct">{{ pct(job) }}%</span>
           <button
             type="button"
             class="dl-cancel"
             :data-test="`dl-cancel-${job.id}`"
-            :aria-label="`Cancel ${job.model}`"
+            :aria-label="`Cancel ${modelLabel(job.model)}`"
             @click="emit('cancel', job.id)"
           >
             <Icon name="close" :size="12" />
@@ -109,13 +113,13 @@ const isEmpty = () =>
         :data-test="`dl-queued-${job.id}`"
       >
         <span class="dl-dot dl-dot--queued" />
-        <span class="dl-row__name">{{ job.model }}</span>
+        <span class="dl-row__name">{{ modelLabel(job.model) }}</span>
         <span class="dl-row__meta">#{{ idx + 1 }}</span>
         <button
           type="button"
           class="dl-cancel"
           :data-test="`dl-cancel-${job.id}`"
-          :aria-label="`Cancel queued ${job.model}`"
+          :aria-label="`Cancel queued ${modelLabel(job.model)}`"
           @click="emit('cancel', job.id)"
         >
           <Icon name="close" :size="12" />
@@ -144,7 +148,7 @@ const isEmpty = () =>
           <Icon v-if="job.status === 'completed'" name="check" :size="12" />
           <Icon v-else name="close" :size="12" />
         </span>
-        <span class="dl-row__name">{{ job.model }}</span>
+        <span class="dl-row__name">{{ modelLabel(job.model) }}</span>
         <span v-if="job.status === 'completed'" class="dl-row__meta">
           {{ formatSize(job.bytes_total) }}
         </span>

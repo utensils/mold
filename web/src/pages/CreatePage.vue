@@ -1387,7 +1387,10 @@ onBeforeUnmount(() => {
               class="absolute right-0 z-30 mt-2 w-80 rounded-card border border-edge bg-bench p-3 shadow-[var(--shadow-raised)]"
               data-test="templates-popover"
             >
-              <GenerationTemplatesPanel v-model="form.state.value" />
+              <GenerationTemplatesPanel
+                v-model="form.state.value"
+                :models="models"
+              />
             </div>
           </div>
         </div>

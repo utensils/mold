@@ -117,14 +117,14 @@ memory telemetry live in the Machines workspace and the chrome host chip.
 
 ### Essentials
 
-| Row             | Shows                    | ◀▶ / +/-             | Enter                |
-| --------------- | ------------------------ | -------------------- | -------------------- |
-| Model           | model name + description | —                    | fuzzy model selector |
-| Size            | `1024 × 1024`            | cycle aspect presets | type an exact `WxH`  |
-| Detail          | `●●●●○○○○ 28` step dots  | adjust steps         | —                    |
-| Prompt strength | guidance                 | adjust               | —                    |
-| Seed            | `random` / `fixed · 42`  | cycle seed mode      | type an exact seed   |
-| Batch           | image count              | adjust               | —                    |
+| Row             | Shows                                   | ◀▶ / +/-             | Enter                |
+| --------------- | --------------------------------------- | -------------------- | -------------------- |
+| Model           | human-readable model name + description | —                    | fuzzy model selector |
+| Size            | `1024 × 1024`                           | cycle aspect presets | type an exact `WxH`  |
+| Detail          | `●●●●○○○○ 28` step dots                 | adjust steps         | —                    |
+| Prompt strength | guidance                                | adjust               | —                    |
+| Seed            | `random` / `fixed · 42`                 | cycle seed mode      | type an exact seed   |
+| Batch           | image count                             | adjust               | —                    |
 
 Size's `◀▶` cycles 1:1, 3:2, 2:3, 16:9, and 9:16 presets fitted to the
 model's default pixel area (64-aligned). Seed modes are `random` (new seed

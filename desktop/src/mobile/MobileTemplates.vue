@@ -18,8 +18,11 @@ import {
   type GenerationTemplateSort,
 } from "../lib/generationTemplates";
 import type { GenerateForm } from "../lib/generateForm";
+import type { ModelEntry } from "../lib/api/types";
+import { modelDisplayNameForId } from "../lib/models";
 
-const props = defineProps<{ form: GenerateForm; hostId: string }>();
+const props = defineProps<{ form: GenerateForm; hostId: string; models?: ModelEntry[] }>();
+const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);
 const emit = defineEmits<{ (event: "load", template: GenerationTemplate): void }>();
 
 const open = ref(false);
@@ -171,7 +174,7 @@ onMounted(refresh);
             @click="load(template)"
           >
             <strong>{{ template.name }}</strong>
-            <span>{{ template.form.model || "No model" }}</span>
+            <span>{{ template.form.model ? modelLabel(template.form.model) : "No model" }}</span>
           </button>
           <div class="mobile-template-actions">
             <button type="button" data-test="mobile-template-rename" @click="startRename(template)">

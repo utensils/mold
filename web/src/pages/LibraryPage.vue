@@ -843,6 +843,7 @@ onBeforeUnmount(() => {
         <GalleryGrid
           v-else-if="view === 'grid'"
           :entries="filtered"
+          :models="models"
           :loading="loading"
           :select-mode="selectMode"
           :selection="selection"

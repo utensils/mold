@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { GenerateFormState } from "../types";
+import type { ModelInfoExtended } from "../types";
+import { modelDisplayNameForId } from "../lib/modelName";
 import { requestText } from "../lib/toasts";
 import {
   deleteGenerationTemplate,
@@ -16,7 +18,10 @@ defineOptions({ name: "GenerationTemplatesPanel" });
 
 const props = defineProps<{
   modelValue: GenerateFormState;
+  models?: ModelInfoExtended[];
 }>();
+const modelLabel = (name: string) =>
+  modelDisplayNameForId(name, props.models ?? []);
 const emit = defineEmits<{
   (e: "update:modelValue", value: GenerateFormState): void;
 }>();
@@ -147,7 +152,9 @@ function deleteTemplate(template: GenerationTemplate) {
         >
           <span data-test="template-row-name">{{ template.name }}</span>
           <span class="ml-1 text-ink-3">
-            {{ template.form.model || "no model" }}
+            {{
+              template.form.model ? modelLabel(template.form.model) : "no model"
+            }}
           </span>
         </button>
         <button

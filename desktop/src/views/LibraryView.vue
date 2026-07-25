@@ -24,6 +24,7 @@ import { inTauri, ipc } from "../lib/ipc";
 import { copyImageBytesToClipboard } from "../lib/clipboard";
 import { primaryModifierPressed } from "../lib/platform";
 import { allowsNativeContextMenu } from "../lib/shortcuts";
+import { modelDisplayNameForId } from "../lib/models";
 import type { GalleryImage } from "../lib/api/types";
 
 const GAP = 8;
@@ -40,6 +41,7 @@ const composer = useComposerStore();
 const generateForm = useGenerateFormStore();
 const contextMenu = useContextMenuStore();
 const toasts = useToastStore();
+const modelLabel = (name: string) => modelDisplayNameForId(name, models.all);
 
 const primaryId = computed(() => hosts.primaryHost?.id ?? null);
 
@@ -837,7 +839,7 @@ onUnmounted(() => {
             <span
               class="edge-code absolute right-0 bottom-0 left-0 translate-y-full bg-black/60 px-1.5 py-0.5 text-left !text-on-media transition-transform duration-100 group-hover:translate-y-0"
             >
-              {{ laid.item.metadata.model }} · S {{ laid.item.metadata.seed }}
+              {{ modelLabel(laid.item.metadata.model) }} · S {{ laid.item.metadata.seed }}
             </span>
           </button>
         </div>

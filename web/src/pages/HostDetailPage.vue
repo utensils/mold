@@ -12,7 +12,7 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
-import { modelDisplayName } from "../lib/modelName";
+import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
 import {
@@ -89,6 +89,7 @@ const address = computed(() => {
 });
 
 const installed = computed(() => models.value.filter((m) => m.downloaded));
+const modelLabel = (name: string) => modelDisplayNameForId(name, models.value);
 
 async function reloadQueue() {
   if (!host) return;
@@ -418,6 +419,7 @@ onBeforeUnmount(() => {
       <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
         <QueueCard
           :entries="queue"
+          :models="models"
           :gpu-count="gpuCount"
           :can-reorder="canReorder"
           :can-pause="caps?.queue?.can_pause === true"
@@ -452,13 +454,13 @@ onBeforeUnmount(() => {
             data-test="download-row"
           >
             <div class="md-dl__head">
-              <span class="md-dl__name">{{ job.model }}</span>
+              <span class="md-dl__name">{{ modelLabel(job.model) }}</span>
               <BadgePill tone="info" outline>{{ job.status }}</BadgePill>
             </div>
             <ProgressBar
               :value="downloadPct(job)"
               tone="info"
-              :label="`${job.model} download`"
+              :label="`${modelLabel(job.model)} download`"
             />
           </div>
         </div>

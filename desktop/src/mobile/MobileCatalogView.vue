@@ -35,7 +35,7 @@ import {
 import { catalogThumbnailUrl } from "../lib/catalogThumbnails";
 import { isVideoFamily } from "../lib/capabilities";
 import { formatCount, formatGB, percent } from "../lib/format";
-import { isCatalogModelId, isUtilityModel } from "../lib/models";
+import { isCatalogModelId, isUtilityModel, modelDisplayNameForId } from "../lib/models";
 import { fetchModelComponents, loadModel, removeModel, unloadModel } from "../lib/api/models";
 import type { CatalogEntry, DownloadJob, ModelComponentStatus, ModelEntry } from "../lib/api/types";
 import { mobileHostTarget, type MobileHost } from "./hosts";
@@ -166,6 +166,7 @@ const installedEntries = computed<MobileCatalogEntry[]>(() => {
 });
 
 const installedNames = computed(() => new Set(installedEntries.value.map((entry) => entry.name)));
+const modelLabel = (name: string) => modelDisplayNameForId(name, installedEntries.value);
 
 function manifestModelToEntry(model: ModelEntry): MobileCatalogEntry {
   const weights = Math.round(model.size_gb * 1_000_000_000);
@@ -973,7 +974,7 @@ onBeforeUnmount(() => {
             data-test="mobile-catalog-download"
           >
             <div class="mobile-catalog-download-copy">
-              <strong>{{ row.job.model }}</strong>
+              <strong>{{ modelLabel(row.job.model) }}</strong>
               <span>{{ row.host.name }} · {{ row.job.status }}</span>
             </div>
             <div
@@ -982,7 +983,7 @@ onBeforeUnmount(() => {
               aria-valuemin="0"
               aria-valuemax="100"
               :aria-valuenow="percent(row.job.bytes_done, row.job.bytes_total)"
-              :aria-label="`Downloading ${row.job.model} on ${row.host.name}`"
+              :aria-label="`Downloading ${modelLabel(row.job.model)} on ${row.host.name}`"
             >
               <span :style="{ width: `${percent(row.job.bytes_done, row.job.bytes_total)}%` }" />
             </div>
@@ -995,7 +996,7 @@ onBeforeUnmount(() => {
             <button
               type="button"
               :disabled="mobileDownloads.isCancelling(row.host, row.job.id)"
-              :aria-label="`Cancel download of ${row.job.model} on ${row.host.name}`"
+              :aria-label="`Cancel download of ${modelLabel(row.job.model)} on ${row.host.name}`"
               @click="cancelDownload(row)"
             >
               {{ mobileDownloads.isCancelling(row.host, row.job.id) ? "…" : "Cancel" }}

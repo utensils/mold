@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import type { GenerateForm } from "../../lib/generateForm";
+import { modelDisplayNameForId, type DisplayableModel } from "../../lib/models";
 import {
   deleteGenerationTemplate,
   fallbackTemplateName,
@@ -12,7 +13,11 @@ import {
   type GenerationTemplateSort,
 } from "../../lib/generationTemplates";
 
-const props = defineProps<{ form: GenerateForm }>();
+const props = defineProps<{
+  form: GenerateForm;
+  models?: DisplayableModel[] | undefined;
+}>();
+const modelLabel = (name: string) => modelDisplayNameForId(name, props.models ?? []);
 const emit = defineEmits<{ (e: "load", template: GenerationTemplate): void }>();
 
 const nameDraft = ref("");
@@ -167,7 +172,7 @@ function requestDelete(template: GenerationTemplate) {
         >
           <span data-test="template-row-name" class="truncate">{{ template.name }}</span>
           <span class="data-mono ml-1.5 text-caption text-ink-3">
-            {{ template.form.model || "no model" }}
+            {{ template.form.model ? modelLabel(template.form.model) : "no model" }}
           </span>
         </button>
 

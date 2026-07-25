@@ -15,9 +15,29 @@ export function isCatalogModelId(name: string): boolean {
 export function modelDisplayName(m: {
   name: string;
   display_name?: string | null;
-  description?: string;
+  description?: string | null;
 }): string {
-  if (m.display_name) return m.display_name;
-  if (isCatalogModelId(m.name) && m.description) return m.description;
+  const displayName = m.display_name?.trim();
+  if (displayName) return displayName;
+  const description = m.description?.trim();
+  if (isCatalogModelId(m.name) && description) return description;
+  if (m.name.startsWith("cv:")) return `Civitai model #${m.name.slice(3)}`;
+  if (m.name.startsWith("hf:")) {
+    const repo = m.name.slice(3).split("/").pop() ?? m.name.slice(3);
+    return repo.replaceAll("-", " ").replaceAll("_", " ");
+  }
   return m.name;
+}
+
+export function modelDisplayNameForId(
+  name: string,
+  models: readonly {
+    name: string;
+    display_name?: string | null;
+    description?: string | null;
+  }[],
+): string {
+  return modelDisplayName(
+    models.find((model) => model.name === name) ?? { name },
+  );
 }

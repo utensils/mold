@@ -1,4 +1,5 @@
 import type { OutputMetadata } from "../types";
+import { modelDisplayNameForId } from "../lib/modelName";
 
 /** Decimal gigabytes, matching server and storage-vendor reporting. */
 export function formatGB(bytes: number | null | undefined): string {
@@ -27,5 +28,5 @@ export function formatResolution(meta: OutputMetadata): string {
 
 /** Trim `flux-dev:q8` → `flux-dev` when we only want the family name. */
 export function shortModel(model: string): string {
-  return model || "unknown model";
+  return model ? modelDisplayNameForId(model, []) : "unknown model";
 }

@@ -7,6 +7,8 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useHostsStore } from "../../stores/hosts";
 import { useGalleryStore } from "../../stores/gallery";
+import { useGenerationStore } from "../../stores/generation";
+import { useHostModelsStore } from "../../stores/hostModels";
 
 const stub = { template: "<div />" };
 
@@ -145,5 +147,49 @@ describe("NavRail workspace badges (G11)", () => {
     const badge = wrapper.find(".ms-nav__badge");
     expect(badge.exists()).toBe(true);
     expect(badge.text()).toBe("1");
+  });
+});
+
+describe("NavRail model labels", () => {
+  it("renders the human-readable catalog name for active jobs", async () => {
+    const wrapper = await mountAt("/create");
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    useHostModelsStore().byHost["plato-7680"] = {
+      entries: [
+        {
+          name: "cv:1759168",
+          display_name: "Juggernaut XL - Ragnarok",
+          downloaded: true,
+          family: "sdxl",
+        } as never,
+      ],
+      fetchedAt: Date.now(),
+      error: null,
+    };
+    useGenerationStore().jobs.push({
+      clientId: 1,
+      model: "cv:1759168",
+      prompt: "portrait",
+      status: "queued",
+      step: 0,
+      total: 20,
+      hostLabel: "plato",
+      resultUrl: null,
+      previewUrl: null,
+      result: null,
+    } as never);
+
+    await flushPromises();
+    expect(wrapper.text()).toContain("Juggernaut XL - Ragnarok · plato");
+    expect(wrapper.text()).not.toContain("cv:1759168");
   });
 });

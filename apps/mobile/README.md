@@ -75,7 +75,8 @@ pushed screen opened from the header.
   `Queued`, and `Pulling N%`; active downloads can be cancelled.
 - **Machines** supports Bonjour discovery, manual IP/hostname/HTTPS entry, and
   Tailscale MagicDNS. Host detail shows telemetry, models-disk usage, queue,
-  downloads, loaded models, and installed models, with rename, retry, select,
+  downloads, loaded models, and installed models (all using catalog display
+  names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions.
 - **Settings** persists the Mold Studio theme families (Mold or Safelight) and
   System, Dark, or Light appearance. Fresh installs start with Safelight +
