@@ -16,10 +16,12 @@ const props = withDefaults(
     title: string;
     summary?: string;
     icon?: IconName;
+    /** Optional accent treatment for contexts that need stronger visual grouping. */
+    tone?: "plain" | "halide";
     /** When false the header is a plain div and no chevron renders. */
     headerInteractive?: boolean;
   }>(),
-  { headerInteractive: true },
+  { headerInteractive: true, tone: "plain" },
 );
 
 const emit = defineEmits<{ toggle: [] }>();
@@ -32,7 +34,13 @@ function onHeaderClick() {
 </script>
 
 <template>
-  <section class="ms-acc">
+  <section
+    class="ms-acc"
+    :class="{
+      'ms-acc--halide': tone === 'halide',
+      'ms-acc--open': open,
+    }"
+  >
     <component
       :is="headerInteractive ? 'button' : 'div'"
       class="ms-acc__head"
@@ -71,6 +79,17 @@ function onHeaderClick() {
   overflow: hidden;
 }
 
+.ms-acc--halide {
+  background: color-mix(in srgb, var(--halide) 3%, var(--bench));
+  border-color: color-mix(in srgb, var(--halide) 22%, var(--edge));
+  box-shadow: inset 0 1px 0 var(--card-hi);
+}
+
+.ms-acc--halide.ms-acc--open {
+  background: color-mix(in srgb, var(--halide) 5%, var(--bench));
+  border-color: color-mix(in srgb, var(--halide) 34%, var(--edge));
+}
+
 .ms-acc__head {
   width: 100%;
   display: flex;
@@ -91,6 +110,10 @@ function onHeaderClick() {
 
 .ms-acc__head--interactive:hover {
   background: color-mix(in srgb, var(--rebate) 5%, transparent);
+}
+
+.ms-acc--halide .ms-acc__head--interactive:hover {
+  background: color-mix(in srgb, var(--halide) 7%, transparent);
 }
 
 .ms-acc__head--interactive:focus-visible {

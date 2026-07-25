@@ -1,3 +1,5 @@
+import type { IconName } from "@ui/icons";
+
 /**
  * The Darkroom Bench: curated metadata for the Settings surface.
  *
@@ -23,9 +25,18 @@ export type SectionId =
 export interface SectionInfo {
   id: SectionId;
   label: string;
+  /** Icon-led header treatment shared by desktop and web Settings groups. */
+  icon?: IconName;
+  /** One-line explanation shown beneath the group title. */
+  summary?: string;
   /** Extra search terms for sections whose controls carry no curated key
    *  (Accounts tokens, Profiles) so the global search still finds them. */
   keywords?: string[];
+}
+
+export interface AccordionSectionInfo extends SectionInfo {
+  icon: IconName;
+  summary: string;
 }
 
 export const SECTIONS: SectionInfo[] = [
@@ -48,17 +59,45 @@ export const SECTIONS: SectionInfo[] = [
  * one-open-at-a-time accordions. This list is that region, in order — none of
  * it blocks first use (spec G7).
  */
-export const ACCORDION_SECTIONS: SectionInfo[] = [
-  { id: "performance", label: "Performance" },
-  { id: "generation", label: "Generation" },
-  { id: "expansion", label: "Prompt expansion" },
+export const ACCORDION_SECTIONS: AccordionSectionInfo[] = [
+  {
+    id: "performance",
+    label: "Performance",
+    icon: "scheduler",
+    summary: "Memory, previews, queueing, and compute backends",
+  },
+  {
+    id: "generation",
+    label: "Generation",
+    icon: "image",
+    summary: "Defaults for new image and video jobs",
+  },
+  {
+    id: "expansion",
+    label: "Prompt expansion",
+    icon: "sparkle",
+    summary: "Rewrite behavior, model, and sampling controls",
+  },
   {
     id: "accounts",
     label: "Accounts & tokens",
+    icon: "lock",
+    summary: "Credentials used for catalogs and model downloads",
     keywords: ["hugging face", "huggingface", "hf", "civitai", "token", "api key"],
   },
-  { id: "profiles", label: "Profiles", keywords: ["profile"] },
-  { id: "advanced", label: "Advanced" },
+  {
+    id: "profiles",
+    label: "Profiles",
+    icon: "history",
+    summary: "Keep separate sets of engine preferences",
+    keywords: ["profile"],
+  },
+  {
+    id: "advanced",
+    label: "Advanced",
+    icon: "settings",
+    summary: "Uncommon and newly discovered engine options",
+  },
 ];
 
 export type EditorKind = "toggle" | "select" | "number" | "text" | "slider" | "path" | "secret";

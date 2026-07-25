@@ -71,6 +71,13 @@ describe("Settings accordion sections", () => {
     }
   });
 
+  it("gives every group an icon and concise summary for the shared Settings treatment", () => {
+    for (const section of ACCORDION_SECTIONS) {
+      expect(section.icon, section.id).toBeTruthy();
+      expect(section.summary, section.id).toBeTruthy();
+    }
+  });
+
   it("collects the curated schemas that belong to a section", () => {
     expect(schemasForSection("expansion").map((s) => s.key)).toContain("expand.temperature");
     expect(schemasForSection("performance").every((s) => s.section === "performance")).toBe(true);
