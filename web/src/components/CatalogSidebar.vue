@@ -22,7 +22,7 @@ function clearFamily() {
       <button
         v-if="cat.filter.value.family"
         type="button"
-        class="rounded-full px-2 py-0.5 text-[11px] text-ink-3 transition hover:bg-white/5 hover:text-white"
+        class="rounded-full px-2 py-0.5 text-[11px] text-ink-3 transition hover:bg-white/5 hover:text-rebate"
         @click="clearFamily"
       >
         Clear
@@ -32,9 +32,9 @@ function clearFamily() {
       <li v-for="row in cat.families.value" :key="row.family">
         <button
           type="button"
-          class="min-h-11 w-full rounded-2xl border border-transparent px-3 py-1.5 text-left text-[13px] font-medium text-ink-2 transition hover:bg-white/5 hover:text-white"
+          class="min-h-11 w-full rounded-2xl border border-transparent px-3 py-1.5 text-left text-[13px] font-medium text-ink-2 transition hover:bg-white/5 hover:text-rebate"
           :class="{
-            'border-safelight/40 bg-safelight/15 text-white':
+            'border-safelight/40 bg-safelight/15 text-rebate':
               cat.filter.value.family === row.family,
           }"
           :data-family="row.family"

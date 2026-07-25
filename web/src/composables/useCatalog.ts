@@ -40,6 +40,7 @@ export type ModelDetail =
     };
 
 export type ModelsTab = "installed" | "discover";
+export type CatalogLayout = "grid" | "list";
 
 /** Single variant a catalog row resolves to. Label leans on the file format
  * since the live search wire exposes one downloadable form per row; a row
@@ -82,6 +83,7 @@ function build() {
   // to true — leaving it unset put the topbar's unchecked box over an
   // NSFW-inclusive result set.
   const filter = ref<CatalogFilter>({ sort: "downloads", include_nsfw: false });
+  const layout = ref<CatalogLayout>("grid");
   const page = ref(1);
   const entries = ref<CatalogEntryWire[]>([]);
   const total = ref<number | null>(null);
@@ -199,6 +201,10 @@ function build() {
 
   function setFilter(patch: Partial<CatalogFilter>) {
     filter.value = { ...filter.value, ...patch };
+  }
+
+  function setLayout(next: CatalogLayout) {
+    layout.value = next;
   }
 
   watch(
@@ -373,6 +379,7 @@ function build() {
 
   return {
     filter,
+    layout,
     page,
     entries,
     visibleEntries,
@@ -389,6 +396,7 @@ function build() {
     refresh,
     loadMore,
     setFilter,
+    setLayout,
     openDetail,
     retryDetail,
     closeDetail,

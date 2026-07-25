@@ -89,11 +89,20 @@ function pullCard(id: string) {
         {{ cat.resultCount.value === 1 ? "result" : "results" }}
       </p>
 
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div
+        data-test="catalog-results"
+        :data-layout="cat.layout.value"
+        :class="
+          cat.layout.value === 'grid'
+            ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3'
+            : 'flex flex-col gap-2'
+        "
+      >
         <CatalogCard
           v-for="entry in cat.visibleEntries.value"
           :key="entry.id"
           :entry="entry"
+          :layout="cat.layout.value"
           @open="openCard(entry.id)"
           @pull="pullCard(entry.id)"
         />

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { useCatalog } from "../composables/useCatalog";
+import CatalogLayoutToggle, {
+  type CatalogLayoutChoice,
+} from "@ui/components/CatalogLayoutToggle.vue";
+import { useCatalog, type CatalogLayout } from "../composables/useCatalog";
 import type { CatalogKind, CatalogListParams } from "../types";
 
 const cat = useCatalog();
@@ -69,6 +72,10 @@ function clearSearch() {
   searchLocal.value = "";
   cat.setFilter({ q: undefined });
 }
+
+function setLayout(layout: CatalogLayoutChoice) {
+  cat.setLayout(layout as CatalogLayout);
+}
 </script>
 
 <template>
@@ -84,8 +91,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.modality
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setModality(undefined)"
       >
@@ -95,8 +102,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.modality === 'image'
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setModality('image')"
       >
@@ -106,8 +113,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.modality === 'video'
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setModality('video')"
       >
@@ -124,8 +131,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.kind
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setKind(undefined)"
       >
@@ -137,8 +144,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.kind === opt.value
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setKind(opt.value)"
       >
@@ -155,8 +162,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           !cat.filter.value.source
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setSource(undefined)"
       >
@@ -166,8 +173,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.source === 'hf'
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setSource('hf')"
       >
@@ -177,8 +184,8 @@ function clearSearch() {
         class="rounded-full px-3 py-1.5 transition"
         :class="
           cat.filter.value.source === 'civitai'
-            ? 'bg-safelight text-white shadow-sm'
-            : 'hover:text-white'
+            ? 'bg-safelight text-on-accent shadow-sm'
+            : 'hover:text-rebate'
         "
         @click="setSource('civitai')"
       >
@@ -212,7 +219,7 @@ function clearSearch() {
       <button
         v-if="searchLocal"
         type="button"
-        class="absolute right-2.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-ink-3 transition hover:bg-white/10 hover:text-white"
+        class="absolute right-2.5 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-ink-3 transition hover:bg-white/10 hover:text-rebate"
         aria-label="Clear search"
         @click="clearSearch"
       >
@@ -259,5 +266,11 @@ function clearSearch() {
       />
       Include NSFW
     </label>
+
+    <CatalogLayoutToggle
+      class="ml-auto"
+      :model-value="cat.layout.value"
+      @update:model-value="setLayout"
+    />
   </div>
 </template>

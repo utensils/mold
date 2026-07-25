@@ -141,7 +141,7 @@ function deleteTemplate(template: GenerationTemplate) {
       >
         <button
           type="button"
-          class="min-w-0 truncate text-left text-xs text-ink-2 hover:text-white"
+          class="min-w-0 truncate text-left text-xs text-ink-2 hover:text-rebate"
           data-test="template-load"
           @click="loadTemplate(template)"
         >

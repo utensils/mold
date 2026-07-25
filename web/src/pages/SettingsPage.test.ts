@@ -17,14 +17,22 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     statusRef.value = null;
     resetNotifications();
+    localStorage.clear();
     globalThis.fetch = vi.fn(
       async (input) =>
         ({
           ok: true,
-          json: async () =>
-            String(input).endsWith("/profiles")
-              ? { profiles: ["default"], active: "default" }
-              : { entries: [] },
+          json: async () => {
+            if (String(input).endsWith("/profiles"))
+              return { profiles: ["default"], active: "default" };
+            if (String(input).endsWith("/api/catalog/credentials")) {
+              return {
+                hf: { configured: false, source: null, masked: null },
+                civitai: { configured: false, source: null, masked: null },
+              };
+            }
+            return { entries: [] };
+          },
         }) as Response,
     ) as typeof fetch;
   });
@@ -80,49 +88,108 @@ describe("SettingsPage", () => {
     expect(theme.value).toBe("dark");
   });
 
-  it("stores the Hugging Face token in this browser and shows a masked state", async () => {
+  it("stores the Hugging Face token on the server and shows a masked state", async () => {
     localStorage.clear();
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (
+        String(input).endsWith("/api/catalog/credentials/hf") &&
+        init?.method === "PUT"
+      ) {
+        return {
+          ok: true,
+          json: async () => ({
+            hf: {
+              configured: true,
+              source: "server",
+              masked: "hf_••••1234",
+            },
+            civitai: { configured: false, source: null, masked: null },
+          }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () =>
+          String(input).endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : {
+                hf: { configured: false, source: null, masked: null },
+                civitai: { configured: false, source: null, masked: null },
+              },
+      } as Response;
+    });
     const wrapper = mount(SettingsPage);
+    await flushPromises();
     await wrapper.get("input[name=hf_token]").setValue("hf_secretvalue1234");
     await wrapper.get('[data-test="save-hf"]').trigger("click");
     await flushPromises();
 
-    // No fictional network call — the token lives in localStorage.
-    const fm = globalThis.fetch as ReturnType<typeof vi.fn>;
-    const calledSettings = fm.mock.calls.some((c) =>
-      String(c[0]).includes("/api/settings/set"),
+    const saveCall = fetchMock.mock.calls.find((c) =>
+      String(c[0]).endsWith("/api/catalog/credentials/hf"),
     );
-    expect(calledSettings).toBe(false);
-    expect(
-      JSON.parse(localStorage.getItem("mold.web.accounts.v1") ?? "{}").hfToken,
-    ).toBe("hf_secretvalue1234");
-    // Masked indicator + honest toast.
+    expect(saveCall?.[1]).toEqual(
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ token: "hf_secretvalue1234" }),
+      }),
+    );
+    expect(localStorage.getItem("mold.web.accounts.v1")).toBeNull();
     expect(wrapper.get('[data-test="hf-mask"]').text()).toBe("hf_••••1234");
-    expect(
-      useNotifications().toasts.some((t) => /this browser/.test(t.text)),
-    ).toBe(true);
+    expect(useNotifications().toasts.some((t) => /server/.test(t.text))).toBe(
+      true,
+    );
   });
 
-  it("reflects an already-saved token on load and can clear it", async () => {
-    localStorage.setItem(
-      "mold.web.accounts.v1",
-      JSON.stringify({ civitaiToken: "cv_abcdef7890" }),
-    );
+  it("reflects an already-saved server token on load and can clear it", async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      const configured = {
+        hf: { configured: false, source: null, masked: null },
+        civitai: {
+          configured: true,
+          source: "server",
+          masked: "cv_••••7890",
+        },
+      };
+      const cleared = {
+        hf: { configured: false, source: null, masked: null },
+        civitai: { configured: false, source: null, masked: null },
+      };
+      return {
+        ok: true,
+        json: async () =>
+          String(input).endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : init?.method === "DELETE"
+              ? cleared
+              : configured,
+      } as Response;
+    });
     const wrapper = mount(SettingsPage);
+    await flushPromises();
     expect(wrapper.get('[data-test="civitai-mask"]').text()).toBe(
       "cv_••••7890",
     );
     await wrapper.get('[data-test="clear-civitai"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-test="civitai-mask"]').exists()).toBe(false);
-    expect(localStorage.getItem("mold.web.accounts.v1")).toBeNull();
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) =>
+          String(input).endsWith("/api/catalog/credentials/civitai") &&
+          init?.method === "DELETE",
+      ),
+    ).toBe(true);
   });
 
-  it("keeps the token in the field and says so when the browser blocks storage", async () => {
-    localStorage.clear();
+  it("keeps the token in the field when the server rejects the save", async () => {
     const wrapper = mount(SettingsPage);
-    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceededError");
+    await flushPromises();
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => "disk full",
     });
 
     await wrapper.get("input[name=hf_token]").setValue("hf_secretvalue1234");
@@ -137,20 +204,36 @@ describe("SettingsPage", () => {
     const { toasts } = useNotifications();
     expect(toasts.some((t) => t.kind === "success")).toBe(false);
     const error = toasts.find((t) => t.kind === "error");
-    expect(error?.text).toBe(
-      "This browser blocked storage — the token wasn't saved.",
-    );
+    expect(error?.text).toContain("disk full");
   });
 
-  it("does not claim a token was removed when the clear could not persist", async () => {
-    localStorage.setItem(
-      "mold.web.accounts.v1",
-      JSON.stringify({ civitaiToken: "cv_abcdef7890" }),
-    );
-    const wrapper = mount(SettingsPage);
-    vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
-      throw new Error("storage blocked");
+  it("does not claim a server token was removed when the clear fails", async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (init?.method === "DELETE") {
+        return {
+          ok: false,
+          status: 500,
+          text: async () => "read-only filesystem",
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () =>
+          String(input).endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : {
+                hf: { configured: false, source: null, masked: null },
+                civitai: {
+                  configured: true,
+                  source: "server",
+                  masked: "cv_••••7890",
+                },
+              },
+      } as Response;
     });
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
 
     await wrapper.get('[data-test="clear-civitai"]').trigger("click");
     await flushPromises();
@@ -159,9 +242,7 @@ describe("SettingsPage", () => {
       "cv_••••7890",
     );
     const error = useNotifications().toasts.find((t) => t.kind === "error");
-    expect(error?.text).toBe(
-      "This browser blocked storage — the token wasn't removed.",
-    );
+    expect(error?.text).toContain("read-only filesystem");
   });
 
   it("does not render a fictional default-scheduler control", () => {

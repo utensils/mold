@@ -10,7 +10,10 @@ import Icon from "@ui/components/Icon.vue";
 import type { CatalogEntryWire } from "../types";
 import { formatGB } from "../util/format";
 
-const props = defineProps<{ entry: CatalogEntryWire }>();
+const props = withDefaults(
+  defineProps<{ entry: CatalogEntryWire; layout?: "grid" | "list" }>(),
+  { layout: "grid" },
+);
 const emit = defineEmits<{ open: []; pull: [] }>();
 
 const CATALOG_THUMBNAIL_WIDTH = 512;
@@ -89,8 +92,9 @@ const pullLabel = computed(() => {
 </script>
 
 <template>
-  <article class="card" data-test="discover-card">
+  <article class="card" data-test="discover-card" :data-layout="props.layout">
     <button
+      v-if="props.layout === 'grid'"
       type="button"
       class="card__media"
       :aria-label="`${props.entry.name} — details`"
@@ -185,6 +189,35 @@ const pullLabel = computed(() => {
 
 .card:hover {
   border-color: var(--ce);
+}
+
+.card[data-layout="list"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+  padding: 12px 14px;
+}
+
+.card[data-layout="list"] .card__top,
+.card[data-layout="list"] .card__nameline {
+  grid-column: 1;
+}
+
+.card[data-layout="list"] .card__top {
+  margin-bottom: 3px;
+}
+
+.card[data-layout="list"] .card__pull {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  width: auto;
+  min-width: 104px;
+  margin-top: 0;
+}
+
+.card[data-layout="list"] .card__meta {
+  margin-bottom: 0;
 }
 
 /* Full-bleed preview: pulled out past the card padding, square-cornered where

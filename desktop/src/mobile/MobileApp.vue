@@ -6,6 +6,7 @@ import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
+import { createUuid } from "@studio/lib/id";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName } from "../lib/models";
@@ -233,7 +234,7 @@ let recoveryRetryId = 0;
 let unmounted = false;
 const downloadConsumerId = `mobile-generate-${
   typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
+    ? createUuid()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }`;
 const progress = ref("Ready");

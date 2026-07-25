@@ -41,4 +41,12 @@ describe("CatalogSidebar", () => {
     await rows[0].trigger("click");
     expect(cat.setFilter).toHaveBeenCalledWith({ family: "flux" });
   });
+
+  it("keeps family text readable on hover in light themes", () => {
+    const w = mount(CatalogSidebar);
+    for (const row of w.findAll("button[data-family]")) {
+      expect(row.classes()).toContain("hover:text-rebate");
+      expect(row.classes()).not.toContain("hover:text-white");
+    }
+  });
 });

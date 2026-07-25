@@ -1,4 +1,5 @@
 import type { SourceImageState, SourceMediaState } from "../types";
+import { createUuid } from "@studio/lib/id";
 
 type DraftMedia = SourceImageState | SourceMediaState;
 
@@ -40,7 +41,7 @@ async function withStore<T>(
 }
 
 export function newDraftId(): string {
-  return crypto.randomUUID();
+  return createUuid();
 }
 
 export async function putDraftMedia(media: DraftMedia): Promise<void> {

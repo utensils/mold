@@ -308,14 +308,17 @@ pub(crate) async fn install_catalog_model(
     }
 
     // Live single-id lookup via the shared cv:/hf: dispatcher. Tokens are
-    // picked up from env so unauthenticated browsing still works; the
+    // resolved from server-owned credentials (environment first, then the
+    // private credential file) so unauthenticated browsing still works; the
     // Civitai base is test-overridable through AppState.
+    let civitai_token = crate::catalog_credentials::resolved_civitai_token();
+    let hf_token = crate::catalog_credentials::resolved_hf_token();
     let entry = mold_catalog::live::fetch_entry_by_id(
         model_name,
         state.catalog_live_civitai_base.as_str(),
         "https://huggingface.co",
-        std::env::var("CIVITAI_TOKEN").ok().as_deref(),
-        std::env::var("HF_TOKEN").ok().as_deref(),
+        civitai_token.as_deref(),
+        hf_token.as_deref(),
     )
     .await
     .map_err(|e| live_error_to_install_error(model_name, &e))?;

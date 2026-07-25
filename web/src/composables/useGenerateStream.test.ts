@@ -365,6 +365,26 @@ describe("workStarted tracking", () => {
   });
 });
 
+describe("insecure-context compatibility", () => {
+  it("submits when crypto.randomUUID is unavailable", () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array) {
+        bytes.fill(7);
+        return bytes;
+      },
+    });
+    try {
+      const id = useGenerateStream().submit(singleGen(), { kind: "single" });
+      expect(id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(lastSingleHandlers).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 // ── Auto-remove on completion ───────────────────────────────────────────────
 //
 // The running-strip card is supposed to vanish ~1.5 s after a successful

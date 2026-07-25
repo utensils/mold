@@ -48,6 +48,7 @@ let mockState: {
   entries: any;
   visibleEntries: any;
   resultCount: any;
+  layout: any;
   total: any;
   loading: any;
   loadingMore: any;
@@ -68,6 +69,7 @@ beforeEach(() => {
     entries: ref([baseEntry]),
     visibleEntries: ref([baseEntry]),
     resultCount: ref(1),
+    layout: ref<"grid" | "list">("grid"),
     total: ref<number | null>(1),
     loading: ref(false),
     loadingMore: ref(false),
@@ -103,6 +105,26 @@ describe("CatalogCardGrid result count", () => {
     expect(w.find('[data-testid="catalog-result-count"]').text()).toBe(
       "1 result",
     );
+  });
+});
+
+describe("CatalogCardGrid layout", () => {
+  it("renders the existing card grid by default", () => {
+    const w = mount(CatalogCardGrid);
+    expect(
+      w.get("[data-test='catalog-results']").attributes("data-layout"),
+    ).toBe("grid");
+  });
+
+  it("switches the same catalog cards into the compact list layout", () => {
+    mockState.layout = ref("list");
+    const w = mount(CatalogCardGrid);
+    expect(
+      w.get("[data-test='catalog-results']").attributes("data-layout"),
+    ).toBe("list");
+    expect(
+      w.getComponent({ name: "CatalogCard" }).attributes("data-layout"),
+    ).toBe("list");
   });
 });
 

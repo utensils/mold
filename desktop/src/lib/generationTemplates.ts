@@ -10,6 +10,7 @@
  * human-facing `mediaReferences` hint so the user knows to re-select bytes.
  */
 import type { GenerateForm } from "./generateForm";
+import { createUuid } from "@studio/lib/id";
 
 /** Storage key — MUST differ from the web SPA's `mold.generation.templates.v1`. */
 export const GENERATION_TEMPLATES_STORAGE_KEY = "mold.desktop.generation.templates.v1";
@@ -54,10 +55,7 @@ function now(): number {
 }
 
 function templateId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
-  return `tpl-${now()}-${Math.random().toString(36).slice(2)}`;
+  return createUuid();
 }
 
 function normalizeName(name: string): string {

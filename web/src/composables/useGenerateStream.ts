@@ -16,6 +16,7 @@ import type {
 import type { ChainRoutingDecision } from "../lib/chainRouting";
 import type { HostRoute } from "../lib/hostRouting";
 import { StreamSlotPool } from "../lib/streamSlots";
+import { createUuid } from "@studio/lib/id";
 
 export interface JobProgress {
   stage: string;
@@ -617,7 +618,7 @@ function submitJob(
   decision: ChainRoutingDecision = { kind: "single" },
   route: HostRoute | null = null,
 ): string {
-  const id = crypto.randomUUID();
+  const id = createUuid();
   const controller = new AbortController();
   const isChain = decision.kind === "chain";
   // Wrap in reactive() so that property mutations during SSE streaming

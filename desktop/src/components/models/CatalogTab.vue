@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import CatalogLayoutToggle, {
+  type CatalogLayoutChoice,
+} from "@ui/components/CatalogLayoutToggle.vue";
 import { useDownloadsStore } from "../../stores/downloads";
 import { useHostsStore, type HostView } from "../../stores/hosts";
 import { isGenerationModel, useModelStore } from "../../stores/models";
@@ -47,6 +50,10 @@ const ui = useUiStore();
 /** Grid or table — the layout toggle lives here now (Discover's secondary
  *  control); an explicit `layout` prop still overrides for embeddings/tests. */
 const effectiveLayout = computed(() => props.layout ?? ui.catalogLayout);
+
+function setCatalogLayout(layout: CatalogLayoutChoice) {
+  if (layout !== "list") ui.setCatalogLayout(layout);
+}
 
 const PAGE_SIZE = 24;
 /**
@@ -488,70 +495,13 @@ onMounted(async () => {
 
       <!-- Grid/table toggle — Discover's secondary control (session-persisted
            in the ui store; table is the default). -->
-      <div
-        class="border-control-edge ml-auto flex h-7 items-center gap-0.5 rounded-control border bg-bath p-0.5"
-        role="radiogroup"
-        aria-label="Catalog layout"
-      >
-        <button
-          type="button"
-          role="radio"
-          data-test="layout-table"
-          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
-          :class="
-            ui.catalogLayout === 'table'
-              ? 'bg-safelight text-on-accent'
-              : 'text-ink-3 hover:text-ink'
-          "
-          :aria-checked="ui.catalogLayout === 'table'"
-          title="Table view"
-          @click="ui.setCatalogLayout('table')"
-        >
-          <svg
-            viewBox="0 0 12 12"
-            width="11"
-            height="11"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.4"
-            stroke-linecap="round"
-            aria-hidden="true"
-          >
-            <path d="M1.75 2.5h8.5M1.75 6h8.5M1.75 9.5h8.5" />
-          </svg>
-          Table
-        </button>
-        <button
-          type="button"
-          role="radio"
-          data-test="layout-grid"
-          class="flex h-6 items-center gap-1.5 rounded-[3px] px-2 text-caption transition-colors duration-100"
-          :class="
-            ui.catalogLayout === 'grid'
-              ? 'bg-safelight text-on-accent'
-              : 'text-ink-3 hover:text-ink'
-          "
-          :aria-checked="ui.catalogLayout === 'grid'"
-          title="Grid view"
-          @click="ui.setCatalogLayout('grid')"
-        >
-          <svg
-            viewBox="0 0 12 12"
-            width="11"
-            height="11"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-            aria-hidden="true"
-          >
-            <rect x="1.5" y="1.5" width="3.6" height="3.6" rx="0.8" />
-            <rect x="6.9" y="1.5" width="3.6" height="3.6" rx="0.8" />
-            <rect x="1.5" y="6.9" width="3.6" height="3.6" rx="0.8" />
-            <rect x="6.9" y="6.9" width="3.6" height="3.6" rx="0.8" />
-          </svg>
-          Grid
-        </button>
-      </div>
+      <CatalogLayoutToggle
+        class="ml-auto"
+        :model-value="ui.catalogLayout"
+        list-value="table"
+        list-label="Table"
+        @update:model-value="setCatalogLayout"
+      />
     </div>
 
     <p v-if="error" class="text-caption text-stop">{{ error }}</p>

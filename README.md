@@ -106,7 +106,7 @@ before deletion.
 Settings exposes the serving engine's complete configuration and profile
 surface with search, per-key provenance, environment-override locks, typed
 editors, and individual reset controls; prompt-expansion preferences are
-available there alongside appearance and browser-local catalog tokens.
+available there alongside appearance and server-owned catalog credentials.
 
 ## Desktop app
 
@@ -117,10 +117,10 @@ Machines — and can use this device alongside multiple remote Mold hosts. The
 retired `/jobs` URL redirects to Machines; queue controls remain on their owning
 machine, and only the five documented workspace shortcuts are active. The
 Models workspace splits into Installed and Discover segments, keeps image/video
-filters and pinned downloads in Discover, and lets you choose which host
-receives a download. Its Installed segment merges every connected host with host
-badges, while both that segment and each host detail page show host-scoped pull
-progress. Size labels
+filters and pinned downloads in Discover, offers List/Grid catalog layouts, and
+lets you choose which host receives a download. Its Installed segment merges
+every connected host with host badges, while both that segment and each host
+detail page show host-scoped pull progress. Size labels
 separate checkpoint weights from the larger footprint including shared runtime
 components.
 Curated built-in variants take precedence over ambiguous multi-checkpoint

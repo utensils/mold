@@ -34,6 +34,7 @@ import Icon from "@ui/components/Icon.vue";
 import { ASPECTS } from "@ui/lib/resolution";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
+import { createUuid } from "@studio/lib/id";
 import {
   createChainJob,
   deleteGalleryImage,
@@ -1021,7 +1022,7 @@ async function onExpand() {
       );
       variations.value = validateExpandedPrompts(response.expanded, count);
       preparedBatch.value = {
-        batchId: crypto.randomUUID(),
+        batchId: createUuid(),
         sourcePrompt,
         model,
         family,
