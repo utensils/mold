@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_SEQUENCE_CLIP_FRAMES,
   defaultSequenceStages,
+  friendlySequenceError,
   modelSupportsSequence,
   sequenceDuration,
   sequenceValidation,
@@ -54,6 +56,11 @@ describe("sequence authoring", () => {
   });
 
   it("starts an explicit sequence with two clips", () => {
+    expect(DEFAULT_SEQUENCE_CLIP_FRAMES).toBe(25);
+    expect(defaultSequenceStages()).toEqual([
+      { prompt: "", frames: 25, transition: "smooth" },
+      { prompt: "", frames: 25, transition: "smooth" },
+    ]);
     expect(defaultSequenceStages(65)).toEqual([
       { prompt: "", frames: 65, transition: "smooth" },
       { prompt: "", frames: 65, transition: "smooth" },
@@ -95,5 +102,18 @@ describe("sequence authoring", () => {
     expect(transitionLabel("smooth")).toBe("Continue motion");
     expect(transitionLabel("cut")).toBe("Cut");
     expect(transitionLabel("fade")).toBe("Crossfade");
+  });
+
+  it("turns GPU memory failures into actionable sequence recovery", () => {
+    expect(
+      friendlySequenceError(
+        'DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")',
+      ),
+    ).toBe(
+      "This sequence needs more GPU memory. Shorten the clip duration or reduce the size, then try again.",
+    );
+    expect(friendlySequenceError("model unavailable")).toBe(
+      "model unavailable",
+    );
   });
 });

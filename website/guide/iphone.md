@@ -230,10 +230,15 @@ changes pass the iOS workflow on `main`. The pipeline validates the bundled
 mobile `index.html`, Mold icon catalog, native archive, App Store Connect
 processing, and internal tester access before it is considered complete.
 
-The initial iPhone release focuses on remote Create, Library, Models, Machines,
-and appearance settings. Use desktop or the CLI for a local engine, the full
-Chains authoring/jobs workspace, RunPod provisioning, engine configuration, and
-desktop Stable/Nightly self-update controls.
+The iPhone app focuses on remote Create, Library, Models, Machines, and
+appearance settings. Create includes a guided **Sequence** mode for compatible
+installed video models: start with two clips, describe each shot, choose the
+duration, and generate while Mold keeps progress and cancellation attached to
+the exact host. An interrupted sequence can reconnect after relaunch without
+storing the host API key outside the Keychain. Use desktop or the CLI for a
+local engine, the TOML chain editor and full jobs-administration workspace,
+RunPod provisioning, engine configuration, and desktop Stable/Nightly
+self-update controls.
 
 For server networking and deployment options, continue with
 [Remote Workflows](/guide/remote-workflows). For supported model-family

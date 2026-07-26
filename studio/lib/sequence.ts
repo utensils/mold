@@ -19,6 +19,11 @@ export interface SequenceLimits {
   motionTailFrames: number;
 }
 
+// Verified on Plato's 48 GB L40S at the catalog model's 1216×704 defaults.
+// The server's per-clip cap/recommendation describes a format limit, not a
+// promise that the largest clip fits the active GPU at every resolution.
+export const DEFAULT_SEQUENCE_CLIP_FRAMES = 25;
+
 export function modelSupportsSequence(
   model: SequenceModel | null | undefined,
 ): boolean {
@@ -37,11 +42,24 @@ export function modelSupportsSequence(
   );
 }
 
-export function defaultSequenceStages(frames = 97): SequenceStage[] {
+export function defaultSequenceStages(
+  frames = DEFAULT_SEQUENCE_CLIP_FRAMES,
+): SequenceStage[] {
   return [
     { prompt: "", frames, transition: "smooth" },
     { prompt: "", frames, transition: "smooth" },
   ];
+}
+
+export function friendlySequenceError(error: string): string {
+  const normalized = error.toLowerCase();
+  if (
+    normalized.includes("cuda_error_out_of_memory") ||
+    normalized.includes("out of memory")
+  ) {
+    return "This sequence needs more GPU memory. Shorten the clip duration or reduce the size, then try again.";
+  }
+  return error;
 }
 
 export function sequenceDuration(

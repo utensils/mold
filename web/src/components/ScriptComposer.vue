@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import Icon from "@ui/components/Icon.vue";
 import {
+  DEFAULT_SEQUENCE_CLIP_FRAMES,
   defaultSequenceStages,
   sequenceDuration,
   sequenceValidation,
@@ -35,7 +36,7 @@ const emit = defineEmits<{
 const DRAFT_KEY = "mold.chain.draft.v2";
 
 function blankStage(transition?: "smooth" | "cut" | "fade"): ChainStageToml {
-  return { prompt: "", frames: 97, transition };
+  return { prompt: "", frames: DEFAULT_SEQUENCE_CLIP_FRAMES, transition };
 }
 
 function newScript(): ChainScriptToml {
@@ -49,7 +50,7 @@ function newScript(): ChainScriptToml {
       steps: 8,
       guidance: 3.0,
       strength: 1.0,
-      motion_tail_frames: 25,
+      motion_tail_frames: 17,
       output_format: "mp4",
     },
     stage: defaultSequenceStages().map((stage) => ({
