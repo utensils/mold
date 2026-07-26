@@ -135,6 +135,7 @@ provenance_checksum_line="$(
   || fail "release provenance checksum must be appended after provenance generation"
 
 for phase_g_path in \
+  .github/workflows/desktop-distribution.yml \
   scripts/verify-cuda-release-binary.sh \
   scripts/probe-cuda-embedded-ptx.py \
   scripts/create-release-provenance.sh \
@@ -143,6 +144,7 @@ for phase_g_path in \
   scripts/validate-cuda-qualification-report.py \
   scripts/verify-png-artifact.py \
   scripts/tests/cuda-distribution-contract.sh \
+  scripts/tests/cuda-ptx-parser-contract.py \
   scripts/tests/install-cuda-arch.sh \
   scripts/tests/cuda-qualification-contract.sh; do
   require_text ".github/workflows/ci.yml" "- '${phase_g_path}'"
