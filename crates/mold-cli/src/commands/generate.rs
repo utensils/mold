@@ -1103,44 +1103,6 @@ async fn prepare_local_request(
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
-async fn prepare_local_engine(
-    req: &GenerateRequest,
-    config: &Config,
-    gpus: Option<String>,
-    t5_variant_override: Option<String>,
-    qwen3_variant_override: Option<String>,
-    qwen2_variant_override: Option<String>,
-    qwen2_text_encoder_mode_override: Option<String>,
-    eager: bool,
-    offload: bool,
-    cli_width: Option<u32>,
-    cli_height: Option<u32>,
-    cli_steps: Option<u32>,
-    cli_guidance: Option<f64>,
-) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
-    use super::local_engine::build_local_engine;
-    let (req, paths, config, overrides) = prepare_local_request(
-        req,
-        config,
-        gpus,
-        t5_variant_override,
-        qwen3_variant_override,
-        qwen2_variant_override,
-        qwen2_text_encoder_mode_override,
-        eager,
-        offload,
-        cli_width,
-        cli_height,
-        cli_steps,
-        cli_guidance,
-    )
-    .await?;
-    let engine = build_local_engine(&req.model, paths, &config, &overrides)?;
-    Ok((req, engine))
-}
-
-#[cfg(any(feature = "cuda", feature = "metal"))]
-#[allow(clippy::too_many_arguments)]
 async fn generate_local(
     req: &GenerateRequest,
     config: &Config,
@@ -1156,7 +1118,9 @@ async fn generate_local(
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
 ) -> Result<GenerateResponse> {
-    let (req, mut engine) = prepare_local_engine(
+    let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
+    let output_format = req.output_format.unwrap_or(OutputFormat::Png);
+    generate_local_batch(
         req,
         config,
         gpus,
@@ -1170,23 +1134,14 @@ async fn generate_local(
         cli_height,
         cli_steps,
         cli_guidance,
+        1,
+        base_seed,
+        None,
+        &None,
+        output_format,
+        false,
     )
-    .await?;
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
-    engine.set_on_progress(Box::new(move |event| {
-        let _ = tx.send(event.into());
-    }));
-
-    let handle = tokio::task::spawn_blocking(move || {
-        engine.load_for_request(&req)?;
-        engine.generate(&req)
-    });
-
-    let render = tokio::spawn(render_progress(rx));
-    let result = handle.await?;
-    let _ = render.await;
-    result
+    .await
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -1212,28 +1167,9 @@ async fn generate_local_batch(
     output_format: OutputFormat,
     preview: bool,
 ) -> Result<GenerateResponse> {
-    if batch == 1 {
-        return generate_local(
-            req,
-            config,
-            gpus,
-            t5_variant_override,
-            qwen3_variant_override,
-            qwen2_variant_override,
-            qwen2_text_encoder_mode_override,
-            eager,
-            offload,
-            cli_width,
-            cli_height,
-            cli_steps,
-            cli_guidance,
-        )
-        .await;
-    }
-
     use super::local_engine::{
-        apply_local_engine_env_overrides, build_local_engine_from_plan,
-        partition_local_owner_lanes, plan_local_batch,
+        apply_local_engine_env_overrides, build_local_engine_from_plan, plan_local_batch,
+        LocalBatchAdmission, LocalLease,
     };
 
     let (base_req, _paths, effective_config, overrides) = prepare_local_request(
@@ -1258,104 +1194,218 @@ async fn generate_local_batch(
         overrides.qwen2_variant.as_deref(),
         overrides.qwen2_text_encoder_mode.as_deref(),
     );
-    let (assignments, execution_plans) =
-        plan_local_batch(&base_req, &effective_config, &overrides, batch as usize).await?;
-    let first_wave_len = assignments
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        .min(batch as usize);
-    let mut planned_items = Vec::<(u32, GenerateRequest)>::with_capacity(batch as usize);
-    for (index, ordinal) in assignments.iter().copied().enumerate() {
-        let mut iter_req = base_req.clone();
-        let index = index as u32;
-        iter_req.seed = Some(base_seed.wrapping_add(index as u64));
-        iter_req.batch_size = 1;
-        let execution_plan = execution_plans.get(&ordinal).ok_or_else(|| {
-            anyhow::anyhow!("local scheduler omitted execution plan for GPU {ordinal}")
-        })?;
-        mold_server::execution_plan::materialize_request(execution_plan, &mut iter_req);
-        if let Some(prompt) = batch_prompts.and_then(|prompts| prompts.get(index as usize)) {
-            iter_req.prompt = prompt.clone();
-        }
-        if batch > 1 {
-            if (index as usize) < first_wave_len {
-                status!(
-                    "{} Queued local item {}/{} on GPU {} (seed: {})",
-                    theme::icon_info(),
-                    index + 1,
-                    batch,
-                    ordinal,
-                    iter_req.seed.unwrap(),
-                );
-            } else {
-                status!(
-                    "{} Queued local item {}/{} for the next free GPU (seed: {})",
-                    theme::icon_info(),
-                    index + 1,
-                    batch,
-                    iter_req.seed.unwrap(),
-                );
+    let local_plan = plan_local_batch(&base_req, &effective_config, &overrides).await?;
+    let mut admission = LocalBatchAdmission::new(
+        &local_plan.candidates,
+        batch as usize,
+        local_plan.host_headroom_bytes,
+    )?;
+    let mut planned_items = (0..batch)
+        .map(|index| {
+            let mut iter_req = base_req.clone();
+            iter_req.seed = Some(base_seed.wrapping_add(index as u64));
+            iter_req.batch_size = 1;
+            if let Some(prompt) = batch_prompts.and_then(|prompts| prompts.get(index as usize)) {
+                iter_req.prompt = prompt.clone();
             }
-        }
-        planned_items.push((index, iter_req));
-    }
-    let per_device = partition_local_owner_lanes(&assignments, planned_items)?;
+            Some((index, iter_req))
+        })
+        .collect::<Vec<_>>();
 
+    enum LocalOwnerEvent {
+        Ready(usize),
+        Completed(usize, u32, GenerateResponse),
+        Failed(usize, u32, anyhow::Error),
+        Crashed(usize, anyhow::Error),
+    }
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<LocalOwnerEvent>();
+    let mut command_txs = std::collections::BTreeMap::new();
     let mut workers = tokio::task::JoinSet::new();
     let mut progress_tasks = Vec::new();
-    for (ordinal, work) in per_device {
+    for (ordinal, execution_plan) in &local_plan.execution_plans {
+        let ordinal = *ordinal;
         let config = effective_config.clone();
-        let execution_plan = execution_plans.get(&ordinal).cloned().ok_or_else(|| {
-            anyhow::anyhow!("local scheduler omitted execution plan for GPU {ordinal}")
-        })?;
+        let execution_plan = execution_plan.clone();
+        let (command_tx, command_rx) =
+            std::sync::mpsc::sync_channel::<Option<(u32, GenerateRequest)>>(1);
+        command_txs.insert(ordinal, command_tx);
+        let event_tx = event_tx.clone();
+        let crash_tx = event_tx.clone();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
         let render = tokio::spawn(render_progress(rx));
-        workers.spawn_blocking(move || -> Result<Vec<(u32, GenerateResponse)>> {
-            // Engine construction, loading, generation, and drop all remain
-            // on this device's one local owner thread.
-            mold_inference::device::init_thread_gpu_ordinal(ordinal);
-            let preload_request = work
-                .first()
-                .map(|(_, request)| request)
-                .ok_or_else(|| anyhow::anyhow!("local owner lane cannot be empty"))?;
-            let mut engine =
-                build_local_engine_from_plan(preload_request, &config, &execution_plan)?;
-            engine.set_on_progress(Box::new(move |event| {
-                let _ = tx.send(event.into());
-            }));
-            engine.load_for_request(preload_request)?;
-            let mut completed = Vec::new();
-            for (index, request) in work {
-                completed.push((index, engine.generate(&request)?));
+        workers.spawn(async move {
+            let joined = tokio::task::spawn_blocking(move || {
+                // Engine construction, loading, generation, and drop all remain
+                // on this device's one local owner thread.
+                mold_inference::device::init_thread_gpu_ordinal(ordinal);
+                let mut engine = None;
+                let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
+                while let Ok(Some((index, mut request))) = command_rx.recv() {
+                    mold_server::execution_plan::materialize_request(&execution_plan, &mut request);
+                    let result = (|| -> Result<GenerateResponse> {
+                        if engine.is_none() {
+                            let mut created =
+                                build_local_engine_from_plan(&request, &config, &execution_plan)?;
+                            created.set_on_progress(Box::new({
+                                let tx = tx.clone();
+                                move |event| {
+                                    let _ = tx.send(event.into());
+                                }
+                            }));
+                            created.load_for_request(&request)?;
+                            engine = Some(created);
+                        }
+                        engine
+                            .as_mut()
+                            .expect("local engine initialized before generation")
+                            .generate(&request)
+                    })();
+                    match result {
+                        Ok(response) => {
+                            let _ =
+                                event_tx.send(LocalOwnerEvent::Completed(ordinal, index, response));
+                            let _ = event_tx.send(LocalOwnerEvent::Ready(ordinal));
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(LocalOwnerEvent::Failed(ordinal, index, error));
+                            break;
+                        }
+                    }
+                }
+                if let Some(engine) = engine.as_mut() {
+                    engine.clear_on_progress();
+                }
+            })
+            .await;
+            if let Err(error) = joined {
+                let _ = crash_tx.send(LocalOwnerEvent::Crashed(ordinal, error.into()));
             }
-            engine.clear_on_progress();
-            Ok(completed)
         });
         progress_tasks.push(render);
     }
+    drop(event_tx);
 
     let mut completed = Vec::with_capacity(batch as usize);
     let mut first_error = None;
-    while let Some(result) = workers.join_next().await {
-        match result {
-            Ok(Ok(items)) => completed.extend(items),
-            Ok(Err(error)) => {
+    let mut terminal_items = 0_usize;
+    let mut initial_ready = std::collections::BTreeSet::new();
+    while terminal_items < batch as usize {
+        let Some(event) = event_rx.recv().await else {
+            if first_error.is_none() {
+                first_error = Some(anyhow::anyhow!(
+                    "all local GPU owners exited with batch work unfinished"
+                ));
+            }
+            break;
+        };
+        match event {
+            LocalOwnerEvent::Ready(ordinal) => {
+                admission.owner_ready(ordinal)?;
+                initial_ready.insert(ordinal);
+            }
+            LocalOwnerEvent::Completed(ordinal, index, response) => {
+                admission.owner_completed(ordinal)?;
+                completed.push((index, response));
+                terminal_items += 1;
+            }
+            LocalOwnerEvent::Failed(ordinal, index, error) => {
+                let _ = admission.owner_failed(ordinal);
+                terminal_items += 1;
                 if first_error.is_none() {
-                    first_error = Some(error);
+                    first_error = Some(anyhow::anyhow!(
+                        "local item {} failed on GPU {}: {error:#}",
+                        index + 1,
+                        ordinal
+                    ));
                 }
             }
-            Err(error) => {
+            LocalOwnerEvent::Crashed(ordinal, error) => {
+                initial_ready.insert(ordinal);
+                if admission.owner_failed(ordinal).is_some() {
+                    terminal_items += 1;
+                }
                 if first_error.is_none() {
-                    first_error = Some(error.into());
+                    first_error = Some(anyhow::anyhow!(
+                        "local GPU owner {ordinal} crashed: {error:#}"
+                    ));
                 }
             }
         }
+
+        // Wait for every owner to publish its initial Ready before the first
+        // admission so batch=1 is selected from the complete device set.
+        if initial_ready.len() < command_txs.len() {
+            continue;
+        }
+        loop {
+            let leases = admission.lease_ready()?;
+            if leases.is_empty() {
+                break;
+            }
+            let mut retry_admission = false;
+            for lease in leases {
+                let Some((index, request)) = planned_items
+                    .get_mut(lease.item_index)
+                    .and_then(Option::take)
+                else {
+                    admission.lease_transport_failed(lease);
+                    retry_admission = true;
+                    if first_error.is_none() {
+                        first_error = Some(anyhow::anyhow!(
+                            "local scheduler leased an unavailable batch item"
+                        ));
+                    }
+                    continue;
+                };
+                if batch > 1 {
+                    status!(
+                        "{} Starting local item {}/{} on GPU {} (seed: {})",
+                        theme::icon_info(),
+                        index + 1,
+                        batch,
+                        lease.ordinal,
+                        request.seed.unwrap(),
+                    );
+                }
+                let returned = match command_txs.get(&lease.ordinal) {
+                    Some(tx) => match tx.send(Some((index, request))) {
+                        Ok(()) => None,
+                        Err(error) => error.0,
+                    },
+                    None => Some((index, request)),
+                };
+                if let Some(returned) = returned {
+                    planned_items[lease.item_index] = Some(returned);
+                    admission.lease_transport_failed(LocalLease {
+                        ordinal: lease.ordinal,
+                        item_index: lease.item_index,
+                    });
+                    retry_admission = true;
+                }
+            }
+            if !retry_admission {
+                break;
+            }
+        }
+        if admission.has_pending() && !admission.has_active() && !admission.has_owners() {
+            if first_error.is_none() {
+                first_error = Some(anyhow::anyhow!(
+                    "no healthy local GPU owner remains for queued batch work"
+                ));
+            }
+            break;
+        }
     }
-    // Do not let an early sibling failure detach other GPU work. Every owner
-    // task runs to completion, drops its progress sender, and is joined before
-    // this call reports the first error.
+    for tx in command_txs.values() {
+        let _ = tx.send(None);
+    }
+    while let Some(result) = workers.join_next().await {
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error.into());
+            }
+        }
+    }
     for render in progress_tasks {
         let _ = render.await;
     }

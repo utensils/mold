@@ -337,8 +337,13 @@ fn shared_quantized_fallback<'a, T>(
             })
         })
         .map(|device| device.available_vram_bytes)
-        .min()?;
-    choose_largest_fitting(variants, smallest_supported_budget, fields)
+        .min();
+    smallest_supported_budget
+        .and_then(|budget| choose_largest_fitting(variants, budget, fields))
+        // Dependency materialization is not admission. When every device is
+        // temporarily pressured, prepare the smallest concrete variant and
+        // let the scheduler keep the work blocked until a device can admit it.
+        .or_else(|| variants.last())
 }
 
 fn flux2_uses_qwen3_8b(model: &str, paths: &ModelPaths) -> bool {
@@ -364,7 +369,6 @@ struct VariantSelection<'a> {
     preference: Option<&'a str>,
     auto_quantized_tag: Option<&'a str>,
     free: u64,
-    supports_cpu: bool,
 }
 
 async fn materialize_t5(
@@ -383,19 +387,6 @@ async fn materialize_t5(
             tag
         }
     };
-    let required = if tag == "fp16" {
-        T5_FP16_THRESHOLD
-    } else {
-        mold_core::manifest::find_t5_variant(tag)
-            .map(|variant| variant.size_bytes.saturating_add(ENCODER_HEADROOM))
-            .unwrap_or(u64::MAX)
-    };
-    if selection.free < required && !selection.supports_cpu {
-        return Err(format!(
-            "selected T5 {tag} requires {required} bytes but device has {} and the family has no CPU encoder path",
-            selection.free
-        ));
-    }
     frozen.t5_variant = Some(tag.to_string());
     let selected = if tag == "fp16" {
         paths
@@ -474,19 +465,6 @@ async fn materialize_qwen3(
             tag
         }
     };
-    let required = if tag == "bf16" {
-        fp16_threshold
-    } else {
-        find(tag)
-            .map(|variant| variant.size_bytes.saturating_add(ENCODER_HEADROOM))
-            .unwrap_or(u64::MAX)
-    };
-    if selection.free < required && !selection.supports_cpu {
-        return Err(format!(
-            "selected Qwen3 {tag} requires {required} bytes but device has {} and the family has no CPU encoder path",
-            selection.free
-        ));
-    }
     frozen.qwen3_variant = Some(tag.to_string());
     let selected = if tag == "bf16" {
         paths.text_encoder_files.clone()
@@ -533,19 +511,6 @@ async fn materialize_qwen2(
             tag
         }
     };
-    let required = if tag == "bf16" {
-        QWEN2_FP16_THRESHOLD
-    } else {
-        mold_core::manifest::find_qwen2_vl_variant(tag)
-            .map(|variant| variant.size_bytes.saturating_add(ENCODER_HEADROOM))
-            .unwrap_or(u64::MAX)
-    };
-    if selection.free < required && !selection.supports_cpu {
-        return Err(format!(
-            "selected Qwen2.5-VL {tag} requires {required} bytes but device has {} and the family has no CPU encoder path",
-            selection.free
-        ));
-    }
     frozen.qwen2_variant = Some(tag.to_string());
     if tag == "bf16" {
         if !have_bf16 {
@@ -596,6 +561,82 @@ fn sorted_matching_files(root: &Path, predicate: impl Fn(&str) -> bool) -> Vec<P
     files
 }
 
+fn complete_gemma_bf16_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let files = sorted_matching_files(root, |name| {
+        name == "model.safetensors"
+            || (name.starts_with("model-") && name.ends_with(".safetensors"))
+    });
+    let unsharded = files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "model.safetensors")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let sharded = files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != "model.safetensors")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unsharded.is_empty() {
+        if !sharded.is_empty() {
+            return Err(
+                "Gemma BF16 root mixes model.safetensors with sharded model-N-of-M files".into(),
+            );
+        }
+        return Ok(unsharded);
+    }
+    if sharded.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut total = None;
+    let mut indices = std::collections::BTreeSet::new();
+    for path in &sharded {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Gemma BF16 shard name is not valid UTF-8".to_string())?;
+        let body = name
+            .strip_prefix("model-")
+            .and_then(|value| value.strip_suffix(".safetensors"))
+            .ok_or_else(|| format!("malformed Gemma BF16 shard name '{name}'"))?;
+        let (index, shard_total) = body
+            .split_once("-of-")
+            .ok_or_else(|| format!("malformed Gemma BF16 shard name '{name}'"))?;
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| format!("malformed Gemma BF16 shard index in '{name}'"))?;
+        let shard_total = shard_total
+            .parse::<usize>()
+            .map_err(|_| format!("malformed Gemma BF16 shard total in '{name}'"))?;
+        if shard_total == 0 || index == 0 || index > shard_total {
+            return Err(format!("invalid Gemma BF16 shard range in '{name}'"));
+        }
+        if total
+            .replace(shard_total)
+            .is_some_and(|prior| prior != shard_total)
+        {
+            return Err("inconsistent Gemma BF16 shard totals".into());
+        }
+        if !indices.insert(index) {
+            return Err(format!("duplicate Gemma BF16 shard index {index}"));
+        }
+    }
+    let total = total.expect("non-empty shard list records a total");
+    if indices.len() != total || !(1..=total).all(|index| indices.contains(&index)) {
+        return Err(format!(
+            "incomplete Gemma BF16 shard set: found {} of {total}",
+            indices.len()
+        ));
+    }
+    Ok(sharded)
+}
+
 fn materialize_gemma(
     preference: Option<&str>,
     paths: &ModelPaths,
@@ -608,10 +649,7 @@ fn materialize_gemma(
     // registry, so an explicit missing Q4 pin fails here rather than causing
     // network or discovery after scheduler admission.
     let root = gemma_root(paths)?;
-    let bf16 = sorted_matching_files(&root, |name| {
-        name == "model.safetensors"
-            || (name.starts_with("model-") && name.ends_with(".safetensors"))
-    });
+    let bf16 = complete_gemma_bf16_files(&root)?;
     let gguf = sorted_matching_files(&root, |name| name.ends_with(".gguf"));
     let tag = match preference.map(|value| value.trim().to_ascii_lowercase()) {
         Some(value) if matches!(value.as_str(), "q4" | "gguf" | "q4_gguf") => "q4",
@@ -655,8 +693,8 @@ async fn prepare_inputs_for_devices(
         })
         .unwrap_or_else(|| "unknown".to_string());
     let base = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
-    let supports_text_encoder_cpu =
-        crate::execution_plan::capabilities_for_family(&family).supports_text_encoder_cpu;
+    let authority_fingerprint =
+        crate::execution_plan::preparation_authority_fingerprint(config, request, &paths, &base);
     let devices = crate::execution_plan::eligible_devices_for_request(config, request, &devices)
         .map_err(|error| error.to_string())?;
     if devices.is_empty() {
@@ -703,7 +741,6 @@ async fn prepare_inputs_for_devices(
                         preference: base.t5_variant.as_deref(),
                         auto_quantized_tag: shared_t5_tag.as_deref(),
                         free: device.available_vram_bytes,
-                        supports_cpu: supports_text_encoder_cpu,
                     },
                     &mut selected_paths,
                     &mut frozen,
@@ -719,7 +756,6 @@ async fn prepare_inputs_for_devices(
                         preference: base.qwen3_variant.as_deref(),
                         auto_quantized_tag: shared_qwen3_tag.as_deref(),
                         free: device.available_vram_bytes,
-                        supports_cpu: supports_text_encoder_cpu,
                     },
                     &mut selected_paths,
                     &mut frozen,
@@ -733,7 +769,6 @@ async fn prepare_inputs_for_devices(
                         preference: base.qwen2_variant.as_deref(),
                         auto_quantized_tag: None,
                         free: device.available_vram_bytes,
-                        supports_cpu: supports_text_encoder_cpu,
                     },
                     &family,
                     &mut selected_paths,
@@ -766,7 +801,10 @@ async fn prepare_inputs_for_devices(
             failures.join("; ")
         ));
     }
-    Ok(PreparedExecutionInputs { by_device })
+    Ok(PreparedExecutionInputs {
+        authority_fingerprint,
+        by_device,
+    })
 }
 
 pub async fn prepare_execution_inputs(
@@ -882,8 +920,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incapable_sibling_does_not_abort_viable_prepared_device() {
-        let (_root, config, request) = zimage_case();
+    async fn transient_pressure_does_not_remove_a_prepared_sibling() {
+        let (_root, mut config, request) = zimage_case();
+        config.qwen3_variant = Some("bf16".to_string());
         let prepared = prepare_local_execution_inputs(
             &config,
             &request,
@@ -904,15 +943,58 @@ mod tests {
         .unwrap();
         assert_eq!(
             prepared.by_device.keys().cloned().collect::<Vec<_>>(),
-            vec!["cuda:1".to_string()]
+            vec!["cuda:0".to_string(), "cuda:1".to_string()]
         );
         assert_eq!(
-            prepared.by_device["cuda:1"]
+            prepared.by_device["cuda:0"]
                 .engine_config
                 .qwen3_variant
                 .as_deref(),
             Some("bf16")
         );
+    }
+
+    #[tokio::test]
+    async fn all_temporarily_low_devices_still_materialize_for_later_replanning() {
+        let (_root, mut config, request) = zimage_case();
+        config.qwen3_variant = Some("bf16".to_string());
+        let low_facts = (0..8)
+            .map(|ordinal| DeviceFact {
+                id: format!("cuda:{ordinal}"),
+                ordinal,
+                available_vram_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare_local_execution_inputs(&config, &request, low_facts.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.by_device.len(), 8);
+        assert!(matches!(
+            crate::execution_plan::resolve_execution_plans_with_prepared(
+                &config,
+                &request,
+                &low_facts,
+                false,
+                Some(&prepared),
+            ),
+            Err(crate::execution_plan::ExecutionPlanError::InsufficientVram)
+        ));
+        let recovered = crate::execution_plan::resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &(0..8)
+                .map(|ordinal| DeviceFact {
+                    id: format!("cuda:{ordinal}"),
+                    ordinal,
+                    available_vram_bytes: 24_000_000_000,
+                })
+                .collect::<Vec<_>>(),
+            false,
+            Some(&prepared),
+        )
+        .unwrap();
+        assert_eq!(recovered.len(), 8);
     }
 
     #[tokio::test]
@@ -1027,6 +1109,80 @@ mod tests {
         let mut q4 = frozen.clone();
         let error = materialize_gemma(Some("q4"), &paths, &mut q4).unwrap_err();
         assert!(error.contains("q4 encoder is not locally available"));
+    }
+
+    #[test]
+    fn gemma_rejects_partial_or_inconsistent_shard_sets_before_readiness() {
+        let root = TempDir::new().unwrap();
+        let tokenizer = root.path().join("tokenizer.json");
+        std::fs::write(&tokenizer, b"tokenizer").unwrap();
+        std::fs::write(
+            root.path().join("model-00001-of-00005.safetensors"),
+            b"partial",
+        )
+        .unwrap();
+        let paths = ModelPaths {
+            transformer: root.path().join("transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: root.path().join("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![tokenizer],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mut frozen = mold_inference::FrozenEngineConfig::resolve("ltx-2", &Config::default());
+
+        let error = materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap_err();
+        assert!(error.contains("incomplete Gemma BF16 shard set"), "{error}");
+
+        std::fs::write(
+            root.path().join("model-00002-of-00003.safetensors"),
+            b"inconsistent",
+        )
+        .unwrap();
+        let error = materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap_err();
+        assert!(
+            error.contains("inconsistent Gemma BF16 shard totals"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn gemma_accepts_one_unsharded_weight_file() {
+        let root = TempDir::new().unwrap();
+        let tokenizer = root.path().join("tokenizer.json");
+        let weights = root.path().join("model.safetensors");
+        std::fs::write(&tokenizer, b"tokenizer").unwrap();
+        std::fs::write(&weights, b"weights").unwrap();
+        let paths = ModelPaths {
+            transformer: root.path().join("transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: root.path().join("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: None,
+            clip_encoder: None,
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: None,
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![tokenizer],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let mut frozen = mold_inference::FrozenEngineConfig::resolve("ltx-2", &Config::default());
+
+        materialize_gemma(Some("bf16"), &paths, &mut frozen).unwrap();
+        assert_eq!(frozen.selected_gemma_paths, vec![weights]);
     }
 
     #[test]

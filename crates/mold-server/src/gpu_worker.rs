@@ -1988,24 +1988,25 @@ fn ensure_model_ready_sync_inner(
     let planned_engine_config = planned_load.map(|planned| planned.engine_config);
     let cache = worker.model_cache.lock().unwrap();
 
+    let cached_requires_reconstruction = cache.get(model_name).is_some_and(|entry| {
+        cached_engine_requires_reconstruction(
+            entry.engine.as_ref(),
+            planned_mode,
+            planned_execution_fingerprint,
+            entry.engine.model_paths().is_some_and(|paths| {
+                crate::model_manager::request_requires_fresh_engine_for_offload_policy(
+                    paths,
+                    hint,
+                    request_has_lora,
+                )
+            }),
+        )
+    });
+
     // Already loaded?
     if let Some(entry) = cache.get(model_name) {
-        if entry.residency == ModelResidency::Gpu {
-            let must_recreate = planned_mode
-                .is_some_and(|mode| !mode.matches(entry.engine.as_ref()))
-                || planned_execution_fingerprint.is_some_and(|fingerprint| {
-                    entry.engine.configured_execution_fingerprint() != Some(fingerprint)
-                })
-                || entry.engine.model_paths().is_some_and(|paths| {
-                    crate::model_manager::request_requires_fresh_engine_for_offload_policy(
-                        paths,
-                        hint,
-                        request_has_lora,
-                    )
-                });
-            if !must_recreate {
-                return Ok(());
-            }
+        if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
+            return Ok(());
         }
     }
 
@@ -2023,6 +2024,9 @@ fn ensure_model_ready_sync_inner(
     } else {
         None
     };
+    let preflight_paths = planned_engine_paths
+        .cloned()
+        .or_else(|| cached_paths.clone());
     drop(cache);
 
     if has_cached {
@@ -2030,7 +2034,7 @@ fn ensure_model_ready_sync_inner(
         // footprint counts toward effective availability since we're about
         // to free it. On budget failure, evict-to-fit drops parked entries
         // (other than `model_name` itself) and retries.
-        if let Some(ref paths) = cached_paths {
+        if let Some(ref paths) = preflight_paths {
             preflight_memory_guard_with_eviction(
                 &worker.model_cache,
                 model_name,
@@ -2048,7 +2052,7 @@ fn ensure_model_ready_sync_inner(
                 worker.set_resident_model(None);
             }
         }
-        if let Some(ref paths) = cached_paths {
+        if let Some(ref paths) = preflight_paths {
             crate::memory_preflight::preflight_memory_guard_after_drop(
                 model_name,
                 paths,
@@ -2078,7 +2082,10 @@ fn ensure_model_ready_sync_inner(
             .is_some_and(|entry| {
                 planned_mode.is_none_or(|mode| mode.matches(entry.engine.as_ref()))
             });
-        if load_strategy == mold_inference::LoadStrategy::Sequential || !cached_mode_matches {
+        if load_strategy == mold_inference::LoadStrategy::Sequential
+            || cached_requires_reconstruction
+            || !cached_mode_matches
+        {
             let paths = planned_engine_paths
                 .cloned()
                 .or(cached_paths)
@@ -2153,7 +2160,7 @@ fn ensure_model_ready_sync_inner(
             tracing::info!(
                 gpu = worker.gpu.ordinal,
                 model = %model_name,
-                "recreating cached engine in sequential mode..."
+                "recreating cached engine for exact execution plan..."
             );
             let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
             let engine = match load_engine_safely(worker, engine, load_request) {
@@ -2172,7 +2179,7 @@ fn ensure_model_ready_sync_inner(
                 }
             };
             let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
-            drop(old_engine);
+            retire_replaced_engine(old_engine);
             let evicted = {
                 let mut cache = worker.model_cache.lock().unwrap();
                 cache.insert_loaded(model_name.to_string(), engine, vram)
@@ -2333,6 +2340,23 @@ fn ensure_model_ready_sync_inner(
     drop(evicted);
 
     Ok(())
+}
+
+fn cached_engine_requires_reconstruction(
+    engine: &dyn mold_inference::InferenceEngine,
+    planned_mode: Option<PlannedEngineMode>,
+    planned_execution_fingerprint: Option<&str>,
+    offload_policy_requires_fresh_engine: bool,
+) -> bool {
+    planned_mode.is_some_and(|mode| !mode.matches(engine))
+        || planned_execution_fingerprint.is_some_and(|fingerprint| {
+            engine.configured_execution_fingerprint() != Some(fingerprint)
+        })
+        || offload_policy_requires_fresh_engine
+}
+
+fn retire_replaced_engine(engine: Box<dyn mold_inference::InferenceEngine>) {
+    drop(engine);
 }
 
 /// Synchronously load a model on this GPU worker for the admin API.
@@ -2683,6 +2707,40 @@ mod tests {
         assert_eq!(
             configured.configured_execution_fingerprint(),
             Some("plan-fingerprint")
+        );
+    }
+
+    #[test]
+    fn same_mode_eager_fingerprint_mismatch_requires_reconstruction() {
+        let mode = PlannedEngineMode {
+            load_strategy: mold_inference::LoadStrategy::Eager,
+            block_offload: false,
+        };
+        let configured = record_planned_engine_mode(
+            FakeSlowEngine::boxed("planned", Duration::ZERO),
+            mode,
+            "old-fingerprint",
+        );
+
+        assert!(cached_engine_requires_reconstruction(
+            configured.as_ref(),
+            Some(mode),
+            Some("new-fingerprint"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn successful_reconstruction_retires_the_replaced_engine() {
+        let dropped_on = Arc::new(Mutex::new(None));
+        retire_replaced_engine(Box::new(DropRecordingEngine {
+            name: "replaced".to_string(),
+            dropped_on: dropped_on.clone(),
+        }));
+
+        assert!(
+            dropped_on.lock().unwrap().is_some(),
+            "the old engine must be dropped after its exact-plan replacement loads"
         );
     }
 

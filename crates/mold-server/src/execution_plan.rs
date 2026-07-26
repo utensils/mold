@@ -206,6 +206,10 @@ pub struct DeviceFact {
 /// can legitimately select different encoder variants for different GPUs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PreparedExecutionInputs {
+    /// Hash of the immutable request/config authority that selected these
+    /// concrete dependency variants. An empty value is reserved for synthetic
+    /// tests that do not exercise production dependency preparation.
+    pub authority_fingerprint: String,
     pub by_device: BTreeMap<String, PreparedDeviceExecutionInputs>,
 }
 
@@ -231,6 +235,8 @@ pub enum ExecutionPlanError {
     InsufficientVram,
     #[error("execution plan was invalidated before CUDA work: {0}")]
     PlanInvalidated(String),
+    #[error("prepared execution inputs are stale: {0}")]
+    PreparedInputsStale(String),
 }
 
 pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
@@ -368,6 +374,17 @@ pub fn resolve_execution_plans_with_prepared(
     let effective_loras = effective_loras(config, request);
     let admission_engine_config =
         mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    if let Some(prepared) = prepared {
+        let current_authority =
+            preparation_authority_fingerprint(config, request, &paths, &admission_engine_config);
+        if !prepared.authority_fingerprint.is_empty()
+            && prepared.authority_fingerprint != current_authority
+        {
+            return Err(ExecutionPlanError::PreparedInputsStale(
+                "request or configuration changed after dependency preparation".into(),
+            ));
+        }
+    }
     let admission_artifacts =
         concrete_artifacts_for_family(&paths, &family, &effective_loras, &admission_engine_config);
     let constraints = effective_constraints(&normalized, &admission_artifacts);
@@ -419,6 +436,38 @@ pub fn resolve_execution_plans_with_prepared(
         return Err(ExecutionPlanError::InsufficientVram);
     }
     Ok(candidates)
+}
+
+pub(crate) fn preparation_authority_fingerprint(
+    config: &Config,
+    request: &GenerateRequest,
+    paths: &ModelPaths,
+    engine_config: &mold_inference::FrozenEngineConfig,
+) -> String {
+    let mut normalized_request = request.clone();
+    // Local prompt expansion is part of the same dependency-preparation
+    // transaction and intentionally changes only these fields.
+    normalized_request.prompt.clear();
+    normalized_request.original_prompt = None;
+    normalized_request.expand = None;
+
+    let mut hash = Sha256::new();
+    hash.update(format!("{paths:?}").as_bytes());
+    hash.update(format!("{engine_config:?}").as_bytes());
+    hash.update(
+        format!(
+            "{:?}",
+            config.effective_placement(&request.model, request.placement.as_ref())
+        )
+        .as_bytes(),
+    );
+    hash.update(format!("{:?}", effective_loras(config, request)).as_bytes());
+    hash.update(
+        serde_json::to_vec(&normalized_request)
+            .expect("GenerateRequest serialization is infallible")
+            .as_slice(),
+    );
+    format!("{:x}", hash.finalize())
 }
 
 pub fn validate_before_cuda(
@@ -535,6 +584,12 @@ fn concrete_artifacts_for_family(
     engine_config: &mold_inference::FrozenEngineConfig,
 ) -> BTreeMap<ComponentRole, PathBuf> {
     let mut artifacts = BTreeMap::new();
+    // LTX-2 audio VAE and vocoder tensors are namespaces inside the primary
+    // transformer/checkpoint safetensors, not independently addressable
+    // ModelPaths. They therefore share this artifact, device placement, and
+    // content fingerprint. Do not invent duplicate component paths: the
+    // runtime currently cannot place either audio namespace on CPU
+    // (`supports_audio_components_cpu == false`).
     artifacts.insert(ComponentRole::Transformer, paths.transformer.clone());
     for (index, shard) in paths.transformer_shards.iter().enumerate() {
         artifacts.insert(ComponentRole::TransformerShard(index as u8), shard.clone());
@@ -884,7 +939,7 @@ fn build_plan(
             (
                 ResolvedComponentPlacement::Device(device.id.clone()),
                 strategy,
-                0,
+                bytes,
                 0,
             )
         };
@@ -1867,6 +1922,12 @@ mod tests {
         selected_config.t5_variant = Some("fp16".to_string());
         selected_config.selected_t5_path = Some(selected_t5.clone());
         let prepared = PreparedExecutionInputs {
+            authority_fingerprint: preparation_authority_fingerprint(
+                &config,
+                &request,
+                &admission_paths,
+                &mold_inference::FrozenEngineConfig::resolve(&request.model, &config),
+            ),
             by_device: BTreeMap::from([(
                 "cuda:0".to_string(),
                 PreparedDeviceExecutionInputs {
@@ -1895,7 +1956,69 @@ mod tests {
                 .map(|component| &component.artifact_path),
             Some(&selected_t5)
         );
+        assert!(
+            plan.components
+                .values()
+                .filter(|component| {
+                    matches!(component.placement, ResolvedComponentPlacement::Device(_))
+                })
+                .all(|component| component.predicted_vram_bytes > 0),
+            "every concrete GPU component must expose a non-zero weight estimate"
+        );
         validate_before_cuda(plan, "cuda:0", 0, &config, &request).unwrap();
+    }
+
+    #[test]
+    fn prepared_inputs_are_rejected_when_config_or_request_authority_changes() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), b"prepared").unwrap();
+        }
+        let config = config(root.path(), "flux", None);
+        let request = request(None);
+        let paths = ModelPaths::resolve(&request.model, &config).unwrap();
+        let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
+        let prepared = PreparedExecutionInputs {
+            authority_fingerprint: preparation_authority_fingerprint(
+                &config,
+                &request,
+                &paths,
+                &engine_config,
+            ),
+            by_device: BTreeMap::from([(
+                "cuda:0".to_string(),
+                PreparedDeviceExecutionInputs {
+                    engine_paths: paths.clone(),
+                    engine_config,
+                },
+            )]),
+        };
+
+        let mut changed_config = config.clone();
+        changed_config.t5_variant = Some("q3".to_string());
+        assert!(matches!(
+            resolve_execution_plans_with_prepared(
+                &changed_config,
+                &request,
+                &devices(&[24 * GIB]),
+                false,
+                Some(&prepared),
+            ),
+            Err(ExecutionPlanError::PreparedInputsStale(_))
+        ));
+
+        let mut changed_request = request.clone();
+        changed_request.width += 64;
+        assert!(matches!(
+            resolve_execution_plans_with_prepared(
+                &config,
+                &changed_request,
+                &devices(&[24 * GIB]),
+                false,
+                Some(&prepared),
+            ),
+            Err(ExecutionPlanError::PreparedInputsStale(_))
+        ));
     }
 
     #[test]

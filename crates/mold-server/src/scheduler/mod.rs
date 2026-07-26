@@ -242,6 +242,7 @@ struct PendingGeneration {
 #[derive(Debug)]
 enum GenerationPlanFailure {
     Transient(String),
+    StalePreparation(String),
     Terminal(crate::execution_plan::ExecutionPlanError),
 }
 
@@ -249,6 +250,7 @@ impl std::fmt::Display for GenerationPlanFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Transient(error) => formatter.write_str(error),
+            Self::StalePreparation(error) => formatter.write_str(error),
             Self::Terminal(error) => error.fmt(formatter),
         }
     }
@@ -1459,16 +1461,43 @@ impl Coordinator {
                 })
                 .collect());
         }
-        resolved.map_err(|error| {
-            if matches!(
-                error,
-                crate::execution_plan::ExecutionPlanError::InsufficientVram
-            ) {
+        resolved.map_err(|error| match error {
+            crate::execution_plan::ExecutionPlanError::InsufficientVram => {
                 GenerationPlanFailure::Transient(error.to_string())
-            } else {
-                GenerationPlanFailure::Terminal(error)
             }
+            crate::execution_plan::ExecutionPlanError::PreparedInputsStale(_) => {
+                GenerationPlanFailure::StalePreparation(error.to_string())
+            }
+            _ => GenerationPlanFailure::Terminal(error),
         })
+    }
+
+    fn reset_stale_preparations(&mut self) -> bool {
+        let stale = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
+            .filter(|(_, pending)| {
+                matches!(
+                    self.generation_plans(pending),
+                    Err(GenerationPlanFailure::StalePreparation(_))
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return false;
+        }
+        for id in stale {
+            if let Some(pending) = self.pending.get_mut(&id) {
+                pending.preparation = PreparationState::Needed;
+                pending.prepared_inputs = None;
+            }
+        }
+        self.state_version = self.state_version.saturating_add(1);
+        self.dirty.mark_dirty(Instant::now(), self.state_version);
+        self.start_needed_preparations();
+        true
     }
 
     fn generation_plan_catalog(
@@ -1666,6 +1695,9 @@ impl Coordinator {
     }
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
+        if self.reset_stale_preparations() {
+            return None;
+        }
         if !self.pending.is_empty() {
             self.reject_terminal_generation_plan_errors();
         }
@@ -2587,6 +2619,64 @@ mod tests {
             .request;
         assert_eq!(request.original_prompt.as_deref(), Some("source prompt"));
         assert_eq!(request.prompt, "expanded prompt");
+    }
+
+    #[tokio::test]
+    async fn changed_config_invalidates_prepared_inputs_and_starts_repreparation() {
+        let root = tempfile::TempDir::new().unwrap();
+        for name in ["transformer.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), b"prepared").unwrap();
+        }
+        let mut config = mold_core::Config {
+            t5_variant: Some("fp16".to_string()),
+            ..Default::default()
+        };
+        config.models.insert(
+            "prepared-test".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(root.path().join("transformer.gguf").display().to_string()),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                t5_encoder: Some(root.path().join("t5.safetensors").display().to_string()),
+                family: Some("flux".to_string()),
+                ..Default::default()
+            },
+        );
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
+        let (mut generation, _result) = fake_generation("stale-prepared");
+        generation.request.model = "prepared-test".to_string();
+        let prepared = crate::variant_dependencies::prepare_local_execution_inputs(
+            &config,
+            &generation.request,
+            vec![crate::execution_plan::DeviceFact {
+                id: worker_device_id(&worker),
+                ordinal: 0,
+                available_vram_bytes: 24 << 30,
+            }],
+        )
+        .await
+        .unwrap();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(generation, &mut immediate);
+        let pending = coordinator.pending.get_mut("stale-prepared").unwrap();
+        pending.preparation = PreparationState::Ready;
+        pending.prepared_inputs = Some(prepared);
+        state.config.write().await.t5_variant = Some("q3".to_string());
+
+        assert!(coordinator.reset_stale_preparations());
+        let pending = coordinator.pending.get("stale-prepared").unwrap();
+        assert_eq!(pending.preparation, PreparationState::Preparing);
+        assert!(pending.prepared_inputs.is_none());
+        coordinator.stop_preparations().await;
     }
 
     #[test]

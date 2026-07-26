@@ -204,11 +204,7 @@ pub(crate) async fn plan_local_batch(
     request: &mold_core::GenerateRequest,
     config: &Config,
     ov: &EngineOverrides,
-    item_count: usize,
-) -> Result<(
-    Vec<usize>,
-    std::collections::BTreeMap<usize, mold_server::execution_plan::ResolvedExecutionPlan>,
-)> {
+) -> Result<LocalBatchPlan> {
     use sysinfo::System;
 
     if ov.eager {
@@ -273,8 +269,11 @@ pub(crate) async fn plan_local_batch(
     let total = system.total_memory();
     let safety_floor = (total.saturating_mul(15) / 100).max(8 << 30);
     let host_headroom = system.available_memory().saturating_sub(safety_floor);
-    let assignments = local_batch_assignments(&candidates, item_count, host_headroom)?;
-    Ok((assignments, by_ordinal))
+    Ok(LocalBatchPlan {
+        candidates,
+        execution_plans: by_ordinal,
+        host_headroom_bytes: host_headroom,
+    })
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -327,77 +326,170 @@ pub(crate) struct LocalCandidate {
     pub predicted_host_ram_bytes: u64,
 }
 
-/// Partition payloads into immutable owner lanes. There is deliberately no
-/// shared steal queue: a payload carrying GPU 0's materialized plan can never
-/// be claimed by GPU 1.
-#[cfg(any(feature = "cuda", feature = "metal", test))]
-pub(crate) fn partition_local_owner_lanes<T>(
-    assignments: &[usize],
-    items: Vec<T>,
-) -> anyhow::Result<std::collections::BTreeMap<usize, Vec<T>>> {
-    if assignments.len() != items.len() {
-        anyhow::bail!(
-            "local scheduler produced {} assignments for {} items",
-            assignments.len(),
-            items.len()
-        );
-    }
-    let mut lanes = std::collections::BTreeMap::<usize, Vec<T>>::new();
-    for (ordinal, item) in assignments.iter().copied().zip(items) {
-        lanes.entry(ordinal).or_default().push(item);
-    }
-    Ok(lanes)
+#[derive(Clone, Debug)]
+#[cfg(any(feature = "cuda", feature = "metal"))]
+pub(crate) struct LocalBatchPlan {
+    pub candidates: Vec<LocalCandidate>,
+    pub execution_plans:
+        std::collections::BTreeMap<usize, mold_server::execution_plan::ResolvedExecutionPlan>,
+    pub host_headroom_bytes: u64,
 }
 
-/// Assign local batch items through the shared deterministic scheduler using
-/// concrete capacity and placement facts. The returned ordinal for each item
-/// is its lease lane; callers must keep all work for that lane on one owner
-/// thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg(any(feature = "cuda", feature = "metal", test))]
-pub(crate) fn local_batch_assignments(
-    candidates: &[LocalCandidate],
-    item_count: usize,
+pub(crate) struct LocalLease {
+    pub ordinal: usize,
+    pub item_index: usize,
+}
+
+/// Runtime adapter for forced-local batches. Future items remain in one global
+/// queue. An owner enters the ready set only after its prior lease completes,
+/// and every readiness event runs the same pure planner used by the server.
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+pub(crate) struct LocalBatchAdmission {
+    candidates: std::collections::BTreeMap<usize, LocalCandidate>,
+    pending: std::collections::VecDeque<usize>,
+    ready: std::collections::BTreeSet<usize>,
+    active: std::collections::BTreeMap<usize, usize>,
+    resident_host_bytes: std::collections::BTreeMap<usize, u64>,
     host_headroom_bytes: u64,
-) -> anyhow::Result<Vec<usize>> {
-    use mold_scheduler::{
-        CandidatePlacement, DeviceSnapshot, HostMemorySnapshot, Planner, PlannerSnapshot,
-        WorkSnapshot,
-    };
-    if item_count == 0 {
-        return Ok(Vec::new());
-    }
-    if candidates.is_empty() {
-        anyhow::bail!("local scheduler has no eligible device");
-    }
-    let mut candidates = candidates.to_vec();
-    candidates.sort_by(|left, right| {
-        left.ordinal
-            .cmp(&right.ordinal)
-            .then_with(|| left.execution_fingerprint.cmp(&right.execution_fingerprint))
-    });
-    let devices = candidates
-        .iter()
-        .map(|candidate| {
-            DeviceSnapshot::idle(candidate.device_id.clone(), candidate.available_vram_bytes)
+    plan_version: u64,
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+impl LocalBatchAdmission {
+    pub(crate) fn new(
+        candidates: &[LocalCandidate],
+        item_count: usize,
+        host_headroom_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        if item_count > 0 && candidates.is_empty() {
+            anyhow::bail!("local scheduler has no eligible device");
+        }
+        if item_count > 0
+            && !candidates.iter().any(|candidate| {
+                candidate.predicted_vram_bytes <= candidate.available_vram_bytes
+                    && candidate.predicted_host_ram_bytes <= host_headroom_bytes
+            })
+        {
+            anyhow::bail!(
+                "local scheduler cannot admit an engine within current GPU and host-memory headroom"
+            );
+        }
+        Ok(Self {
+            candidates: candidates
+                .iter()
+                .cloned()
+                .map(|candidate| (candidate.ordinal, candidate))
+                .collect(),
+            pending: (0..item_count).collect(),
+            ready: Default::default(),
+            active: Default::default(),
+            resident_host_bytes: Default::default(),
+            host_headroom_bytes,
+            plan_version: 0,
         })
-        .collect::<Vec<_>>();
-    let mut assignments = vec![usize::MAX; item_count];
-    let planner = Planner::default();
-    let mut next = 0_usize;
-    let mut plan_version = 1_u64;
-    while next < item_count {
-        let work = (next..item_count)
+    }
+
+    pub(crate) fn owner_ready(&mut self, ordinal: usize) -> anyhow::Result<()> {
+        if !self.candidates.contains_key(&ordinal) {
+            anyhow::bail!("unknown local GPU owner {ordinal}");
+        }
+        if self.active.contains_key(&ordinal) {
+            anyhow::bail!("local GPU owner {ordinal} became ready with an active lease");
+        }
+        self.ready.insert(ordinal);
+        Ok(())
+    }
+
+    pub(crate) fn owner_completed(&mut self, ordinal: usize) -> anyhow::Result<()> {
+        if self.active.remove(&ordinal).is_none() {
+            anyhow::bail!("local GPU owner {ordinal} completed without an active lease");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn owner_failed(&mut self, ordinal: usize) -> Option<usize> {
+        let active_item = self.active.remove(&ordinal);
+        self.resident_host_bytes.remove(&ordinal);
+        self.ready.remove(&ordinal);
+        self.candidates.remove(&ordinal);
+        active_item
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn lease_transport_failed(&mut self, lease: LocalLease) {
+        self.active.remove(&lease.ordinal);
+        self.resident_host_bytes.remove(&lease.ordinal);
+        self.ready.remove(&lease.ordinal);
+        self.candidates.remove(&lease.ordinal);
+        let position = self
+            .pending
+            .iter()
+            .position(|index| *index > lease.item_index)
+            .unwrap_or(self.pending.len());
+        self.pending.insert(position, lease.item_index);
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub(crate) fn has_active(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    pub(crate) fn has_owners(&self) -> bool {
+        !self.candidates.is_empty()
+    }
+
+    pub(crate) fn lease_ready(&mut self) -> anyhow::Result<Vec<LocalLease>> {
+        use mold_scheduler::{
+            CandidatePlacement, DeviceSnapshot, HostMemorySnapshot, Planner, PlannerSnapshot,
+            WorkSnapshot,
+        };
+        if self.pending.is_empty() || self.ready.is_empty() {
+            return Ok(Vec::new());
+        }
+        let devices = self
+            .candidates
+            .values()
+            .map(|candidate| {
+                if self.ready.contains(&candidate.ordinal) {
+                    DeviceSnapshot::idle(
+                        candidate.device_id.clone(),
+                        candidate.available_vram_bytes,
+                    )
+                } else {
+                    DeviceSnapshot::busy(
+                        candidate.device_id.clone(),
+                        candidate.available_vram_bytes,
+                        u64::MAX,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let work = self
+            .pending
+            .iter()
+            .copied()
             .map(|index| {
                 WorkSnapshot::new(
                     format!("item:{index}"),
                     index as u64,
-                    candidates
-                        .iter()
+                    self.candidates
+                        .values()
                         .map(|candidate| {
+                            let incremental_host_ram_bytes =
+                                if self.resident_host_bytes.contains_key(&candidate.ordinal) {
+                                    0
+                                } else {
+                                    candidate.predicted_host_ram_bytes
+                                };
                             CandidatePlacement::new(
                                 candidate.device_id.clone(),
                                 candidate.execution_fingerprint.clone(),
-                                candidate.predicted_host_ram_bytes,
+                                incremental_host_ram_bytes,
                             )
                             .with_vram(candidate.predicted_vram_bytes)
                             .with_device_available_vram(candidate.available_vram_bytes)
@@ -407,26 +499,29 @@ pub(crate) fn local_batch_assignments(
                 )
             })
             .collect();
+        self.plan_version = self.plan_version.saturating_add(1);
+        let reserved = self
+            .resident_host_bytes
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add);
         let snapshot = PlannerSnapshot {
-            state_version: plan_version,
-            next_plan_version: plan_version,
+            state_version: self.plan_version,
+            next_plan_version: self.plan_version,
             now_ms: 0,
             next_replan_at_ms: None,
             host_memory: HostMemorySnapshot {
-                headroom_bytes: host_headroom_bytes,
+                headroom_bytes: self.host_headroom_bytes.saturating_sub(reserved),
                 sample_generation: 1,
                 ledger_sequence: 1,
             },
-            devices: devices.clone(),
+            devices,
             work,
         };
-        let plan = planner
+        let plan = Planner::default()
             .plan(&snapshot)
             .map_err(|error| anyhow::anyhow!("local scheduler rejected batch: {error}"))?;
-        if plan.immediate_leases.is_empty() {
-            anyhow::bail!("local scheduler could not assign remaining batch items");
-        }
-        let mut assigned_indices = Vec::new();
+        let mut leases = Vec::new();
         for lease in plan.immediate_leases {
             let index = lease
                 .work_id
@@ -434,23 +529,33 @@ pub(crate) fn local_batch_assignments(
                 .strip_prefix("item:")
                 .and_then(|value| value.parse::<usize>().ok())
                 .ok_or_else(|| anyhow::anyhow!("local scheduler returned an invalid work id"))?;
-            let ordinal = candidates
-                .iter()
+            let ordinal = self
+                .candidates
+                .values()
                 .find(|candidate| candidate.device_id == lease.device_id.as_str())
                 .map(|candidate| candidate.ordinal)
                 .ok_or_else(|| anyhow::anyhow!("local scheduler returned an invalid device id"))?;
-            assignments[index] = ordinal;
-            assigned_indices.push(index);
+            let position = self
+                .pending
+                .iter()
+                .position(|pending| *pending == index)
+                .ok_or_else(|| anyhow::anyhow!("local scheduler leased a non-pending item"))?;
+            self.pending.remove(position);
+            self.ready.remove(&ordinal);
+            self.active.insert(ordinal, index);
+            if let Some(candidate) = self.candidates.get(&ordinal) {
+                self.resident_host_bytes
+                    .entry(ordinal)
+                    .or_insert(candidate.predicted_host_ram_bytes);
+            }
+            leases.push(LocalLease {
+                ordinal,
+                item_index: index,
+            });
         }
-        assigned_indices.sort_unstable();
-        let expected = (next..next + assigned_indices.len()).collect::<Vec<_>>();
-        if assigned_indices != expected {
-            anyhow::bail!("local scheduler violated strict batch order");
-        }
-        next += assigned_indices.len();
-        plan_version = plan_version.saturating_add(1);
+        leases.sort_by_key(|lease| lease.item_index);
+        Ok(leases)
     }
-    Ok(assignments)
 }
 
 #[cfg(test)]
@@ -490,83 +595,137 @@ mod tests {
         }
     }
 
+    fn candidates(count: usize) -> Vec<LocalCandidate> {
+        (0..count)
+            .map(|ordinal| LocalCandidate {
+                ordinal,
+                device_id: format!("cuda:{ordinal}"),
+                execution_fingerprint: format!("exec:{ordinal}"),
+                available_vram_bytes: 24 << 30,
+                predicted_vram_bytes: 8 << 30,
+                predicted_host_ram_bytes: 1 << 30,
+            })
+            .collect()
+    }
+
     #[test]
-    fn local_batch_scheduler_supports_zero_one_and_arbitrary_real_capacities() {
-        let candidates = |count: usize| {
-            (0..count)
-                .map(|ordinal| LocalCandidate {
-                    ordinal,
-                    device_id: format!("cuda:{ordinal}"),
-                    execution_fingerprint: format!("exec:{ordinal}"),
-                    available_vram_bytes: 24 << 30,
-                    predicted_vram_bytes: 8 << 30,
-                    predicted_host_ram_bytes: 1 << 30,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert!(local_batch_assignments(&[], 1, 32 << 30).is_err());
-        assert_eq!(
-            local_batch_assignments(&candidates(1), 0, 32 << 30).unwrap(),
-            Vec::<usize>::new()
-        );
-        let mut one = candidates(1);
-        one[0].ordinal = 7;
-        assert_eq!(
-            local_batch_assignments(&one, 3, 32 << 30).unwrap(),
-            vec![7, 7, 7]
-        );
-        for count in [2_usize, 8, 16, 64] {
-            let assignments =
-                local_batch_assignments(&candidates(count), count * 2 + 1, 128 << 30).unwrap();
-            assert_eq!(assignments.len(), count * 2 + 1);
-            for wave in assignments.chunks(count) {
-                let unique = wave
-                    .iter()
-                    .copied()
-                    .collect::<std::collections::BTreeSet<_>>();
-                assert_eq!(unique.len(), wave.len());
+    fn local_batch_admission_supports_zero_one_and_arbitrary_device_counts() {
+        assert!(LocalBatchAdmission::new(&[], 1, 32 << 30).is_err());
+        assert!(LocalBatchAdmission::new(&[], 0, 32 << 30)
+            .unwrap()
+            .lease_ready()
+            .unwrap()
+            .is_empty());
+
+        for count in [1_usize, 2, 8, 16, 64] {
+            let item_count = count * 2 + 1;
+            let mut admission =
+                LocalBatchAdmission::new(&candidates(count), item_count, 128 << 30).unwrap();
+            for ordinal in 0..count {
+                admission.owner_ready(ordinal).unwrap();
             }
+            let mut leased = Vec::new();
+            while admission.has_pending() || admission.has_active() {
+                let wave = admission.lease_ready().unwrap();
+                assert!(!wave.is_empty());
+                for lease in wave {
+                    leased.push(lease.item_index);
+                    admission.owner_completed(lease.ordinal).unwrap();
+                    admission.owner_ready(lease.ordinal).unwrap();
+                }
+            }
+            leased.sort_unstable();
+            assert_eq!(leased, (0..item_count).collect::<Vec<_>>());
         }
+    }
 
-        let mut oversized = candidates(1);
-        oversized[0].predicted_vram_bytes = 25 << 30;
-        assert!(local_batch_assignments(&oversized, 1, 32 << 30).is_err());
+    #[test]
+    fn faster_owner_takes_next_global_item_instead_of_idling() {
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30).unwrap();
+        admission.owner_ready(0).unwrap();
+        admission.owner_ready(1).unwrap();
+        let opening = admission.lease_ready().unwrap();
+        assert_eq!(opening.len(), 2);
+        let fast = opening.iter().find(|lease| lease.ordinal == 1).unwrap();
+        admission.owner_completed(fast.ordinal).unwrap();
+        admission.owner_ready(fast.ordinal).unwrap();
 
-        let host_heavy = candidates(2);
-        let host_limited = local_batch_assignments(&host_heavy, 2, (2 << 30) - 1).unwrap();
+        let next = admission.lease_ready().unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].ordinal, 1);
+        assert_eq!(next[0].item_index, 2);
+    }
+
+    #[test]
+    fn failed_owner_does_not_strand_unstarted_global_items() {
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 4, 32 << 30).unwrap();
+        admission.owner_ready(0).unwrap();
+        admission.owner_ready(1).unwrap();
+        let opening = admission.lease_ready().unwrap();
+        assert_eq!(opening.len(), 2);
+        let _ = admission.owner_failed(0);
+        admission.owner_completed(1).unwrap();
+        admission.owner_ready(1).unwrap();
+
+        let next = admission.lease_ready().unwrap();
         assert_eq!(
-            host_limited
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            1,
-            "host headroom may admit only one persistent local owner lane"
+            next,
+            vec![LocalLease {
+                ordinal: 1,
+                item_index: 2,
+            }]
         );
+        assert!(admission.has_pending());
+        assert!(admission.has_owners());
+    }
 
-        let pinned = vec![candidates(2)[1].clone()];
+    #[test]
+    fn transport_failure_requeues_the_same_item_on_a_surviving_ready_owner() {
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 1, 32 << 30).unwrap();
+        admission.owner_ready(0).unwrap();
+        admission.owner_ready(1).unwrap();
+        let failed = admission.lease_ready().unwrap().pop().unwrap();
+        admission.lease_transport_failed(failed);
+
+        let replacement = admission.lease_ready().unwrap();
+        assert_eq!(replacement.len(), 1);
+        assert_eq!(replacement[0].item_index, failed.item_index);
+        assert_ne!(replacement[0].ordinal, failed.ordinal);
+    }
+
+    #[test]
+    fn host_ram_admission_limits_only_current_leases_not_future_ownership() {
+        let mut admission = LocalBatchAdmission::new(&candidates(2), 2, (2 << 30) - 1).unwrap();
+        admission.owner_ready(0).unwrap();
+        admission.owner_ready(1).unwrap();
+        let first = admission.lease_ready().unwrap();
+        assert_eq!(first.len(), 1);
+        admission.owner_completed(first[0].ordinal).unwrap();
+        admission.owner_ready(first[0].ordinal).unwrap();
+        let second = admission.lease_ready().unwrap();
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].item_index, second[0].item_index);
         assert_eq!(
-            local_batch_assignments(&pinned, 2, 32 << 30).unwrap(),
-            vec![1, 1]
+            first[0].ordinal, second[0].ordinal,
+            "the resident owner must retain its host-RAM charge and receive the next item"
         );
     }
 
     #[test]
-    fn local_owner_lanes_cannot_steal_another_devices_concrete_plan() {
-        let assignments = vec![0, 1, 0, 1];
-        let items = vec![
-            (0, "plan-gpu-0"),
-            (1, "plan-gpu-1"),
-            (2, "plan-gpu-0"),
-            (3, "plan-gpu-1"),
-        ];
-        let lanes = partition_local_owner_lanes(&assignments, items).unwrap();
-        assert_eq!(lanes[&0], vec![(0, "plan-gpu-0"), (2, "plan-gpu-0")]);
-        assert_eq!(lanes[&1], vec![(1, "plan-gpu-1"), (3, "plan-gpu-1")]);
-        for (owner, items) in lanes {
-            assert!(items
-                .iter()
-                .all(|(_, plan)| *plan == format!("plan-gpu-{owner}")));
-        }
+    fn single_item_uses_the_same_gpu_and_host_admission_path() {
+        let mut devices = candidates(2);
+        devices[0].available_vram_bytes = 7 << 30;
+        assert!(LocalBatchAdmission::new(&devices, 1, (1 << 30) - 1).is_err());
+
+        let mut admission = LocalBatchAdmission::new(&devices, 1, 2 << 30).unwrap();
+        admission.owner_ready(0).unwrap();
+        admission.owner_ready(1).unwrap();
+        assert_eq!(
+            admission.lease_ready().unwrap(),
+            vec![LocalLease {
+                ordinal: 1,
+                item_index: 0,
+            }]
+        );
     }
 }
