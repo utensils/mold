@@ -70,16 +70,22 @@ const dotState = computed<"online" | "offline" | "unknown">(() => {
 const telemetry = computed(() =>
   deriveTelemetry(poll?.status.value ?? null, poll?.resources.value ?? null),
 );
-const gpuCount = computed(() => {
+const gpuOrdinals = computed(() => {
   const devices = poll?.devices.value;
   if (devices !== null && devices !== undefined)
-    return devices.filter(
-      (device) => device.schedulable && device.ordinal !== null,
-    ).length;
+    return [
+      ...new Set(
+        devices
+          .filter((device) => device.schedulable && device.ordinal !== null)
+          .map((device) => device.ordinal as number),
+      ),
+    ].sort((a, b) => a - b);
   const status = poll?.status.value;
   if (status?.gpus != null)
-    return status.gpus.filter((gpu) => gpu.state !== "degraded").length;
-  return status?.gpu_info ? 1 : 0;
+    return status.gpus
+      .filter((gpu) => gpu.state !== "degraded")
+      .map((gpu) => gpu.ordinal);
+  return status?.gpu_info ? [0] : [];
 });
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId);
@@ -426,7 +432,7 @@ onBeforeUnmount(() => {
         <QueueCard
           :entries="queue"
           :models="models"
-          :gpu-count="gpuCount"
+          :gpu-ordinals="gpuOrdinals"
           :can-reorder="canReorder"
           :can-pause="caps?.queue?.can_pause === true"
           :can-cancel-all="caps?.queue?.can_cancel_all === true"

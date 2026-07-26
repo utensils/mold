@@ -346,6 +346,19 @@ describe("HostDetailPage — queue", () => {
     expect(w.find('[data-test="queue-lane"]').exists()).toBe(true);
   });
 
+  it("preserves non-contiguous schedulable ordinals in queue lane options", async () => {
+    queueEntries = [queued("a", 0)];
+    poll.devices.value = [makeDevice(1), makeDevice(3)];
+
+    const w = await mountDetail();
+    const options = w
+      .get('[data-test="queue-lane"]')
+      .findAll("option")
+      .map((option) => option.attributes("value"));
+
+    expect(options).toEqual(["", "1", "3"]);
+  });
+
   it("does not build queue lanes from explicitly non-routable workers", async () => {
     queueEntries = [queued("a", 0)];
     poll.status.value = makeStatus({
