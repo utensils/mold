@@ -16,6 +16,10 @@ import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue"
 import QueueColumn from "../components/machines/QueueColumn.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
+import {
+  gpuFleetLabel,
+  gpuSnapshotsFromWorkers,
+} from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
 import { formatGB } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
@@ -57,17 +61,26 @@ function openDetail(host: HostView) {
 }
 
 // ── Card telemetry (from the app-wide status poll) ────────────────────────
-function gpuInfo(id: string) {
-  return hosts.telemetry[id]?.gpuInfo ?? null;
+function hostGpus(id: string) {
+  const telemetry = hosts.telemetry[id];
+  return gpuSnapshotsFromWorkers(
+    telemetry?.gpuInfo,
+    telemetry?.gpuWorkers,
+  );
 }
 
 /** Right-aligned hardware line: "RTX 4090 · Metal" / "RTX 4090 · host:port". */
 function hardwareLine(host: HostView): string {
-  const info = gpuInfo(host.id);
+  const gpus = hostGpus(host.id);
   const parts: string[] = [];
-  if (info?.name) parts.push(info.name);
+  const fleet = gpuFleetLabel(gpus);
+  if (fleet) parts.push(fleet);
   if (host.kind === "local") {
-    if (info) parts.push((info.backend ?? inferBackendFromGpuName(info.name)).toUpperCase());
+    if (gpus[0]) {
+      parts.push(
+        (gpus[0].backend ?? inferBackendFromGpuName(gpus[0].name)).toUpperCase(),
+      );
+    }
   } else if (host.baseUrl) {
     parts.push(host.baseUrl.replace(/^https?:\/\//, ""));
   }
@@ -75,15 +88,18 @@ function hardwareLine(host: HostView): string {
 }
 
 function memoryLabel(host: HostView): string | null {
-  const info = gpuInfo(host.id);
-  if (!info) return null;
-  return `Memory ${formatGB(info.vram_used_mb * 1_000_000)} / ${formatGB(info.vram_total_mb * 1_000_000)}`;
+  const gpus = hostGpus(host.id);
+  if (!gpus.length) return null;
+  const used = gpus.reduce((sum, gpu) => sum + gpu.vram_used, 0);
+  const total = gpus.reduce((sum, gpu) => sum + gpu.vram_total, 0);
+  return `Memory ${formatGB(used)} / ${formatGB(total)}`;
 }
 
 function memoryPct(host: HostView): number {
-  const info = gpuInfo(host.id);
-  if (!info || info.vram_total_mb <= 0) return 0;
-  return Math.round((info.vram_used_mb / info.vram_total_mb) * 100);
+  const gpus = hostGpus(host.id);
+  const used = gpus.reduce((sum, gpu) => sum + gpu.vram_used, 0);
+  const total = gpus.reduce((sum, gpu) => sum + gpu.vram_total, 0);
+  return total > 0 ? Math.round((used / total) * 100) : 0;
 }
 
 function statusDot(status: HostView["status"]): string {

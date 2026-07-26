@@ -15,6 +15,7 @@ import ConfirmDialog from "../components/shell/ConfirmDialog.vue";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { unloadModel } from "../lib/api/models";
 import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
@@ -212,19 +213,10 @@ onUnmounted(() => {
  *  stream) fall back to the status poll's MB-based `gpu_info` summary. */
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value) return snapshot.value.gpus;
-  const info = telemetry.value?.gpuInfo;
-  if (!info) return [];
-  // Decimal MB → bytes, matching formatGB and the server's resources path.
-  return [
-    {
-      ordinal: 0,
-      name: info.name,
-      backend: info.backend ?? inferBackendFromGpuName(info.name),
-      vram_total: info.vram_total_mb * 1_000_000,
-      vram_used: info.vram_used_mb * 1_000_000,
-      gpu_utilization: null,
-    },
-  ];
+  return gpuSnapshotsFromWorkers(
+    telemetry.value?.gpuInfo,
+    telemetry.value?.gpuWorkers,
+  );
 });
 
 function backendLabel(gpu: GpuSnapshot): string {

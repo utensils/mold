@@ -153,6 +153,22 @@ async function mountView(
     version: "0.17.0",
     modelsLoaded: ["flux-dev:q8"],
     gpuInfo: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24_000, vram_used_mb: 6_000 },
+    gpuWorkers: [
+      {
+        ordinal: 0,
+        name: "NVIDIA GeForce RTX 4090",
+        vram_total_bytes: 24_000_000_000,
+        vram_used_bytes: 6_000_000_000,
+        state: "generating",
+      },
+      {
+        ordinal: 1,
+        name: "NVIDIA B200",
+        vram_total_bytes: 80_000_000_000,
+        vram_used_bytes: 20_000_000_000,
+        state: "idle",
+      },
+    ],
     instanceId: "0f7a2c31-instance-uuid",
     hostname: "hal9000",
   };
@@ -231,9 +247,13 @@ describe("HostDetailView telemetry", () => {
     expect(stream.path).toBe("/api/resources/stream");
     expect(stream.options.target).toEqual({ baseUrl: "http://hal9000:7680", apiKey: "sekrit" });
 
-    // Before any frame: the status-poll gpu_info fallback (MB → decimal GB).
-    expect(wrapper.get("[data-test='gpu-card']").text()).toContain("NVIDIA GeForce RTX 4090");
-    expect(wrapper.get("[data-test='gpu-card']").text()).toContain("6.0 GB/24.0 GB");
+    // Before any frame: every status-poll worker is visible.
+    const fallbackCards = wrapper.findAll("[data-test='gpu-card']");
+    expect(fallbackCards).toHaveLength(2);
+    expect(fallbackCards[0]!.text()).toContain("NVIDIA GeForce RTX 4090");
+    expect(fallbackCards[0]!.text()).toContain("6.0 GB/24.0 GB");
+    expect(fallbackCards[1]!.text()).toContain("NVIDIA B200");
+    expect(fallbackCards[1]!.text()).toContain("20.0 GB/80.0 GB");
     expect(wrapper.find("[data-test='cpu-card']").exists()).toBe(false);
 
     stream.options.onEvent(
