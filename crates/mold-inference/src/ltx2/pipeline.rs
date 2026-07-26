@@ -40,10 +40,8 @@ pub struct Ltx2Engine {
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
-    /// GPU ordinal this engine is pinned to. Every `Device::new_cuda` and
-    /// `reclaim_gpu_memory` call must use this ordinal — hardcoding `0` here
-    /// is what took down the process on <gpu-host> when LTX-2 ran alongside
-    /// SD3.5 on a multi-GPU host.
+    /// GPU ordinal this engine is pinned to. Every CUDA device operation must
+    /// use this ordinal; hardcoding `0` can target a sibling worker's context.
     gpu_ordinal: usize,
     /// Optional preset hint used when the model name doesn't carry a
     /// recognisable family substring (`ltx-2.3`, `ltx-2`). Populated by
@@ -251,12 +249,12 @@ impl Ltx2Engine {
 
     fn unload_runtime_state(&mut self) -> Option<usize> {
         self.loaded = false;
-        let should_reclaim = self
+        let had_cuda_state = self
             .native_runtime
             .as_ref()
-            .is_some_and(Ltx2RuntimeSession::needs_cuda_reclaim_on_unload);
+            .is_some_and(Ltx2RuntimeSession::has_cuda_state);
         self.native_runtime = None;
-        should_reclaim.then_some(self.gpu_ordinal)
+        had_cuda_state.then_some(self.gpu_ordinal)
     }
 
     fn gemma_root(&self) -> Result<PathBuf> {
@@ -502,7 +500,7 @@ impl Ltx2Engine {
                     "Native LTX-2 prompt encoder ran out of CUDA memory; retrying Gemma on CPU \
                      while keeping the transformer and VAE on CUDA",
                 );
-                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
+                let _ = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
                 let (transformer_device, prompt_placement) =
                     prompt_encoder_oom_retry_placement(&device);
                 self.load_runtime_session_with_devices(
@@ -953,7 +951,7 @@ impl InferenceEngine for Ltx2Engine {
 
     fn unload(&mut self) {
         if let Some(ordinal) = self.unload_runtime_state() {
-            crate::reclaim_gpu_memory(ordinal);
+            let _ = crate::device::post_drop_free_vram_bytes(ordinal);
         }
     }
 
@@ -1762,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_unload_drops_runtime_and_requests_cuda_reclaim() {
+    fn ltx2_unload_drops_runtime_and_reports_cuda_state() {
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),
@@ -1777,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn ltx2_unload_cpu_runtime_skips_cuda_reclaim() {
+    fn ltx2_unload_cpu_runtime_needs_no_cuda_synchronization() {
         let mut engine = Ltx2Engine::with_runtime_session(
             "ltx-2-19b-distilled:fp8".to_string(),
             dummy_paths(),

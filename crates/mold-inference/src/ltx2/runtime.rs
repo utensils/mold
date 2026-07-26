@@ -363,12 +363,12 @@ pub struct Ltx2RuntimeSession {
     /// [`crate::chain::ChainTail`]. `None` outside chain flow.
     pub(crate) tail_capture: Option<std::sync::Arc<std::sync::Mutex<Option<Tensor>>>>,
     /// GPU ordinal inherited from `Ltx2Engine`. Used for the deferred CUDA
-    /// device creation in `prepare()` and for post-OOM context reset.
+    /// device creation in `prepare()` and post-drop synchronization.
     gpu_ordinal: usize,
     /// True when this session has owned, or will lazily create, CUDA state
-    /// that should be followed by a primary-context reset after unload drops
-    /// all tensors and devices.
-    cuda_reclaim_on_unload: bool,
+    /// whose pending work must be synchronized after unload drops all tensors
+    /// and devices.
+    cuda_state_on_unload: bool,
 }
 
 /// Remembers the last `encode_prompt_pair_with_unconditional` call so
@@ -389,7 +389,7 @@ impl Ltx2RuntimeSession {
         gpu_ordinal: usize,
     ) -> Self {
         Self {
-            cuda_reclaim_on_unload: device.is_cuda(),
+            cuda_state_on_unload: device.is_cuda(),
             device: Some(device),
             prompt_encoder: Some(prompt_encoder),
             cached_prompt_encoding: None,
@@ -405,12 +405,12 @@ impl Ltx2RuntimeSession {
             cached_prompt_encoding: None,
             tail_capture: None,
             gpu_ordinal,
-            cuda_reclaim_on_unload: true,
+            cuda_state_on_unload: true,
         }
     }
 
-    pub(crate) fn needs_cuda_reclaim_on_unload(&self) -> bool {
-        self.cuda_reclaim_on_unload
+    pub(crate) fn has_cuda_state(&self) -> bool {
+        self.cuda_state_on_unload
     }
 
     /// Arm the pre-VAE-decode latent capture slot. The distilled render
@@ -582,7 +582,7 @@ impl Ltx2RuntimeSession {
         let device_handoff_start = Instant::now();
         if prompt_device_is_cuda {
             if self.device.is_none() {
-                crate::device::reclaim_gpu_memory(self.gpu_ordinal);
+                let _ = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
                 self.device = Some(new_native_cuda_device(self.gpu_ordinal)?);
             } else if let Some(device) = self.device.as_ref() {
                 if device.is_cuda() {

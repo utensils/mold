@@ -37,7 +37,6 @@ pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
 
-pub use device::reclaim_gpu_memory;
 pub use engine::{InferenceEngine, LoadStrategy};
 pub use error::InferenceError;
 pub use factory::{create_engine, create_engine_with_pool};

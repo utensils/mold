@@ -27,8 +27,9 @@ pub(crate) use crate::memory_preflight::{
 };
 pub(crate) use crate::memory_preflight::{
     effective_load_available_bytes, estimate_generation_memory_for_request, preflight_memory_guard,
-    request_requires_fresh_engine_for_offload_policy, select_server_load_strategy_for_budget,
-    select_server_load_strategy_for_device, server_offload_enabled_for_paths,
+    preflight_memory_guard_after_drop, request_requires_fresh_engine_for_offload_policy,
+    select_server_load_strategy_for_budget, select_server_load_strategy_for_device,
+    server_offload_enabled_for_paths,
 };
 
 pub(crate) fn request_has_effective_lora(req: &GenerateRequest) -> bool {
@@ -982,23 +983,6 @@ pub(crate) async fn ensure_model_ready(
             if let Some(paths) = cached_paths.as_ref() {
                 preflight_memory_guard(model_name, paths, active_vram, 0, hint)?;
             }
-            let load_strategy = cached_paths
-                .as_ref()
-                .map(|paths| {
-                    select_server_load_strategy_for_budget(
-                        paths,
-                        effective_load_available_bytes(active_vram, 0),
-                        hint,
-                    )
-                })
-                .unwrap_or(mold_inference::LoadStrategy::Eager);
-            if load_strategy == mold_inference::LoadStrategy::Sequential {
-                tracing::info!(
-                    model = %model_name,
-                    "server load strategy degraded to sequential to fit memory budget"
-                );
-            }
-
             // Parked engines retain tokenizers/caches for faster reload.
             // First unload the currently active model (if any) to free VRAM.
             if let Some(active_name) = cache.unload_active() {
@@ -1009,23 +993,40 @@ pub(crate) async fn ensure_model_ready(
                     to = %model_name,
                     "unloaded active model to reload cached model"
                 );
-                // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-                // because `state.model_load_lock` (taken above) is the only
-                // lock protecting GPU 0's primary context on this path — the
-                // GpuPool path uses `worker.model_load_lock` and
-                // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-                mold_inference::reclaim_gpu_memory(0);
             }
 
-            // Take the engine out of cache to load in spawn_blocking. Using
-            // `take()` (not `remove()`) keeps the model name in the cache's
-            // `in_flight` set so concurrent `check_model_available` calls
-            // still see it as logically cached during the load window.
-            let cached = cache.take(model_name).ok_or_else(|| {
-                ApiError::internal(format!("cache race: model '{model_name}' vanished"))
-            })?;
             drop(cache);
+            if let Some(paths) = cached_paths.as_ref() {
+                preflight_memory_guard_after_drop(model_name, paths, 0, hint)?;
+            } else {
+                let _ = mold_inference::device::post_drop_free_vram_bytes(0);
+            }
+            let load_strategy = cached_paths
+                .as_ref()
+                .map(|paths| {
+                    select_server_load_strategy_for_budget(
+                        paths,
+                        effective_load_available_bytes(0, 0),
+                        hint,
+                    )
+                })
+                .unwrap_or(mold_inference::LoadStrategy::Eager);
+            if load_strategy == mold_inference::LoadStrategy::Sequential {
+                tracing::info!(
+                    model = %model_name,
+                    "server load strategy degraded to sequential to fit post-drop memory budget"
+                );
+            }
 
+            // Only check the engine out after the authoritative post-drop
+            // guard passes. A failed guard must leave the parked cache entry
+            // intact rather than leaking its in-flight marker.
+            let cached = {
+                let mut cache = state.model_cache.lock().await;
+                cache.take(model_name).ok_or_else(|| {
+                    ApiError::internal(format!("cache race: model '{model_name}' vanished"))
+                })?
+            };
             let mut engine = cached.engine;
             if load_strategy == mold_inference::LoadStrategy::Sequential {
                 let Some(paths) = cached_paths else {
@@ -1225,8 +1226,8 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
     // Use try_lock() to avoid blocking the async runtime if an upscale
     // is in progress (the spawn_blocking thread holds this lock).
     if let Ok(mut upscaler) = state.upscaler_cache.try_lock() {
-        if upscaler.is_some() {
-            *upscaler = None;
+        if let Some(mut engine) = upscaler.take() {
+            engine.unload();
             tracing::info!("upscaler cache cleared");
         }
     }
@@ -1240,12 +1241,11 @@ pub(crate) async fn unload_model(state: &AppState) -> String {
                 crate::metrics::record_gpu_memory(0);
             }
             drop(cache);
-            // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-            // because `state.model_load_lock` (taken above) is the only
-            // lock protecting GPU 0's primary context on this path — the
-            // GpuPool path uses `worker.model_load_lock` and
-            // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-            mold_inference::reclaim_gpu_memory(0);
+            let free_after_drop = mold_inference::device::post_drop_free_vram_bytes(0);
+            tracing::info!(
+                free_vram_bytes = ?free_after_drop,
+                "legacy model unloaded; sampled post-drop VRAM"
+            );
             tracing::info!(model = %name, "model unloaded via API");
             format!("unloaded {name}")
         }
@@ -1267,24 +1267,8 @@ async fn create_and_load_engine(
         cache.active_vram_bytes()
     };
     preflight_memory_guard(model_name, &paths, active_vram, 0, hint)?;
-    let load_strategy = select_server_load_strategy_for_device(
-        &paths,
-        effective_load_available_bytes(active_vram, 0),
-        mold_inference::device::total_vram_bytes(0),
-        hint,
-    );
-    if load_strategy == mold_inference::LoadStrategy::Sequential {
-        tracing::info!(
-            model = %model_name,
-            "server load strategy degraded to sequential to fit memory budget"
-        );
-    }
-
     // Unload the current active model to free GPU memory.
-    // Only reclaim GPU memory if there was an active model — calling
-    // reclaim_gpu_memory() (CUDA primary context reset) when nothing was
-    // loaded is unnecessary and may misbehave on some driver versions.
-    let had_active = {
+    {
         let mut cache = state.model_cache.lock().await;
         let result = cache.unload_active();
         if let Some(ref name) = result {
@@ -1296,15 +1280,19 @@ async fn create_and_load_engine(
                 "unloading active model before loading new one"
             );
         }
-        result.is_some()
-    };
-    if had_active {
-        // Legacy no-worker path only: hardcoded ordinal 0 is safe here
-        // because `state.model_load_lock` (taken above) is the only
-        // lock protecting GPU 0's primary context on this path — the
-        // GpuPool path uses `worker.model_load_lock` and
-        // `reclaim_gpu_memory(worker.gpu.ordinal)` via `gpu_worker`.
-        mold_inference::reclaim_gpu_memory(0);
+    }
+    preflight_memory_guard_after_drop(model_name, &paths, 0, hint)?;
+    let load_strategy = select_server_load_strategy_for_device(
+        &paths,
+        effective_load_available_bytes(0, 0),
+        mold_inference::device::total_vram_bytes(0),
+        hint,
+    );
+    if load_strategy == mold_inference::LoadStrategy::Sequential {
+        tracing::info!(
+            model = %model_name,
+            "server load strategy degraded to sequential to fit post-drop memory budget"
+        );
     }
 
     let config = state.config.read().await;
@@ -1708,10 +1696,9 @@ mod tests {
         (dir, paths)
     }
 
-    /// Regression: a quantized FLUX-shaped model should fit on a 24 GB card
-    /// when the sibling model is unloaded and the context reset, even though
-    /// the Eager (sum) peak would have been ~24 GB and tripped the 90 %
-    /// hard limit.
+    /// Regression: a quantized FLUX-shaped model should fit when the actual
+    /// post-drop sample reports 24 GB available, even though the Eager (sum)
+    /// peak would have been ~24 GB and tripped the 90 % hard limit.
     ///
     /// Concrete shape: FLUX-dev:q8 → transformer ≈ 12 GB, VAE ≈ 0.3 GB,
     /// T5 ≈ 9.5 GB, CLIP ≈ 0.25 GB. Eager peak = 12+0.3+9.5+0.25+2 ≈ 24 GB
@@ -1723,15 +1710,25 @@ mod tests {
         // composition is realistic enough to exercise Eager-vs-Sequential
         // divergence (encoder + transformer both > headroom).
         let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
-        // Free 4 GB on a 24 GB card with an 18 GB sibling about to be
-        // reclaimed → effective_available passed in by the outer guard
-        // is total_vram = 24 GB on CUDA, but we test the inner directly with
-        // the Sequential strategy in mind.
+        // This is the authoritative post-drop reading, not nominal capacity.
         let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 24 * GB, None);
         assert!(
             result.is_ok(),
             "quantized FLUX must fit on a 24 GB card under the Sequential \
              peak estimate (drop-and-reload encoders), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_treats_unrecovered_vram_as_unavailable_pressure() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(12, 1, 10, 1);
+        // Nominal capacity may be 24 GB, but only the observed 14 GB is
+        // admissible after the old engine is gone. The guard must not promote
+        // this reading back to total capacity.
+        let result = preflight_memory_guard_with_available("flux-dev:q8", &paths, 0, 14 * GB, None);
+        assert!(
+            result.is_err(),
+            "unrecovered or externally-owned VRAM must remain unavailable"
         );
     }
 

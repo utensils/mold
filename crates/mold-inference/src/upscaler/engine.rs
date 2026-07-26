@@ -323,8 +323,12 @@ impl UpscaleEngine for UpscalerEngine {
     fn unload(&mut self) {
         if self.loaded.is_some() {
             self.loaded = None;
-            crate::reclaim_gpu_memory(self.gpu_ordinal);
-            tracing::info!("Upscaler model unloaded: {}", self.name);
+            let free_after_drop = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
+            tracing::info!(
+                free_vram_bytes = ?free_after_drop,
+                "Upscaler model unloaded: {}",
+                self.name
+            );
         }
     }
 

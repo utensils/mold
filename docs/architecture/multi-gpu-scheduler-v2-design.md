@@ -1094,11 +1094,11 @@ Unsupported CPU placement is infeasible, not an invitation to try and OOM.
 
 ### 10.3 Reset-free CUDA reclamation
 
-Current main calls `reclaim_gpu_memory()` from worker load/unload/OOM paths,
-model management, server cleanup, memory preflight, upscaling, and LTX-2; its
-CUDA implementation invokes `cuDevicePrimaryCtxReset_v2`. Memory preflight
-also assumes a reset restores total VRAM. Those assumptions must not survive
-V2.
+The Phase B baseline called `reclaim_gpu_memory()` from worker
+load/unload/OOM paths, model management, server cleanup, memory preflight,
+upscaling, and LTX-2; its CUDA implementation invoked
+`cuDevicePrimaryCtxReset_v2`. Memory preflight also assumed a reset restored
+total VRAM. Those assumptions must not survive V2.
 
 Phase B explicitly:
 

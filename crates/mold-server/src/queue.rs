@@ -514,6 +514,9 @@ async fn upscale_generated_image_on_single_worker(
                     mold_inference::LoadStrategy::Eager,
                     0,
                 )?;
+                if let Some(mut old_engine) = cache.take() {
+                    old_engine.unload();
+                }
                 *cache = Some(new_engine);
             }
             let engine = cache.as_mut().unwrap();

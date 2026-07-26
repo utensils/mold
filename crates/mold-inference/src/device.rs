@@ -7,11 +7,8 @@ use std::collections::BTreeSet;
 // ── Thread-local GPU ordinal guard ─────────────────────────────────────────
 //
 // Each GPU worker thread is pinned to a single ordinal. We stash that ordinal
-// in a thread-local so cross-engine hotpaths (`create_device`, `reclaim_gpu_memory`)
-// can debug-assert the caller isn't drifting onto a sibling GPU's context —
-// the exact footgun that took the process down on <gpu-host> when LTX-2 had
-// `reclaim_gpu_memory(0)` hardcoded and nuked GPU 0's context while SD3.5
-// was still denoising there.
+// in a thread-local so cross-engine hotpaths can debug-assert the caller
+// isn't drifting onto a sibling GPU's context.
 //
 // Threads without a bound ordinal (tokio blocking pool, tests) see `None`
 // and the assert is skipped.
@@ -21,8 +18,8 @@ thread_local! {
 }
 
 /// Bind the current thread to a GPU ordinal. Call once from each GPU worker
-/// thread's entry point. Any subsequent `create_device` / `reclaim_gpu_memory`
-/// call on this thread must match `ordinal` (debug builds only).
+/// thread's entry point. Any subsequent device operation on this thread must
+/// match `ordinal` (debug builds only).
 pub fn init_thread_gpu_ordinal(ordinal: usize) {
     THREAD_GPU_ORDINAL.with(|c| c.set(Some(ordinal)));
 }
@@ -1117,50 +1114,6 @@ pub fn keep_te_in_ram() -> bool {
         .unwrap_or(false)
 }
 
-// ── GPU memory reclamation ───────────────────────────────────────────────────
-
-/// Reclaim GPU memory by resetting the CUDA primary context for the specified device.
-///
-/// **Must only be called when no CUDA objects (tensors, devices, engines) exist on this device.**
-/// This resets CUDA state on the specified GPU: driver context, cuBLAS workspace caches,
-/// compiled kernel modules, and memory pools. After calling this, the next
-/// `Device::new_cuda(ordinal)` will create a fresh context.
-///
-/// On non-CUDA platforms, this is a no-op.
-#[cfg(feature = "cuda")]
-pub fn reclaim_gpu_memory(ordinal: usize) {
-    use candle_core::cuda_backend::cudarc::driver::{result, sys};
-
-    debug_assert_ordinal_matches_thread(ordinal, "reclaim_gpu_memory");
-
-    // Synchronize to ensure all async GPU work completes before reset.
-    let _ = result::ctx::synchronize();
-
-    // Get the CUdevice handle for the specified GPU ordinal.
-    let cu_device = match result::device::get(ordinal as i32) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("reclaim_gpu_memory: failed to get device {ordinal}: {e}");
-            return;
-        }
-    };
-
-    // Reset the primary context — frees all allocations, destroys cuBLAS/cuDNN
-    // workspace caches, and releases compiled kernel modules.
-    let result = unsafe { sys::cuDevicePrimaryCtxReset_v2(cu_device) };
-    if result != sys::CUresult::CUDA_SUCCESS {
-        tracing::warn!(
-            "reclaim_gpu_memory: cuDevicePrimaryCtxReset for device {ordinal} returned {result:?}"
-        );
-    } else {
-        tracing::info!("CUDA primary context reset for device {ordinal}, GPU memory reclaimed");
-    }
-}
-
-/// No-op on non-CUDA platforms.
-#[cfg(not(feature = "cuda"))]
-pub fn reclaim_gpu_memory(_ordinal: usize) {}
-
 /// Best-effort CUDA device synchronize, ignoring errors.
 ///
 /// After a `CUDA_ERROR_OUT_OF_MEMORY` the CUDA context may have in-flight work
@@ -1175,14 +1128,27 @@ pub fn reclaim_gpu_memory(_ordinal: usize) {}
 ///
 /// On non-CUDA platforms this is a no-op.
 #[cfg(feature = "cuda")]
-pub fn try_synchronize_device(_ordinal: usize) {
-    use candle_core::cuda_backend::cudarc::driver::result;
-    let _ = result::ctx::synchronize();
+pub fn try_synchronize_device(ordinal: usize) {
+    debug_assert_ordinal_matches_thread(ordinal, "try_synchronize_device");
+    if let Ok(context) = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal) {
+        let _ = context.synchronize();
+    }
 }
 
 /// No-op on non-CUDA platforms.
 #[cfg(not(feature = "cuda"))]
 pub fn try_synchronize_device(_ordinal: usize) {}
+
+/// Synchronize pending work after device-backed values have been dropped, then
+/// return the actual reserve-adjusted free VRAM reported by the driver.
+///
+/// Dropping Mold-owned objects does not imply that nominal total VRAM is
+/// available: driver workspaces, fragmentation, and external allocations
+/// remain unavailable pressure and are preserved in this measurement.
+pub fn post_drop_free_vram_bytes(ordinal: usize) -> Option<u64> {
+    try_synchronize_device(ordinal);
+    usable_free_vram_bytes(ordinal)
+}
 
 // ── VRAM query ───────────────────────────────────────────────────────────────
 
@@ -1291,10 +1257,10 @@ pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
 
 /// Total VRAM (bytes) physically present on the specified GPU ordinal.
 ///
-/// Used by the preflight memory guard to budget against the post-reclaim
-/// state: when an existing model is about to be unloaded and the CUDA
-/// primary context reset, the *entire* device returns to the OS, so the
-/// realistic upper bound is total VRAM, not `free + active_vram`.
+/// This is inventory/telemetry capacity, not an allocation promise. Memory
+/// admission must use the current free reading because driver workspaces,
+/// fragmentation, retained handles, and external processes may consume part
+/// of the total.
 ///
 /// Returns `None` when the device cannot be queried (CUDA disabled, ordinal
 /// out of range, driver error). Callers should fall back to a less generous

@@ -20,13 +20,13 @@ pub fn spawn_gpu_thread(
     worker: Arc<GpuWorker>,
     job_rx: std::sync::mpsc::Receiver<GpuJob>,
     scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    cache_idle_ttl: Duration,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("gpu-worker-{}", worker.gpu.ordinal))
         .spawn(move || {
-            // Bind this thread to its GPU ordinal so `create_device` /
-            // `reclaim_gpu_memory` can debug-assert callers don't drift onto
-            // a sibling GPU's context. See device::init_thread_gpu_ordinal.
+            // Bind this thread to its GPU ordinal so device operations can
+            // debug-assert callers don't drift onto a sibling GPU's context.
             mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
             tracing::info!(
                 gpu = worker.gpu.ordinal,
@@ -35,7 +35,7 @@ pub fn spawn_gpu_thread(
             );
             let device_id = crate::scheduler::worker_device_id(&worker);
             let mut generation = 1_u64;
-            loop {
+            'owner: loop {
                 if scheduler_tx
                     .send(crate::scheduler::WorkerEvent::Ready {
                         device_id: device_id.clone(),
@@ -46,8 +46,14 @@ pub fn spawn_gpu_thread(
                 {
                     break;
                 }
-                let Ok(job) = job_rx.recv() else {
-                    break;
+                let job = loop {
+                    match job_rx.recv_timeout(Duration::from_secs(60)) {
+                        Ok(job) => break job,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            evict_idle_on_worker(&worker, cache_idle_ttl);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'owner,
+                    }
                 };
                 if let Some(fence) = job.lease.as_ref() {
                     if fence.device_id != device_id || fence.worker_generation != generation {
@@ -96,6 +102,36 @@ pub fn spawn_gpu_thread(
             tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
         })
         .expect("failed to spawn GPU worker thread")
+}
+
+/// Evict parked engines on the worker thread that owns their device context.
+///
+/// Engine destruction may call into CUDA while releasing tensors and library
+/// workspaces, so returning the boxes to an async maintenance task is not safe.
+fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
+    let _load_guard = worker
+        .model_load_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let evicted = {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.evict_idle(ttl)
+    };
+    if evicted.is_empty() {
+        return;
+    }
+    let count = evicted.len();
+    drop(evicted);
+    let free_after_drop = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        count,
+        free_vram_bytes = ?free_after_drop,
+        "evicted idle model cache entries on owning GPU worker"
+    );
 }
 
 /// Convert an inference-crate progress event to an SSE wire event.
@@ -303,10 +339,18 @@ fn upscale_generated_image_on_worker(
             mold_core::build_info::version_string(),
         )),
     };
-    let upscaled = engine
-        .upscale(&req)
-        .map_err(|e| format!("upscale failed: {e}"))?;
+    let upscale_result = engine.upscale(&req);
     engine.clear_on_progress();
+    let fatal_cuda = upscale_result
+        .as_ref()
+        .err()
+        .is_some_and(is_fatal_cuda_error);
+    if fatal_cuda {
+        quarantine_poisoned_worker(worker);
+    } else {
+        engine.unload();
+    }
+    let upscaled = upscale_result.map_err(|e| format!("upscale failed: {e}"))?;
     apply_upscale_response_to_image_generation(&job.request, response, img, upscaled)
         .map_err(|e| format!("upscale failed: {e}"))
 }
@@ -662,6 +706,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     if upscale_result
                         .as_ref()
                         .is_err_and(|error| has_fatal_cuda_error(error))
+                        && !worker.poisoned.load(Ordering::SeqCst)
                     {
                         quarantine_poisoned_worker(worker);
                     }
@@ -802,13 +847,13 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 ///
 /// Wraps `model_manager::preflight_memory_guard`. On a budget failure, drops
 /// the LRU parked entry (skipping `model_name` so a parked-reload doesn't
-/// evict its own target), reclaims the GPU's CUDA pool when no engine remains
-/// resident, and retries. Loops until the preflight passes or the cache has
+/// evict its own target), samples the resulting pressure, and retries. Loops
+/// until the preflight passes or the cache has
 /// no parked entries left to surrender — at which point the original
 /// insufficient-memory error is returned.
 ///
-/// Holds the cache lock only for the brief eviction step; the engine drop and
-/// `reclaim_gpu_memory` run outside it. The caller is expected to hold
+/// Holds the cache lock only for the brief eviction step; the engine drop runs
+/// outside it. The caller is expected to hold
 /// `worker.model_load_lock`, which keeps a concurrent generation from slotting
 /// a fresh load into the context between our reclaim and the actual load.
 fn preflight_memory_guard_with_eviction(
@@ -851,19 +896,7 @@ fn preflight_memory_guard_with_eviction(
         // can block other cache users during the drop.
         drop(engine);
 
-        // Reclaim only when no GPU-resident engine remains. The parked-reload
-        // case has the active model still on GPU at preflight time, so we can
-        // free CPU caches via the eviction but must not nuke the primary
-        // context. The fresh-load case usually has no active model when this
-        // is hit, so the reclaim can run.
-        let safe_to_reclaim = cache_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .active_model()
-            .is_none();
-        if safe_to_reclaim {
-            device::reclaim_gpu_memory(ordinal);
-        }
+        let _ = device::post_drop_free_vram_bytes(ordinal);
     }
 }
 
@@ -959,11 +992,6 @@ fn ensure_model_ready_sync_inner(
     drop(cache);
 
     if has_cached {
-        let load_strategy = cached_paths
-            .as_ref()
-            .map(|paths| select_load_strategy_for_worker(worker, model_name, paths, hint))
-            .unwrap_or(mold_inference::LoadStrategy::Eager);
-
         // Preflight before unloading the active model — the active model's
         // footprint counts toward effective availability since we're about
         // to free it. On budget failure, evict-to-fit drops parked entries
@@ -986,7 +1014,21 @@ fn ensure_model_ready_sync_inner(
                 worker.set_resident_model(None);
             }
         }
-        device::reclaim_gpu_memory(worker.gpu.ordinal);
+        if let Some(ref paths) = cached_paths {
+            crate::memory_preflight::preflight_memory_guard_after_drop(
+                model_name,
+                paths,
+                worker.gpu.ordinal,
+                hint,
+            )
+            .map_err(|e| anyhow::anyhow!(e.error))?;
+        } else {
+            let _ = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
+        }
+        let load_strategy = cached_paths
+            .as_ref()
+            .map(|paths| select_load_strategy_for_worker(worker, model_name, paths, hint))
+            .unwrap_or(mold_inference::LoadStrategy::Eager);
 
         if load_strategy == mold_inference::LoadStrategy::Sequential {
             let paths = cached_paths.ok_or_else(|| {
@@ -1129,8 +1171,6 @@ fn ensure_model_ready_sync_inner(
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
 
-    let load_strategy = select_load_strategy_for_worker(worker, model_name, &paths, hint);
-
     // Unload active model first.
     {
         let mut cache = worker.model_cache.lock().unwrap();
@@ -1138,7 +1178,14 @@ fn ensure_model_ready_sync_inner(
             worker.set_resident_model(None);
         }
     }
-    device::reclaim_gpu_memory(worker.gpu.ordinal);
+    crate::memory_preflight::preflight_memory_guard_after_drop(
+        model_name,
+        &paths,
+        worker.gpu.ordinal,
+        hint,
+    )
+    .map_err(|e| anyhow::anyhow!(e.error))?;
+    let load_strategy = select_load_strategy_for_worker(worker, model_name, &paths, hint);
 
     let offload =
         crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora);
@@ -1208,7 +1255,12 @@ pub fn unload_blocking(worker: &GpuWorker) -> Option<String> {
     };
     if unloaded.is_some() {
         worker.set_resident_model(None);
-        device::reclaim_gpu_memory(worker.gpu.ordinal);
+        let free_after_drop = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
+        tracing::info!(
+            gpu = worker.gpu.ordinal,
+            free_vram_bytes = ?free_after_drop,
+            "model unloaded; sampled post-drop VRAM"
+        );
     }
     unloaded
 }
@@ -1240,8 +1292,8 @@ pub type ChainPrep<T, E> = Result<Result<T, E>, anyhow::Error>;
 /// Run a blocking chain operation on a specific GPU worker.
 ///
 /// Acquires `worker.model_load_lock` for the full duration, binds the current
-/// thread to `worker.gpu.ordinal` (so `reclaim_gpu_memory` debug asserts are
-/// satisfied), ensures the model is loaded on GPU, takes the engine out of
+/// thread to `worker.gpu.ordinal`, ensures the model is loaded on GPU, takes
+/// the engine out of
 /// the worker's cache, passes it to `with_engine`, and restores the engine
 /// unconditionally on both success and closure failure.
 ///
@@ -1263,10 +1315,8 @@ pub fn run_chain_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
     hint: Option<crate::model_manager::ActivationHint>,
     with_engine: impl FnOnce(&mut dyn mold_inference::InferenceEngine) -> Result<T, E>,
 ) -> ChainPrep<T, E> {
-    // Bind the thread to this worker's ordinal for the duration of the call.
-    // `reclaim_gpu_memory` inside ensure_model_ready_sync debug-asserts this
-    // matches its ordinal argument; without it, a stray caller on an unbound
-    // thread would panic in debug builds.
+    // Bind the thread to this worker's ordinal for the duration of the call so
+    // synchronization and memory sampling cannot target a sibling context.
     struct ThreadGpuGuard;
     impl Drop for ThreadGpuGuard {
         fn drop(&mut self) {
@@ -1423,6 +1473,37 @@ mod tests {
         }
     }
 
+    struct DropRecordingEngine {
+        name: String,
+        dropped_on: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Drop for DropRecordingEngine {
+        fn drop(&mut self) {
+            if let Ok(mut dropped_on) = self.dropped_on.lock() {
+                *dropped_on = std::thread::current().name().map(str::to_string);
+            }
+        }
+    }
+
+    impl InferenceEngine for DropRecordingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("drop-order test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            false
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
         let mut cache = ModelCache::new(3);
@@ -1524,7 +1605,7 @@ mod tests {
             job_tx,
         });
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx);
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
         let ready = event_rx.blocking_recv().expect("initial Ready event");
         assert!(matches!(
             ready,
@@ -1586,6 +1667,40 @@ mod tests {
         handle
             .join()
             .expect("worker exits when coordinator is gone");
+    }
+
+    #[test]
+    fn idle_eviction_drops_engine_on_assigned_worker_thread() {
+        let dropped_on = Arc::new(Mutex::new(None));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert(
+                Box::new(DropRecordingEngine {
+                    name: "evict-me".to_string(),
+                    dropped_on: dropped_on.clone(),
+                }),
+                0,
+            );
+            // Refresh the original entry's timestamp so the recording engine
+            // is the older parked entry selected once the TTL has elapsed.
+            let mut keep_one = cache.take("keep-one").unwrap();
+            keep_one.last_used = Instant::now();
+            cache.restore(keep_one);
+        }
+
+        let worker_for_thread = worker.clone();
+        std::thread::Builder::new()
+            .name("gpu-worker-test".to_string())
+            .spawn(move || evict_idle_on_worker(&worker_for_thread, Duration::ZERO))
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(
+            dropped_on.lock().unwrap().as_deref(),
+            Some("gpu-worker-test")
+        );
     }
 
     #[test]

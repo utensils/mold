@@ -425,20 +425,19 @@ fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool 
 
 /// Check whether estimated peak memory fits before committing to a model load.
 ///
-/// Budgeting strategy on CUDA:
-/// - **No active model on this GPU** — the new load lands in whatever is
-///   currently free, so use `free_vram_bytes(gpu_ordinal)`.
-/// - **Active model present** — the call site unloads it and runs
-///   `cuDevicePrimaryCtxReset_v2`, which releases *every* allocation on the
-///   device (transformer, leftover activation buffers, fragmentation in the
-///   caching pool). The realistic post-reclaim budget is total VRAM, not
-///   `free + recorded active_vram`. Using the latter under-counts whatever
-///   the cache forgot to track (notably the encoder churn during the
-///   previous generation) and produces false rejections.
+/// CUDA uses the current reserve-adjusted free reading plus only the active
+/// model footprint that the caller is about to drop. Driver workspaces,
+/// allocator fragmentation, retained live handles, and external allocations
+/// are deliberately not promoted back to total capacity.
 ///
-/// On macOS (unified memory) we keep the additive `available + active_vram`
-/// budget because Metal has no equivalent device-wide context reset; tensors
-/// freed during `unload()` simply return to the system page cache.
+/// Callers perform a second guard with an actual post-drop sample before
+/// allocating the replacement model. The first pass preserves the old model
+/// when the request is obviously infeasible; the second catches an optimistic
+/// recorded footprint or unrecovered "ghost" VRAM.
+///
+/// On macOS (unified memory) the same additive `available + active_vram`
+/// budget applies because tensors freed during `unload()` return to the
+/// system page cache.
 /// On other platforms with no memory query available, the guard is a no-op.
 pub(crate) fn preflight_memory_guard(
     model_name: &str,
@@ -447,56 +446,14 @@ pub(crate) fn preflight_memory_guard(
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
-    // CUDA branch: when an active model will be reclaimed via primary-context
-    // reset, the post-reclaim budget is the device total, not free+active.
     #[cfg(feature = "cuda")]
     {
-        if active_vram_bytes > 0 {
-            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return preflight_memory_guard_with_available(model_name, paths, 0, total, hint);
-            }
-        }
-        // Ghost-VRAM case: no active model in our cache, but the device
-        // reports `free` significantly below `total` because cuBLAS / cuDNN /
-        // kernel modules from a previous load are still squatting on
-        // workspace allocations. Reclaim the primary context — we have
-        // nothing live to lose — and re-query before deciding. After reclaim,
-        // re-query through `usable_free_vram_bytes` so the OS reserve
-        // (T2-B) is respected on the post-reclaim reading too.
-        if let (Some(free), Some(total)) = (
-            mold_inference::device::free_vram_bytes(gpu_ordinal),
-            mold_inference::device::total_vram_bytes(gpu_ordinal),
-        ) {
-            const GHOST_VRAM_THRESHOLD: u64 = 1_500_000_000; // 1.5 GB
-            if total.saturating_sub(free) > GHOST_VRAM_THRESHOLD {
-                tracing::info!(
-                    gpu = gpu_ordinal,
-                    free_gb = format_args!("{:.1}", free as f64 / 1e9),
-                    total_gb = format_args!("{:.1}", total as f64 / 1e9),
-                    "no active model on this GPU but VRAM is held — reclaiming primary context",
-                );
-                mold_inference::device::reclaim_gpu_memory(gpu_ordinal);
-            }
-            let effective_free = mold_inference::device::usable_free_vram_bytes(gpu_ordinal)
-                .unwrap_or_else(|| {
-                    free.saturating_sub(mold_inference::device::reserved_vram_bytes())
-                });
+        if let Some(effective_free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
             return preflight_memory_guard_with_available(
                 model_name,
                 paths,
                 active_vram_bytes,
                 effective_free,
-                hint,
-            );
-        }
-        // Fallback if total_vram is unavailable: still go through the
-        // reserve-adjusted reading.
-        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                free,
                 hint,
             );
         }
@@ -519,25 +476,38 @@ pub(crate) fn preflight_memory_guard(
     Ok(())
 }
 
+/// Re-check a load against the driver's actual free-memory reading after the
+/// previous engine and all of its device-backed state have been dropped.
+///
+/// This is the authoritative swap gate. It intentionally passes no
+/// reclaimable active footprint: anything the driver still reports as used is
+/// unavailable pressure, regardless of whether Mold expected the drop to
+/// release it.
+pub(crate) fn preflight_memory_guard_after_drop(
+    model_name: &str,
+    paths: &ModelPaths,
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
+    if let Some(available) = mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal) {
+        return preflight_memory_guard_with_available(model_name, paths, 0, available, hint);
+    }
+    Ok(())
+}
+
 /// Effective memory budget to use when deciding whether a server engine can
 /// stay eager-loaded or should degrade to load-use-drop sequential mode.
 ///
-/// This mirrors the budget shape in [`preflight_memory_guard`]: CUDA swaps can
-/// reclaim the whole primary context when an active model exists, while Metal
-/// uses unified system memory and adds the active footprint as reclaimable.
+/// This mirrors the budget shape in [`preflight_memory_guard`]: current free
+/// memory plus the explicitly tracked active footprint that will be dropped.
 pub(crate) fn effective_load_available_bytes(
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
 ) -> Option<u64> {
     #[cfg(feature = "cuda")]
     {
-        if active_vram_bytes > 0 {
-            if let Some(total) = mold_inference::device::total_vram_bytes(gpu_ordinal) {
-                return Some(total);
-            }
-        }
         if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return Some(free);
+            return Some(free.saturating_add(active_vram_bytes));
         }
     }
 
