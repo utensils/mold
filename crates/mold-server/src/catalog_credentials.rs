@@ -185,6 +185,8 @@ fn mask_token(token: &str) -> String {
 }
 
 fn state(stored: Option<&str>, environment: Option<&str>) -> CatalogCredentialState {
+    let stored = stored.map(str::trim).filter(|value| !value.is_empty());
+    let environment = environment.map(str::trim).filter(|value| !value.is_empty());
     let (token, source) = if let Some(token) = stored {
         (Some(token), Some("server"))
     } else if let Some(token) = environment {
@@ -375,6 +377,17 @@ mod tests {
         assert_eq!(status.hf.masked.as_deref(), Some("••••v-hf"));
         assert_eq!(status.civitai.source, Some("environment"));
         assert_eq!(status.civitai.masked.as_deref(), Some("••••v-cv"));
+    }
+
+    #[test]
+    fn whitespace_only_saved_value_reports_the_environment_fallback() {
+        let credentials = CatalogCredentials {
+            hf_token: Some("  ".into()),
+            civitai_token: None,
+        };
+        let status = credential_status(&credentials, Some("env-hf"), None);
+        assert_eq!(status.hf.source, Some("environment"));
+        assert_eq!(status.hf.masked.as_deref(), Some("••••v-hf"));
     }
 
     #[test]
