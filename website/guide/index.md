@@ -1,7 +1,14 @@
 # Getting Started
 
-mold is a single-binary CLI for generating AI images on your own GPU. No cloud
-APIs, no Python environment, no heavyweight dependencies.
+mold began as a single-binary command-line tool for generating AI images and
+video on your own GPU, and it remains **CLI-native**. No cloud API, Python
+environment, or heavyweight runtime is required.
+
+The command line is the stable product foundation: core workflows accept
+predictable arguments, stdin, files, and environment variables; return useful
+stdout, stderr, exit status, and machine-readable output; and work the same for
+a person, shell script, CI job, or agent. Desktop, web, TUI, iPhone, REST/SSE,
+and MCP clients extend that engine rather than hiding it.
 
 ## How It Works
 
@@ -22,6 +29,24 @@ available, it falls back to local GPU inference — auto-downloading the model i
 needed.
 
 ![Tea house — generated with FLUX Dev Q4](/gallery/flux-dev-teahouse.png)
+
+## Built for automation
+
+Mold composes with ordinary Unix tools:
+
+```bash
+# Prompt on stdin, image bytes on stdout
+echo "a cinematic city at night" | mold run flux-schnell | viu -
+
+# Reproducible batch work from a script or CI job
+mold run flux-dev:q4 "product photo" --seed 42 --output artifact.png
+
+# Point the same CLI or an agent at a remote GPU
+MOLD_HOST=http://gpu-server:7680 mold run "a storyboard frame"
+```
+
+For tool-calling agents, use `mold mcp`, the
+[OpenClaw skill](/guide/openclaw), or the documented [REST/SSE API](/api/).
 
 ## Quick Start
 

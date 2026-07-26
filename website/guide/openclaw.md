@@ -1,8 +1,10 @@
 # OpenClaw
 
 [OpenClaw](https://docs.openclaw.ai) is an agentic coding assistant and runtime
-that can load workspace-specific skills. mold can be exposed to it as a skill so
-agent flows can generate images through your local or remote mold server.
+that can load workspace-specific skills. Mold's CLI-native interface makes it a
+natural agent tool: commands remain inspectable and reproducible outside the
+agent, while the same local or remote engine is also available through MCP and
+REST/SSE.
 
 ## How It Fits Together
 

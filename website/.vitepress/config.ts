@@ -4,7 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   title: 'mold',
   description:
-    'Local AI image and video generation CLI — FLUX, SD3.5, SD 1.5, SDXL, Z-Image, Flux.2, Qwen-Image, LTX Video, and LTX-2 on your GPU',
+    'CLI-native local AI image and video generation for people, scripts, and agents — CUDA, Metal, desktop, web, REST, SSE, and MCP',
   base: '/mold/',
 
   vite: {

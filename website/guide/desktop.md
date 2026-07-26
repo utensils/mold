@@ -18,6 +18,11 @@ The desktop app lives in `desktop/`. Local generation uses Metal on Apple
 Silicon and CUDA on x86_64 Linux.
 :::
 
+![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)
+
+_Mold Studio's Create workspace keeps the canvas, prompt, model-aware controls,
+machine status, and live generation progress in one native window._
+
 ## Download
 
 Every tagged release ships a signed, notarized, stapled DMG:
