@@ -1082,8 +1082,13 @@ async function onSubmitScript(script: ChainScriptToml) {
     }
     const { job_id } = await createChainJob(req, route.target);
     submittedChainJobHostId.value = route.hostId;
-    localStorage.setItem(CHAIN_JOB_HOST_STORAGE_KEY, route.hostId);
     submittedChainJobId.value = job_id;
+    try {
+      localStorage.setItem(CHAIN_JOB_HOST_STORAGE_KEY, route.hostId);
+    } catch {
+      // The durable job is already running. Storage is recovery convenience,
+      // not part of submission success.
+    }
   } catch (e) {
     composerError.value = e instanceof Error ? e.message : String(e);
   }

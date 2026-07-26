@@ -31,6 +31,12 @@ const resumable = computed(() =>
 const dismissible = computed(() =>
   ["completed", "failed", "cancelled"].includes(props.job.state),
 );
+let previewJobKey = "";
+
+function clearPreviews() {
+  for (const url of Object.values(previewUrls.value)) URL.revokeObjectURL(url);
+  previewUrls.value = {};
+}
 
 watch(
   () => props.job.state,
@@ -42,11 +48,25 @@ watch(
 
 watch(
   () =>
-    props.job.stages
-      .filter((stage) => stage.has_preview)
-      .map((stage) => stage.idx)
-      .join(","),
+    [
+      props.job.id,
+      props.target?.baseUrl ?? "",
+      props.target?.apiKey ?? "",
+      props.job.stages
+        .filter((stage) => stage.has_preview)
+        .map((stage) => stage.idx)
+        .join(","),
+    ].join(":"),
   () => {
+    const nextJobKey = [
+      props.job.id,
+      props.target?.baseUrl ?? "",
+      props.target?.apiKey ?? "",
+    ].join(":");
+    if (previewJobKey !== nextJobKey) {
+      clearPreviews();
+      previewJobKey = nextJobKey;
+    }
     for (const stage of props.job.stages) {
       if (!stage.has_preview || previewUrls.value[stage.idx]) continue;
       const headers = props.target?.apiKey
@@ -71,7 +91,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
-  for (const url of Object.values(previewUrls.value)) URL.revokeObjectURL(url);
+  clearPreviews();
 });
 
 function errorMessage(error: unknown): string {

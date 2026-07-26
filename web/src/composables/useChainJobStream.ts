@@ -15,14 +15,11 @@ export function useChainJobStream(
   const detail = ref<ChainJobDetail | null>(null);
   const connected = ref(false);
   let abort: AbortController | null = null;
-  let reconnectTimer: number | null = null;
   let pollTimer: number | null = null;
   let stopped = false;
 
   function clearTimers() {
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
     if (pollTimer !== null) window.clearTimeout(pollTimer);
-    reconnectTimer = null;
     pollTimer = null;
   }
 
@@ -79,11 +76,10 @@ export function useChainJobStream(
     }
   }
 
-  function scheduleReconnect(id: string) {
+  function schedulePoll(id: string) {
     if (stopped) return;
-    clearTimers();
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
     pollTimer = window.setTimeout(() => void pollOnce(id), 250);
-    reconnectTimer = window.setTimeout(() => connect(id), 1_000);
   }
 
   function connect(id: string) {
@@ -110,13 +106,19 @@ export function useChainJobStream(
         }
       },
       onclose: () => {
-        if (!controller.signal.aborted) scheduleReconnect(id);
+        connected.value = false;
+        if (!controller.signal.aborted)
+          throw new Error("Sequence event stream closed.");
       },
       onerror: () => {
-        if (!controller.signal.aborted) scheduleReconnect(id);
+        connected.value = false;
+        if (!controller.signal.aborted) {
+          schedulePoll(id);
+          return 1_000;
+        }
       },
     }).catch(() => {
-      if (!controller.signal.aborted) scheduleReconnect(id);
+      connected.value = false;
     });
   }
 

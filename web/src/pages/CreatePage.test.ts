@@ -595,6 +595,49 @@ describe("CreatePage layout and behavior", () => {
     expect(submitMock).not.toHaveBeenCalled();
   });
 
+  it("keeps a successfully submitted Sequence job when host persistence fails", async () => {
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const seqButton = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((button) => button.text() === "Sequence")!;
+    await seqButton.trigger("click");
+    const setItem = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(function (this: Storage, key, value) {
+        if (key === "mold.create.chain-job-host")
+          throw new DOMException("blocked", "QuotaExceededError");
+        return Reflect.apply(
+          Object.getOwnPropertyDescriptor(Storage.prototype, "setItem")!.value,
+          this,
+          [key, value],
+        );
+      });
+
+    wrapper.getComponent({ name: "ScriptComposer" }).vm.$emit("submit", {
+      chain: {
+        model: "ltx-2-19b-distilled:fp8",
+        width: 64,
+        height: 64,
+        fps: 12,
+        seed: 42,
+        steps: 4,
+        guidance: 3,
+        strength: 1,
+        output_format: "mp4",
+        motion_tail_frames: 0,
+      },
+      stage: [{ prompt: "stage zero", frames: 9, transition: "cut" }],
+    });
+    await flushPromises();
+
+    expect(createChainJobMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("mold.create.chain-job")).toBe("job-1");
+    setItem.mockRestore();
+  });
+
   it("explains Sequence for a non-chain model instead of a dead composer", async () => {
     useGenerateForm().state.value.modelFamily = "flux2";
     useGenerateForm().state.value.model = "flux2-klein:q4";
