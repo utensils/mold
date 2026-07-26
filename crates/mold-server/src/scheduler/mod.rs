@@ -2101,6 +2101,58 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_ledger_change_rejects_the_entire_matching_without_partial_reservations() {
+        let mut ledger = HostMemoryLedger::new();
+        let initial = ledger.begin_collection();
+        ledger.publish_sample(initial, 48 << 30, 40 << 30);
+        let planner = Planner::default();
+        let mut snapshot = PlannerSnapshot::new(
+            3,
+            9,
+            0,
+            ledger.headroom_bytes(),
+            vec![
+                DeviceSnapshot::idle("gpu-a", 24 << 30),
+                DeviceSnapshot::idle("gpu-b", 24 << 30),
+            ],
+            vec![
+                WorkSnapshot::new(
+                    "work-a",
+                    0,
+                    vec![CandidatePlacement::new("gpu-a", "model", 8 << 30)],
+                ),
+                WorkSnapshot::new(
+                    "work-b",
+                    1,
+                    vec![CandidatePlacement::new("gpu-b", "model", 8 << 30)],
+                ),
+            ],
+        );
+        snapshot.host_memory = ledger.snapshot();
+        let stale_plan = planner.plan(&snapshot).expect("valid two-lease plan");
+        assert_eq!(stale_plan.immediate_leases.len(), 2);
+        assert_eq!(stale_plan.reservation.items.len(), 2);
+
+        let raced_collection = ledger.begin_collection();
+        assert_eq!(
+            ledger.try_reserve(&stale_plan, 3, 9),
+            Err(GrantFenceError::StalePlan)
+        );
+        assert!(
+            ledger.reservations.is_empty(),
+            "a stale aggregate reservation must insert neither item"
+        );
+
+        ledger.publish_sample(raced_collection, 48 << 30, 40 << 30);
+        snapshot.host_memory = ledger.snapshot();
+        let fresh_plan = planner.plan(&snapshot).expect("fresh two-lease plan");
+        ledger
+            .try_reserve(&fresh_plan, 3, 9)
+            .expect("fresh aggregate reservation");
+        assert_eq!(ledger.reservations.len(), 2);
+    }
+
+    #[test]
     fn stale_ready_generation_and_duplicate_device_lease_are_rejected() {
         let ready = BTreeMap::from([(
             "gpu-a".to_string(),

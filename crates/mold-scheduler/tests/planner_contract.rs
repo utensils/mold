@@ -87,7 +87,12 @@ fn globally_rematches_a_flexible_job_around_a_specialist() {
                     0,
                     vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
                 ),
-                work("younger-specialist", 1, vec![candidate("gpu-0", 1)]),
+                work(
+                    "younger-hard-pinned",
+                    1,
+                    vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
+                )
+                .with_hard_device("gpu-0"),
             ],
             8,
         ))
@@ -97,9 +102,34 @@ fn globally_rematches_a_flexible_job_around_a_specialist() {
         assignments(&plan),
         BTreeMap::from([
             ("older-flexible".into(), "gpu-1".into()),
-            ("younger-specialist".into(), "gpu-0".into()),
+            ("younger-hard-pinned".into(), "gpu-0".into()),
         ])
     );
+}
+
+#[test]
+fn sixty_four_way_rematching_preserves_a_late_hard_pin_and_full_cardinality() {
+    let devices = (0..64)
+        .map(|index| device(&format!("gpu-{index:02}")))
+        .collect::<Vec<_>>();
+    let all_candidates = || {
+        (0..64)
+            .map(|index| candidate(&format!("gpu-{index:02}"), 0))
+            .collect::<Vec<_>>()
+    };
+    let mut jobs = (0..63)
+        .map(|index| work(&format!("flex-{index:02}"), index, all_candidates()))
+        .collect::<Vec<_>>();
+    jobs.push(work("late-hard-pin", 63, all_candidates()).with_hard_device("gpu-00"));
+
+    let plan = Planner::default()
+        .plan(&snapshot(devices, jobs, 128))
+        .expect("valid plan");
+    let assigned = assignments(&plan);
+
+    assert_eq!(assigned.len(), 64);
+    assert_eq!(assigned["late-hard-pin"], "gpu-00");
+    assert_eq!(assigned.values().collect::<BTreeSet<_>>().len(), 64);
 }
 
 #[test]
@@ -229,12 +259,18 @@ fn priority_does_not_replace_an_older_eight_gib_job_with_two_younger_four_gib_jo
                     vec![candidate("gpu-0", 4), candidate("gpu-1", 4)],
                 ),
             ],
-            8,
+            12,
         ))
         .expect("valid plan");
 
-    assert_eq!(plan.immediate_leases.len(), 1);
+    assert_eq!(plan.immediate_leases.len(), 2);
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "older-8");
+    assert_eq!(plan.immediate_leases[1].work_id.as_str(), "younger-4-a");
+    assert_eq!(plan.reservation.total_host_ram_bytes, 12 * GIB);
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("younger-4-b")),
+        Some(&BlockedReason::LowerPriorityOpening)
+    );
 }
 
 #[test]
@@ -432,6 +468,81 @@ fn input_and_index_mutation_order_do_not_change_the_plan() {
         planner.plan_with_index(&forward, &index_a),
         planner.plan_with_index(&forward, &index_b)
     );
+}
+
+#[test]
+fn incrementally_mutated_index_equals_full_recomputation_across_mixed_facts() {
+    let mut devices = (0..8)
+        .map(|index| device(&format!("gpu-{index}")))
+        .collect::<Vec<_>>();
+    let mut jobs = (0..48)
+        .map(|work_index| {
+            work(
+                &format!("work-{work_index:02}"),
+                work_index,
+                (0..8)
+                    .filter(|device_index| (work_index + device_index) % 3 != 0)
+                    .map(|device_index| {
+                        candidate(&format!("gpu-{device_index}"), (work_index % 4) + 1)
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut state_version = 1;
+    let mut index = EligibilityIndex::from_work(state_version, &jobs);
+    let planner = Planner::default();
+
+    for turn in 0..192 {
+        let work_index = (turn * 17 + 5) % jobs.len();
+        let device_index = (turn * 29 + 3) % devices.len();
+        let job_count = jobs.len();
+        state_version += 1;
+
+        let item = &mut jobs[work_index];
+        item.queue_rank = ((turn * 11) % job_count) as u64;
+        item.priority_class = match turn % 5 {
+            0 => PriorityClass::Critical,
+            1 => PriorityClass::Admin,
+            _ => PriorityClass::User,
+        };
+        item.hard_device_id =
+            (turn % 7 == 0).then(|| mold_scheduler::DeviceId::new(format!("gpu-{device_index}")));
+        item.candidate_placements = (0..8)
+            .filter(|candidate_index| (candidate_index + work_index + turn) % ((turn % 4) + 2) != 0)
+            .map(|candidate_index| {
+                candidate(
+                    &format!("gpu-{candidate_index}"),
+                    ((turn + candidate_index) % 6) as u64,
+                )
+                .with_vram((((turn + candidate_index) % 4) as u64 + 1) * 6 * GIB)
+            })
+            .rev()
+            .collect();
+        index.upsert_work(state_version, item);
+
+        let changed_device = &mut devices[device_index];
+        changed_device.available_vram_bytes = (((turn + device_index) % 4) as u64 + 1) * 6 * GIB;
+        changed_device.health = if turn % 31 == 0 {
+            DeviceHealth::Degraded
+        } else {
+            DeviceHealth::Healthy
+        };
+        let input = PlannerSnapshot::new(
+            state_version,
+            turn as u64 + 1,
+            turn as u64 * 10,
+            (((turn % 10) + 1) as u64) * 8 * GIB,
+            devices.clone(),
+            jobs.clone(),
+        );
+
+        assert_eq!(
+            planner.plan_with_index(&input, &index),
+            planner.plan(&input),
+            "incremental index diverged after reducer turn {turn}"
+        );
+    }
 }
 
 #[test]
@@ -884,7 +995,8 @@ fn watchdog_returns_the_same_priority_cardinality_preserving_seed_every_time() {
                 0,
                 vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
             ),
-            work("pin", 1, vec![candidate("gpu-0", 1)]),
+            work("pin", 1, vec![candidate("gpu-0", 1), candidate("gpu-1", 1)])
+                .with_hard_device("gpu-0"),
             work(
                 "later",
                 2,
@@ -910,6 +1022,29 @@ fn watchdog_returns_the_same_priority_cardinality_preserving_seed_every_time() {
     assert_eq!(watchdog.optimizer_state, OptimizerState::WatchdogFallback);
     assert_eq!(watchdog.immediate_leases.len(), 2);
     assert_eq!(watchdog.operations_evaluated, 0);
+    assert_eq!(
+        assignments(&watchdog),
+        BTreeMap::from([
+            ("flex".into(), "gpu-1".into()),
+            ("pin".into(), "gpu-0".into()),
+        ])
+    );
+    let optimized = Planner::default()
+        .plan(&input)
+        .expect("valid optimized plan");
+    assert_eq!(watchdog.immediate_leases, optimized.immediate_leases);
+    assert_eq!(watchdog.reservation, optimized.reservation);
+
+    let mut permuted = input.clone();
+    permuted.devices.reverse();
+    permuted.work.reverse();
+    let permuted_watchdog = Planner::new(PlannerConfig {
+        mode: PlanningMode::WatchdogFallback,
+        ..PlannerConfig::default()
+    })
+    .plan(&permuted)
+    .expect("valid permuted watchdog plan");
+    assert_eq!(watchdog, permuted_watchdog);
 }
 
 #[test]
@@ -1048,45 +1183,52 @@ fn exhaustive_priority_cardinality(jobs: &[WorkSnapshot], device_count: usize) -
     selected.len()
 }
 
+fn benchmark_input(device_count: usize, ready_count: usize) -> PlannerSnapshot {
+    let devices = (0..device_count)
+        .map(|index| device(&format!("gpu-{index:03}")))
+        .collect::<Vec<_>>();
+    let jobs = (0..ready_count)
+        .map(|index| {
+            let candidates = (0..device_count)
+                .map(|device_index| candidate(&format!("gpu-{device_index:03}"), 0))
+                .collect();
+            work(&format!("work-{index:05}"), index as u64, candidates)
+        })
+        .collect::<Vec<_>>();
+    snapshot(devices, jobs, 128)
+}
+
+fn percentile_95(samples: &mut [std::time::Duration]) -> std::time::Duration {
+    samples.sort_unstable();
+    samples[(samples.len() * 95).div_ceil(100).saturating_sub(1)]
+}
+
 #[test]
-#[ignore = "deterministic large-queue harness; latency is measured on pinned hardware"]
-fn deterministic_two_hundred_and_ten_thousand_ready_harness() {
+#[ignore = "local immediate-dispatch benchmark; run on pinned hardware, never a CI timing gate"]
+fn local_immediate_dispatch_benchmark_harness() {
     for (device_count, ready_count) in [(8, 200), (64, 200), (8, 10_000), (64, 10_000)] {
-        let devices = (0..device_count)
-            .map(|index| device(&format!("gpu-{index:03}")))
-            .collect::<Vec<_>>();
-        let jobs = (0..ready_count)
-            .map(|index| {
-                let candidates = (0..device_count)
-                    .map(|device_index| candidate(&format!("gpu-{device_index:03}"), 0))
-                    .collect();
-                work(&format!("work-{index:05}"), index as u64, candidates)
-            })
-            .collect::<Vec<_>>();
-        let input = snapshot(devices, jobs, 128);
+        let input = benchmark_input(device_count, ready_count);
         let index = EligibilityIndex::from_snapshot(&input);
         let planner = Planner::new(PlannerConfig {
             mode: PlanningMode::WatchdogFallback,
             ..PlannerConfig::default()
         });
-        let started = Instant::now();
-        let first = planner.plan_with_index(&input, &index);
-        let elapsed = started.elapsed();
-        let second = planner.plan_with_index(&input, &index);
-        assert_eq!(first, second);
-        eprintln!("{ready_count} ready / {device_count} devices immediate seed: {elapsed:?}");
-        if ready_count == 200 {
-            let optimized_started = Instant::now();
-            let optimized = Planner::default().plan_with_index(&input, &index);
-            let optimized_elapsed = optimized_started.elapsed();
-            assert_eq!(
-                optimized,
-                Planner::default().plan_with_index(&input, &index)
-            );
-            eprintln!(
-                "{ready_count} ready / {device_count} devices optimized: {optimized_elapsed:?}"
-            );
+        let expected = planner
+            .plan_with_index(&input, &index)
+            .expect("valid warmup plan");
+        let mut samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let measured = planner
+                .plan_with_index(&input, &index)
+                .expect("valid measured plan");
+            samples.push(started.elapsed());
+            assert_eq!(measured, expected);
         }
+        eprintln!(
+            "{ready_count} ready / {device_count} devices immediate p95: {:?}",
+            percentile_95(&mut samples)
+        );
     }
 
     let devices = (0..64)
@@ -1102,21 +1244,42 @@ fn deterministic_two_hundred_and_ten_thousand_ready_harness() {
         .collect::<Vec<_>>();
     let input = snapshot(devices, jobs, 0);
     let index = EligibilityIndex::from_snapshot(&input);
-    let started = Instant::now();
     let plan = Planner::new(PlannerConfig {
         mode: PlanningMode::WatchdogFallback,
         ..PlannerConfig::default()
     })
     .plan_with_index(&input, &index)
     .expect("valid host-RAM-blocked plan");
-    eprintln!(
-        "10000 host-RAM-blocked / 64 devices immediate seed: {:?}",
-        started.elapsed()
-    );
     assert!(plan.immediate_leases.is_empty());
     assert_eq!(plan.blocked.len(), 10_000);
     assert!(plan
         .blocked
         .iter()
         .all(|blocked| blocked.reason == BlockedReason::AggregateHostRamReserved));
+}
+
+#[test]
+#[ignore = "local pure-planner benchmark; run on pinned hardware, never a CI timing gate"]
+fn local_pure_optimizer_benchmark_harness() {
+    for (device_count, ready_count) in [(8, 200), (64, 200)] {
+        let input = benchmark_input(device_count, ready_count);
+        let index = EligibilityIndex::from_snapshot(&input);
+        let planner = Planner::default();
+        let expected = planner
+            .plan_with_index(&input, &index)
+            .expect("valid warmup plan");
+        let mut samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let measured = planner
+                .plan_with_index(&input, &index)
+                .expect("valid measured plan");
+            samples.push(started.elapsed());
+            assert_eq!(measured, expected);
+        }
+        eprintln!(
+            "{ready_count} ready / {device_count} devices optimizer p95: {:?}",
+            percentile_95(&mut samples)
+        );
+    }
 }
