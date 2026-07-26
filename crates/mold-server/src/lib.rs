@@ -69,19 +69,58 @@ enum StartupMode {
     Maintenance,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupPlan {
+    mode: StartupMode,
+    start_gpu_workers: bool,
+    create_cpu_engine: bool,
+    start_generation_runner: bool,
+    start_chain_runner: bool,
+    start_legacy_cache_evictor: bool,
+}
+
 fn classify_startup_mode(
     selection: &GpuSelection,
     discovered_count: usize,
     selected_count: usize,
     gpu_runtime_build: bool,
 ) -> StartupMode {
+    // Explicit maintenance mode is authoritative. Fail closed even if a
+    // future selection resolver regression returns devices for `none`.
+    if matches!(selection, GpuSelection::None) {
+        return StartupMode::Maintenance;
+    }
     if selected_count > 0 {
         return StartupMode::GpuWorkers;
     }
-    if matches!(selection, GpuSelection::None) || discovered_count > 0 || gpu_runtime_build {
+    if discovered_count > 0 || gpu_runtime_build {
         StartupMode::Maintenance
     } else {
         StartupMode::CpuFallback
+    }
+}
+
+fn startup_plan(
+    selection: &GpuSelection,
+    discovered_count: usize,
+    selected_count: usize,
+    gpu_runtime_build: bool,
+) -> StartupPlan {
+    let mode = classify_startup_mode(
+        selection,
+        discovered_count,
+        selected_count,
+        gpu_runtime_build,
+    );
+    StartupPlan {
+        mode,
+        start_gpu_workers: mode == StartupMode::GpuWorkers,
+        create_cpu_engine: mode == StartupMode::CpuFallback,
+        start_generation_runner: mode != StartupMode::Maintenance,
+        start_chain_runner: mode != StartupMode::Maintenance,
+        // GPU workers own their cache eviction on their CUDA owner threads.
+        // Maintenance has no engine cache to sweep.
+        start_legacy_cache_evictor: mode == StartupMode::CpuFallback,
     }
 }
 
@@ -117,7 +156,7 @@ pub async fn run_server(
 
     let discovered = mold_inference::device::discover_gpus();
     let selected = mold_inference::device::resolve_gpu_selection(&discovered, &gpu_selection)?;
-    let startup_mode = classify_startup_mode(
+    let startup = startup_plan(
         &gpu_selection,
         discovered.len(),
         selected.len(),
@@ -136,35 +175,37 @@ pub async fn run_server(
 
     let max_cached = state::resolve_max_cached_models();
     let cache_idle_ttl = std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs());
-    for gpu in &selected {
-        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(PER_WORKER_CHANNEL_SIZE);
-        let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
-            gpu: gpu.clone(),
-            model_cache: std::sync::Arc::new(std::sync::Mutex::new(model_cache::ModelCache::new(
-                max_cached,
-            ))),
-            resident_model: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
-            shared_pool: shared_pool.clone(),
-            in_flight: AtomicUsize::new(0),
-            consecutive_failures: AtomicUsize::new(0),
-            poisoned: AtomicBool::new(false),
-            fatal_cuda_error: fatal_cuda_error.clone(),
-            fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
-            shutdown_requested: AtomicBool::new(false),
-            degraded_until: std::sync::RwLock::new(None),
-            job_tx,
-        });
+    if startup.start_gpu_workers {
+        for gpu in &selected {
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel(PER_WORKER_CHANNEL_SIZE);
+            let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
+                gpu: gpu.clone(),
+                model_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                    model_cache::ModelCache::new(max_cached),
+                )),
+                resident_model: std::sync::Arc::new(std::sync::RwLock::new(None)),
+                active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
+                model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+                shared_pool: shared_pool.clone(),
+                in_flight: AtomicUsize::new(0),
+                consecutive_failures: AtomicUsize::new(0),
+                poisoned: AtomicBool::new(false),
+                fatal_cuda_error: fatal_cuda_error.clone(),
+                fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                shutdown_requested: AtomicBool::new(false),
+                degraded_until: std::sync::RwLock::new(None),
+                job_tx,
+            });
 
-        let handle = gpu_worker::spawn_gpu_thread(
-            worker.clone(),
-            job_rx,
-            scheduler_worker_tx.clone(),
-            cache_idle_ttl,
-        );
-        gpu_thread_handles.push(handle);
-        workers.push(worker);
+            let handle = gpu_worker::spawn_gpu_thread(
+                worker.clone(),
+                job_rx,
+                scheduler_worker_tx.clone(),
+                cache_idle_ttl,
+            );
+            gpu_thread_handles.push(handle);
+            workers.push(worker);
+        }
     }
 
     let gpu_pool = std::sync::Arc::new(gpu_pool::GpuPool { workers });
@@ -179,7 +220,7 @@ pub async fn run_server(
         );
     }
 
-    match startup_mode {
+    match startup.mode {
         StartupMode::GpuWorkers => {}
         StartupMode::CpuFallback => {
             info!("CPU-only build — server generation uses the CPU correctness path");
@@ -212,7 +253,7 @@ pub async fn run_server(
     let queue_handle = QueueHandle::new(job_tx);
 
     // ── Create AppState ────────────────────────────────────────────────────
-    let mut state = if gpu_pool.worker_count() > 0 {
+    let mut state = if startup.start_gpu_workers {
         if let Some(paths) = ModelPaths::resolve(&model_name, &config) {
             info!(model = %model_name, "configured model");
             info!(transformer = %paths.transformer.display());
@@ -251,7 +292,7 @@ pub async fn run_server(
         let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
         state.shared_pool = shared_pool;
         state
-    } else if startup_mode == StartupMode::CpuFallback {
+    } else if startup.create_cpu_engine {
         match ModelPaths::resolve(&model_name, &config) {
             Some(paths) => {
                 info!(model = %model_name, "configured model");
@@ -419,7 +460,7 @@ pub async fn run_server(
         } else {
             Some(config_snapshot.effective_output_dir())
         };
-        if state.generation_unavailable().is_none() {
+        if startup.start_chain_runner {
             let deps = chain_job_runner::RunnerDeps {
                 db: state.metadata_db.clone(),
                 jobs_root,
@@ -449,8 +490,8 @@ pub async fn run_server(
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
     let scheduler_shutdown = tokio_util::sync::CancellationToken::new();
-    let uses_gpu_scheduler = startup_mode == StartupMode::GpuWorkers;
-    let generation_worker_handle = match startup_mode {
+    let uses_gpu_scheduler = startup.mode == StartupMode::GpuWorkers;
+    let generation_worker_handle = match startup.mode {
         StartupMode::GpuWorkers => Some(tokio::spawn(scheduler::run_scheduler_coordinator(
             job_rx,
             scheduler_worker_rx,
@@ -471,11 +512,15 @@ pub async fn run_server(
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
     // graceful shutdown like every other long-running task in this fn.
-    let idle_evict_handle = spawn_cache_idle_evictor(
-        state.model_cache.clone(),
-        state.model_load_lock.clone(),
-        cache_idle_ttl,
-    );
+    let idle_evict_handle = if startup.start_legacy_cache_evictor {
+        Some(spawn_cache_idle_evictor(
+            state.model_cache.clone(),
+            state.model_load_lock.clone(),
+            cache_idle_ttl,
+        ))
+    } else {
+        None
+    };
 
     // ── Downloads UI (Agent A) ──────────────────────────────────────────────
     // Single-writer download queue driver. Bind the `JoinHandle` so we can
@@ -727,7 +772,9 @@ pub async fn run_server(
     }
     downloads_shutdown.cancel();
     downloads_driver.abort();
-    idle_evict_handle.abort();
+    if let Some(handle) = idle_evict_handle {
+        handle.abort();
+    }
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();
@@ -839,7 +886,9 @@ fn build_cors_layer() -> Result<CorsLayer> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cors_layer, classify_startup_mode, trace_request_path, StartupMode};
+    use super::{
+        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, StartupMode,
+    };
     use mold_core::types::GpuSelection;
     use std::sync::Mutex;
 
@@ -884,11 +933,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_none_constructs_no_gpu_execution_components() {
+        // Fail closed even if a future resolver regression accidentally hands
+        // startup a selected device for the explicit maintenance selector.
+        let plan = startup_plan(&GpuSelection::None, 2, 1, true);
+
+        assert_eq!(plan.mode, StartupMode::Maintenance);
+        assert!(!plan.start_gpu_workers);
+        assert!(!plan.create_cpu_engine);
+        assert!(!plan.start_generation_runner);
+        assert!(!plan.start_chain_runner);
+        assert!(!plan.start_legacy_cache_evictor);
+    }
+
+    #[test]
     fn visible_but_unusable_gpu_inventory_is_not_a_cpu_fallback() {
         assert_eq!(
             classify_startup_mode(&GpuSelection::All, 2, 0, true),
             StartupMode::Maintenance
         );
+    }
+
+    #[test]
+    fn unusable_gpu_identity_constructs_no_gpu_execution_components() {
+        let plan = startup_plan(&GpuSelection::All, 2, 0, true);
+
+        assert_eq!(plan.mode, StartupMode::Maintenance);
+        assert!(!plan.start_gpu_workers);
+        assert!(!plan.create_cpu_engine);
+        assert!(!plan.start_generation_runner);
+        assert!(!plan.start_chain_runner);
+        assert!(!plan.start_legacy_cache_evictor);
     }
 
     #[test]

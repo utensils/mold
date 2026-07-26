@@ -911,6 +911,57 @@ mod tests {
         assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
     }
 
+    #[tokio::test]
+    async fn maintenance_mode_rejects_chain_and_upscale_routes_before_gpu_work() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+        let chain_body = serde_json::to_vec(&route_chain_request()).unwrap();
+        // Deliberately invalid image bytes prove the availability fence runs
+        // before upscale validation, model resolution/pull, or engine creation.
+        let upscale_body = serde_json::to_vec(&serde_json::json!({
+            "model": "does-not-exist",
+            "image": "AQID",
+            "output_format": "png"
+        }))
+        .unwrap();
+
+        for (path, body) in [
+            ("/api/generate/chain", chain_body.clone()),
+            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/upscale", upscale_body.clone()),
+            ("/api/upscale/stream", upscale_body.clone()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must be fenced in maintenance mode"
+            );
+            let body = json_body(response).await;
+            assert_eq!(
+                body["code"], "GENERATION_UNAVAILABLE",
+                "{path} must return the typed maintenance error"
+            );
+            assert!(
+                body["error"].as_str().unwrap().contains("maintenance mode"),
+                "{path} must preserve the startup reason"
+            );
+        }
+    }
+
     // ── /api/queue ───────────────────────────────────────────────────────────
 
     #[tokio::test]

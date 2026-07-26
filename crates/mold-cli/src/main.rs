@@ -2231,6 +2231,24 @@ mod tests {
     }
 
     #[test]
+    fn serve_reads_explicit_none_from_mold_gpus() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("MOLD_GPUS");
+        std::env::set_var("MOLD_GPUS", "none");
+
+        let cli = parse(&["serve"]);
+
+        match previous {
+            Some(value) => std::env::set_var("MOLD_GPUS", value),
+            None => std::env::remove_var("MOLD_GPUS"),
+        }
+        match cli.command {
+            Commands::Serve { gpus, .. } => assert_eq!(gpus.as_deref(), Some("none")),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
     fn run_seed_before_prompt() {
         let cli = parse(&["run", "model", "--seed", "42", "a", "cat"]);
         match cli.command {
