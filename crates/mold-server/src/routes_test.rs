@@ -5504,9 +5504,8 @@ mod tests {
 
     #[tokio::test]
     async fn put_model_placement_updates_config_and_persists() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("MOLD_HOME", tmp.path());
+        let _home = MoldHomeGuard::set(tmp.path());
         let app = app_empty();
         // Re-create state inside this test with mutable access.
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -5552,18 +5551,16 @@ mod tests {
         assert_eq!(p.text_encoders, mold_core::types::DeviceRef::Cpu);
         let adv = p.advanced.unwrap();
         assert_eq!(adv.transformer, mold_core::types::DeviceRef::gpu(1));
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
     async fn put_model_placement_returns_500_when_save_fails() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // Point MOLD_HOME at a regular file so `config.toml` cannot be created
         // underneath it — `Config::save()` must return `Err`.
         let tmp = tempfile::tempdir().unwrap();
         let blocker = tmp.path().join("not-a-dir");
         std::fs::write(&blocker, "blocker").unwrap();
-        std::env::set_var("MOLD_HOME", &blocker);
+        let _home = MoldHomeGuard::set(&blocker);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
@@ -5601,8 +5598,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
@@ -5665,9 +5660,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_model_placement_returns_saved_value() {
-        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("MOLD_HOME", tmp.path());
+        let _home = MoldHomeGuard::set(tmp.path());
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
@@ -5715,7 +5709,6 @@ mod tests {
         assert_eq!(got["advanced"]["transformer"]["kind"], "gpu");
         assert_eq!(got["advanced"]["transformer"]["ordinal"], 1);
         assert_eq!(got["advanced"]["t5"]["kind"], "cpu");
-        std::env::remove_var("MOLD_HOME");
     }
 
     #[tokio::test]
