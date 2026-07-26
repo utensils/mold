@@ -866,13 +866,15 @@ impl LtxGemmaPlacement {
     }
 }
 
-/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder: active GPU first,
-/// then sibling GPUs in ordinal order, then CPU.
+/// Pick where to load the LTX-2 Gemma 3 12B prompt encoder.
+///
+/// The encoder may use only the GPU already leased to this stage or CPU.
+/// Sibling GPUs are intentionally ignored: allocating there without a lease
+/// would violate the one-device-per-stage invariant and could double-book
+/// another worker.
 ///
 /// - `gpus` is the output of [`discover_gpus`] — ordinals in ascending order.
-/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto. We
-///   prefer co-residency (no cross-device tensor copy at encode time) but
-///   fall through to siblings when the active GPU is full.
+/// - `active_ordinal` is the GPU the LTX-2 transformer was loaded onto.
 /// - A GPU is considered to fit when `free_vram_bytes > threshold` (strict
 ///   greater-than, mirrors [`select_expand_device`]).
 /// - Returns [`LtxGemmaPlacement::Cpu`] when no GPU has room.
@@ -881,19 +883,11 @@ pub fn select_ltx2_gemma_device(
     active_ordinal: usize,
     threshold: u64,
 ) -> LtxGemmaPlacement {
-    if let Some(g) = gpus
+    if let Some(gpu) = gpus
         .iter()
-        .find(|g| g.ordinal == active_ordinal && g.free_vram_bytes > threshold)
+        .find(|gpu| gpu.ordinal == active_ordinal && gpu.free_vram_bytes > threshold)
     {
-        return LtxGemmaPlacement::Gpu(g.ordinal);
-    }
-    for g in gpus {
-        if g.ordinal == active_ordinal {
-            continue;
-        }
-        if g.free_vram_bytes > threshold {
-            return LtxGemmaPlacement::Gpu(g.ordinal);
-        }
+        return LtxGemmaPlacement::Gpu(gpu.ordinal);
     }
     LtxGemmaPlacement::Cpu
 }
@@ -945,7 +939,7 @@ fn warn_once_legacy_force_cpu_prompt_encoder() {
 }
 
 /// Resolve the LTX-2 Gemma encoder placement once, honoring the env override
-/// before falling through to the GPU-walk + CPU fallback. The runtime and
+/// before falling through to the assigned-GPU-or-CPU fallback. The runtime and
 /// the server-side preflight both call this so they reach the same decision
 /// for the same observation of free VRAM and env vars.
 pub fn resolve_ltx2_gemma_placement(gpu_ordinal: usize) -> LtxGemmaPlacement {
@@ -2762,27 +2756,26 @@ mod tests {
         );
     }
 
-    /// Multi-GPU host: the active GPU is full (4 GB free), but a sibling
-    /// GPU has plenty of room. Encoder runs there and pays a single
-    /// cross-device copy at encode time.
+    /// Multi-GPU host: the assigned GPU is full even though a sibling has
+    /// room. The sibling is not leased to this stage, so auto placement must
+    /// fall back to CPU instead of allocating there behind the scheduler.
     #[test]
-    fn select_ltx2_gemma_device_picks_sibling_gpu_when_active_full() {
+    fn select_ltx2_gemma_device_never_uses_unleased_sibling() {
         let gpus = vec![gpu(0, 4), gpu(1, 25)];
         assert_eq!(
             select_ltx2_gemma_device(&gpus, 0, 24 * GB),
-            LtxGemmaPlacement::Gpu(1),
+            LtxGemmaPlacement::Cpu,
         );
     }
 
-    /// Three-GPU walk: the active GPU is GPU 1; both GPU 0 and GPU 2 have
-    /// room. The walk picks the first sibling in ordinal order (GPU 0)
-    /// rather than starting from `active_ordinal`.
+    /// No amount of sibling capacity changes the one-device-per-stage
+    /// contract when the assigned device cannot fit Gemma.
     #[test]
-    fn select_ltx2_gemma_device_walks_remaining_in_ordinal_order() {
+    fn select_ltx2_gemma_device_ignores_all_sibling_capacity() {
         let gpus = vec![gpu(0, 25), gpu(1, 4), gpu(2, 25)];
         assert_eq!(
             select_ltx2_gemma_device(&gpus, 1, 24 * GB),
-            LtxGemmaPlacement::Gpu(0),
+            LtxGemmaPlacement::Cpu,
         );
     }
 
