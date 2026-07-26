@@ -2606,6 +2606,7 @@ onBeforeUnmount(() => {
         :settings="mobileSettings"
         :host-count="hosts.length"
         :app-version="appVersion"
+        :host="selectedHost ?? null"
         @update="updateSettings"
         @manage-hosts="manageHostsFromSettings"
       />

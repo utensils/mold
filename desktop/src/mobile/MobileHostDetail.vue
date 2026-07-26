@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
@@ -39,6 +40,8 @@ const emit = defineEmits<{
 
 const status = ref<ServerStatus | null>(null);
 const snapshot = ref<DetailSnapshot | null>(null);
+const devices = ref<DeviceInfo[] | null>(null);
+const deviceMutations = ref(new Set<string>());
 const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
 const queueApiAvailable = ref(false);
@@ -96,6 +99,11 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   }
 }
 
+async function loadDevices(): Promise<DeviceInfo[]> {
+  const response = await apiJsonTo<unknown>(target.value, "/api/devices");
+  return parseDeviceListResponse(response).devices;
+}
+
 function startLiveServices(epoch: number): void {
   resourceAbort = new AbortController();
   void sseStream("/api/resources/stream", {
@@ -138,6 +146,7 @@ async function loadHost(): Promise<void> {
   error.value = "";
   status.value = null;
   snapshot.value = null;
+  devices.value = null;
   installed.value = [];
   queue.value = [];
   queueApiAvailable.value = false;
@@ -147,13 +156,15 @@ async function loadHost(): Promise<void> {
   forgetPending.value = false;
 
   try {
-    const [nextStatus, models] = await Promise.all([
+    const [nextStatus, models, nextDevices] = await Promise.all([
       apiJsonTo<ServerStatus>(target.value, "/api/status"),
       apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
+      loadDevices().catch(() => null),
     ]);
     if (epoch !== loadEpoch) return;
     status.value = nextStatus;
     installed.value = models.filter((model) => model.downloaded);
+    devices.value = nextDevices;
     emit("status", { id: props.host.id, status: nextStatus });
     startLiveServices(epoch);
   } catch (caught) {
@@ -162,6 +173,30 @@ async function loadHost(): Promise<void> {
     emit("status", { id: props.host.id, status: null });
   } finally {
     if (epoch === loadEpoch) loading.value = false;
+  }
+}
+
+function deviceStateLabel(device: DeviceInfo): string {
+  if (device.admin_state === "draining") return "Finishing current work";
+  if (device.admin_state === "starting") return "Starting";
+  if (device.admin_state === "startup_excluded") return "Excluded at startup";
+  if (device.health !== "healthy") return device.health;
+  return device.admin_state;
+}
+
+async function toggleDevice(device: DeviceInfo): Promise<void> {
+  if (device.admin_state === "startup_excluded") return;
+  const enabled = !device.desired_enabled;
+  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
+  try {
+    await setDeviceEnabled(target.value, device.id, enabled);
+    devices.value = await loadDevices();
+  } catch (caught) {
+    error.value = describeTransportError(caught, props.host.name);
+  } finally {
+    const next = new Set(deviceMutations.value);
+    next.delete(device.id);
+    deviceMutations.value = next;
   }
 }
 
@@ -357,6 +392,42 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <p v-else class="mobile-empty-note">No live telemetry from this host yet.</p>
+      </section>
+
+      <section
+        v-if="devices !== null"
+        class="mobile-detail-section"
+        aria-labelledby="host-devices-title"
+        data-test="host-detail-devices"
+      >
+        <div class="mobile-section-head">
+          <h2 id="host-devices-title">GPU devices</h2>
+          <span>{{ devices.length }}</span>
+        </div>
+        <ul class="mobile-data-list">
+          <li v-for="device in devices" :key="device.id" data-test="device-row">
+            <div>
+              <strong>{{ device.name }}</strong>
+              <span>
+                {{
+                  device.ordinal == null ? device.backend.toUpperCase() : `GPU ${device.ordinal}`
+                }}
+                · {{ deviceStateLabel(device) }}
+              </span>
+            </div>
+            <button
+              type="button"
+              class="status-badge"
+              :data-test="`device-toggle-${device.ordinal ?? device.id}`"
+              :disabled="
+                device.admin_state === 'startup_excluded' || deviceMutations.has(device.id)
+              "
+              @click="toggleDevice(device)"
+            >
+              {{ device.desired_enabled ? "Disable" : "Enable" }}
+            </button>
+          </li>
+        </ul>
       </section>
 
       <section class="mobile-detail-section" aria-labelledby="host-queue-title">

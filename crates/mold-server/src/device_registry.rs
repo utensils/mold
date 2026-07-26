@@ -174,6 +174,26 @@ impl DeviceRegistry {
         Ok(())
     }
 
+    pub fn discovered_device(&self, device_id: &str) -> Option<DiscoveredDevice> {
+        self.discovery
+            .devices()
+            .into_iter()
+            .find(|device| device.stable_id.as_deref() == Some(device_id))
+    }
+
+    pub fn desired_enabled(&self, device_id: &str) -> bool {
+        self.explicit_preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(device_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    pub fn has_devices(&self) -> bool {
+        !self.discovery.devices().is_empty()
+    }
+
     pub fn snapshot(
         &self,
         pool: &GpuPool,
@@ -193,7 +213,7 @@ impl DeviceRegistry {
         // During integration and tests, a worker may predate the UUID-first
         // adapter. Keep it visible, but mark it unavailable because an ordinal
         // is not a persistable identity.
-        for worker in &pool.workers {
+        for worker in pool.worker_snapshot() {
             let telemetry_device = resources.and_then(|snapshot| {
                 snapshot
                     .gpus
@@ -243,6 +263,7 @@ impl DeviceRegistry {
         });
 
         let worker_statuses = pool.gpu_status();
+        let workers = pool.worker_snapshot();
         let queue = jobs.snapshot();
         let preferences = self
             .explicit_preferences
@@ -271,8 +292,22 @@ impl DeviceRegistry {
                     })
                 });
 
+                let worker_ref = workers.iter().find(|worker| {
+                    device.visible_ordinal == Some(worker.gpu.ordinal)
+                        && device.backend == worker.gpu.backend
+                });
                 let admin_state = if !device.startup_allowed {
                     DeviceAdminState::StartupExcluded
+                } else if pool.workers.is_starting(&id)
+                    || (desired_enabled
+                        && worker_ref.is_some_and(|worker| {
+                            worker.drain_state.load(std::sync::atomic::Ordering::SeqCst)
+                                == crate::gpu_pool::DRAIN_COMMITTED
+                        }))
+                {
+                    DeviceAdminState::Starting
+                } else if !desired_enabled && worker_ref.is_some() {
+                    DeviceAdminState::Draining
                 } else if desired_enabled {
                     DeviceAdminState::Enabled
                 } else {
@@ -280,8 +315,8 @@ impl DeviceRegistry {
                 };
                 let health = if !stable_identity {
                     DeviceHealth::Unavailable
-                } else if let Some(ordinal) = device.visible_ordinal {
-                    if let Some(worker_ref) = pool.worker_by_ordinal(ordinal) {
+                } else if device.visible_ordinal.is_some() {
+                    if let Some(worker_ref) = worker_ref {
                         if worker_ref
                             .poisoned
                             .load(std::sync::atomic::Ordering::SeqCst)
@@ -307,16 +342,36 @@ impl DeviceRegistry {
                         GpuWorkerState::Idle | GpuWorkerState::Degraded => DeviceActivity::Idle,
                     })
                     .unwrap_or(DeviceActivity::Idle);
+                let activity = if admin_state == DeviceAdminState::Draining
+                    && activity == DeviceActivity::Idle
+                {
+                    DeviceActivity::Stopping
+                } else {
+                    activity
+                };
                 let schedulable = admin_state == DeviceAdminState::Enabled
                     && health == DeviceHealth::Healthy
-                    && worker.is_some();
+                    && worker_ref.is_some()
+                    && worker_ref.is_some_and(|worker| {
+                        !worker
+                            .shutdown_requested
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            && worker.drain_state.load(std::sync::atomic::Ordering::SeqCst)
+                                == crate::gpu_pool::DRAIN_RUNNING
+                    });
                 let unschedulable_reason = (!schedulable).then(|| {
                     if admin_state == DeviceAdminState::StartupExcluded {
                         "device_startup_excluded"
+                    } else if admin_state == DeviceAdminState::Starting {
+                        "device_starting"
+                    } else if admin_state == DeviceAdminState::Draining {
+                        "device_draining"
                     } else if admin_state == DeviceAdminState::Disabled {
                         "device_disabled"
                     } else if health == DeviceHealth::Degraded {
                         "device_degraded"
+                    } else if let Some(error) = pool.workers.last_start_error(&id) {
+                        return format!("device_start_failed: {error}");
                     } else {
                         "device_unavailable"
                     }
@@ -510,6 +565,7 @@ mod tests {
     fn worker(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel(1);
         Arc::new(crate::gpu_pool::GpuWorker {
+            owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{ordinal:032x}")),
@@ -537,6 +593,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -690,7 +747,7 @@ mod tests {
             Arc::new(None),
         );
         let pool = crate::gpu_pool::GpuPool {
-            workers: vec![worker(1)],
+            workers: vec![worker(1)].into(),
         };
         let state = registry.snapshot(
             &pool,
@@ -744,7 +801,7 @@ mod tests {
             Arc::new(None),
         );
         let pool = GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         };
         let jobs = crate::job_registry::JobRegistry::new();
 
@@ -769,7 +826,7 @@ mod tests {
             Arc::new(None),
         );
         let pool = GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         };
         let jobs = crate::job_registry::JobRegistry::new();
 

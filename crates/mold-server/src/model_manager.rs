@@ -156,7 +156,7 @@ fn annotate_audio_capabilities(catalog: &mut [ModelInfoExtended], config: &Confi
 
 fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
     let mut names = Vec::new();
-    for worker in &state.gpu_pool.workers {
+    for worker in state.gpu_pool.worker_snapshot() {
         // Prefer the active-generation model (cache entry is taken out during
         // inflight generation), else whatever is GPU-resident.
         let active = worker

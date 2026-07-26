@@ -565,6 +565,20 @@ pub enum JobsAction {
     Gc,
 }
 
+#[derive(Subcommand)]
+enum GpuAction {
+    /// List every runtime-visible device and lifecycle state
+    List {
+        /// Output the stable device API response as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop assigning work and disable after the current lease finishes
+    Disable { device: String },
+    /// Enable a device and start a fresh owner thread when needed
+    Enable { device: String },
+}
+
 #[derive(clap::ValueEnum, Clone, Copy)]
 pub enum RetakeModeArg {
     Cascade,
@@ -1214,6 +1228,12 @@ Examples:
     /// Show server status and loaded models
     #[command(after_long_help = "Use 'mold unload' to free GPU memory when idle.")]
     Ps,
+
+    /// Inspect and control server GPU lifecycle
+    Gpu {
+        #[command(subcommand)]
+        action: GpuAction,
+    },
 
     /// Show version information
     Version,
@@ -2033,6 +2053,11 @@ async fn run() -> anyhow::Result<()> {
         Commands::Ps => {
             commands::ps::run().await?;
         }
+        Commands::Gpu { action } => match action {
+            GpuAction::List { json } => commands::gpu::list(json).await?,
+            GpuAction::Disable { device } => commands::gpu::set(&device, false).await?,
+            GpuAction::Enable { device } => commands::gpu::set(&device, true).await?,
+        },
         Commands::Version => {
             println!("mold {}", mold_core::build_info::version_string());
         }

@@ -861,7 +861,7 @@ async fn single_gpu_loaded_models(state: &AppState) -> std::collections::HashSet
 /// cache entry briefly disappears).
 fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
-    for worker in &state.gpu_pool.workers {
+    for worker in state.gpu_pool.worker_snapshot() {
         if let Ok(active_gen) = worker.active_generation.read() {
             if let Some(g) = active_gen.as_ref() {
                 set.insert(g.model.clone());
@@ -1576,6 +1576,7 @@ async fn dispatch_legacy_scheduled_work(
         let fence = crate::scheduler::LeaseFence {
             work_id: current.id,
             device_id: crate::scheduler::worker_device_id(&worker),
+            owner_epoch: worker.owner_epoch,
             state_version: 0,
             plan_version: 0,
             worker_generation: 0,
@@ -1923,6 +1924,7 @@ async fn run_queue_dispatcher_with_tuning(
             let lease = crate::scheduler::LeaseFence {
                 work_id: pending.id.clone(),
                 device_id: crate::scheduler::worker_device_id(&worker),
+                owner_epoch: worker.owner_epoch,
                 state_version: 0,
                 plan_version: 0,
                 worker_generation: 1,
@@ -2073,7 +2075,7 @@ pub(crate) fn build_observed_dispatch(
         .workers
         .iter()
         .map(|worker| {
-            let device_id = crate::scheduler::worker_device_id(worker);
+            let device_id = crate::scheduler::worker_device_id(&worker);
             let sampled_available_vram = sampled_free
                 .get(&(worker.gpu.backend, worker.gpu.ordinal))
                 .map(|(free, _)| *free);
@@ -2223,7 +2225,7 @@ pub(crate) fn build_observed_dispatch(
             .iter()
             .map(|worker| {
                 mold_scheduler::CandidatePlacement::new(
-                    crate::scheduler::worker_device_id(worker),
+                    crate::scheduler::worker_device_id(&worker),
                     model_fingerprint,
                     estimated_host_ram_bytes,
                 )
@@ -2232,7 +2234,7 @@ pub(crate) fn build_observed_dispatch(
                     devices
                         .iter()
                         .find(|device| {
-                            device.id.as_str() == crate::scheduler::worker_device_id(worker)
+                            device.id.as_str() == crate::scheduler::worker_device_id(&worker)
                         })
                         .map_or(0, |device| device.available_vram_bytes),
                 )
@@ -2484,6 +2486,7 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(channel_size);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{ordinal:032x}")),
@@ -2511,6 +2514,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -2523,7 +2527,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0, 1);
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -2590,7 +2594,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0, 1);
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -2657,7 +2661,7 @@ mod tests {
 
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![busy.clone(), idle.clone()],
+            workers: vec![busy.clone(), idle.clone()].into(),
         });
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -2717,7 +2721,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0, 1);
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -2796,7 +2800,7 @@ mod tests {
             let (worker, worker_rx) = test_worker(0, 1);
             let mut state = empty_test_state(mold_core::Config::default());
             state.gpu_pool = Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             });
             let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
             state.scheduled_work =
@@ -2829,7 +2833,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0, 1);
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
         state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -2865,6 +2869,7 @@ mod tests {
                 fence: crate::scheduler::LeaseFence {
                     work_id: "filler".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
                     state_version: 0,
                     plan_version: 0,
                     worker_generation: 0,
@@ -2917,6 +2922,7 @@ mod tests {
         .expect("legacy transport should accept after capacity opens");
         let accepted_id = match accepted {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.id().to_string(),
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         assert_eq!(accepted_id, "observed-accepted");
@@ -2932,7 +2938,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0, 2);
         let mut state = empty_test_state(mold_core::Config::default());
         state.gpu_pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (scheduled_tx, scheduled_rx) = tokio::sync::mpsc::channel(2);
         let (owner_event_tx, owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2992,6 +2998,9 @@ mod tests {
             }
             crate::gpu_pool::GpuWorkerCommand::Shutdown => {
                 panic!("unexpected worker shutdown command")
+            }
+            crate::gpu_pool::GpuWorkerCommand::Drain => {
+                panic!("unexpected worker drain command")
             }
         }
     }
@@ -3833,7 +3842,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -3907,7 +3916,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -4249,7 +4258,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -4310,7 +4319,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             8,
         );
@@ -4450,7 +4459,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             }),
             32,
         );
@@ -4600,7 +4609,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0, worker1],
+                workers: vec![worker0, worker1].into(),
             }),
             8,
         );
@@ -4646,7 +4655,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0, worker1],
+                workers: vec![worker0, worker1].into(),
             }),
             8,
         );
@@ -4692,7 +4701,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0],
+                workers: vec![worker0].into(),
             }),
             8,
         );
@@ -4738,7 +4747,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker],
+                workers: vec![worker].into(),
             }),
             8,
         );
@@ -4804,7 +4813,7 @@ mod tests {
             mold_core::Config::default(),
             queue.clone(),
             Arc::new(GpuPool {
-                workers: vec![worker0],
+                workers: vec![worker0].into(),
             }),
             8,
         );

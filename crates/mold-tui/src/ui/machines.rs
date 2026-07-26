@@ -225,6 +225,7 @@ fn build_local_detail(app: &App, lines: &mut Vec<Line>) {
         mold_core::build_info::version_string(),
         true,
     ));
+    render_devices(app, crate::hosts::LOCAL_HOST_ID, lines);
 
     // Lane: the in-flight generation plus recent prompt history.
     lines.push(Line::default());
@@ -316,7 +317,9 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             return;
         }
         (_, Some(status)) => {
-            if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+            if st.devices.contains_key(host_id) {
+                render_devices(app, host_id, lines);
+            } else if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
                 for gpu in gpus {
                     lines.push(kv_owned(
                         theme,
@@ -418,6 +421,105 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         _ => {
             lines.push(Line::from(Span::styled("— queue empty.", theme.dim())));
         }
+    }
+}
+
+fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
+    let Some(state) = app.machines.devices.get(host_id) else {
+        return;
+    };
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "GPU devices",
+        app.theme.dim().add_modifier(Modifier::BOLD),
+    )));
+    if state.devices.is_empty() {
+        lines.push(Line::from(Span::styled("— none visible.", app.theme.dim())));
+        return;
+    }
+    for (index, device) in state.devices.iter().enumerate() {
+        let selected =
+            app.machines.focus == MachinesFocus::Detail && index == app.machines.device_selected;
+        let marker = if selected { "›" } else { " " };
+        let ordinal = device
+            .ordinal
+            .map(|ordinal| format!("GPU {ordinal}"))
+            .unwrap_or_else(|| match device.backend {
+                mold_core::GpuBackend::Cuda => "CUDA".to_string(),
+                mold_core::GpuBackend::Metal => "METAL".to_string(),
+            });
+        let state = device_state_label(device);
+        let style = if selected {
+            app.theme.list_selected()
+        } else if device.admin_state == mold_core::DeviceAdminState::Draining {
+            app.theme.warning()
+        } else if device.health != mold_core::DeviceHealth::Healthy {
+            app.theme.error()
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {ordinal} · {} · {state}", device.name),
+            style,
+        )));
+        let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
+            (Some(used), Some(total)) => {
+                vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2))
+            }
+            (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
+            _ => "VRAM unavailable".to_string(),
+        };
+        let utilization = device
+            .telemetry
+            .utilization_percent
+            .map(|value| format!(" · {value:.0}%"))
+            .unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            format!("  {vram}{utilization} · {}", short_device_id(&device.id)),
+            app.theme.dim(),
+        )));
+        if selected {
+            if let Some(active) = &device.active_work_id {
+                lines.push(Line::from(Span::styled(
+                    format!("  active {active}"),
+                    app.theme.warning(),
+                )));
+            }
+            if !device.loaded_models.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("  loaded {}", device.loaded_models.join(", ")),
+                    app.theme.dim(),
+                )));
+            }
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        "g Next GPU · e Enable/disable",
+        app.theme.dim(),
+    )));
+}
+
+fn device_state_label(device: &mold_core::DeviceInfo) -> &'static str {
+    use mold_core::{DeviceAdminState, DeviceHealth};
+    match device.admin_state {
+        DeviceAdminState::StartupExcluded => "startup excluded",
+        DeviceAdminState::Starting => "starting",
+        DeviceAdminState::Draining => "finishing current work",
+        DeviceAdminState::Disabled => "disabled",
+        DeviceAdminState::Enabled => match device.health {
+            DeviceHealth::Healthy => "enabled",
+            DeviceHealth::Degraded => "degraded",
+            DeviceHealth::Unavailable => "unavailable",
+            DeviceHealth::Poisoned => "poisoned",
+        },
+    }
+}
+
+fn short_device_id(id: &str) -> String {
+    if id.len() <= 18 {
+        id.to_string()
+    } else {
+        format!("{}…{}", &id[..11], &id[id.len() - 6..])
     }
 }
 

@@ -183,6 +183,7 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             | "/api/upscale/stream",
         ) => Some(RouteTier::Generation),
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
+        ("PATCH", path) if path.starts_with("/api/devices/") => Some(RouteTier::Generation),
         ("DELETE", "/api/models/unload") => Some(RouteTier::Generation),
         ("DELETE", _) if path.starts_with("/api/gallery/") => Some(RouteTier::Generation),
         ("GET", _) => Some(RouteTier::Read),
@@ -329,6 +330,13 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/upscale/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route(
+                "/api/devices/cuda:0123456789abcdef0123456789abcdef",
+                &Method::PATCH
+            ),
             Some(RouteTier::Generation)
         );
     }

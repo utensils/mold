@@ -1813,8 +1813,8 @@ impl QueueProbe for ProductionQueueProbe {
         self.queue.pending()
             + self
                 .gpu_pool
-                .workers
-                .iter()
+                .worker_snapshot()
+                .into_iter()
                 .map(|worker| worker.in_flight.load(Ordering::SeqCst))
                 .sum::<usize>()
     }
@@ -2374,7 +2374,7 @@ fn claim_worker_for_stage(
             .worker_by_ordinal(ordinal)
             .ok_or_else(|| anyhow!("gpu:{ordinal} is unavailable for chain stage"))?]
     } else {
-        gpu_pool.workers.clone()
+        gpu_pool.worker_snapshot()
     };
     if eligible.is_empty() {
         bail!("no GPU worker available for chain stage model '{model}'");
@@ -2516,6 +2516,7 @@ mod tests {
                 let (job_tx, _job_rx) =
                     std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
                 Arc::new(GpuWorker {
+                    owner_epoch: 1,
                     gpu: mold_inference::device::DiscoveredGpu {
                         ordinal,
                         stable_id: Some(format!("cuda:{ordinal:032x}")),
@@ -2545,6 +2546,7 @@ mod tests {
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                     shutdown_requested: AtomicBool::new(false),
+                    drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                     owner_thread_id: std::sync::OnceLock::new(),
                     degraded_until: std::sync::RwLock::new(None),
                     job_tx,
@@ -2585,11 +2587,12 @@ mod tests {
         }
 
         let mut younger_starts = 0;
-        let mut owner_holds_claim = vec![true; pool.workers.len()];
+        let workers = pool.worker_snapshot();
+        let mut owner_holds_claim = vec![true; workers.len()];
         let mut chain_claimed = false;
         while younger_starts < 4 {
-            let worker_idx = younger_starts % pool.workers.len();
-            let worker = &pool.workers[worker_idx];
+            let worker_idx = younger_starts % workers.len();
+            let worker = &workers[worker_idx];
             worker.release_in_flight();
             owner_holds_claim[worker_idx] = false;
             if claimed_rx.try_recv().is_ok() {
@@ -2663,7 +2666,7 @@ mod tests {
     #[test]
     fn shutdown_wakes_waiting_chain_and_cleans_registration() {
         let pool = claim_test_pool(1);
-        let worker = pool.workers[0].clone();
+        let worker = pool.worker_snapshot()[0].clone();
         assert!(worker.try_claim_owner_in_flight());
         let chain_pool = pool.clone();
         let chain = std::thread::spawn(move || {

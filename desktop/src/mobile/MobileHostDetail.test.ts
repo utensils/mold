@@ -14,10 +14,16 @@ interface SseCall {
   };
 }
 
-const { apiJsonTo, unloadModel, sseCalls } = vi.hoisted(() => ({
+const { apiJsonTo, setDeviceEnabled, unloadModel, sseCalls } = vi.hoisted(() => ({
   apiJsonTo: vi.fn(),
+  setDeviceEnabled: vi.fn(),
   unloadModel: vi.fn(),
   sseCalls: [] as SseCall[],
+}));
+
+vi.mock("@studio/api/devices", () => ({
+  setDeviceEnabled,
+  parseDeviceListResponse: (value: { devices: unknown[]; plan_version: number }) => value,
 }));
 
 vi.mock("../lib/api/client", async (importOriginal) => ({
@@ -143,6 +149,9 @@ function installApi(): void {
     if (path === "/api/queue") {
       return Promise.resolve({ entries: target.baseUrl === renderBox.baseUrl ? [] : queueEntries });
     }
+    if (path === "/api/devices") {
+      return Promise.resolve({ devices: [], plan_version: 0 });
+    }
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
 }
@@ -181,6 +190,7 @@ async function mountDetail(host: MobileHost = studio, active = false): Promise<V
 
 beforeEach(() => {
   apiJsonTo.mockReset();
+  setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   unloadModel.mockReset().mockResolvedValue(undefined);
   sseCalls.length = 0;
   installApi();
@@ -299,37 +309,33 @@ describe("MobileHostDetail remote host data", () => {
   });
 
   it("renders every status GPU before the resource stream produces a snapshot", async () => {
-    apiJsonTo.mockImplementation(
-      (target: { baseUrl: string }, path: string): Promise<unknown> => {
-        if (path === "/api/status") {
-          return Promise.resolve(
-            serverStatus({
-              gpus: [
-                {
-                  ordinal: 0,
-                  name: "NVIDIA RTX 3090",
-                  vram_total_bytes: 24_000_000_000,
-                  vram_used_bytes: 8_000_000_000,
-                  state: "generating",
-                },
-                {
-                  ordinal: 1,
-                  name: "NVIDIA B200",
-                  vram_total_bytes: 80_000_000_000,
-                  vram_used_bytes: 20_000_000_000,
-                  state: "idle",
-                },
-              ],
-            }),
-          );
-        }
-        if (path === "/api/models") return Promise.resolve([]);
-        if (path === "/api/queue") return Promise.resolve({ entries: [] });
-        return Promise.reject(
-          new Error(`Unexpected API path: ${path} for ${target.baseUrl}`),
+    apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
+      if (path === "/api/status") {
+        return Promise.resolve(
+          serverStatus({
+            gpus: [
+              {
+                ordinal: 0,
+                name: "NVIDIA RTX 3090",
+                vram_total_bytes: 24_000_000_000,
+                vram_used_bytes: 8_000_000_000,
+                state: "generating",
+              },
+              {
+                ordinal: 1,
+                name: "NVIDIA B200",
+                vram_total_bytes: 80_000_000_000,
+                vram_used_bytes: 20_000_000_000,
+                state: "idle",
+              },
+            ],
+          }),
         );
-      },
-    );
+      }
+      if (path === "/api/models") return Promise.resolve([]);
+      if (path === "/api/queue") return Promise.resolve({ entries: [] });
+      return Promise.reject(new Error(`Unexpected API path: ${path} for ${target.baseUrl}`));
+    });
 
     const view = await mountDetail();
 
@@ -337,6 +343,74 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.text()).toContain("NVIDIA B200");
     expect(view.text()).toContain("8.0 GB/24.0 GB");
     expect(view.text()).toContain("20.0 GB/80.0 GB");
+  });
+
+  it("mutates one device on the exact remote and reloads the lifecycle state", async () => {
+    const device = {
+      id: "cuda:GPU-3090",
+      backend: "cuda",
+      ordinal: 1,
+      device_kind: "full_gpu",
+      nvml_uuid: "GPU-3090",
+      physical_uuid: "GPU-3090",
+      mig_uuid: null,
+      mig_parent_uuid: null,
+      mig_profile: null,
+      name: "NVIDIA RTX 3090",
+      pci_bus_id: "0000:02:00.0",
+      compute_capability: "8.6",
+      memory: {
+        total_bytes: 24_000_000_000,
+        used_bytes: 4_000_000_000,
+        mold_used_bytes: null,
+        other_used_bytes: null,
+      },
+      telemetry: {
+        utilization_percent: 10,
+        temperature_c: 45,
+        power_w: 80,
+      },
+      desired_enabled: true,
+      admin_state: "enabled",
+      health: "healthy",
+      activity: "idle",
+      schedulable: true,
+      unschedulable_reason: null,
+      loaded_models: [],
+      active_work_id: null,
+      planned_work_ids: [],
+    };
+    let deviceLoads = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path !== "/api/devices") return existingApi(target, path);
+      deviceLoads += 1;
+      return Promise.resolve({
+        devices:
+          deviceLoads === 1
+            ? [device]
+            : [
+                {
+                  ...device,
+                  desired_enabled: false,
+                  admin_state: "disabled",
+                  schedulable: false,
+                  unschedulable_reason: "device_disabled",
+                },
+              ],
+        plan_version: deviceLoads + 1,
+      });
+    });
+
+    const view = await mountDetail();
+    expect(view.get("[data-test='host-detail-devices']").text()).toContain("NVIDIA RTX 3090");
+
+    await view.get("[data-test='device-toggle-1']").trigger("click");
+    await flushPromises();
+
+    expect(setDeviceEnabled).toHaveBeenCalledWith(studioTarget, "cuda:GPU-3090", false);
+    expect(apiJsonTo.mock.calls.filter(([, path]) => path === "/api/devices")).toHaveLength(2);
+    expect(view.get("[data-test='device-toggle-1']").text()).toBe("Enable");
   });
 
   it("uses the live queue count after the queue API responds", async () => {

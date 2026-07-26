@@ -147,6 +147,56 @@ pub fn spawn_gpu_thread(
         .expect("failed to spawn GPU worker thread")
 }
 
+/// Spawn a replacement owner without waiting for its context probe. The
+/// epoch-qualified first Ready or StartFailed event settles Starting.
+pub fn spawn_gpu_thread_async(
+    worker: Arc<GpuWorker>,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    cache_idle_ttl: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let thread_worker = worker.clone();
+    std::thread::Builder::new()
+        .name(format!(
+            "gpu-worker-{}-epoch-{}",
+            worker.gpu.ordinal, worker.owner_epoch
+        ))
+        .spawn(move || {
+            if let Err(error) = validate_owner_device(thread_worker.gpu.ordinal) {
+                let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::StartFailed {
+                    device_id: crate::scheduler::worker_device_id(&thread_worker),
+                    ordinal: thread_worker.gpu.ordinal,
+                    owner_epoch: thread_worker.owner_epoch,
+                    error,
+                });
+                return;
+            }
+            run_gpu_owner(
+                &thread_worker,
+                job_rx,
+                scheduler_tx,
+                cache_idle_ttl,
+                Duration::from_secs(60),
+            );
+        })
+}
+
+#[cfg(all(not(test), any(feature = "cuda", feature = "metal")))]
+fn validate_owner_device(ordinal: usize) -> Result<(), String> {
+    let device =
+        mold_inference::device::resolve_device(Some(mold_core::DeviceRef::Gpu { ordinal }), || {
+            unreachable!("explicit GPU placement does not use the auto resolver")
+        })
+        .map_err(|error| format!("failed to create device context on owner thread: {error:#}"))?;
+    drop(device);
+    Ok(())
+}
+
+#[cfg(any(test, not(any(feature = "cuda", feature = "metal"))))]
+fn validate_owner_device(_ordinal: usize) -> Result<(), String> {
+    Ok(())
+}
+
 /// Spawn a rollback-window worker that retains the pre-V2 dispatcher as the
 /// sole dispatch authority. It never publishes Ready generations or validates
 /// V2 lease fences; all CUDA ownership still stays on this one OS thread.
@@ -179,8 +229,19 @@ fn run_gpu_owner(
     cache_idle_ttl: Duration,
     idle_poll: Duration,
 ) {
+    let terminal_tx = scheduler_tx.clone();
+    let device_id = crate::scheduler::worker_device_id(worker);
+    let ordinal = worker.gpu.ordinal;
+    let owner_epoch = worker.owner_epoch;
     run_gpu_owner_entrypoint(worker, || {
         run_gpu_owner_loop(worker, job_rx, scheduler_tx, cache_idle_ttl, idle_poll);
+    });
+    // The lifecycle reducer needs one exact terminal event on every path,
+    // including an owner-loop or teardown panic contained by the entrypoint.
+    let _ = terminal_tx.send(crate::scheduler::WorkerEvent::Stopped {
+        device_id,
+        ordinal,
+        owner_epoch,
     });
 }
 
@@ -248,10 +309,14 @@ fn run_gpu_owner_loop(
         {
             break;
         }
+        if worker.commit_drain() {
+            break;
+        }
         if scheduler_tx
             .send(crate::scheduler::WorkerEvent::Ready {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
+                owner_epoch: worker.owner_epoch,
                 worker_generation: generation,
             })
             .is_err()
@@ -275,6 +340,12 @@ fn run_gpu_owner_loop(
         };
         let grant = match command {
             GpuWorkerCommand::Grant(grant) => grant,
+            GpuWorkerCommand::Drain => {
+                if worker.commit_drain() {
+                    break;
+                }
+                continue;
+            }
             GpuWorkerCommand::Shutdown => break,
         };
         if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst)
@@ -282,6 +353,7 @@ fn run_gpu_owner_loop(
             let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
+                owner_epoch: worker.owner_epoch,
                 worker_generation: generation,
                 grant,
                 reason: crate::scheduler::LeaseRejection::FatalCuda,
@@ -292,6 +364,7 @@ fn run_gpu_owner_loop(
             let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
+                owner_epoch: worker.owner_epoch,
                 worker_generation: generation,
                 grant,
                 reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
@@ -299,10 +372,14 @@ fn run_gpu_owner_loop(
             break;
         }
         let fence = &grant.fence;
-        if fence.device_id != device_id || fence.worker_generation != generation {
+        if fence.device_id != device_id
+            || fence.owner_epoch != worker.owner_epoch
+            || fence.worker_generation != generation
+        {
             let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
+                owner_epoch: worker.owner_epoch,
                 worker_generation: generation,
                 grant,
                 reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
@@ -313,6 +390,7 @@ fn run_gpu_owner_loop(
             let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
+                owner_epoch: worker.owner_epoch,
                 worker_generation: generation,
                 grant,
                 reason: crate::scheduler::LeaseRejection::PlanInvalidated(error),
@@ -322,10 +400,13 @@ fn run_gpu_owner_loop(
         let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
             device_id: device_id.clone(),
             ordinal: worker.gpu.ordinal,
+            owner_epoch: worker.owner_epoch,
             worker_generation: generation,
             work_id: fence.work_id.clone(),
             plan_version: fence.plan_version,
         });
+        #[cfg(test)]
+        pause_after_acceptance_for_test(&fence.work_id);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_owner_work(worker, *grant, &scheduler_tx);
         }));
@@ -339,12 +420,14 @@ fn run_gpu_owner_loop(
         let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
             device_id: device_id.clone(),
             ordinal: worker.gpu.ordinal,
+            owner_epoch: worker.owner_epoch,
             worker_generation: generation,
         });
         if outcome.is_err()
             || worker.shutdown_requested.load(Ordering::SeqCst)
             || worker.poisoned.load(Ordering::SeqCst)
             || worker.fatal_cuda_error.load(Ordering::SeqCst)
+            || worker.commit_drain()
         {
             break;
         }
@@ -418,6 +501,13 @@ fn run_legacy_gpu_owner_loop(
         };
         let grant = match command {
             GpuWorkerCommand::Grant(grant) => grant,
+            GpuWorkerCommand::Drain => {
+                if worker.commit_drain() {
+                    reject_buffered_legacy_grants(worker, &job_rx);
+                    break;
+                }
+                continue;
+            }
             GpuWorkerCommand::Shutdown => {
                 reject_buffered_legacy_grants(worker, &job_rx);
                 break;
@@ -590,6 +680,7 @@ fn commit_utility_allocation(
     let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
         device_id: fence.device_id.clone(),
         work_id: fence.work_id.clone(),
+        owner_epoch: fence.owner_epoch,
         worker_generation: fence.worker_generation,
     });
 }
@@ -664,6 +755,8 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
 
 fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) {
     let cleanup = GenerationCleanup::new(&job.generation);
+    #[cfg(test)]
+    pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PrePostUpscale);
     let upscale_model = job
         .generation
         .request
@@ -677,6 +770,8 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
         job.image.clone(),
         &mut job.response,
     );
+    #[cfg(test)]
+    pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PostPostUpscale);
     if result
         .as_ref()
         .is_err_and(|error| has_fatal_cuda_error(error))
@@ -1314,6 +1409,7 @@ impl GenerationEventSink<'_> {
             let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
                 device_id: lease.device_id.clone(),
                 work_id: lease.work_id.clone(),
+                owner_epoch: lease.owner_epoch,
                 worker_generation: lease.worker_generation,
             });
         }
@@ -2641,6 +2737,89 @@ pub fn run_stage_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
 }
 
 #[cfg(test)]
+type AcceptanceBarrier = (
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
+#[cfg(test)]
+static ACCEPTANCE_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<String, AcceptanceBarrier>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum TestOwnerStageBarrier {
+    PrePostUpscale,
+    PostPostUpscale,
+}
+
+#[cfg(test)]
+static OWNER_STAGE_BARRIERS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::BTreeMap<(String, TestOwnerStageBarrier), AcceptanceBarrier>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+#[cfg(test)]
+fn install_acceptance_barrier(
+    work_id: &str,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    ACCEPTANCE_BARRIERS
+        .lock()
+        .unwrap()
+        .insert(work_id.to_string(), (reached_tx, resume_rx));
+    (reached_rx, resume_tx)
+}
+
+#[cfg(test)]
+fn pause_after_acceptance_for_test(work_id: &str) {
+    let barrier = ACCEPTANCE_BARRIERS.lock().unwrap().remove(work_id);
+    if let Some((reached_tx, resume_rx)) = barrier {
+        reached_tx
+            .send(())
+            .expect("acceptance test should be waiting");
+        resume_rx
+            .recv()
+            .expect("acceptance test should resume owner");
+    }
+}
+
+#[cfg(test)]
+fn install_owner_stage_barrier(
+    work_id: &str,
+    point: TestOwnerStageBarrier,
+) -> (
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::SyncSender<()>,
+) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    OWNER_STAGE_BARRIERS
+        .lock()
+        .unwrap()
+        .insert((work_id.to_string(), point), (reached_tx, resume_rx));
+    (reached_rx, resume_tx)
+}
+
+#[cfg(test)]
+fn pause_owner_stage_for_test(work_id: &str, point: TestOwnerStageBarrier) {
+    let barrier = OWNER_STAGE_BARRIERS
+        .lock()
+        .unwrap()
+        .remove(&(work_id.to_string(), point));
+    if let Some((reached_tx, resume_rx)) = barrier {
+        reached_tx.send(()).expect("stage test should be waiting");
+        resume_rx.recv().expect("stage test should resume owner");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::job_registry::JobRegistry;
@@ -2662,6 +2841,8 @@ mod tests {
         name: String,
         loaded: bool,
         load_sleep: Duration,
+        load_started: Option<std::sync::mpsc::SyncSender<()>>,
+        load_resume: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
     }
 
     impl FakeSlowEngine {
@@ -2670,7 +2851,31 @@ mod tests {
                 name: name.to_string(),
                 loaded: false,
                 load_sleep,
+                load_started: None,
+                load_resume: None,
             })
+        }
+
+        fn blocked(
+            name: &str,
+        ) -> (
+            Box<dyn InferenceEngine>,
+            std::sync::mpsc::Receiver<()>,
+            std::sync::mpsc::SyncSender<()>,
+        ) {
+            let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+            (
+                Box::new(Self {
+                    name: name.to_string(),
+                    loaded: false,
+                    load_sleep: Duration::ZERO,
+                    load_started: Some(started_tx),
+                    load_resume: Some(Mutex::new(resume_rx)),
+                }),
+                started_rx,
+                resume_tx,
+            )
         }
     }
 
@@ -2685,12 +2890,67 @@ mod tests {
             self.loaded
         }
         fn load(&mut self) -> anyhow::Result<()> {
+            if let Some(started) = self.load_started.take() {
+                started.send(()).unwrap();
+            }
+            if let Some(resume) = self.load_resume.take() {
+                resume.into_inner().unwrap().recv().unwrap();
+            }
             std::thread::sleep(self.load_sleep);
             self.loaded = true;
             Ok(())
         }
         fn unload(&mut self) {
             self.loaded = false;
+        }
+    }
+
+    struct BarrierGenerationEngine {
+        name: String,
+        generate_started: Option<std::sync::mpsc::SyncSender<()>>,
+        generate_resume: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl InferenceEngine for BarrierGenerationEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            self.generate_started
+                .take()
+                .expect("generation barrier used once")
+                .send(())
+                .unwrap();
+            self.generate_resume
+                .take()
+                .expect("generation barrier used once")
+                .into_inner()
+                .unwrap()
+                .recv()
+                .unwrap();
+            Ok(GenerateResponse {
+                images: vec![ImageData {
+                    data: vec![1, 2, 3],
+                    format: OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                }],
+                video: None,
+                generation_time_ms: 1,
+                model: self.name.clone(),
+                seed_used: 1,
+                gpu: None,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
@@ -3124,6 +3384,7 @@ mod tests {
         // and calls `engine.load()` — that's where the sleep widens the window.
         cache.insert(FakeSlowEngine::boxed(model, load_sleep), 0);
         Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
                 stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
@@ -3151,6 +3412,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -3208,6 +3470,7 @@ mod tests {
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(capacity);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{:032x}", ordinal + 1)),
@@ -3235,6 +3498,7 @@ mod tests {
             fatal_cuda_error,
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -3255,6 +3519,7 @@ mod tests {
                 fence: crate::scheduler::LeaseFence {
                     work_id: id.to_string(),
                     device_id: crate::scheduler::worker_device_id(worker),
+                    owner_epoch: worker.owner_epoch,
                     state_version: 0,
                     plan_version: 0,
                     worker_generation: 0,
@@ -3277,6 +3542,7 @@ mod tests {
     fn worker_rejects_stale_generation_before_touching_inference() {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
                 stable_id: Some("cuda:00000000000000000000000000000001".to_string()),
@@ -3304,6 +3570,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -3344,6 +3611,7 @@ mod tests {
                 lease: Some(crate::scheduler::LeaseFence {
                     work_id: "stale".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
                     state_version: 1,
                     plan_version: 1,
                     worker_generation: 0,
@@ -3437,6 +3705,7 @@ mod tests {
         job.lease = Some(crate::scheduler::LeaseFence {
             work_id: job.id.clone(),
             device_id: crate::scheduler::worker_device_id(&worker),
+            owner_epoch: worker.owner_epoch,
             state_version: 1,
             plan_version: 1,
             worker_generation: 1,
@@ -3472,6 +3741,10 @@ mod tests {
             ));
             worker.request_shutdown();
             handle.join().expect("owner thread must join on shutdown");
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Stopped { owner_epoch: 1, .. })
+            ));
             assert!(
                 event_rx.blocking_recv().is_none(),
                 "owner must drop its coordinator sender before restart"
@@ -3504,6 +3777,11 @@ mod tests {
             .join()
             .expect("owner shutdown catches teardown panic");
 
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { owner_epoch: 1, .. })
+        ));
+        assert!(event_rx.blocking_recv().is_none());
         assert_eq!(unload_calls.load(Ordering::SeqCst), 1);
         assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
         assert!(worker.poisoned.load(Ordering::SeqCst));
@@ -3527,6 +3805,7 @@ mod tests {
                 fence: crate::scheduler::LeaseFence {
                     work_id: "legacy-probe".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
                     state_version: 0,
                     plan_version: 0,
                     worker_generation: 0,
@@ -3576,6 +3855,7 @@ mod tests {
                 fence: crate::scheduler::LeaseFence {
                     work_id: "legacy-behind-chain".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
                     state_version: 0,
                     plan_version: 0,
                     worker_generation: 0,
@@ -3995,6 +4275,7 @@ mod tests {
             0,
         );
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal: 0,
                 stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
@@ -4022,6 +4303,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -4046,10 +4328,11 @@ mod tests {
         worker.fatal_cuda_error.store(true, Ordering::SeqCst);
         handle.join().expect("owner exits on fatal timeout branch");
 
-        assert!(
-            event_rx.try_recv().is_err(),
-            "fatal worker must not re-advertise Ready"
-        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(crate::scheduler::WorkerEvent::Stopped { owner_epoch: 1, .. })
+        ));
+        assert!(event_rx.try_recv().is_err());
         assert!(dropped_on.lock().unwrap().is_none());
         assert_eq!(worker.model_cache.lock().unwrap().len(), 2);
     }
@@ -4072,6 +4355,458 @@ mod tests {
             error.to_string().contains("resources are owned by thread"),
             "unexpected owner-thread rejection: {error:#}"
         );
+    }
+
+    #[test]
+    fn drain_at_pre_and_post_upscale_barriers_finishes_exact_stage_then_stops() {
+        for (id, point) in [
+            ("drain-pre-upscale", TestOwnerStageBarrier::PrePostUpscale),
+            ("drain-post-upscale", TestOwnerStageBarrier::PostPostUpscale),
+        ] {
+            let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let handle =
+                spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Ready {
+                    worker_generation: 1,
+                    ..
+                })
+            ));
+            assert!(worker.try_claim_in_flight());
+            let (stage_reached, stage_resume) = install_owner_stage_barrier(id, point);
+            let request: GenerateRequest = serde_json::from_str(
+                r#"{"prompt":"upscale barrier","model":"flux-dev:q4","width":64,"height":64,"steps":1,"guidance":1.0,"batch_size":1,"upscale_model":"missing-upscaler"}"#,
+            )
+            .unwrap();
+            let original = fake_upscale_image();
+            let response = GenerateResponse {
+                images: vec![original.clone()],
+                video: None,
+                generation_time_ms: 1,
+                model: request.model.clone(),
+                seed_used: 1,
+                gpu: Some(0),
+            };
+            let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+            let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+            let generation = GpuJob {
+                id: id.to_string(),
+                model: request.model.clone(),
+                request,
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: None,
+                result_tx,
+                output_dir: None,
+                config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                metadata_db: Arc::new(None),
+                queue: QueueHandle::new(queue_tx),
+                registry: JobRegistry::new(),
+                events: crate::events::EventBroadcaster::new(),
+                execution_plan: None,
+                prepared_execution_inputs: None,
+                lease: None,
+            };
+            worker
+                .send_grant(LeaseGrant {
+                    fence: crate::scheduler::LeaseFence {
+                        work_id: id.to_string(),
+                        device_id: crate::scheduler::worker_device_id(&worker),
+                        owner_epoch: worker.owner_epoch,
+                        state_version: 1,
+                        plan_version: 1,
+                        worker_generation: 1,
+                        memory_sample_generation: 1,
+                        memory_ledger_sequence: 1,
+                    },
+                    work: OwnerWork::PostUpscale(Box::new(PostGenerationUpscaleJob {
+                        id: id.to_string(),
+                        generation: Box::new(generation),
+                        response,
+                        image: original,
+                    })),
+                    retry: None,
+                })
+                .unwrap();
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Accepted { .. })
+            ));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+            ));
+            stage_reached
+                .recv_timeout(Duration::from_secs(1))
+                .expect("post-upscale stage must reach deterministic barrier");
+
+            worker.request_drain(false);
+            assert!(matches!(
+                result_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            stage_resume.send(()).unwrap();
+            assert!(result_rx.blocking_recv().unwrap().is_ok());
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Completed { .. })
+            ));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Stopped { .. })
+            ));
+            handle.join().unwrap();
+            assert_eq!(worker.pending_or_executing(), 0);
+            assert!(!worker.poisoned.load(Ordering::SeqCst));
+            assert!(!worker.fatal_cuda_error.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn drain_after_model_ready_finishes_generation_then_stops() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (generate_started_tx, generate_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (generate_resume_tx, generate_resume_rx) = std::sync::mpsc::sync_channel(1);
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(BarrierGenerationEngine {
+                name: "barrier-generation".to_string(),
+                generate_started: Some(generate_started_tx),
+                generate_resume: Some(Mutex::new(generate_resume_rx)),
+            }),
+            0,
+        );
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+        assert!(worker.try_claim_in_flight());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"barrier","model":"barrier-generation","width":64,"height":64,"steps":1,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "barrier-generation".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::Generation(Box::new(GpuJob {
+                    id: "barrier-generation".to_string(),
+                    model: request.model.clone(),
+                    request,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    queue: QueueHandle::new(queue_tx),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
+                    prepared_execution_inputs: None,
+                    lease: None,
+                })),
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        generate_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("generation must start only after model readiness");
+
+        worker.request_drain(false);
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        generate_resume_tx.send(()).unwrap();
+        assert!(result_rx.blocking_recv().unwrap().is_ok());
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Completed { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        handle.join().unwrap();
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(!worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn drain_while_admin_model_load_is_blocked_finishes_load_then_stops() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (engine, load_started, load_resume) = FakeSlowEngine::blocked("blocked-admin");
+        worker.model_cache.lock().unwrap().insert(engine, 0);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+        assert!(worker.try_claim_in_flight());
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "blocked-admin-load".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::AdminModelLoad(Box::new(crate::gpu_pool::AdminModelLoadJob {
+                    id: "blocked-admin-load".to_string(),
+                    model: "blocked-admin".to_string(),
+                    config: Config::default(),
+                    result_tx,
+                })),
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        load_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("admin load must reach the model load barrier");
+
+        worker.request_drain(false);
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED
+        );
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        load_resume.send(()).unwrap();
+        assert_eq!(result_rx.blocking_recv().unwrap(), Ok(()));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Completed { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        handle.join().unwrap();
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(!worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn drain_after_acceptance_finishes_each_exact_owner_stage_without_quarantine() {
+        let cases = [
+            ("accepted-generation", mold_scheduler::WorkKind::Generation),
+            (
+                "accepted-admin-load",
+                mold_scheduler::WorkKind::AdminModelLoad,
+            ),
+            (
+                "accepted-post-upscale",
+                mold_scheduler::WorkKind::PostUpscale,
+            ),
+        ];
+
+        for (id, kind) in cases {
+            let fatal = Arc::new(AtomicBool::new(false));
+            let (worker, job_rx) = protocol_worker(0, fatal.clone());
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let handle =
+                spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Ready {
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    ..
+                })
+            ));
+            assert!(worker.try_claim_in_flight());
+            let (accepted_rx, resume_tx) = install_acceptance_barrier(id);
+            let (ran_tx, ran_rx) = std::sync::mpsc::sync_channel(1);
+            worker
+                .send_grant(LeaseGrant {
+                    fence: crate::scheduler::LeaseFence {
+                        work_id: id.to_string(),
+                        device_id: crate::scheduler::worker_device_id(&worker),
+                        owner_epoch: worker.owner_epoch,
+                        state_version: 1,
+                        plan_version: 1,
+                        worker_generation: 1,
+                        memory_sample_generation: 1,
+                        memory_ledger_sequence: 1,
+                    },
+                    work: OwnerWork::Probe {
+                        id: id.to_string(),
+                        kind,
+                        run: Box::new(move || ran_tx.send(()).unwrap()),
+                    },
+                    retry: None,
+                })
+                .unwrap();
+            accepted_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("owner must stop at the accepted-before-process barrier");
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Accepted {
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    ..
+                })
+            ));
+
+            worker.request_drain(false);
+            assert_eq!(
+                worker.drain_state.load(Ordering::SeqCst),
+                crate::gpu_pool::DRAIN_REQUESTED
+            );
+            assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+            assert!(!worker.poisoned.load(Ordering::SeqCst));
+            assert!(!fatal.load(Ordering::SeqCst));
+
+            resume_tx.send(()).unwrap();
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::AllocationCommitted {
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    ..
+                })
+            ));
+            ran_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("accepted owner stage must finish while draining");
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Completed {
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    ..
+                })
+            ));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Stopped { owner_epoch: 1, .. })
+            ));
+            handle.join().expect("drained owner must stop exactly");
+            assert_eq!(worker.pending_or_executing(), 0);
+            assert_eq!(
+                worker.drain_state.load(Ordering::SeqCst),
+                crate::gpu_pool::DRAIN_COMMITTED
+            );
+            assert!(!worker.poisoned.load(Ordering::SeqCst));
+            assert!(!fatal.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn reenable_cancels_only_an_uncommitted_drain() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+        assert!(worker.try_claim_in_flight());
+        let (accepted_rx, resume_tx) = install_acceptance_barrier("cancel-drain");
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "cancel-drain".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::Probe {
+                    id: "cancel-drain".to_string(),
+                    kind: mold_scheduler::WorkKind::PostUpscale,
+                    run: Box::new(|| {}),
+                },
+                retry: None,
+            })
+            .unwrap();
+        accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        worker.request_drain(false);
+        assert!(worker.cancel_drain());
+        resume_tx.send(()).unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Completed { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 2,
+                ..
+            })
+        ));
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_RUNNING
+        );
+
+        worker.request_drain(true);
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        assert!(!worker.cancel_drain());
+        handle.join().unwrap();
     }
 
     #[test]
@@ -4104,6 +4839,7 @@ mod tests {
                     fence: crate::scheduler::LeaseFence {
                         work_id: id.clone(),
                         device_id: device_id.clone(),
+                        owner_epoch: worker.owner_epoch,
                         state_version: generation,
                         plan_version: generation,
                         worker_generation: generation,
@@ -4215,6 +4951,7 @@ mod tests {
                 fence: crate::scheduler::LeaseFence {
                     work_id: "invalidated".to_string(),
                     device_id,
+                    owner_epoch: worker.owner_epoch,
                     state_version: 1,
                     plan_version: 1,
                     worker_generation: 1,
@@ -4260,6 +4997,7 @@ mod tests {
                     == std::mem::discriminant(&crate::scheduler::WorkerEvent::Completed {
                         device_id: String::new(),
                         ordinal: 0,
+                        owner_epoch: 0,
                         worker_generation: 0,
                     })
             ),
@@ -4319,6 +5057,7 @@ mod tests {
         let fence = |id: &str, generation| crate::scheduler::LeaseFence {
             work_id: id.to_string(),
             device_id: device_id.clone(),
+            owner_epoch: worker.owner_epoch,
             state_version: generation,
             plan_version: generation,
             worker_generation: generation,

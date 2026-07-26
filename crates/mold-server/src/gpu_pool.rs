@@ -4,13 +4,16 @@ use mold_db::MetadataDb;
 use mold_inference::device::DiscoveredGpu;
 use mold_inference::shared_pool::SharedPool;
 use mold_scheduler::WorkKind;
-use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock, Weak};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 const MODEL_CUDA_OOM_COOLDOWN: Duration = Duration::from_secs(60);
 pub(crate) const MAX_OWNER_BYPASSES_FOR_CHAIN: u8 = 3;
+pub(crate) const DRAIN_RUNNING: u8 = 0;
+pub(crate) const DRAIN_REQUESTED: u8 = 1;
+pub(crate) const DRAIN_COMMITTED: u8 = 2;
 
 static LEGACY_CHAIN_TICKET: AtomicUsize = AtomicUsize::new(0);
 
@@ -177,6 +180,7 @@ pub(crate) fn clear_model_cuda_ooms_for_tests() {
 
 /// Per-GPU worker state. Each GPU gets its own model cache, load lock, and health tracking.
 pub struct GpuWorker {
+    pub owner_epoch: u64,
     pub gpu: DiscoveredGpu,
     pub model_cache: Arc<Mutex<ModelCache>>,
     /// Driver-free snapshot of the model currently resident on this worker.
@@ -209,6 +213,7 @@ pub struct GpuWorker {
     /// Explicit owner-thread shutdown. The command wakes an idle blocking
     /// receiver; the flag also fences a grant that was already transported.
     pub shutdown_requested: AtomicBool,
+    pub drain_state: AtomicU8,
     /// Exact OS thread authorized to create/use/drop device-backed objects.
     pub owner_thread_id: std::sync::OnceLock<std::thread::ThreadId>,
     pub degraded_until: RwLock<Option<Instant>>,
@@ -429,6 +434,7 @@ pub struct OwnerWorkRetry {
 
 pub enum GpuWorkerCommand {
     Grant(Box<LeaseGrant>),
+    Drain,
     Shutdown,
 }
 
@@ -683,7 +689,9 @@ impl GpuWorker {
                 std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(grant)) => {
                     std::sync::mpsc::TrySendError::Disconnected(grant)
                 }
-                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown)
+                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Drain)
+                | std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Drain)
+                | std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown)
                 | std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Shutdown) => {
                     unreachable!("try_send_job only transports Grant")
                 }
@@ -698,6 +706,7 @@ impl GpuWorker {
         let fence = job.lease.clone().unwrap_or(crate::scheduler::LeaseFence {
             work_id: job.id.clone(),
             device_id: crate::scheduler::worker_device_id(self),
+            owner_epoch: self.owner_epoch,
             state_version: 0,
             plan_version: 0,
             worker_generation: 1,
@@ -721,7 +730,9 @@ impl GpuWorker {
             .send(GpuWorkerCommand::Grant(Box::new(grant)))
             .map_err(|error| match error.0 {
                 GpuWorkerCommand::Grant(grant) => std::sync::mpsc::SendError(grant),
-                GpuWorkerCommand::Shutdown => unreachable!("send_job only transports Grant"),
+                GpuWorkerCommand::Drain | GpuWorkerCommand::Shutdown => {
+                    unreachable!("send_job only transports Grant")
+                }
             })
     }
 
@@ -737,13 +748,512 @@ impl GpuWorker {
             | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(_))) => {
                 unreachable!("request_shutdown only transports Shutdown")
             }
+            Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Drain))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Drain)) => {
+                unreachable!("request_shutdown only transports Shutdown")
+            }
+        }
+    }
+
+    pub(crate) fn request_drain(&self, wake_idle_owner: bool) {
+        let _ = self.drain_state.compare_exchange(
+            DRAIN_RUNNING,
+            DRAIN_REQUESTED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        if !wake_idle_owner {
+            return;
+        }
+        match self.job_tx.try_send(GpuWorkerCommand::Drain) {
+            Ok(())
+            | Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Drain))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Drain)) => {}
+            Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Grant(_)))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(_)))
+            | Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Shutdown)) => {
+                unreachable!("request_drain only transports Drain")
+            }
+        }
+    }
+
+    pub(crate) fn cancel_drain(&self) -> bool {
+        self.drain_state
+            .compare_exchange(
+                DRAIN_REQUESTED,
+                DRAIN_RUNNING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+            || self.drain_state.load(Ordering::SeqCst) == DRAIN_RUNNING
+    }
+
+    pub(crate) fn commit_drain(&self) -> bool {
+        self.drain_state
+            .compare_exchange(
+                DRAIN_REQUESTED,
+                DRAIN_COMMITTED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+}
+
+pub(crate) struct WorkerFactory {
+    pub devices: BTreeMap<String, DiscoveredGpu>,
+    pub shared_pool: Arc<Mutex<SharedPool>>,
+    pub fatal_cuda_error: Arc<AtomicBool>,
+    pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
+    pub scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    pub max_cached: usize,
+    pub cache_idle_ttl: Duration,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OwnerKey {
+    device_id: String,
+    owner_epoch: u64,
+}
+
+#[derive(Default)]
+struct WorkerLifecycle {
+    handles: BTreeMap<OwnerKey, std::thread::JoinHandle<()>>,
+    starting: BTreeMap<String, u64>,
+    start_announced: BTreeSet<OwnerKey>,
+    ready_seen: BTreeSet<OwnerKey>,
+    failed_seen: BTreeMap<OwnerKey, String>,
+    start_failures: BTreeMap<String, String>,
+    next_owner_epoch: u64,
+}
+
+pub(crate) enum StartAnnouncement {
+    Pending,
+    Ready,
+    Failed(String),
+}
+
+pub struct WorkerSet {
+    active: RwLock<Vec<Arc<GpuWorker>>>,
+    lifecycle: Mutex<WorkerLifecycle>,
+    factory: OnceLock<WorkerFactory>,
+}
+
+impl Default for WorkerSet {
+    fn default() -> Self {
+        Self::from(Vec::new())
+    }
+}
+
+impl From<Vec<Arc<GpuWorker>>> for WorkerSet {
+    fn from(workers: Vec<Arc<GpuWorker>>) -> Self {
+        let next_owner_epoch = workers
+            .iter()
+            .map(|worker| worker.owner_epoch)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        Self {
+            active: RwLock::new(workers),
+            lifecycle: Mutex::new(WorkerLifecycle {
+                next_owner_epoch,
+                ..WorkerLifecycle::default()
+            }),
+            factory: OnceLock::new(),
         }
     }
 }
 
-/// Pool of GPU workers with placement strategy.
+impl FromIterator<Arc<GpuWorker>> for WorkerSet {
+    fn from_iter<T: IntoIterator<Item = Arc<GpuWorker>>>(iter: T) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl IntoIterator for &WorkerSet {
+    type Item = Arc<GpuWorker>;
+    type IntoIter = std::vec::IntoIter<Arc<GpuWorker>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.snapshot().into_iter()
+    }
+}
+
 pub struct GpuPool {
-    pub workers: Vec<Arc<GpuWorker>>,
+    pub workers: WorkerSet,
+}
+
+impl WorkerSet {
+    pub fn snapshot(&self) -> Vec<Arc<GpuWorker>> {
+        self.active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> std::vec::IntoIter<Arc<GpuWorker>> {
+        self.snapshot().into_iter()
+    }
+
+    pub(crate) fn install_factory(
+        &self,
+        factory: WorkerFactory,
+        handles: Vec<(String, u64, std::thread::JoinHandle<()>)>,
+    ) -> Result<(), &'static str> {
+        self.factory
+            .set(factory)
+            .map_err(|_| "GPU worker factory already installed")?;
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (device_id, owner_epoch, handle) in handles {
+            lifecycle.handles.insert(
+                OwnerKey {
+                    device_id,
+                    owner_epoch,
+                },
+                handle,
+            );
+            lifecycle.next_owner_epoch = lifecycle
+                .next_owner_epoch
+                .max(owner_epoch.saturating_add(1));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_starting(&self, device_id: &str) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .starting
+            .contains_key(device_id)
+    }
+
+    pub(crate) fn last_start_error(&self, device_id: &str) -> Option<String> {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .start_failures
+            .get(device_id)
+            .cloned()
+    }
+
+    pub(crate) fn request_disable(&self, device_id: &str) -> Result<bool, String> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(worker) = self
+            .snapshot()
+            .into_iter()
+            .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+        else {
+            return Ok(false);
+        };
+        let busy = worker.pending_or_executing() > 0
+            || worker
+                .active_generation
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some();
+        worker.request_drain(!busy);
+        Ok(busy)
+    }
+
+    pub(crate) fn cancel_drain(&self, device_id: &str) -> bool {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.snapshot()
+            .into_iter()
+            .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            .is_some_and(|worker| worker.cancel_drain())
+    }
+
+    pub(crate) fn mark_ready(&self, device_id: &str, owner_epoch: u64) -> bool {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = OwnerKey {
+            device_id: device_id.to_string(),
+            owner_epoch,
+        };
+        if lifecycle.starting.get(device_id) == Some(&owner_epoch) {
+            lifecycle.ready_seen.insert(key.clone());
+            if lifecycle.start_announced.contains(&key) {
+                lifecycle.starting.remove(device_id);
+            }
+            lifecycle.start_failures.remove(device_id);
+            return true;
+        }
+        self.active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|worker| {
+                crate::scheduler::worker_device_id(worker) == device_id
+                    && worker.owner_epoch == owner_epoch
+            })
+    }
+
+    pub(crate) fn announce_start(&self, device_id: &str, owner_epoch: u64) -> StartAnnouncement {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.starting.get(device_id) != Some(&owner_epoch) {
+            return StartAnnouncement::Pending;
+        }
+        let key = OwnerKey {
+            device_id: device_id.to_string(),
+            owner_epoch,
+        };
+        lifecycle.start_announced.insert(key.clone());
+        if let Some(error) = lifecycle.failed_seen.remove(&key) {
+            lifecycle.starting.remove(device_id);
+            lifecycle.start_announced.remove(&key);
+            lifecycle
+                .start_failures
+                .insert(device_id.to_string(), error.clone());
+            return StartAnnouncement::Failed(error);
+        }
+        if lifecycle.ready_seen.contains(&key) {
+            lifecycle.starting.remove(device_id);
+            return StartAnnouncement::Ready;
+        }
+        StartAnnouncement::Pending
+    }
+
+    pub(crate) fn wait_and_reap(&self, device_id: &str, owner_epoch: u64) -> bool {
+        let key = OwnerKey {
+            device_id: device_id.to_string(),
+            owner_epoch,
+        };
+        let handle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handles
+            .remove(&key);
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = self
+            .active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = active.len();
+        active.retain(|worker| {
+            crate::scheduler::worker_device_id(worker) != device_id
+                || worker.owner_epoch != owner_epoch
+        });
+        if lifecycle.starting.get(device_id) == Some(&owner_epoch) {
+            lifecycle.starting.remove(device_id);
+        }
+        lifecycle.start_announced.remove(&key);
+        lifecycle.ready_seen.remove(&key);
+        lifecycle.failed_seen.remove(&key);
+        before != active.len()
+    }
+
+    pub(crate) fn mark_start_failed(
+        &self,
+        device_id: &str,
+        owner_epoch: u64,
+        error: String,
+    ) -> Option<bool> {
+        let key = OwnerKey {
+            device_id: device_id.to_string(),
+            owner_epoch,
+        };
+        let (announced, handle) = {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                lifecycle.start_announced.contains(&key),
+                lifecycle.handles.remove(&key),
+            )
+        };
+        let had_handle = handle.is_some();
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut active = self
+            .active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = active.len();
+        active.retain(|worker| {
+            crate::scheduler::worker_device_id(worker) != device_id
+                || worker.owner_epoch != owner_epoch
+        });
+        if !had_handle && before == active.len() {
+            return None;
+        }
+        drop(active);
+        lifecycle.starting.remove(device_id);
+        lifecycle.start_announced.remove(&key);
+        lifecycle.ready_seen.remove(&key);
+        lifecycle.failed_seen.remove(&key);
+        if announced {
+            lifecycle
+                .start_failures
+                .insert(device_id.to_string(), error);
+        } else {
+            lifecycle
+                .starting
+                .insert(device_id.to_string(), owner_epoch);
+            lifecycle.failed_seen.insert(key, error);
+        }
+        Some(announced)
+    }
+
+    pub(crate) fn start(&self, device_id: &str) -> Result<u64, String> {
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(owner_epoch) = lifecycle.starting.get(device_id).copied() {
+            let key = OwnerKey {
+                device_id: device_id.to_string(),
+                owner_epoch,
+            };
+            if !lifecycle.failed_seen.contains_key(&key) {
+                return Ok(owner_epoch);
+            }
+            let error = lifecycle
+                .failed_seen
+                .remove(&key)
+                .expect("checked deferred failure");
+            lifecycle.starting.remove(device_id);
+            lifecycle.start_announced.remove(&key);
+            lifecycle.ready_seen.remove(&key);
+            lifecycle
+                .start_failures
+                .insert(device_id.to_string(), error);
+        }
+        if let Some(worker) = self
+            .snapshot()
+            .iter()
+            .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+        {
+            return Ok(worker.owner_epoch);
+        }
+        let factory = self
+            .factory
+            .get()
+            .ok_or_else(|| "dynamic GPU lifecycle is unavailable".to_string())?;
+        if factory.fatal_cuda_error.load(Ordering::SeqCst) {
+            return Err(
+                "process CUDA context is fatally poisoned; server restart required".to_string(),
+            );
+        }
+        let gpu = factory
+            .devices
+            .get(device_id)
+            .cloned()
+            .ok_or_else(|| format!("device '{device_id}' cannot be started in this process"))?;
+        let owner_epoch = lifecycle.next_owner_epoch.max(1);
+        lifecycle.next_owner_epoch = owner_epoch.saturating_add(1);
+        lifecycle
+            .starting
+            .insert(device_id.to_string(), owner_epoch);
+        lifecycle.start_failures.remove(device_id);
+
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = Arc::new(GpuWorker {
+            owner_epoch,
+            gpu,
+            model_cache: Arc::new(Mutex::new(ModelCache::new(factory.max_cached))),
+            resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: factory.shared_pool.clone(),
+            legacy_pending: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
+            legacy_chain_waiters: Default::default(),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: factory.fatal_cuda_error.clone(),
+            fatal_cuda_shutdown: factory.fatal_cuda_shutdown.clone(),
+            shutdown_requested: AtomicBool::new(false),
+            drain_state: AtomicU8::new(DRAIN_RUNNING),
+            owner_thread_id: OnceLock::new(),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        let handle = crate::gpu_worker::spawn_gpu_thread_async(
+            worker.clone(),
+            job_rx,
+            factory.scheduler_tx.clone(),
+            factory.cache_idle_ttl,
+        )
+        .map_err(|error| format!("failed to start GPU owner thread: {error}"))?;
+        self.active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(worker);
+        lifecycle.handles.insert(
+            OwnerKey {
+                device_id: device_id.to_string(),
+                owner_epoch,
+            },
+            handle,
+        );
+        Ok(owner_epoch)
+    }
+
+    pub(crate) fn shutdown_and_join_all(&self) {
+        let handles = {
+            let mut lifecycle = self
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for worker in self.snapshot() {
+                worker.request_shutdown();
+            }
+            lifecycle.starting.clear();
+            lifecycle.start_announced.clear();
+            lifecycle.ready_seen.clear();
+            lifecycle.failed_seen.clear();
+            std::mem::take(&mut lifecycle.handles)
+        };
+        for (_, handle) in handles {
+            let _ = handle.join();
+        }
+        self.active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
 }
 
 impl GpuWorker {
@@ -825,12 +1335,31 @@ impl GpuWorker {
 }
 
 impl GpuPool {
+    pub fn schedulable_workers(&self) -> Vec<Arc<GpuWorker>> {
+        self.worker_snapshot()
+            .into_iter()
+            .filter(|worker| {
+                !worker.shutdown_requested.load(Ordering::SeqCst)
+                    && worker.drain_state.load(Ordering::SeqCst) == DRAIN_RUNNING
+                    && !worker.poisoned.load(Ordering::SeqCst)
+                    && !worker.is_degraded()
+            })
+            .collect()
+    }
+
+    pub fn schedulable_worker_count(&self) -> usize {
+        self.schedulable_workers().len()
+    }
+
+    pub fn worker_snapshot(&self) -> Vec<Arc<GpuWorker>> {
+        self.workers.snapshot()
+    }
+
     /// Return the worker bound to `ordinal`, if present in this pool.
     pub fn worker_by_ordinal(&self, ordinal: usize) -> Option<Arc<GpuWorker>> {
-        self.workers
-            .iter()
+        self.worker_snapshot()
+            .into_iter()
             .find(|w| w.gpu.ordinal == ordinal)
-            .cloned()
     }
 
     /// Validate a request/config placement against the active worker pool.
@@ -865,8 +1394,8 @@ impl GpuPool {
         let ordinal = *ordinals.iter().next().expect("checked non-empty");
         if self.worker_by_ordinal(ordinal).is_none() {
             let available = self
-                .workers
-                .iter()
+                .worker_snapshot()
+                .into_iter()
                 .map(|w| w.gpu.ordinal.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -910,23 +1439,22 @@ impl GpuPool {
             DeviceRef::Auto | DeviceRef::Cpu => return Ok(()),
             DeviceRef::Gpu { ordinal } => self.worker_by_ordinal(*ordinal).ok_or_else(|| {
                 let available = self
-                    .workers
-                    .iter()
+                    .worker_snapshot()
+                    .into_iter()
                     .map(|worker| worker.gpu.ordinal.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("gpu:{ordinal} is not available in this server's worker pool [{available}]")
             })?,
             DeviceRef::Device { id } => self
-                .workers
-                .iter()
+                .worker_snapshot()
+                .into_iter()
                 .find(|worker| worker.gpu.stable_id.as_deref() == Some(id.as_str()))
-                .cloned()
                 .ok_or_else(|| {
                     let available = self
-                        .workers
-                        .iter()
-                        .filter_map(|worker| worker.gpu.stable_id.as_deref())
+                        .worker_snapshot()
+                        .into_iter()
+                        .filter_map(|worker| worker.gpu.stable_id.clone())
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!(
@@ -942,12 +1470,9 @@ impl GpuPool {
     /// If multiple workers have it, prefer the one with fewer in-flight requests.
     pub fn find_loaded(&self, model_name: &str) -> Option<Arc<GpuWorker>> {
         let mut candidates: Vec<_> = self
-            .workers
-            .iter()
+            .schedulable_workers()
+            .into_iter()
             .filter(|w| {
-                if w.is_degraded() {
-                    return false;
-                }
                 let active_gen = w.active_generation.read().unwrap();
                 if active_gen.as_ref().is_some_and(|g| g.model == model_name) {
                     return true;
@@ -961,7 +1486,7 @@ impl GpuPool {
             .collect();
 
         candidates.sort_by_key(|w| w.pending_or_executing());
-        candidates.into_iter().next().cloned()
+        candidates.into_iter().next()
     }
 
     /// Select the best worker for a model, using the placement strategy
@@ -982,10 +1507,10 @@ impl GpuPool {
         estimated_vram: u64,
         skip: &[usize],
     ) -> Option<Arc<GpuWorker>> {
-        let eligible: Vec<&Arc<GpuWorker>> = self
-            .workers
-            .iter()
-            .filter(|w| !w.is_degraded() && !skip.contains(&w.gpu.ordinal))
+        let eligible: Vec<Arc<GpuWorker>> = self
+            .schedulable_workers()
+            .into_iter()
+            .filter(|w| !skip.contains(&w.gpu.ordinal))
             .collect();
 
         if eligible.is_empty() {
@@ -1085,7 +1610,10 @@ impl GpuPool {
 
     /// Collect status from all workers.
     pub fn gpu_status(&self) -> Vec<GpuWorkerStatus> {
-        self.workers.iter().map(|w| w.status()).collect()
+        self.worker_snapshot()
+            .into_iter()
+            .map(|w| w.status())
+            .collect()
     }
 
     /// Number of GPU workers in the pool.
@@ -1112,6 +1640,7 @@ mod tests {
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(2);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{ordinal:032x}")),
@@ -1139,11 +1668,55 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn one_enable_after_unannounced_start_failure_spawns_a_fresh_epoch() {
+        let (template, _template_rx) = test_worker(0, 24_000_000_000);
+        let device_id = crate::scheduler::worker_device_id(&template);
+        let workers = WorkerSet::from(Vec::new());
+        let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        workers
+            .install_factory(
+                WorkerFactory {
+                    devices: BTreeMap::from([(device_id.clone(), template.gpu.clone())]),
+                    shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        {
+            let mut lifecycle = workers.lifecycle.lock().unwrap();
+            let failed_key = OwnerKey {
+                device_id: device_id.clone(),
+                owner_epoch: 1,
+            };
+            lifecycle.starting.insert(device_id.clone(), 1);
+            lifecycle
+                .failed_seen
+                .insert(failed_key, "probe failed".to_string());
+            lifecycle.next_owner_epoch = 2;
+        }
+
+        let replacement_epoch = workers
+            .start(&device_id)
+            .expect("one retry click must replace a failed unannounced owner");
+
+        assert_eq!(replacement_epoch, 2);
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers.snapshot()[0].owner_epoch, 2);
+        workers.shutdown_and_join_all();
     }
 
     #[test]
@@ -1232,7 +1805,7 @@ mod tests {
         busy.in_flight.store(1, Ordering::SeqCst);
 
         let pool = GpuPool {
-            workers: vec![busy.clone(), idle.clone()],
+            workers: vec![busy.clone(), idle.clone()].into(),
         };
 
         let picked = pool
@@ -1262,7 +1835,7 @@ mod tests {
         });
 
         let pool = GpuPool {
-            workers: vec![busy.clone(), idle.clone()],
+            workers: vec![busy.clone(), idle.clone()].into(),
         };
 
         let picked = pool.select_worker("small-model:q4", 6_000_000_000).unwrap();
@@ -1278,7 +1851,7 @@ mod tests {
         let (small, _small_rx) = test_worker(1, 12_000_000_000);
 
         let pool = GpuPool {
-            workers: vec![big.clone(), small.clone()],
+            workers: vec![big.clone(), small.clone()].into(),
         };
 
         // A 6GB model fits on both — should pick the smaller card.
@@ -1296,7 +1869,7 @@ mod tests {
         b.in_flight.store(1, Ordering::SeqCst);
 
         let pool = GpuPool {
-            workers: vec![a.clone(), b.clone()],
+            workers: vec![a.clone(), b.clone()].into(),
         };
 
         let picked = pool.select_worker("new-model", 6_000_000_000).unwrap();
@@ -1323,7 +1896,7 @@ mod tests {
         });
 
         let pool = GpuPool {
-            workers: vec![warm_busy.clone(), cold_idle.clone()],
+            workers: vec![warm_busy.clone(), cold_idle.clone()].into(),
         };
 
         let picked = pool
@@ -1353,7 +1926,7 @@ mod tests {
         });
 
         let pool = GpuPool {
-            workers: vec![warm_busy.clone(), small_idle.clone()],
+            workers: vec![warm_busy.clone(), small_idle.clone()].into(),
         };
 
         let picked = pool
@@ -1369,7 +1942,7 @@ mod tests {
     fn resolve_explicit_placement_gpu_accepts_single_worker_ordinal() {
         let (worker, _rx) = test_worker(1, 24_000_000_000);
         let pool = GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::Auto,
@@ -1391,7 +1964,7 @@ mod tests {
         let (worker, _rx) = test_worker(3, 24_000_000_000);
         let stable_id = worker.gpu.stable_id.clone().expect("test stable id");
         let pool = GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::Auto,
@@ -1412,7 +1985,7 @@ mod tests {
     fn resolve_explicit_placement_gpu_rejects_unavailable_durable_device_id() {
         let (worker, _rx) = test_worker(0, 24_000_000_000);
         let pool = GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::device("cuda:ffffffffffffffffffffffffffffffff"),
@@ -1430,7 +2003,7 @@ mod tests {
         let (worker, _rx) = test_worker(2, 24_000_000_000);
         let stable_id = worker.gpu.stable_id.clone().expect("test stable id");
         let pool = GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::gpu(2),
@@ -1452,7 +2025,7 @@ mod tests {
         let (worker0, _rx0) = test_worker(0, 24_000_000_000);
         let (worker1, _rx1) = test_worker(1, 24_000_000_000);
         let pool = GpuPool {
-            workers: vec![worker0, worker1],
+            workers: vec![worker0, worker1].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::gpu(0),
@@ -1472,7 +2045,7 @@ mod tests {
     fn resolve_explicit_placement_gpu_rejects_ordinals_outside_pool() {
         let (worker1, _rx1) = test_worker(1, 24_000_000_000);
         let pool = GpuPool {
-            workers: vec![worker1],
+            workers: vec![worker1].into(),
         };
         let placement = DevicePlacement {
             text_encoders: DeviceRef::Auto,
@@ -1572,7 +2145,7 @@ mod tests {
         let (failed, _failed_rx) = test_worker(0, 24_000_000_000);
         let (untested, _untested_rx) = test_worker(1, 24_000_000_000);
         let pool = GpuPool {
-            workers: vec![failed, untested.clone()],
+            workers: vec![failed, untested.clone()].into(),
         };
         let model = "flux2-klein-9b:bf16";
 

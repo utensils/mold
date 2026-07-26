@@ -41,6 +41,7 @@ import {
 import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
+import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 
 const route = useRoute();
 const router = useRouter();
@@ -90,6 +91,7 @@ const gpuOrdinals = computed(() => {
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId);
 const paused = computed(() => poll?.status.value?.queue_paused === true);
+const deviceMutations = ref(new Set<string>());
 
 const address = computed(() => {
   if (!host) return "";
@@ -190,6 +192,37 @@ async function onTogglePause() {
       `Couldn't ${paused.value ? "resume" : "pause"} queue: ${errMsg(e)}`,
     );
   }
+}
+
+async function onToggleDevice(device: DeviceInfo) {
+  if (!host || device.admin_state === "startup_excluded") return;
+  const enabled = !device.desired_enabled;
+  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
+  try {
+    await setDeviceEnabled(
+      { baseUrl: host.url, apiKey: host.apiKey ?? null },
+      device.id,
+      enabled,
+    );
+    await poll?.refresh();
+  } catch (e) {
+    toast(
+      "error",
+      `Couldn't ${enabled ? "enable" : "disable"} GPU: ${errMsg(e)}`,
+    );
+  } finally {
+    const next = new Set(deviceMutations.value);
+    next.delete(device.id);
+    deviceMutations.value = next;
+  }
+}
+
+function deviceStateLabel(device: DeviceInfo): string {
+  if (device.admin_state === "draining") return "Finishing current work";
+  if (device.admin_state === "starting") return "Starting";
+  if (device.admin_state === "startup_excluded") return "Excluded at startup";
+  if (device.health !== "healthy") return device.health;
+  return device.admin_state;
 }
 
 async function onCancelAll() {
@@ -423,6 +456,46 @@ onBeforeUnmount(() => {
               >
                 loaded
               </span>
+            </div>
+          </div>
+        </CardSurface>
+
+        <CardSurface
+          v-if="poll?.devices.value != null"
+          class="md-models"
+          data-test="device-controls"
+        >
+          <div class="md-label">GPU devices</div>
+          <div class="md-models__list">
+            <div
+              v-for="device in poll?.devices.value ?? []"
+              :key="device.id"
+              class="md-models__row"
+              data-test="device-row"
+            >
+              <span class="md-models__name">
+                {{ device.name }}
+                <small>
+                  {{
+                    device.ordinal == null
+                      ? device.backend
+                      : `GPU ${device.ordinal}`
+                  }}
+                  · {{ deviceStateLabel(device) }}
+                </small>
+              </span>
+              <button
+                type="button"
+                class="md-action"
+                :data-test="`device-toggle-${device.ordinal ?? device.id}`"
+                :disabled="
+                  device.admin_state === 'startup_excluded' ||
+                  deviceMutations.has(device.id)
+                "
+                @click="onToggleDevice(device)"
+              >
+                {{ device.desired_enabled ? "Disable" : "Enable" }}
+              </button>
             </div>
           </div>
         </CardSurface>

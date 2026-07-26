@@ -127,7 +127,11 @@ impl QueueHandle {
     }
 
     pub fn decrement(&self) {
-        self.pending_count.fetch_sub(1, Ordering::SeqCst);
+        let _ = self
+            .pending_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pending| {
+                Some(pending.saturating_sub(1))
+            });
     }
 
     pub fn pending(&self) -> usize {
@@ -517,7 +521,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn empty_gpu_pool() -> Arc<GpuPool> {
         Arc::new(GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         })
     }
 
@@ -638,7 +642,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Arc::new(GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
@@ -779,6 +783,17 @@ mod tests {
     fn queue_handle_pending_starts_at_zero() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(16);
         let handle = QueueHandle::new(tx);
+        assert_eq!(handle.pending(), 0);
+    }
+
+    #[test]
+    fn queue_handle_decrement_saturates_at_zero() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<GenerationJob>(1);
+        let handle = QueueHandle::new(tx);
+
+        handle.decrement();
+        handle.decrement();
+
         assert_eq!(handle.pending(), 0);
     }
 

@@ -10,9 +10,9 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, DeviceState, DiskUsage, GenerateRequest,
-    GpuWorkerState, ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent,
-    SseProgressEvent,
+    types::GpuSelection, ActiveGenerationStatus, DeviceAdminState, DeviceMutationRequest,
+    DeviceState, DiskUsage, GenerateRequest, GpuWorkerState, ModelInfoExtended, ResourceSnapshot,
+    ServerStatus, SseErrorEvent, SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -157,6 +157,14 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
+
+    pub fn no_schedulable_device(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "NO_SCHEDULABLE_DEVICE".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -191,6 +199,7 @@ use crate::queue::clean_error_message;
         create_gallery_media_token,
         server_status,
         list_devices,
+        patch_device,
         list_queue,
         patch_queue_job,
         cancel_queue_job,
@@ -406,6 +415,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/events", get(stream_events))
         .route("/api/status", get(server_status))
         .route("/api/devices", get(list_devices))
+        .route("/api/devices/:id", patch(patch_device))
         .route("/api/queue", get(list_queue).delete(cancel_all_queue))
         .route("/api/queue/pause", post(pause_queue))
         .route("/api/queue/resume", post(resume_queue))
@@ -502,6 +512,18 @@ fn save_image_to_dir(
 
 // ── Shared pre-queue validation ───────────────────────────────────────────────
 
+fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
+    if state.device_registry.has_devices() && state.gpu_pool.schedulable_worker_count() == 0 {
+        return Err(ApiError::no_schedulable_device(
+            "no enabled, healthy GPU device is available",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a generate request and resolve server-side defaults.
 ///
 /// Performs the identical pre-queue checks used by both `generate` and
@@ -511,9 +533,7 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
-    if let Some(reason) = state.generation_unavailable() {
-        return Err(ApiError::generation_unavailable(reason));
-    }
+    ensure_schedulable_device(state)?;
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
@@ -1139,9 +1159,7 @@ async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
-    if let Some(reason) = state.generation_unavailable() {
-        return Err(ApiError::generation_unavailable(reason));
-    }
+    ensure_schedulable_device(&state)?;
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1222,9 +1240,7 @@ async fn upscale_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    if let Some(reason) = state.generation_unavailable() {
-        return Err(ApiError::generation_unavailable(reason));
-    }
+    ensure_schedulable_device(&state)?;
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1693,9 +1709,7 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(reason) = state.generation_unavailable() {
-        return Err(ApiError::generation_unavailable(reason));
-    }
+    ensure_schedulable_device(&state)?;
     if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
         return Err(model_manager::install_error_to_api_error(&e));
     }
@@ -1704,7 +1718,12 @@ async fn load_model(
     // Multi-GPU path: route through the pool.
     if state.gpu_pool.worker_count() > 0 {
         if let Some(ordinal) = body.gpu {
-            if state.gpu_pool.worker_by_ordinal(ordinal).is_none() {
+            if !state
+                .gpu_pool
+                .schedulable_workers()
+                .iter()
+                .any(|worker| worker.gpu.ordinal == ordinal)
+            {
                 return Err(ApiError::not_found(format!(
                     "no GPU worker with ordinal {ordinal}"
                 )));
@@ -2009,7 +2028,6 @@ async fn unload_model(
                 .workers
                 .iter()
                 .filter(|w| w.gpu.ordinal == ordinal)
-                .cloned()
                 .collect(),
             (None, Some(model)) => state
                 .gpu_pool
@@ -2022,9 +2040,8 @@ async fn unload_model(
                         .as_deref()
                         == Some(model)
                 })
-                .cloned()
                 .collect(),
-            (None, None) => state.gpu_pool.workers.clone(),
+            (None, None) => state.gpu_pool.worker_snapshot(),
         };
 
         if targets.is_empty() {
@@ -2419,6 +2436,178 @@ async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
             .device_registry
             .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry),
     )
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/devices/{id}",
+    tag = "server",
+    params(("id" = String, Path, description = "Opaque stable device ID")),
+    request_body = DeviceMutationRequest,
+    responses(
+        (status = 200, description = "Requested lifecycle state reached"),
+        (status = 202, description = "Device is draining or starting"),
+        (status = 404, description = "Unknown stable device ID"),
+        (status = 409, description = "Runtime lifecycle unavailable in this dispatch mode"),
+        (status = 503, description = "Fresh owner thread could not be started"),
+    )
+)]
+async fn patch_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    request_id: Option<Extension<crate::request_id::RequestId>>,
+    authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
+    Json(request): Json<DeviceMutationRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    // Legacy and Observe own different dispatch protocols. Reject before
+    // discovery, persistence, worker mutation, or event publication.
+    if state.scheduled_work.dispatch_mode() != crate::dispatch_mode::DispatchMode::V2 {
+        return Err(ApiError::with_code(
+            "runtime GPU lifecycle changes require MOLD_DISPATCH_MODE=v2",
+            "DEVICE_LIFECYCLE_MODE_CONFLICT",
+            StatusCode::CONFLICT,
+        ));
+    }
+    let discovered = state
+        .device_registry
+        .discovered_device(&device_id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown device '{device_id}'")))?;
+    if request.enabled && !discovered.startup_allowed {
+        return Err(ApiError::with_code(
+            format!(
+                "device '{device_id}' was excluded by startup selection and requires a restart"
+            ),
+            "DEVICE_STARTUP_EXCLUDED",
+            StatusCode::CONFLICT,
+        ));
+    }
+
+    let old_desired = state.device_registry.desired_enabled(&device_id);
+    let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+    state
+        .device_registry
+        .set_desired_enabled(&device_id, request.enabled)
+        .map_err(|error| {
+            ApiError::internal(format!("failed to persist device preference: {error:#}"))
+        })?;
+
+    let mut asynchronous = false;
+    let mut started_epoch = None;
+    if request.enabled {
+        if !state.gpu_pool.workers.cancel_drain(&device_id) {
+            if state
+                .gpu_pool
+                .worker_snapshot()
+                .iter()
+                .any(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            {
+                // The old owner already committed to exit. Its exact Stopped
+                // reduction observes desired=true and creates the replacement.
+                asynchronous = true;
+            } else {
+                started_epoch =
+                    Some(state.gpu_pool.workers.start(&device_id).map_err(|error| {
+                        ApiError::with_code(
+                            format!("device '{device_id}' remains unavailable: {error}"),
+                            "NO_SCHEDULABLE_DEVICE",
+                            StatusCode::SERVICE_UNAVAILABLE,
+                        )
+                    })?);
+                asynchronous = true;
+            }
+        }
+    } else if let Some(worker) = state
+        .gpu_pool
+        .worker_snapshot()
+        .into_iter()
+        .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+    {
+        let owner_epoch = worker.owner_epoch;
+        let busy = state
+            .gpu_pool
+            .workers
+            .request_disable(&device_id)
+            .map_err(ApiError::internal)?;
+        if busy {
+            asynchronous = true;
+        } else {
+            let pool = state.gpu_pool.clone();
+            let id = device_id.clone();
+            tokio::task::spawn_blocking(move || pool.workers.wait_and_reap(&id, owner_epoch))
+                .await
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to join GPU owner thread: {error}"))
+                })?;
+        }
+    }
+
+    let resources = state.resources.latest();
+    let snapshot =
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let device = snapshot
+        .devices
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
+    state
+        .events
+        .publish(mold_core::ServerEvent::DeviceStateChanged {
+            device_id: device.id.clone(),
+            desired_enabled: device.desired_enabled,
+            admin_state: device.admin_state,
+        });
+    if let Some(owner_epoch) = started_epoch {
+        match state
+            .gpu_pool
+            .workers
+            .announce_start(&device_id, owner_epoch)
+        {
+            crate::gpu_pool::StartAnnouncement::Ready => {
+                state
+                    .events
+                    .publish(mold_core::ServerEvent::DeviceStateChanged {
+                        device_id: device.id.clone(),
+                        desired_enabled: true,
+                        admin_state: DeviceAdminState::Enabled,
+                    });
+            }
+            crate::gpu_pool::StartAnnouncement::Failed(error) => {
+                tracing::error!(
+                    device_id,
+                    owner_epoch,
+                    %error,
+                    "GPU owner failed during asynchronous lifecycle start"
+                );
+            }
+            crate::gpu_pool::StartAnnouncement::Pending => {}
+        }
+    }
+    tracing::info!(
+        device_id,
+        old_desired_enabled = old_desired,
+        desired_enabled = request.enabled,
+        result = ?device.admin_state,
+        request_id = request_id.as_ref().map(|id| id.0.0.as_str()),
+        authenticated_key = authenticated
+            .as_ref()
+            .map(|identity| identity.0.identity.as_str()),
+        remote_addr = ?connect.map(|address| address.0),
+        "device lifecycle mutation"
+    );
+
+    let status = if asynchronous
+        || matches!(
+            device.admin_state,
+            DeviceAdminState::Draining | DeviceAdminState::Starting
+        ) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(device)).into_response())
 }
 
 // ── /health ───────────────────────────────────────────────────────────────────

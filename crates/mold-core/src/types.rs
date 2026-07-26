@@ -3857,9 +3857,17 @@ pub enum DeviceKind {
 #[serde(rename_all = "snake_case")]
 pub enum DeviceAdminState {
     StartupExcluded,
+    Starting,
     Enabled,
     Draining,
     Disabled,
+}
+
+/// Administrative enablement mutation accepted by
+/// `PATCH /api/devices/{stable-id}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceMutationRequest {
+    pub enabled: bool,
 }
 
 /// Transient device health. Health is never persisted as a user preference.
@@ -4364,6 +4372,12 @@ pub enum ServerEvent {
     /// New-job dispatch resumed via `POST /api/queue/resume`. Emitted only on
     /// the paused→resumed transition.
     QueueResumed,
+    /// A machine-wide device lifecycle preference or runtime state changed.
+    DeviceStateChanged {
+        device_id: String,
+        desired_enabled: bool,
+        admin_state: DeviceAdminState,
+    },
 }
 
 /// Listing returned from `GET /api/downloads`.
@@ -4399,6 +4413,21 @@ mod server_event_tests {
             serde_json::to_string(&ended).unwrap(),
             r#"{"type":"job_ended","id":"j1"}"#
         );
+    }
+
+    #[test]
+    fn device_state_event_serializes_stable_lifecycle_fields() {
+        let wire = serde_json::to_value(ServerEvent::DeviceStateChanged {
+            device_id: "cuda:0123456789abcdef0123456789abcdef".into(),
+            desired_enabled: false,
+            admin_state: DeviceAdminState::Draining,
+        })
+        .unwrap();
+
+        assert_eq!(wire["type"], "device_state_changed");
+        assert_eq!(wire["device_id"], "cuda:0123456789abcdef0123456789abcdef");
+        assert_eq!(wire["desired_enabled"], false);
+        assert_eq!(wire["admin_state"], "draining");
     }
 
     #[test]

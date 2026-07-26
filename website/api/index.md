@@ -916,9 +916,24 @@ provide are JSON `null`, not zero.
 ```
 
 `plan_version` remains `0` until the versioned scheduler plan is active.
-Phase A is read-only: there is no device mutation endpoint yet. Desired
-enablement is machine-wide; a newly seen device with no explicit preference
-defaults to enabled.
+Desired enablement is machine-wide; a newly seen device with no explicit
+preference defaults to enabled.
+
+`PATCH /api/devices/{url-encoded-stable-id}` accepts
+`{"enabled":false}` or `{"enabled":true}`. Disabling removes the device from
+new scheduling immediately and returns `202` while an active lease drains.
+Re-enabling starts a fresh owner lifetime and returns `202` with
+`admin_state:"starting"` without waiting for CUDA context creation. The first
+epoch-qualified ready event changes it to enabled. If context creation fails,
+the desired preference remains enabled, health is unavailable, and
+`unschedulable_reason` reports `device_start_failed: ...`; retry the PATCH or
+restart after correcting the driver/device fault. A delayed ready, stopped, or
+completion event from the predecessor cannot mutate or reap the replacement.
+
+Runtime mutation requires scheduler V2. Startup-excluded devices cannot be
+enabled in-process and return `409`; a process whose CUDA context was fatally
+poisoned requires restart. Exposed non-loopback servers require the configured
+API key for this endpoint.
 
 ## `/api/models/pull`
 

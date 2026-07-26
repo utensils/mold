@@ -782,6 +782,30 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Enable or disable one stable device. The server may return a draining
+    /// or starting state while the owner transition completes.
+    pub async fn set_device_enabled(
+        &self,
+        device_id: &str,
+        enabled: bool,
+    ) -> Result<crate::DeviceInfo> {
+        let mut url = reqwest::Url::parse(&self.base_url)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Mold server URL cannot be a base URL"))?
+            .extend(["api", "devices", device_id]);
+        let response = self
+            .client
+            .patch(url)
+            .json(&crate::DeviceMutationRequest { enabled })
+            .send()
+            .await?;
+        let response = error_for_status_with_body(response)
+            .await?
+            .json::<crate::DeviceInfo>()
+            .await?;
+        Ok(response)
+    }
+
     /// Snapshot the server's generation queue (`GET /api/queue`).
     ///
     /// The listing covers everything currently queued or running — completed
@@ -1454,6 +1478,32 @@ mod tests {
         );
         assert_eq!(devices.devices[0].device_kind, crate::DeviceKind::FullGpu);
         assert_eq!(devices.devices[0].memory.used_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn set_device_enabled_preserves_the_server_error_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/devices/cuda:device-1"))
+            .and(body_json(serde_json::json!({ "enabled": true })))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_string("device is startup-excluded and requires a restart"),
+            )
+            .mount(&server)
+            .await;
+
+        let error = MoldClient::new(&server.uri())
+            .set_device_enabled("cuda:device-1", true)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("409 Conflict"));
+        assert!(message.contains("startup-excluded"));
+        assert!(message.contains("requires a restart"));
     }
 
     // ── Queue endpoints ──────────────────────────────────────────────────

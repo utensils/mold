@@ -271,6 +271,7 @@ pub async fn run_server(
 
     let mut workers = Vec::new();
     let mut gpu_owner_threads = GpuOwnerThreads::default();
+    let mut v2_owner_handles = Vec::new();
     let (scheduler_worker_tx, scheduler_worker_rx) =
         tokio::sync::mpsc::unbounded_channel::<scheduler::WorkerEvent>();
     let (legacy_owner_event_tx, legacy_owner_event_rx) =
@@ -286,6 +287,7 @@ pub async fn run_server(
         for gpu in &selected {
             let (job_tx, job_rx) = std::sync::mpsc::sync_channel(per_worker_channel_size);
             let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
+                owner_epoch: 1,
                 gpu: gpu.clone(),
                 model_cache: std::sync::Arc::new(std::sync::Mutex::new(
                     model_cache::ModelCache::new(max_cached),
@@ -303,6 +305,7 @@ pub async fn run_server(
                 fatal_cuda_error: fatal_cuda_error.clone(),
                 fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
                 shutdown_requested: AtomicBool::new(false),
+                drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),
                 degraded_until: std::sync::RwLock::new(None),
                 job_tx,
@@ -323,12 +326,50 @@ pub async fn run_server(
                     cache_idle_ttl,
                 )
             };
-            gpu_owner_threads.track(worker.clone(), handle);
+            if startup.start_v2_coordinator {
+                v2_owner_handles.push((
+                    scheduler::worker_device_id(&worker),
+                    worker.owner_epoch,
+                    handle,
+                ));
+            } else {
+                gpu_owner_threads.track(worker.clone(), handle);
+            }
             workers.push(worker);
         }
     }
 
-    let gpu_pool = std::sync::Arc::new(gpu_pool::GpuPool { workers });
+    let gpu_pool = std::sync::Arc::new(gpu_pool::GpuPool {
+        workers: workers.into(),
+    });
+    if startup.start_v2_coordinator {
+        let devices = selected
+            .iter()
+            .cloned()
+            .map(|gpu| {
+                let id = gpu
+                    .stable_id
+                    .clone()
+                    .unwrap_or_else(|| format!("runtime:gpu:{}", gpu.ordinal));
+                (id, gpu)
+            })
+            .collect();
+        gpu_pool
+            .workers
+            .install_factory(
+                gpu_pool::WorkerFactory {
+                    devices,
+                    shared_pool: shared_pool.clone(),
+                    fatal_cuda_error: fatal_cuda_error.clone(),
+                    fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+                    scheduler_tx: scheduler_worker_tx.clone(),
+                    max_cached,
+                    cache_idle_ttl,
+                },
+                v2_owner_handles,
+            )
+            .map_err(anyhow::Error::msg)?;
+    }
 
     // Log discovered GPUs.
     for status in gpu_pool.gpu_status() {
@@ -530,6 +571,33 @@ pub async fn run_server(
         std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
         state.metadata_db.clone(),
     ));
+    if startup.start_v2_coordinator {
+        for device in state
+            .device_registry
+            .snapshot(&state.gpu_pool, None, &state.job_registry)
+            .devices
+            .into_iter()
+            .filter(|device| {
+                device.admin_state != mold_core::DeviceAdminState::StartupExcluded
+                    && !device.desired_enabled
+            })
+        {
+            let owner_epoch = state
+                .gpu_pool
+                .worker_snapshot()
+                .into_iter()
+                .find(|worker| scheduler::worker_device_id(worker) == device.id)
+                .map(|worker| worker.owner_epoch);
+            if state.gpu_pool.workers.request_disable(&device.id).is_ok() {
+                if let Some(owner_epoch) = owner_epoch {
+                    state
+                        .gpu_pool
+                        .workers
+                        .wait_and_reap(&device.id, owner_epoch);
+                }
+            }
+        }
+    }
 
     // Resolve the persistent instance id (ephemeral when the DB is
     // unavailable). Scoped per (data dir, port) so two servers sharing one
@@ -956,9 +1024,13 @@ pub async fn run_server(
     // and sets the shared flag for any owner finishing a current lease.
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
-    tokio::task::spawn_blocking(move || gpu_owner_threads.shutdown_and_join())
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??;
+    let shutdown_pool = gpu_pool.clone();
+    tokio::task::spawn_blocking(move || {
+        shutdown_pool.workers.shutdown_and_join_all();
+        gpu_owner_threads.shutdown_and_join()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??;
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");
@@ -1196,6 +1268,7 @@ mod tests {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         (
             Arc::new(GpuWorker {
+                owner_epoch: 1,
                 gpu: DiscoveredGpu {
                     ordinal: 0,
                     stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
@@ -1223,6 +1296,7 @@ mod tests {
                 fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                 fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                 shutdown_requested: AtomicBool::new(false),
+                drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
                 owner_thread_id: std::sync::OnceLock::new(),
                 degraded_until: RwLock::new(None),
                 job_tx,
@@ -1251,6 +1325,10 @@ mod tests {
         })();
 
         assert!(startup_result.is_err());
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { owner_epoch: 1, .. })
+        ));
         assert!(
             event_rx.blocking_recv().is_none(),
             "startup error must join the owner and drop its scheduler sender"

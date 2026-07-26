@@ -90,6 +90,11 @@ pub enum BackgroundEvent {
         host_id: String,
         status: Option<Box<ServerStatus>>,
     },
+    /// Per-host authoritative device inventory for Machines controls.
+    HostDevicesUpdate {
+        host_id: String,
+        devices: Option<mold_core::DeviceState>,
+    },
     /// Per-host queue snapshot for the selected Machines row.
     HostQueueUpdate {
         host_id: String,
@@ -1683,11 +1688,19 @@ impl App {
             match client.server_status().await {
                 Ok(status) => {
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(Some(Box::new(status))));
+                    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        devices: client.devices().await.ok(),
+                    });
                 }
                 Err(_) => {
                     // Server became unreachable — clear stale status so the UI
                     // stops showing the last-known hostname/memory.
                     let _ = tx.send(BackgroundEvent::ServerStatusUpdate(None));
+                    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        devices: None,
+                    });
                 }
             }
         });
@@ -3528,6 +3541,42 @@ impl App {
                             job_id: job.id,
                         },
                     });
+                }
+            }
+            Action::MachinesNextDevice if self.active_view == View::Machines => {
+                self.machines.select_next_device();
+            }
+            Action::MachinesToggleDevice
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                let Some(device) = self.machines.selected_device().cloned() else {
+                    return;
+                };
+                if device.admin_state == mold_core::DeviceAdminState::StartupExcluded {
+                    self.generate.error_message =
+                        Some("This GPU was excluded at startup and requires a restart".to_string());
+                    return;
+                }
+                let enabled = !device.desired_enabled;
+                let tx = self.bg_tx.clone();
+                match self.machines.selected_row() {
+                    crate::hosts::MachineRowId::Local => {
+                        if let Some(url) = self.server_url.clone() {
+                            self.tokio_handle
+                                .spawn(crate::hosts::set_local_device_enabled(
+                                    url, device.id, enabled, tx,
+                                ));
+                        }
+                    }
+                    crate::hosts::MachineRowId::Host(id) => {
+                        if let Some(entry) = self.machines.registry.get(&id).cloned() {
+                            self.tokio_handle
+                                .spawn(crate::hosts::set_host_device_enabled(
+                                    entry, device.id, enabled, tx,
+                                ));
+                        }
+                    }
                 }
             }
             Action::ScriptMoveDown => self.script.move_down(),
@@ -6014,6 +6063,9 @@ impl App {
                 }
                 BackgroundEvent::HostStatusUpdate { host_id, status } => {
                     self.machines.apply_status(host_id, status);
+                }
+                BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
+                    self.machines.apply_devices(host_id, devices);
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);

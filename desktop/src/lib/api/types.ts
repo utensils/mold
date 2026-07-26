@@ -496,7 +496,13 @@ export type ServerEvent =
   | { type: "gallery_added"; filename: string; image?: GalleryImage | null }
   | { type: "gallery_removed"; filename: string }
   | { type: "queue_paused" }
-  | { type: "queue_resumed" };
+  | { type: "queue_resumed" }
+  | {
+      type: "device_state_changed";
+      device_id: string;
+      desired_enabled: boolean;
+      admin_state: "startup_excluded" | "starting" | "enabled" | "draining" | "disabled";
+    };
 
 // ── Catalog ───────────────────────────────────────────────────────────────
 

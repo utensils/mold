@@ -2,6 +2,7 @@
 import ConfigRowItem from "./ConfigRowItem.vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import PlacementSection from "./PlacementSection.vue";
+import DeviceSettingsPanel from "./DeviceSettingsPanel.vue";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 import { schemaFor } from "../../lib/settingsSchema";
@@ -25,6 +26,7 @@ async function reset(row: ConfigRow) {
 <template>
   <div>
     <ConfigSettingRow schema-key="server_port" />
+    <DeviceSettingsPanel v-if="!filter" class="mt-5" />
     <PlacementSection v-if="!filter" class="mt-5" />
     <p class="mt-4 mb-1 text-caption text-ink-3">
       Everything the engine exposes that has no curated control — including keys added by newer

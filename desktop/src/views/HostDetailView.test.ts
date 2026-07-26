@@ -16,6 +16,7 @@ vi.mock("@studio/api/devices", () => ({
   // This fixture models a legacy host, so the jobs store must fall back to
   // the exact ordinals in the canned `/api/status` response.
   listDevices: () => Promise.reject(new Error("legacy server in tests")),
+  setDeviceEnabled: vi.fn(),
 }));
 
 interface SseCall {

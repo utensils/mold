@@ -6,6 +6,7 @@ import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
+import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -63,6 +64,8 @@ function modelAccessibilityLabel(model: ModelEntry): string {
 const hostId = computed(() => String(route.params.id ?? ""));
 const host = computed(() => hosts.all.find((h) => h.id === hostId.value) ?? null);
 const telemetry = computed(() => hosts.telemetry[hostId.value]);
+const devices = computed(() => telemetry.value?.devices ?? null);
+const deviceMutations = ref(new Set<string>());
 
 // ── Live telemetry (this host's resources stream) ─────────────────────────
 
@@ -213,10 +216,7 @@ onUnmounted(() => {
  *  stream) fall back to the status poll's MB-based `gpu_info` summary. */
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value) return snapshot.value.gpus;
-  return gpuSnapshotsFromWorkers(
-    telemetry.value?.gpuInfo,
-    telemetry.value?.gpuWorkers,
-  );
+  return gpuSnapshotsFromWorkers(telemetry.value?.gpuInfo, telemetry.value?.gpuWorkers);
 });
 
 function backendLabel(gpu: GpuSnapshot): string {
@@ -347,6 +347,38 @@ const isTarget = computed(() => (appPrefs.settings?.generateTargetHost ?? null) 
 
 function toggleTarget() {
   void appPrefs.update({ generateTargetHost: isTarget.value ? null : hostId.value });
+}
+
+function deviceStateLabel(device: DeviceInfo): string {
+  if (device.admin_state === "draining") return "Finishing current work";
+  if (device.admin_state === "starting") return "Starting";
+  if (device.admin_state === "startup_excluded") return "Excluded at startup";
+  if (device.health !== "healthy") return device.health;
+  return device.admin_state;
+}
+
+async function toggleDevice(device: DeviceInfo) {
+  const target = hostTarget();
+  if (!target || device.admin_state === "startup_excluded") return;
+  const enabled = !device.desired_enabled;
+  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
+  try {
+    await setDeviceEnabled(
+      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
+      device.id,
+      enabled,
+    );
+    await hosts.refresh();
+  } catch (error) {
+    toasts.push(
+      `Could not ${enabled ? "enable" : "disable"} ${device.name}: ${String(error)}`,
+      "error",
+    );
+  } finally {
+    const next = new Set(deviceMutations.value);
+    next.delete(device.id);
+    deviceMutations.value = next;
+  }
 }
 
 const renameOpen = ref(false);
@@ -605,6 +637,40 @@ async function forget() {
                 </div>
               </div>
               <p v-else class="text-caption text-ink-3">No live telemetry from this host yet.</p>
+            </CardSurface>
+
+            <CardSurface v-if="devices !== null" large data-test="device-controls">
+              <div class="mb-3 flex items-center gap-2">
+                <h2 class="edge-code">GPU DEVICES</h2>
+                <div class="border-edge h-px flex-1 border-t" />
+              </div>
+              <div class="flex flex-col divide-y divide-edge">
+                <div
+                  v-for="device in devices"
+                  :key="device.id"
+                  class="flex min-h-11 items-center gap-3 py-2"
+                  data-test="device-row"
+                >
+                  <div class="min-w-0 flex-1">
+                    <div class="truncate text-body font-medium text-ink">{{ device.name }}</div>
+                    <div class="edge-code mt-0.5">
+                      {{ device.ordinal == null ? device.backend : `GPU ${device.ordinal}` }}
+                      · {{ deviceStateLabel(device) }}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="rounded-control border border-edge px-3 py-1.5 text-caption font-semibold text-ink transition-colors hover:border-edge-strong disabled:opacity-40"
+                    :data-test="`device-toggle-${device.ordinal ?? device.id}`"
+                    :disabled="
+                      device.admin_state === 'startup_excluded' || deviceMutations.has(device.id)
+                    "
+                    @click="toggleDevice(device)"
+                  >
+                    {{ device.desired_enabled ? "Disable" : "Enable" }}
+                  </button>
+                </div>
+              </div>
             </CardSurface>
 
             <!-- Downloads on this host -->

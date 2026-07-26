@@ -159,6 +159,22 @@ are also accepted. CUDA/MIG UUID prefixes may be abbreviated only when they
 match exactly one runtime-visible device; ambiguous or missing selectors fail
 startup rather than choosing another GPU.
 
+Runtime controls target the serving host (`MOLD_HOST` and `MOLD_API_KEY`
+apply):
+
+```bash
+mold gpu list [--json]
+mold gpu disable <stable-id-or-ordinal>
+mold gpu enable <stable-id-or-ordinal>
+```
+
+Disable removes the device from future scheduling immediately. Active work
+finishes before Mold drops its device-backed caches on the owner thread and
+joins it. Re-enable starts a fresh owner thread; it never resets and reuses a
+CUDA primary context in-process. Desired enablement is machine-wide and
+persists across restarts and temporary device absence. A startup-excluded
+device still requires a restart with a broader `--gpus` selection.
+
 ## `mold server discover`
 
 Browse the local network (mDNS/DNS-SD, `_mold._tcp`) for running `mold serve`

@@ -382,8 +382,12 @@ wire types as the CLI and web UI:
 
 - **Host detail** — click a host in the Machines workspace to open its detail view:
   live GPU, CPU, and RAM telemetry, disk usage for the filesystem holding its
-  models, current queue state, active model-download progress, and a freshly
-  fetched inventory of the models installed on that host.
+  models, every GPU's utilization, VRAM and lifecycle state, current queue
+  state, active model-download progress, and a freshly fetched inventory of
+  the models installed on that host. Each GPU can be enabled or disabled from
+  host detail. This device also exposes the same controls under **Settings →
+  Advanced**. A busy disable drains its current stage before the owner thread
+  exits; enabling starts a fresh owner thread.
 - **Launch reconnect** — every remembered host is attempted immediately on
   every app launch, in parallel with This Mac. An unreachable host stays in
   the Machines workspace as an errored row and periodic polling lets it self-heal.

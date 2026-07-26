@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use mold_core::{MoldClient, ServerStatus};
+use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerStatus};
 use mold_db::settings::{self as keys, Settings};
 use mold_db::MetadataDb;
 
@@ -346,6 +346,11 @@ pub(crate) struct MachinesState {
     pub focus: MachinesFocus,
     /// Last-known status per host id.
     pub statuses: HashMap<String, HostStatus>,
+    /// Authoritative `/api/devices` snapshots, keyed by machine row id.
+    pub devices: HashMap<String, DeviceState>,
+    /// Selected device in the detail pane. `g` cycles this independently of
+    /// the queue-row selection, preserving the existing Up/Down queue keys.
+    pub device_selected: usize,
     /// Queue snapshot for the selected remote host.
     pub queue: Option<(String, mold_core::QueueListingWire)>,
     /// Job selection inside the detail pane's queue lanes.
@@ -420,6 +425,7 @@ impl MachinesState {
     fn on_selection_changed(&mut self) {
         self.queue = None;
         self.queue_selected = 0;
+        self.device_selected = 0;
     }
 
     pub fn queue_select_prev(&mut self) {
@@ -445,6 +451,44 @@ impl MachinesState {
             Some((host_id.clone(), job.clone()))
         } else {
             None
+        }
+    }
+
+    fn selected_machine_id(&self) -> String {
+        match self.selected_row() {
+            MachineRowId::Local => LOCAL_HOST_ID.to_string(),
+            MachineRowId::Host(id) => id,
+        }
+    }
+
+    pub fn selected_device(&self) -> Option<&DeviceInfo> {
+        let id = self.selected_machine_id();
+        self.devices.get(&id)?.devices.get(self.device_selected)
+    }
+
+    pub fn select_next_device(&mut self) {
+        let id = self.selected_machine_id();
+        let len = self
+            .devices
+            .get(&id)
+            .map(|state| state.devices.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.device_selected = (self.device_selected + 1) % len;
+        }
+    }
+
+    pub fn apply_devices(&mut self, host_id: String, devices: Option<DeviceState>) {
+        match devices {
+            Some(devices) => {
+                if self.device_selected >= devices.devices.len() {
+                    self.device_selected = devices.devices.len().saturating_sub(1);
+                }
+                self.devices.insert(host_id, devices);
+            }
+            None => {
+                self.devices.remove(&host_id);
+            }
         }
     }
 
@@ -541,6 +585,7 @@ impl MachinesState {
         self.registry.forget(id);
         self.registry.save();
         self.statuses.remove(id);
+        self.devices.remove(id);
         if let Some((qid, _)) = &self.queue {
             if qid == id {
                 self.queue = None;
@@ -721,9 +766,53 @@ pub(crate) async fn fetch_host_status(
 ) {
     let client = client_for_host(&entry);
     let status = client.server_status().await.ok().map(Box::new);
+    let devices = client.devices().await.ok();
     let _ = tx.send(BackgroundEvent::HostStatusUpdate {
-        host_id: entry.id,
+        host_id: entry.id.clone(),
         status,
+    });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: entry.id,
+        devices,
+    });
+}
+
+pub(crate) async fn set_host_device_enabled(
+    entry: HostEntry,
+    device_id: String,
+    enabled: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let client = client_for_host(&entry);
+    let result = client.set_device_enabled(&device_id, enabled).await;
+    if let Err(error) = result {
+        let _ = tx.send(BackgroundEvent::Error(format!(
+            "GPU lifecycle update failed: {error:#}"
+        )));
+    }
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: entry.id,
+        devices: client.devices().await.ok(),
+    });
+}
+
+pub(crate) async fn set_local_device_enabled(
+    url: String,
+    device_id: String,
+    enabled: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let api_key = std::env::var("MOLD_API_KEY").ok();
+    let client = client_for(&url, api_key.as_deref());
+    let result = client.set_device_enabled(&device_id, enabled).await;
+    if let Err(error) = result {
+        let _ = tx.send(BackgroundEvent::Error(format!(
+            "GPU lifecycle update failed: {error:#}"
+        )));
+    }
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: LOCAL_HOST_ID.to_string(),
+        devices: client.devices().await.ok(),
     });
 }
 
@@ -979,6 +1068,62 @@ mod tests {
         assert!(st.select_next());
         assert_eq!(st.selected_row(), MachineRowId::Host("h0".into()));
         assert!(!st.select_next(), "selection clamps at the last row");
+    }
+
+    #[test]
+    fn device_selection_cycles_without_stealing_queue_selection() {
+        let device = |ordinal: usize| mold_core::DeviceInfo {
+            id: format!("cuda:{ordinal:032x}"),
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: Some(ordinal),
+            device_kind: mold_core::DeviceKind::FullGpu,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            name: format!("GPU {ordinal}"),
+            pci_bus_id: None,
+            compute_capability: Some("8.6".into()),
+            memory: mold_core::DeviceMemoryInfo {
+                total_bytes: Some(24 * 1024_u64.pow(3)),
+                used_bytes: Some(0),
+                mold_used_bytes: None,
+                other_used_bytes: None,
+            },
+            telemetry: mold_core::DeviceTelemetry {
+                utilization_percent: Some(0),
+                temperature_c: None,
+                power_w: None,
+            },
+            desired_enabled: true,
+            admin_state: mold_core::DeviceAdminState::Enabled,
+            health: mold_core::DeviceHealth::Healthy,
+            activity: mold_core::DeviceActivity::Idle,
+            schedulable: true,
+            unschedulable_reason: None,
+            loaded_models: Vec::new(),
+            active_work_id: None,
+            planned_work_ids: Vec::new(),
+        };
+        let mut st = MachinesState {
+            queue_selected: 3,
+            ..Default::default()
+        };
+        st.apply_devices(
+            LOCAL_HOST_ID.to_string(),
+            Some(mold_core::DeviceState {
+                devices: vec![device(0), device(7)],
+                plan_version: 4,
+            }),
+        );
+
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(0));
+        st.select_next_device();
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(7));
+        st.select_next_device();
+        assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(0));
+        assert_eq!(st.queue_selected, 3);
     }
 
     #[test]

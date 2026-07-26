@@ -39,6 +39,7 @@ const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 pub struct LeaseFence {
     pub work_id: String,
     pub device_id: String,
+    pub owner_epoch: u64,
     pub state_version: u64,
     pub plan_version: u64,
     pub worker_generation: u64,
@@ -57,11 +58,19 @@ pub enum WorkerEvent {
     Ready {
         device_id: String,
         ordinal: usize,
+        owner_epoch: u64,
         worker_generation: u64,
+    },
+    StartFailed {
+        device_id: String,
+        ordinal: usize,
+        owner_epoch: u64,
+        error: String,
     },
     Accepted {
         device_id: String,
         ordinal: usize,
+        owner_epoch: u64,
         worker_generation: u64,
         work_id: String,
         plan_version: u64,
@@ -69,6 +78,7 @@ pub enum WorkerEvent {
     AllocationCommitted {
         device_id: String,
         work_id: String,
+        owner_epoch: u64,
         worker_generation: u64,
     },
     FollowupReady {
@@ -77,6 +87,7 @@ pub enum WorkerEvent {
     Rejected {
         device_id: String,
         ordinal: usize,
+        owner_epoch: u64,
         worker_generation: u64,
         grant: Box<LeaseGrant>,
         reason: LeaseRejection,
@@ -84,7 +95,13 @@ pub enum WorkerEvent {
     Completed {
         device_id: String,
         ordinal: usize,
+        owner_epoch: u64,
         worker_generation: u64,
+    },
+    Stopped {
+        device_id: String,
+        ordinal: usize,
+        owner_epoch: u64,
     },
 }
 
@@ -220,12 +237,14 @@ pub fn worker_device_id(worker: &GpuWorker) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReadyWorker {
     ordinal: usize,
+    owner_epoch: u64,
     generation: u64,
 }
 
 #[derive(Clone, Debug)]
 struct ActiveLease {
     work_id: String,
+    owner_epoch: u64,
     plan_version: u64,
     worker_generation: u64,
     accepted: bool,
@@ -975,8 +994,24 @@ impl Coordinator {
             WorkerEvent::Ready {
                 device_id,
                 ordinal,
+                owner_epoch,
                 worker_generation,
             } => {
+                let was_starting = self.state.gpu_pool.workers.is_starting(&device_id);
+                if !self
+                    .state
+                    .gpu_pool
+                    .workers
+                    .mark_ready(&device_id, owner_epoch)
+                {
+                    tracing::warn!(
+                        device_id,
+                        owner_epoch,
+                        worker_generation,
+                        "ignoring Ready from a stale GPU owner"
+                    );
+                    return;
+                }
                 if self.leases.contains_key(&device_id) {
                     tracing::warn!(
                         device_id,
@@ -985,26 +1020,85 @@ impl Coordinator {
                     );
                     return;
                 }
+                // A transport Full can mark a device unavailable while leaving
+                // its same-generation Ready record intact. Clear unavailable
+                // before dedupe so a stale cancelled Drain wake cannot strand
+                // the GPU forever.
+                self.unavailable.remove(&device_id);
+                if self.ready.get(&device_id).is_some_and(|ready| {
+                    ready.owner_epoch == owner_epoch && ready.generation >= worker_generation
+                }) {
+                    return;
+                }
+                self.ready.insert(
+                    device_id.clone(),
+                    ReadyWorker {
+                        ordinal,
+                        owner_epoch,
+                        generation: worker_generation,
+                    },
+                );
+                if was_starting && !self.state.gpu_pool.workers.is_starting(&device_id) {
+                    self.state
+                        .events
+                        .publish(mold_core::ServerEvent::DeviceStateChanged {
+                            device_id: device_id.clone(),
+                            desired_enabled: self.state.device_registry.desired_enabled(&device_id),
+                            admin_state: mold_core::DeviceAdminState::Enabled,
+                        });
+                }
+                self.mutate(immediate);
+            }
+            WorkerEvent::StartFailed {
+                device_id,
+                ordinal,
+                owner_epoch,
+                error,
+            } => {
+                let Some(start_was_announced) = self.state.gpu_pool.workers.mark_start_failed(
+                    &device_id,
+                    owner_epoch,
+                    error.clone(),
+                ) else {
+                    tracing::warn!(
+                        device_id,
+                        ordinal,
+                        owner_epoch,
+                        %error,
+                        "ignoring startup failure from a stale GPU owner"
+                    );
+                    return;
+                };
                 if self
                     .ready
                     .get(&device_id)
-                    .is_some_and(|ready| ready.generation >= worker_generation)
+                    .is_some_and(|ready| ready.owner_epoch == owner_epoch)
                 {
-                    return;
+                    self.ready.remove(&device_id);
                 }
-                self.unavailable.remove(&device_id);
-                self.ready.insert(
+                self.unavailable.insert(device_id.clone());
+                if start_was_announced {
+                    self.state
+                        .events
+                        .publish(mold_core::ServerEvent::DeviceStateChanged {
+                            device_id: device_id.clone(),
+                            desired_enabled: self.state.device_registry.desired_enabled(&device_id),
+                            admin_state: mold_core::DeviceAdminState::Enabled,
+                        });
+                }
+                tracing::error!(
                     device_id,
-                    ReadyWorker {
-                        ordinal,
-                        generation: worker_generation,
-                    },
+                    ordinal,
+                    owner_epoch,
+                    %error,
+                    "GPU owner startup failed; device remains desired but unavailable"
                 );
                 self.mutate(immediate);
             }
             WorkerEvent::Accepted {
                 device_id,
                 ordinal,
+                owner_epoch,
                 worker_generation,
                 work_id,
                 plan_version,
@@ -1012,6 +1106,7 @@ impl Coordinator {
                 let valid = self.leases.get_mut(&device_id).is_some_and(|lease| {
                     if lease.work_id == work_id
                         && lease.plan_version == plan_version
+                        && lease.owner_epoch == owner_epoch
                         && lease.worker_generation == worker_generation
                     {
                         lease.accepted = true;
@@ -1024,6 +1119,7 @@ impl Coordinator {
                     tracing::error!(
                         device_id,
                         ordinal,
+                        owner_epoch,
                         worker_generation,
                         work_id,
                         plan_version,
@@ -1034,10 +1130,13 @@ impl Coordinator {
             WorkerEvent::AllocationCommitted {
                 device_id,
                 work_id,
+                owner_epoch,
                 worker_generation,
             } => {
                 let valid = self.leases.get(&device_id).is_some_and(|lease| {
-                    lease.work_id == work_id && lease.worker_generation == worker_generation
+                    lease.work_id == work_id
+                        && lease.owner_epoch == owner_epoch
+                        && lease.worker_generation == worker_generation
                 });
                 if valid {
                     self.memory.commit(&work_id);
@@ -1046,6 +1145,7 @@ impl Coordinator {
                     tracing::error!(
                         device_id,
                         work_id,
+                        owner_epoch,
                         worker_generation,
                         "ignoring allocation commit for unknown lease"
                     );
@@ -1057,6 +1157,7 @@ impl Coordinator {
             WorkerEvent::Rejected {
                 device_id,
                 ordinal,
+                owner_epoch,
                 worker_generation,
                 grant,
                 reason,
@@ -1064,11 +1165,31 @@ impl Coordinator {
                 tracing::warn!(
                     device_id,
                     ordinal,
+                    owner_epoch,
                     worker_generation,
                     ?reason,
                     "worker rejected a fenced grant"
                 );
                 let rejected_work_id = grant.work.id().to_string();
+                let valid = self.leases.get(&device_id).is_some_and(|lease| {
+                    lease.work_id == rejected_work_id
+                        && lease.owner_epoch == owner_epoch
+                        && lease.worker_generation == worker_generation
+                });
+                if !valid {
+                    tracing::error!(
+                        device_id,
+                        ordinal,
+                        owner_epoch,
+                        worker_generation,
+                        work_id = %rejected_work_id,
+                        "rejecting payload returned by an unknown or stale owner"
+                    );
+                    grant
+                        .work
+                        .reject("GPU owner returned work from a stale lifecycle epoch".to_string());
+                    return;
+                }
                 // A rejection returns ownership of the transported payload
                 // even when its fence metadata is stale or corrupt. Reclaim
                 // the active lease by stable device/work identity, not by
@@ -1078,7 +1199,9 @@ impl Coordinator {
                 let rejected_lease_device = self
                     .leases
                     .get(&device_id)
-                    .filter(|lease| lease.work_id == rejected_work_id)
+                    .filter(|lease| {
+                        lease.work_id == rejected_work_id && lease.owner_epoch == owner_epoch
+                    })
                     .map(|_| device_id.clone())
                     .or_else(|| {
                         self.leases
@@ -1234,24 +1357,117 @@ impl Coordinator {
             WorkerEvent::Completed {
                 device_id,
                 ordinal,
+                owner_epoch,
                 worker_generation,
             } => {
-                if let Some(lease) = self.leases.remove(&device_id) {
-                    if lease.worker_generation != worker_generation {
-                        tracing::error!(
-                            device_id,
-                            ordinal,
-                            worker_generation,
-                            leased_generation = lease.worker_generation,
-                            "worker completion generation did not match active lease"
-                        );
-                    }
+                let valid = self.leases.get(&device_id).is_some_and(|lease| {
+                    lease.owner_epoch == owner_epoch && lease.worker_generation == worker_generation
+                });
+                if valid {
+                    let lease = self
+                        .leases
+                        .remove(&device_id)
+                        .expect("validated lease must still exist");
                     self.memory.release(&lease.work_id);
                     self.memory.collect_now();
                     self.plan_invalidations.remove(&lease.work_id);
+                } else {
+                    tracing::warn!(
+                        device_id,
+                        ordinal,
+                        owner_epoch,
+                        worker_generation,
+                        "ignoring completion from a stale GPU owner"
+                    );
                 }
                 self.mutate(immediate);
             }
+            WorkerEvent::Stopped {
+                device_id,
+                ordinal,
+                owner_epoch,
+            } => {
+                if self
+                    .ready
+                    .get(&device_id)
+                    .is_some_and(|ready| ready.owner_epoch == owner_epoch)
+                {
+                    self.ready.remove(&device_id);
+                }
+                if self
+                    .leases
+                    .get(&device_id)
+                    .is_some_and(|lease| lease.owner_epoch == owner_epoch)
+                {
+                    let lease = self
+                        .leases
+                        .remove(&device_id)
+                        .expect("exact owner lease must still exist");
+                    self.memory.release(&lease.work_id);
+                    self.memory.collect_now();
+                    if self.state.job_registry.remove_if_present(&lease.work_id) {
+                        self.state.queue.decrement();
+                    }
+                    if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
+                        worker.release_in_flight();
+                    }
+                    tracing::error!(
+                        device_id,
+                        ordinal,
+                        owner_epoch,
+                        work_id = %lease.work_id,
+                        accepted = lease.accepted,
+                        "GPU owner stopped before completing its exact lease"
+                    );
+                }
+                let removed = self
+                    .state
+                    .gpu_pool
+                    .workers
+                    .wait_and_reap(&device_id, owner_epoch);
+                if removed {
+                    if self.state.device_registry.desired_enabled(&device_id) {
+                        if let Ok(new_epoch) = self.state.gpu_pool.workers.start(&device_id) {
+                            self.state
+                                .events
+                                .publish(mold_core::ServerEvent::DeviceStateChanged {
+                                    device_id: device_id.clone(),
+                                    desired_enabled: true,
+                                    admin_state: mold_core::DeviceAdminState::Starting,
+                                });
+                            let _ = self
+                                .state
+                                .gpu_pool
+                                .workers
+                                .announce_start(&device_id, new_epoch);
+                        }
+                    } else {
+                        self.state
+                            .events
+                            .publish(mold_core::ServerEvent::DeviceStateChanged {
+                                device_id: device_id.clone(),
+                                desired_enabled: false,
+                                admin_state: mold_core::DeviceAdminState::Disabled,
+                            });
+                    }
+                }
+                self.mutate(immediate);
+            }
+        }
+    }
+
+    async fn handle_worker_event_serialized(&mut self, event: WorkerEvent, immediate: &mut bool) {
+        if matches!(
+            &event,
+            WorkerEvent::Ready { .. }
+                | WorkerEvent::StartFailed { .. }
+                | WorkerEvent::Stopped { .. }
+        ) {
+            let mutation_fence = self.state.scheduler_mutation_fence.clone();
+            let _mutation = mutation_fence.lock().await;
+            self.handle_worker_event(event, immediate);
+        } else {
+            self.handle_worker_event(event, immediate);
         }
     }
 
@@ -1263,7 +1479,7 @@ impl Coordinator {
             .iter()
             .map(|worker| {
                 (
-                    worker_device_id(worker),
+                    worker_device_id(&worker),
                     worker.in_flight.load(Ordering::SeqCst),
                 )
             })
@@ -1351,10 +1567,10 @@ impl Coordinator {
             .unwrap_or_default();
         self.state
             .gpu_pool
-            .workers
-            .iter()
+            .schedulable_workers()
+            .into_iter()
             .map(|worker| {
-                let id = worker_device_id(worker);
+                let id = worker_device_id(&worker);
                 let ready = self.ready.get(&id);
                 let health = if worker.poisoned.load(Ordering::SeqCst) {
                     DeviceHealth::Poisoned
@@ -1396,7 +1612,7 @@ impl Coordinator {
                     admin_state: DeviceAdminState::Enabled,
                     health,
                     activity: if ready.is_some()
-                        && !self.leases.contains_key(&worker_device_id(worker))
+                        && !self.leases.contains_key(&worker_device_id(&worker))
                         && worker.in_flight.load(Ordering::SeqCst) == 0
                     {
                         DeviceActivity::Idle
@@ -1787,14 +2003,14 @@ impl Coordinator {
                 .iter()
                 .map(|worker| {
                     CandidatePlacement::new(
-                        DeviceId::new(worker_device_id(worker)),
+                        DeviceId::new(worker_device_id(&worker)),
                         ExecutionFingerprint::new(pending.model_fingerprint.clone()),
                         pending.estimated_host_ram_bytes,
                     )
                     .with_vram(pending.estimated_vram_bytes)
                     .with_device_available_vram(
                         authoritative_available_vram
-                            .get(&DeviceId::new(worker_device_id(worker)))
+                            .get(&DeviceId::new(worker_device_id(&worker)))
                             .copied()
                             .unwrap_or(0),
                     )
@@ -2076,6 +2292,7 @@ impl Coordinator {
                 let fence = LeaseFence {
                     work_id: id.clone(),
                     device_id: device_id.clone(),
+                    owner_epoch: ready.owner_epoch,
                     state_version: plan.state_version,
                     plan_version: plan.plan_version,
                     worker_generation: ready.generation,
@@ -2146,6 +2363,7 @@ impl Coordinator {
                                 device_id.clone(),
                                 ActiveLease {
                                     work_id: id.clone(),
+                                    owner_epoch: ready.owner_epoch,
                                     plan_version: plan.plan_version,
                                     worker_generation: ready.generation,
                                     accepted: false,
@@ -2227,6 +2445,7 @@ impl Coordinator {
                                 device_id.clone(),
                                 ActiveLease {
                                     work_id: id.clone(),
+                                    owner_epoch: ready.owner_epoch,
                                     plan_version: plan.plan_version,
                                     worker_generation: ready.generation,
                                     accepted: false,
@@ -2385,7 +2604,7 @@ pub async fn run_scheduler_coordinator(
             }
             event = worker_rx.recv() => {
                 if let Some(event) = event {
-                    coordinator.handle_worker_event(event, &mut immediate);
+                    coordinator.handle_worker_event_serialized(event, &mut immediate).await;
                 }
             }
             event = coordinator.preparation_rx.recv() => {
@@ -2660,6 +2879,7 @@ mod tests {
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
         let worker = Arc::new(GpuWorker {
+            owner_epoch: 1,
             gpu: DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{:032x}", ordinal + 1)),
@@ -2687,6 +2907,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
@@ -2703,8 +2924,62 @@ mod tests {
                 OwnerWork::Generation(job) => *job,
                 work => panic!("expected generation grant, got {:?}", work.kind()),
             },
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain command"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown command"),
         }
+    }
+
+    #[test]
+    fn duplicate_ready_clears_transport_unavailable_before_generation_dedupe() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.ready.insert(
+            device_id.clone(),
+            ReadyWorker {
+                ordinal: 0,
+                owner_epoch: 1,
+                generation: 7,
+            },
+        );
+        coordinator.unavailable.insert(device_id.clone());
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 7,
+            },
+            &mut immediate,
+        );
+
+        assert!(
+            !coordinator.unavailable.contains(&device_id),
+            "same-generation Ready must repair a prior transport-Full mark"
+        );
+        assert_eq!(
+            coordinator
+                .ready
+                .get(&device_id)
+                .map(|ready| ready.generation),
+            Some(7)
+        );
     }
 
     fn fake_generation(
@@ -2754,7 +3029,7 @@ mod tests {
     fn completed_prompt_expansion_freezes_original_and_replaces_generation_prompt() {
         let (worker, _worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -2821,7 +3096,7 @@ mod tests {
         );
         let (worker, _worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
@@ -2944,6 +3219,7 @@ mod tests {
             "gpu-a".to_string(),
             ReadyWorker {
                 ordinal: 0,
+                owner_epoch: 1,
                 generation: 7,
             },
         )]);
@@ -2955,6 +3231,7 @@ mod tests {
             "gpu-a".to_string(),
             ActiveLease {
                 work_id: "work-a".to_string(),
+                owner_epoch: 1,
                 plan_version: 1,
                 worker_generation: 7,
                 accepted: true,
@@ -3091,7 +3368,7 @@ mod tests {
     fn scheduler_capacity_uses_sampled_free_vram_not_total() {
         let (worker, _rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3144,7 +3421,7 @@ mod tests {
             .insert(Box::new(ResidentTestEngine), 16 * GIB);
         worker.set_resident_execution_fingerprint(Some("warm-plan"));
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3185,6 +3462,7 @@ mod tests {
             device_id.clone(),
             ReadyWorker {
                 ordinal: 0,
+                owner_epoch: 1,
                 generation: 1,
             },
         );
@@ -3206,6 +3484,7 @@ mod tests {
             device_id,
             ActiveLease {
                 work_id: "busy".into(),
+                owner_epoch: 1,
                 plan_version: 1,
                 worker_generation: 1,
                 accepted: true,
@@ -3250,7 +3529,7 @@ mod tests {
         let (worker_a, worker_a_rx) = test_worker(0);
         let (worker_b, worker_b_rx) = test_worker(1);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker_a.clone(), worker_b.clone()],
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
         let queue = QueueHandle::new(ingress_tx);
@@ -3290,6 +3569,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker_a),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3298,6 +3578,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker_b),
                 ordinal: 1,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3326,7 +3607,7 @@ mod tests {
         let (worker_a, worker_a_rx) = test_worker(0);
         let (worker_b, worker_b_rx) = test_worker(1);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker_a.clone(), worker_b.clone()],
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3366,6 +3647,7 @@ mod tests {
                 WorkerEvent::Ready {
                     device_id: worker_device_id(&worker),
                     ordinal,
+                    owner_epoch: 1,
                     worker_generation: 1,
                 },
                 &mut immediate,
@@ -3386,7 +3668,7 @@ mod tests {
         let (worker_a, worker_a_rx) = test_worker(0);
         let (worker_b, worker_b_rx) = test_worker(1);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker_a.clone(), worker_b.clone()],
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -3425,6 +3707,7 @@ mod tests {
                 WorkerEvent::Ready {
                     device_id: worker_device_id(worker),
                     ordinal,
+                    owner_epoch: 1,
                     worker_generation: 1,
                 },
                 &mut immediate,
@@ -3437,6 +3720,7 @@ mod tests {
             .into_iter()
             .map(|command| match command {
                 crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.kind(),
+                crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
                 crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
             })
             .collect::<BTreeSet<_>>();
@@ -3449,7 +3733,7 @@ mod tests {
     async fn legacy_chain_in_flight_blocks_owner_utility_grant() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3470,6 +3754,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3506,7 +3791,7 @@ mod tests {
     async fn legacy_chain_claim_after_plan_fences_owner_transport() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3525,6 +3810,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3575,7 +3861,7 @@ mod tests {
     fn legacy_chain_claim_and_release_trigger_coordinator_replans() {
         let (worker, _worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3610,7 +3896,7 @@ mod tests {
     async fn cancelled_owner_work_is_removed_before_any_worker_grant() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3646,6 +3932,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3663,7 +3950,7 @@ mod tests {
         let (worker, worker_rx) = test_worker(0);
         let device_id = worker_device_id(&worker);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
@@ -3676,6 +3963,7 @@ mod tests {
         let parent_fence = LeaseFence {
             work_id: "parent".to_string(),
             device_id: device_id.clone(),
+            owner_epoch: 1,
             state_version: 1,
             plan_version: 1,
             worker_generation: 1,
@@ -3717,6 +4005,7 @@ mod tests {
             device_id.clone(),
             ActiveLease {
                 work_id: "parent".to_string(),
+                owner_epoch: 1,
                 plan_version: 1,
                 worker_generation: 1,
                 accepted: true,
@@ -3741,6 +4030,7 @@ mod tests {
             WorkerEvent::Completed {
                 device_id: device_id.clone(),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3749,6 +4039,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id,
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 2,
             },
             &mut immediate,
@@ -3761,6 +4052,7 @@ mod tests {
                 assert_eq!(grant.work.kind(), mold_scheduler::WorkKind::PostUpscale);
                 assert_eq!(grant.fence.worker_generation, 2);
             }
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         }
     }
@@ -3769,7 +4061,7 @@ mod tests {
     async fn cancellation_after_plan_before_grant_is_acknowledged_and_never_transported() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -3794,6 +4086,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3832,7 +4125,7 @@ mod tests {
     async fn telemetry_change_after_plan_before_grant_replans_without_transport() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -3857,6 +4150,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3930,7 +4224,7 @@ mod tests {
 
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -3956,6 +4250,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -3982,6 +4277,7 @@ mod tests {
 
         let grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         let transported_fingerprint = match &grant.work {
@@ -4004,7 +4300,7 @@ mod tests {
     async fn fatal_cuda_after_plan_before_grant_stops_dispatch_without_spinning() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -4029,6 +4325,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -4085,7 +4382,7 @@ mod tests {
         );
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -4135,7 +4432,7 @@ mod tests {
     async fn owner_plan_invalidation_requeues_and_replans_without_double_release() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -4164,6 +4461,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: device_id.clone(),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -4172,6 +4470,7 @@ mod tests {
 
         let mut first_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         let first_plan_version = first_grant.fence.plan_version;
@@ -4193,7 +4492,8 @@ mod tests {
             WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: 0,
-                worker_generation: 101,
+                owner_epoch: 1,
+                worker_generation: 1,
                 grant: first_grant,
                 reason: LeaseRejection::PlanInvalidated(
                     crate::execution_plan::ExecutionPlanError::PlanInvalidated(
@@ -4247,6 +4547,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: device_id.clone(),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -4254,6 +4555,7 @@ mod tests {
         coordinator.dispatch_ready().await;
         let second_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         assert_eq!(second_grant.fence.work_id, "plan-invalidated");
@@ -4266,6 +4568,7 @@ mod tests {
             WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
                 grant: second_grant,
                 reason: LeaseRejection::PlanInvalidated(
@@ -4285,6 +4588,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: device_id.clone(),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -4292,12 +4596,14 @@ mod tests {
         coordinator.dispatch_ready().await;
         let third_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         coordinator.handle_worker_event(
             WorkerEvent::Rejected {
                 device_id,
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
                 grant: third_grant,
                 reason: LeaseRejection::PlanInvalidated(
@@ -4351,7 +4657,7 @@ mod tests {
     async fn blocked_dependency_preparation_does_not_block_other_ready_gpu_work() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
         let queue = QueueHandle::new(ingress_tx);
@@ -4390,6 +4696,7 @@ mod tests {
             WorkerEvent::Ready {
                 device_id: worker_device_id(&worker),
                 ordinal: 0,
+                owner_epoch: 1,
                 worker_generation: 1,
             },
             &mut immediate,
@@ -4411,7 +4718,7 @@ mod tests {
         let (worker_c, rx_c) = test_worker(2);
         drop(rx_b);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker_a.clone(), worker_b.clone(), worker_c.clone()],
+            workers: vec![worker_a.clone(), worker_b.clone(), worker_c.clone()].into(),
         });
         let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(8);
         let queue = QueueHandle::new(ingress_tx);
@@ -4440,6 +4747,7 @@ mod tests {
                 WorkerEvent::Ready {
                     device_id: worker_device_id(worker),
                     ordinal,
+                    owner_epoch: 1,
                     worker_generation: 1,
                 },
                 &mut immediate,

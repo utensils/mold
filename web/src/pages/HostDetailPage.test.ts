@@ -41,6 +41,19 @@ const cancelAllHostQueue = vi.fn().mockResolvedValue(undefined);
 const routerPush = vi.fn().mockResolvedValue(undefined);
 const requestConfirm = vi.hoisted(() => vi.fn(async () => true));
 const requestText = vi.hoisted(() => vi.fn(async () => "Render box"));
+const setDeviceEnabled = vi.hoisted(() =>
+  vi.fn(async (_target: unknown, _id: string, enabled: boolean) =>
+    makeDevice(0, {
+      desired_enabled: enabled,
+      admin_state: enabled ? "enabled" : "draining",
+    }),
+  ),
+);
+
+vi.mock("@studio/api/devices", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/devices")>()),
+  setDeviceEnabled,
+}));
 
 vi.mock("../lib/toasts", () => ({
   toast: vi.fn(),
@@ -185,7 +198,11 @@ async function mountDetail() {
 
 beforeEach(() => {
   localStorage.clear();
-  const host = addHost({ url: "192.168.1.20:7680", name: "Studio" });
+  const host = addHost({
+    url: "192.168.1.20:7680",
+    name: "Studio",
+    apiKey: "secret",
+  });
   routeHolder.id = host.id;
   caps = { queue: { can_reorder: false } };
   queueEntries = [];
@@ -197,6 +214,7 @@ beforeEach(() => {
   pauseHostQueue.mockClear();
   resumeHostQueue.mockClear();
   cancelAllHostQueue.mockClear();
+  setDeviceEnabled.mockClear();
   routerPush.mockClear();
   requestConfirm.mockReset().mockResolvedValue(true);
   requestText.mockReset().mockResolvedValue("Render box");
@@ -400,6 +418,48 @@ describe("HostDetailPage — queue", () => {
     const w = await mountDetail();
 
     expect(w.find('[data-test="queue-lane"]').exists()).toBe(false);
+  });
+
+  it("renders all eight devices and their lifecycle states", async () => {
+    poll.devices.value = Array.from({ length: 8 }, (_, ordinal) =>
+      makeDevice(ordinal, {
+        desired_enabled: ordinal < 6,
+        admin_state:
+          ordinal === 5
+            ? "draining"
+            : ordinal === 6
+              ? "disabled"
+              : ordinal === 7
+                ? "starting"
+                : "enabled",
+        schedulable: ordinal < 5,
+      }),
+    );
+
+    const w = await mountDetail();
+
+    expect(w.findAll('[data-test="device-row"]')).toHaveLength(8);
+    expect(w.text()).toContain("Finishing current work");
+    expect(w.text()).toContain("disabled");
+    expect(w.text()).toContain("Starting");
+  });
+
+  it("mutates the owning host with its API key and refreshes device state", async () => {
+    poll.devices.value = [makeDevice(0)];
+    const w = await mountDetail();
+
+    await w.get('[data-test="device-toggle-0"]').trigger("click");
+    await flushPromises();
+
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: expect.any(String),
+        apiKey: "secret",
+      }),
+      "cuda:0",
+      false,
+    );
+    expect(poll.refresh).toHaveBeenCalled();
   });
 });
 

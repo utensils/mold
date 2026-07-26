@@ -3,7 +3,7 @@ import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 export type DeviceBackend = "cuda" | "metal";
 export type DeviceKind = "full_gpu" | "mig" | "unknown_cuda" | "metal";
 export type DeviceAdminState =
-  "startup_excluded" | "enabled" | "draining" | "disabled";
+  "startup_excluded" | "starting" | "enabled" | "draining" | "disabled";
 export type DeviceHealth = "healthy" | "degraded" | "unavailable" | "poisoned";
 export type DeviceActivity =
   | "idle"
@@ -66,6 +66,7 @@ const deviceKinds = new Set<DeviceKind>([
 ]);
 const adminStates = new Set<DeviceAdminState>([
   "startup_excluded",
+  "starting",
   "enabled",
   "draining",
   "disabled",
@@ -99,9 +100,7 @@ function isNullableNumber(value: unknown): value is number | null {
   );
 }
 
-function isNullableNonnegativeNumber(
-  value: unknown,
-): value is number | null {
+function isNullableNonnegativeNumber(value: unknown): value is number | null {
   return isNullableNumber(value) && (value === null || value >= 0);
 }
 
@@ -251,4 +250,24 @@ export async function listDevices(
 ): Promise<DeviceListResponse> {
   const value = await apiJsonTo<unknown>(target, "/api/devices");
   return parseDeviceListResponse(value);
+}
+
+export async function setDeviceEnabled(
+  target: ApiTarget,
+  deviceId: string,
+  enabled: boolean,
+): Promise<DeviceInfo> {
+  const value = await apiJsonTo<unknown>(
+    target,
+    `/api/devices/${encodeURIComponent(deviceId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  const missing: string[] = [];
+  const device = parseDevice(value, 0, missing);
+  if (!device || missing.length > 0) throw new IncompatibleHostError(missing);
+  return device;
 }

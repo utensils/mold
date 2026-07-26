@@ -16,6 +16,12 @@ import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
+  listDevices,
+  setDeviceEnabled,
+  type DeviceInfo,
+} from "@studio/api/devices";
+import { originUrl } from "../lib/hostRegistry";
+import {
   deleteCatalogCredential,
   getCatalogCredentialStatus,
   putCatalogCredential,
@@ -129,6 +135,45 @@ async function removeCivitai() {
 // About — server version + processing summary.
 const { status } = useStatusPoll();
 const version = computed(() => status.value?.version ?? "—");
+const devices = ref<DeviceInfo[] | null>(null);
+const deviceMutations = ref(new Set<string>());
+const originTarget = () => ({ baseUrl: originUrl(), apiKey: null });
+
+async function loadDevices() {
+  try {
+    devices.value = (await listDevices(originTarget())).devices;
+  } catch {
+    devices.value = null;
+  }
+}
+
+async function toggleDevice(device: DeviceInfo) {
+  if (device.admin_state === "startup_excluded") return;
+  const enabled = !device.desired_enabled;
+  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
+  try {
+    await setDeviceEnabled(originTarget(), device.id, enabled);
+    await loadDevices();
+  } catch (error) {
+    toast("error", `Could not update ${device.name}: ${errorMessage(error)}`);
+  } finally {
+    const next = new Set(deviceMutations.value);
+    next.delete(device.id);
+    deviceMutations.value = next;
+  }
+}
+
+function deviceStateLabel(device: DeviceInfo): string {
+  if (device.admin_state === "draining") return "Finishing current work";
+  if (device.admin_state === "starting") return "Starting";
+  if (device.admin_state === "startup_excluded") return "Excluded at startup";
+  if (device.health !== "healthy") return device.health;
+  return device.admin_state;
+}
+
+onMounted(() => {
+  void loadDevices();
+});
 </script>
 
 <template>
@@ -288,6 +333,42 @@ const version = computed(() => status.value?.version ?? "—");
 
     <ConfigSettingsPanel />
 
+    <template v-if="devices !== null">
+      <p class="kicker">Advanced · GPU devices</p>
+      <CardSurface class="settings__card" data-test="settings-device-controls">
+        <div
+          v-for="device in devices"
+          :key="device.id"
+          class="row"
+          data-test="device-row"
+        >
+          <span class="row__label">
+            {{ device.name }}
+            <small class="device-state">
+              {{
+                device.ordinal == null
+                  ? device.backend
+                  : `GPU ${device.ordinal}`
+              }}
+              · {{ deviceStateLabel(device) }}
+            </small>
+          </span>
+          <button
+            type="button"
+            class="btn"
+            :data-test="`settings-device-toggle-${device.ordinal ?? device.id}`"
+            :disabled="
+              device.admin_state === 'startup_excluded' ||
+              deviceMutations.has(device.id)
+            "
+            @click="toggleDevice(device)"
+          >
+            {{ device.desired_enabled ? "Disable" : "Enable" }}
+          </button>
+        </div>
+      </CardSurface>
+    </template>
+
     <p class="kicker">About</p>
     <CardSurface class="settings__card settings__card--list" :padded="false">
       <div class="about-row">
@@ -355,6 +436,15 @@ const version = computed(() => status.value?.version ?? "—");
 .row__label {
   font-size: 13.5px;
   color: var(--rebate);
+}
+
+.device-state {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-family: var(--f-mono);
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
 .field {

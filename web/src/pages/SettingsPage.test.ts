@@ -14,6 +14,43 @@ vi.mock("../composables/useStatusPoll", () => ({
 
 const originalFetch = globalThis.fetch;
 
+function deviceWire(enabled = true, adminState = "enabled") {
+  return {
+    id: "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    backend: "cuda",
+    ordinal: 0,
+    device_kind: "full_gpu",
+    nvml_uuid: "GPU-a",
+    physical_uuid: "GPU-a",
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: "NVIDIA RTX 3090",
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 4_000_000_000,
+      mold_used_bytes: null,
+      other_used_bytes: null,
+    },
+    telemetry: {
+      utilization_percent: 10,
+      temperature_c: null,
+      power_w: null,
+    },
+    desired_enabled: enabled,
+    admin_state: adminState,
+    health: "healthy",
+    activity: "idle",
+    schedulable: enabled,
+    unschedulable_reason: enabled ? null : "device_disabled",
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
+}
+
 describe("SettingsPage", () => {
   it("keeps its padded content inside narrow web viewports", () => {
     const settingsRule = settingsPageSource.match(/\.settings\s*\{([^}]*)\}/s);
@@ -312,5 +349,66 @@ describe("SettingsPage", () => {
     const wrapper = mount(SettingsPage);
     expect(wrapper.find("input[name=catalog_show_nsfw]").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Show NSFW");
+  });
+
+  it("controls the origin server GPU from Advanced settings", async () => {
+    let enabled = true;
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/devices") && !init?.method) {
+        return {
+          ok: true,
+          json: async () => ({
+            devices: [deviceWire(enabled, enabled ? "enabled" : "disabled")],
+            plan_version: enabled ? 1 : 2,
+          }),
+        } as Response;
+      }
+      if (url.includes("/api/devices/cuda%3A") && init?.method === "PATCH") {
+        enabled = false;
+        return {
+          ok: true,
+          json: async () => deviceWire(false, "disabled"),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () =>
+          url.endsWith("/profiles")
+            ? { profiles: ["default"], active: "default" }
+            : url.endsWith("/api/catalog/credentials")
+              ? {
+                  hf: { configured: false, source: null, masked: null },
+                  civitai: { configured: false, source: null, masked: null },
+                }
+              : { entries: [] },
+      } as Response;
+    });
+
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(
+      wrapper.get("[data-test='settings-device-controls']").text(),
+    ).toContain("NVIDIA RTX 3090");
+
+    await wrapper
+      .get("[data-test='settings-device-toggle-0']")
+      .trigger("click");
+    await flushPromises();
+
+    const patch = fetchMock.mock.calls.find(
+      ([input, init]) =>
+        String(input).includes("/api/devices/cuda%3A") &&
+        init?.method === "PATCH",
+    );
+    expect(patch?.[1]).toEqual(
+      expect.objectContaining({
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(wrapper.get("[data-test='settings-device-toggle-0']").text()).toBe(
+      "Enable",
+    );
   });
 });

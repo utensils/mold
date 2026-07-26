@@ -480,8 +480,16 @@ impl JobRegistry {
     /// Drop the entry — call once on every terminal path (success, error,
     /// client-disconnect skip, dispatch failure). Idempotent.
     pub fn remove(&self, id: &str) {
+        let _ = self.remove_if_present(id);
+    }
+
+    /// Drop the entry and report whether this call owned terminal settlement.
+    ///
+    /// The scheduler uses this to pair queue-depth decrement with the exact
+    /// terminal path that actually removed a job after an owner disappeared.
+    pub(crate) fn remove_if_present(&self, id: &str) -> bool {
         if id.is_empty() {
-            return;
+            return false;
         }
         let removed = {
             let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
@@ -496,6 +504,7 @@ impl JobRegistry {
             self.mark_mutated();
             self.emit(ServerEvent::JobEnded { id: id.to_string() });
         }
+        removed
     }
 
     /// The ids of currently-queued jobs, in dispatch-priority order — the same

@@ -307,7 +307,7 @@ fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> 
         .workers
         .iter()
         .map(|worker| DeviceFact {
-            id: worker_device_id(worker),
+            id: worker_device_id(&worker),
             ordinal: worker.gpu.ordinal,
             available_vram_bytes: worker.gpu.free_vram_bytes,
         })

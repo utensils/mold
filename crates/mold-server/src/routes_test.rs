@@ -293,7 +293,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         app_with_state(AppState::empty(
             mold_core::Config::default(),
@@ -466,8 +466,18 @@ mod tests {
     }
 
     fn gpu_worker_stub(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
-        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel(1);
-        Arc::new(crate::gpu_pool::GpuWorker {
+        gpu_worker_stub_with_receiver(ordinal).0
+    }
+
+    fn gpu_worker_stub_with_receiver(
+        ordinal: usize,
+    ) -> (
+        Arc<crate::gpu_pool::GpuWorker>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+    ) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = Arc::new(crate::gpu_pool::GpuWorker {
+            owner_epoch: 1,
             gpu: mold_inference::device::DiscoveredGpu {
                 ordinal,
                 stable_id: Some(format!("cuda:{ordinal:032x}")),
@@ -495,17 +505,19 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            drain_state: std::sync::atomic::AtomicU8::new(crate::gpu_pool::DRAIN_RUNNING),
             owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
-        })
+        });
+        (worker, job_rx)
     }
 
     fn install_worker_registry(state: &mut AppState) {
         let devices = state
             .gpu_pool
-            .workers
-            .iter()
+            .worker_snapshot()
+            .into_iter()
             .map(|worker| crate::device_registry::DiscoveredDevice {
                 stable_id: worker.gpu.stable_id.clone(),
                 backend: worker.gpu.backend,
@@ -533,7 +545,12 @@ mod tests {
     fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
         let mut state = AppState::with_engine(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: ordinals.iter().copied().map(gpu_worker_stub).collect(),
+            workers: ordinals
+                .iter()
+                .copied()
+                .map(gpu_worker_stub)
+                .collect::<Vec<_>>()
+                .into(),
         });
         install_worker_registry(&mut state);
         create_router(state)
@@ -634,7 +651,7 @@ mod tests {
         let worker = gpu_worker_stub(0);
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
@@ -686,6 +703,401 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_patch_disables_idle_worker_and_publishes_event() {
+        let worker = gpu_worker_stub(0);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        install_worker_registry(&mut state);
+        let registry = state.device_registry.clone();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["desired_enabled"], false);
+        assert_eq!(body["admin_state"], "disabled");
+        assert!(pool.workers.is_empty());
+        assert!(!registry.desired_enabled(id));
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            mold_core::ServerEvent::DeviceStateChanged {
+                device_id,
+                desired_enabled: false,
+                admin_state: mold_core::DeviceAdminState::Disabled,
+            } if device_id == id
+        ));
+
+        let generation = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("maintenance", 64, 64)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(generation.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_body(generation).await["code"], "NO_SCHEDULABLE_DEVICE");
+    }
+
+    #[tokio::test]
+    async fn busy_disable_drains_and_reenable_cancels_pending_stop() {
+        let worker = gpu_worker_stub(0);
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        install_worker_registry(&mut state);
+        let registry = state.device_registry.clone();
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+
+        let draining = app
+            .clone()
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draining.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(draining).await["admin_state"], "draining");
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED
+        );
+        assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+
+        let enabled = app
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        assert_eq!(json_body(enabled).await["admin_state"], "enabled");
+        assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_RUNNING
+        );
+        assert!(registry.desired_enabled(id));
+    }
+
+    #[tokio::test]
+    async fn patch_remains_responsive_while_owner_admin_load_lease_is_blocked() {
+        let (worker, job_rx) = gpu_worker_stub_with_receiver(0);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = crate::gpu_worker::spawn_gpu_thread(
+            worker.clone(),
+            job_rx,
+            event_tx,
+            Duration::from_secs(60),
+        );
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+        assert!(worker.try_claim_in_flight());
+        let (load_started_tx, load_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (load_resume_tx, load_resume_rx) = std::sync::mpsc::sync_channel(1);
+        worker
+            .send_grant(crate::gpu_pool::LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "blocked-admin-route".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: crate::gpu_pool::OwnerWork::Probe {
+                    id: "blocked-admin-route".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(move || {
+                        load_started_tx.send(()).unwrap();
+                        load_resume_rx.recv().unwrap();
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        load_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("admin lease must be executing");
+
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool;
+        install_worker_registry(&mut state);
+        let app = app_with_state(state);
+        let id = "cuda:00000000000000000000000000000000";
+        let draining = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.clone().oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("PATCH must not join a busy GPU owner")
+        .unwrap();
+        assert_eq!(draining.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(draining).await["admin_state"], "draining");
+        let devices = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.oneshot(Request::get("/api/devices").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("device reads must remain responsive during drain")
+        .unwrap();
+        assert_eq!(devices.status(), StatusCode::OK);
+
+        load_resume_tx.send(()).unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Completed { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        owner.join().unwrap();
+        assert_eq!(worker.pending_or_executing(), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_and_observe_device_patch_reject_before_state_or_event_mutation() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::Observe,
+        ] {
+            let worker = gpu_worker_stub(0);
+            worker.in_flight.store(1, Ordering::SeqCst);
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool.clone();
+            install_worker_registry(&mut state);
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work =
+                crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+            let registry = state.device_registry.clone();
+            let mut events = state.events.subscribe();
+            let app = app_with_state(state);
+            let id = "cuda:00000000000000000000000000000000";
+
+            let response = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{mode:?}");
+            assert_eq!(
+                json_body(response).await["code"],
+                "DEVICE_LIFECYCLE_MODE_CONFLICT"
+            );
+            assert!(registry.desired_enabled(id), "{mode:?}");
+            assert_eq!(pool.workers.len(), 1, "{mode:?}");
+            assert_eq!(
+                worker.drain_state.load(Ordering::SeqCst),
+                crate::gpu_pool::DRAIN_RUNNING,
+                "{mode:?}"
+            );
+            assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
+            let lifecycle_event = events.try_recv();
+            assert!(
+                matches!(
+                    lifecycle_event,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                        | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+                ),
+                "{mode:?} published an event before rejecting: {lifecycle_event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn device_patch_enable_returns_starting_without_waiting_for_owner_ready() {
+        let id = "cuda:dddddddddddddddddddddddddddddddd";
+        let gpu = mold_inference::device::DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some(id.into()),
+            raw_cuda_uuid: Some([0xdd; 16]),
+            device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+            identity_error: None,
+            backend: mold_core::GpuBackend::Cuda,
+            name: "replacement gpu".into(),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
+            total_vram_bytes: 24_000_000_000,
+            free_vram_bytes: 24_000_000_000,
+        };
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        pool.workers
+            .install_factory(
+                crate::gpu_pool::WorkerFactory {
+                    devices: [(id.to_string(), gpu)].into_iter().collect(),
+                    shared_pool: Arc::new(Mutex::new(
+                        mold_inference::shared_pool::SharedPool::new(),
+                    )),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some(id.into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(0),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: None,
+                    physical_uuid: None,
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: None,
+                    name: "replacement gpu".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: true,
+                    telemetry_ordinal: None,
+                },
+            ])),
+            Arc::new(None),
+        ));
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["admin_state"], "starting");
+        assert_eq!(body["schedulable"], false);
+
+        let ready_epoch = match scheduler_rx.recv().await.unwrap() {
+            crate::scheduler::WorkerEvent::Ready { owner_epoch, .. } => owner_epoch,
+            _ => panic!("fresh owner must publish epoch-qualified Ready"),
+        };
+        let worker = pool.worker_snapshot().pop().unwrap();
+        worker.request_shutdown();
+        assert!(pool.workers.wait_and_reap(id, ready_epoch));
+    }
+
+    #[tokio::test]
+    async fn device_patch_rejects_unknown_and_startup_excluded_ids() {
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(3),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: None,
+                    physical_uuid: None,
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: None,
+                    name: "excluded".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: false,
+                    telemetry_ordinal: None,
+                },
+            ])),
+            Arc::new(None),
+        ));
+        let app = app_with_state(state);
+
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/devices/cuda:ffffffffffffffffffffffffffffffff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let excluded = app
+            .oneshot(
+                Request::patch("/api/devices/cuda:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(excluded.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
         let worker = gpu_worker_stub(0);
         let cache = worker.model_cache.clone();
@@ -696,7 +1108,7 @@ mod tests {
         .join();
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
             Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
@@ -803,7 +1215,7 @@ mod tests {
         let worker = gpu_worker_stub(1);
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         let discovered = |ordinal, id: &str, name: &str, startup_allowed| {
             crate::device_registry::DiscoveredDevice {
@@ -2641,7 +3053,7 @@ mod tests {
 
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         install_worker_registry(&mut state);
         let app = app_with_state(state);
@@ -2670,7 +3082,7 @@ mod tests {
         let worker = gpu_worker_stub(1);
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         install_worker_registry(&mut state);
         state.resources.publish(mold_core::ResourceSnapshot {
@@ -3767,7 +4179,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let app = app_with_state(AppState::empty(
             mold_core::Config::default(),
@@ -3802,7 +4214,7 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
@@ -3871,7 +4283,7 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
@@ -4143,7 +4555,7 @@ mod tests {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(crate::state::DiscoveryState::default()),
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
@@ -5133,7 +5545,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
@@ -5173,7 +5585,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = app_with_state(state);
@@ -5236,7 +5648,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -5370,7 +5782,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let mut state = AppState::empty(config, queue, gpu_pool, 200);
         state.metadata_db = std::sync::Arc::new(Some(db));
@@ -5520,7 +5932,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![gpu_worker_stub(1)],
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = {
@@ -5574,7 +5986,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state.clone());
@@ -5638,7 +6050,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![gpu_worker_stub(1)],
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -5674,7 +6086,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![gpu_worker_stub(1)],
+            workers: vec![gpu_worker_stub(1)].into(),
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
@@ -6002,7 +6414,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -6058,7 +6470,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -6127,7 +6539,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -6156,7 +6568,7 @@ mod tests {
             mold_core::Config::default(),
             crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
@@ -6267,7 +6679,7 @@ mod tests {
             config,
             crate::state::QueueHandle::new(tx),
             std::sync::Arc::new(crate::gpu_pool::GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             200,
         );
