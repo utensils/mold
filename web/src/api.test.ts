@@ -441,7 +441,9 @@ describe("chain job api helpers", () => {
 
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detail)));
     await expect(getChainJob("job/1")).resolves.toEqual(detail);
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1", {
+      headers: {},
+    });
 
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(summary)));
     await resumeChainJob("job/1");
@@ -449,6 +451,7 @@ describe("chain job api helpers", () => {
       "/api/chain-jobs/job%2F1/resume",
       {
         method: "POST",
+        headers: {},
       },
     );
 
@@ -469,6 +472,7 @@ describe("chain job api helpers", () => {
       "/api/chain-jobs/job%2F1/cancel",
       {
         method: "POST",
+        headers: {},
       },
     );
 
@@ -496,6 +500,25 @@ describe("chain job api helpers", () => {
     expect(chainJobEventsUrl("job/1")).toBe("/api/chain-jobs/job%2F1/events");
     expect(chainJobStagePreviewUrl("job/1", 12)).toBe(
       "/api/chain-jobs/job%2F1/stages/12/preview",
+    );
+  });
+
+  it("keeps every durable sequence request on an authenticated remote host", async () => {
+    const fetchMock = installFetch({ job_id: "remote-1" });
+    const target = { baseUrl: "http://plato:7680", apiKey: "secret" };
+
+    await createChainJob(chainRequest(), target);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://plato:7680/api/chain-jobs",
+      expect.objectContaining({
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": "secret",
+        },
+      }),
+    );
+    expect(chainJobEventsUrl("remote-1", target)).toBe(
+      "http://plato:7680/api/chain-jobs/remote-1/events",
     );
   });
 });

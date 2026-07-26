@@ -525,7 +525,11 @@ in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
 Sequence-mode browse links enter this view with Video + Models filters. The web
 Create picker contains only sequence-capable installed models and selects one
-when available.
+when available. A new Sequence starts with two required clip descriptions,
+uses the plain-language Continue motion / Cut / Crossfade transition labels,
+and keeps TOML import/export under Sequence tools. Durable sequence creation,
+events, previews, and actions follow the selected machine with its API key in
+headers rather than falling back to the web-serving origin.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. HF separated-bundling entries

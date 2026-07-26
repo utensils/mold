@@ -43,9 +43,9 @@ function updateTransition(v: string) {
 }
 
 const transitionOptions = [
-  { value: "smooth", label: "Smooth" },
+  { value: "smooth", label: "Continue motion" },
   { value: "cut", label: "Cut" },
-  { value: "fade", label: "Fade" },
+  { value: "fade", label: "Crossfade" },
 ] as const;
 const transitionValue = computed(() => props.stage.transition ?? "smooth");
 
@@ -71,7 +71,7 @@ const sourceImageLabel = computed(() => {
         type="button"
         class="sc__grip drag-handle"
         data-test="stage-drag-handle"
-        aria-label="Drag to reorder stage"
+        aria-label="Drag to reorder clip"
         title="Drag to reorder"
       >
         <Icon name="grip" :size="16" />
@@ -87,13 +87,13 @@ const sourceImageLabel = computed(() => {
         data-test="stage-transition"
         @update:model-value="updateTransition"
       />
-      <span v-else class="sc__opening">opening frame</span>
+      <span v-else class="sc__opening">Opening clip</span>
 
       <div class="sc__actions">
         <select
           class="sc__frames"
           :value="stage.frames"
-          aria-label="Frames for this stage"
+          aria-label="Duration for this clip"
           @change="
             updateFrames(Number(($event.target as HTMLSelectElement).value))
           "
@@ -105,7 +105,7 @@ const sourceImageLabel = computed(() => {
         <button
           type="button"
           class="sc__icon"
-          aria-label="Duplicate stage"
+          aria-label="Duplicate clip"
           title="Duplicate"
           @click="emit('duplicate')"
         >
@@ -114,7 +114,7 @@ const sourceImageLabel = computed(() => {
         <button
           type="button"
           class="sc__icon"
-          aria-label="Move stage up"
+          aria-label="Move clip up"
           title="Move up"
           @click="emit('move-up')"
         >
@@ -123,7 +123,7 @@ const sourceImageLabel = computed(() => {
         <button
           type="button"
           class="sc__icon"
-          aria-label="Move stage down"
+          aria-label="Move clip down"
           title="Move down"
           @click="emit('move-down')"
         >
@@ -132,7 +132,7 @@ const sourceImageLabel = computed(() => {
         <button
           type="button"
           class="sc__icon sc__icon--danger"
-          aria-label="Delete stage"
+          aria-label="Delete clip"
           title="Delete"
           @click="emit('delete')"
         >
@@ -172,7 +172,9 @@ const sourceImageLabel = computed(() => {
       <textarea
         class="sc__prompt"
         :value="stage.prompt"
-        placeholder="Describe this stage…"
+        :placeholder="
+          isFirst ? 'How does the sequence begin?' : 'What happens next?'
+        "
         @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
       />
     </div>

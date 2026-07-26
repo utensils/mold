@@ -35,6 +35,7 @@ import { ASPECTS } from "@ui/lib/resolution";
 import type { DevelopPhase } from "@ui/lib/grain";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { modelSupportsSequence } from "@studio/lib/sequence";
 import {
   createChainJob,
   deleteGalleryImage,
@@ -43,6 +44,7 @@ import {
   imageUrl,
   listGallery,
   upscaleStream,
+  type StreamTarget,
 } from "../api";
 import {
   applyMetadataToForm,
@@ -70,7 +72,6 @@ import {
 } from "@studio/lib/sourceFit";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import { useHostRouting } from "../composables/useHostRouting";
-import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import type { HostRoute } from "../lib/hostRouting";
@@ -394,6 +395,7 @@ const stream = useGenerateStream((job) => {
   storeLastSeed(seed);
 });
 const CHAIN_JOB_STORAGE_KEY = "mold.create.chain-job";
+const CHAIN_JOB_HOST_STORAGE_KEY = "mold.create.chain-job-host";
 function loadSubmittedChainJobId(): string | null {
   try {
     return localStorage.getItem(CHAIN_JOB_STORAGE_KEY);
@@ -402,12 +404,38 @@ function loadSubmittedChainJobId(): string | null {
   }
 }
 const submittedChainJobId = ref<string | null>(loadSubmittedChainJobId());
-const submittedChainJob = useChainJobStream(submittedChainJobId);
+const submittedChainJobHostId = ref<string | null>(
+  (() => {
+    try {
+      return localStorage.getItem(CHAIN_JOB_HOST_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  })(),
+);
+const submittedChainTarget = computed<StreamTarget | undefined>(() => {
+  const hostId = submittedChainJobHostId.value;
+  if (!hostId) return undefined;
+  const host = routing.hosts.value.find((candidate) => candidate.id === hostId);
+  if (!host) return undefined;
+  return {
+    baseUrl: host.url,
+    ...(host.apiKey ? { apiKey: host.apiKey } : {}),
+  };
+});
+const submittedChainJob = useChainJobStream(
+  submittedChainJobId,
+  submittedChainTarget,
+);
 const submittedChainJobDetail = submittedChainJob.detail;
 watch(submittedChainJobId, (id) => {
   try {
     if (id) localStorage.setItem(CHAIN_JOB_STORAGE_KEY, id);
-    else localStorage.removeItem(CHAIN_JOB_STORAGE_KEY);
+    else {
+      localStorage.removeItem(CHAIN_JOB_STORAGE_KEY);
+      localStorage.removeItem(CHAIN_JOB_HOST_STORAGE_KEY);
+      submittedChainJobHostId.value = null;
+    }
   } catch {
     // Storage is advisory; the durable server job keeps running regardless.
   }
@@ -487,26 +515,6 @@ const currentFamily = computed(
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(currentFamily.value),
 );
-
-// Chain (Sequence) generation is only meaningful for the video families that
-// stitch multiple clips. For everything else the Sequence tab stays
-// discoverable but explains itself instead of offering a dead Generate button.
-function modelSupportsSequence(model: ModelInfoExtended | null): boolean {
-  if (!model) return false;
-  if (typeof model.supports_sequence === "boolean")
-    return model.supports_sequence;
-  if (model.family === "ltx-video") return true;
-  if (model.family !== "ltx2") return false;
-  // Older servers do not expose model-specific sequence support. Built-in
-  // distilled checkpoints and single-file catalog checkpoints choose the
-  // supported Distilled/OneStage paths; built-in dev checkpoints choose
-  // TwoStage and must stay out of the sequence picker.
-  return (
-    model.name.includes("distilled") ||
-    model.name.startsWith("cv:") ||
-    model.name.startsWith("hf:")
-  );
-}
 
 const supportsChain = computed(() => {
   if (currentModel.value) return modelSupportsSequence(currentModel.value);
@@ -1043,16 +1051,6 @@ async function onSubmit(allowStaleQuick = false) {
   }
 }
 
-// Sequences are submitted as durable chain jobs and followed with an
-// EventSource, which cannot carry a per-host `x-api-key` — so they stay on this
-// server. Say so rather than letting the Run on chip imply otherwise.
-const sequenceIgnoresRouting = computed(
-  () =>
-    routing.multiHost.value &&
-    (routing.resolve(form.state.value.model || null)?.hostId ??
-      ORIGIN_HOST_ID) !== ORIGIN_HOST_ID,
-);
-
 async function onSubmitScript(script: ChainScriptToml) {
   const stages: ChainStageWire[] = script.stage.map((s) => ({
     prompt: s.prompt,
@@ -1078,8 +1076,19 @@ async function onSubmitScript(script: ChainScriptToml) {
     enable_audio: script.chain.enable_audio,
   };
   try {
-    const { job_id } = await createChainJob(req);
+    const route = routing.resolve(script.chain.model);
+    if (!route) {
+      throw new Error("The selected sequence host is unavailable.");
+    }
+    const { job_id } = await createChainJob(req, route.target);
+    submittedChainJobHostId.value = route.hostId;
     submittedChainJobId.value = job_id;
+    try {
+      localStorage.setItem(CHAIN_JOB_HOST_STORAGE_KEY, route.hostId);
+    } catch {
+      // The durable job is already running. Storage is recovery convenience,
+      // not part of submission success.
+    }
   } catch (e) {
     composerError.value = e instanceof Error ? e.message : String(e);
   }
@@ -1501,15 +1510,6 @@ onBeforeUnmount(() => {
         </div>
 
         <div
-          v-if="composerMode === 'script' && sequenceIgnoresRouting"
-          class="rounded-control bg-halide/10 px-3 py-1.5 text-xs text-halide"
-          data-test="sequence-origin-note"
-        >
-          Sequences render on this server — the Run on choice applies to single
-          prints.
-        </div>
-
-        <div
           v-if="composerMode === 'script' && !supportsChain"
           class="rounded-card-lg border border-edge bg-bench p-6 shadow-[inset_0_1px_0_var(--card-hi)]"
           data-test="chain-unsupported"
@@ -1718,6 +1718,7 @@ onBeforeUnmount(() => {
         <ChainJobCard
           v-if="submittedChainJobDetail"
           :job="submittedChainJobDetail"
+          :target="submittedChainTarget"
           @updated="submittedChainJob.refresh()"
           @dismiss="submittedChainJobId = null"
         />

@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
   cancelChainJob,
   chainJobStagePreviewUrl,
   resumeChainJob,
   retakeChainJob,
+  type StreamTarget,
 } from "../api";
 import type { ChainJobDetail } from "../types";
 
 const props = defineProps<{
   job: ChainJobDetail;
+  target?: StreamTarget;
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +21,7 @@ const emit = defineEmits<{
 
 const actionBusy = ref<"resume" | "cancel" | "retake" | null>(null);
 const actionError = ref<string | null>(null);
+const previewUrls = ref<Record<number, string>>({});
 const active = computed(
   () => props.job.state === "queued" || props.job.state === "running",
 );
@@ -28,6 +31,12 @@ const resumable = computed(() =>
 const dismissible = computed(() =>
   ["completed", "failed", "cancelled"].includes(props.job.state),
 );
+let previewJobKey = "";
+
+function clearPreviews() {
+  for (const url of Object.values(previewUrls.value)) URL.revokeObjectURL(url);
+  previewUrls.value = {};
+}
 
 watch(
   () => props.job.state,
@@ -36,6 +45,54 @@ watch(
     actionError.value = null;
   },
 );
+
+watch(
+  () =>
+    [
+      props.job.id,
+      props.target?.baseUrl ?? "",
+      props.target?.apiKey ?? "",
+      props.job.stages
+        .filter((stage) => stage.has_preview)
+        .map((stage) => stage.idx)
+        .join(","),
+    ].join(":"),
+  () => {
+    const nextJobKey = [
+      props.job.id,
+      props.target?.baseUrl ?? "",
+      props.target?.apiKey ?? "",
+    ].join(":");
+    if (previewJobKey !== nextJobKey) {
+      clearPreviews();
+      previewJobKey = nextJobKey;
+    }
+    for (const stage of props.job.stages) {
+      if (!stage.has_preview || previewUrls.value[stage.idx]) continue;
+      const headers = props.target?.apiKey
+        ? { "x-api-key": props.target.apiKey }
+        : undefined;
+      void fetch(
+        chainJobStagePreviewUrl(props.job.id, stage.idx, props.target),
+        {
+          ...(headers ? { headers } : {}),
+        },
+      )
+        .then(async (response) => {
+          if (!response.ok)
+            throw new Error(`Preview failed: ${response.status}`);
+          const url = URL.createObjectURL(await response.blob());
+          previewUrls.value = { ...previewUrls.value, [stage.idx]: url };
+        })
+        .catch(() => {});
+    }
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  clearPreviews();
+});
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -54,7 +111,7 @@ async function resume() {
   actionBusy.value = "resume";
   actionError.value = null;
   try {
-    await resumeChainJob(props.job.id);
+    await resumeChainJob(props.job.id, props.target);
     emit("updated");
   } catch (error) {
     actionError.value = errorMessage(error);
@@ -68,7 +125,7 @@ async function cancel() {
   actionBusy.value = "cancel";
   actionError.value = null;
   try {
-    await cancelChainJob(props.job.id);
+    await cancelChainJob(props.job.id, props.target);
     emit("updated");
   } catch (error) {
     actionError.value = errorMessage(error);
@@ -83,7 +140,11 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
   actionBusy.value = "retake";
   actionError.value = null;
   try {
-    await retakeChainJob(props.job.id, { stage_idx: stageIdx, mode });
+    await retakeChainJob(
+      props.job.id,
+      { stage_idx: stageIdx, mode },
+      props.target,
+    );
     emit("updated");
   } catch (error) {
     actionError.value = errorMessage(error);
@@ -160,8 +221,8 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
         :data-test="`chain-job-stage-${stage.idx}`"
       >
         <img
-          v-if="stage.has_preview"
-          :src="chainJobStagePreviewUrl(job.id, stage.idx)"
+          v-if="previewUrls[stage.idx]"
+          :src="previewUrls[stage.idx]"
           alt=""
           class="h-10 w-14 rounded object-cover"
           :data-test="`chain-job-stage-preview-${stage.idx}`"
@@ -173,7 +234,7 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
         />
         <div class="min-w-0">
           <div class="text-xs font-medium text-rebate">
-            Stage {{ stage.idx }} - {{ stage.state }}
+            Clip {{ stage.idx + 1 }} · {{ stage.state }}
           </div>
           <div class="truncate text-xs text-ink-3">
             {{ job.script.stage[stage.idx]?.prompt }}

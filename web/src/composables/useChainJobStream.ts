@@ -1,29 +1,31 @@
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import { chainJobEventsUrl, getChainJob } from "../api";
+import type { StreamTarget } from "../api";
 import type { ChainJobDetail, ChainJobEvent } from "../types";
 
-export function useChainJobStream(jobId: Ref<string | null>): {
+export function useChainJobStream(
+  jobId: Ref<string | null>,
+  target?: Ref<StreamTarget | undefined>,
+): {
   detail: Ref<ChainJobDetail | null>;
   connected: Ref<boolean>;
   refresh: () => Promise<void>;
 } {
   const detail = ref<ChainJobDetail | null>(null);
   const connected = ref(false);
-  let source: EventSource | null = null;
-  let reconnectTimer: number | null = null;
+  let abort: AbortController | null = null;
   let pollTimer: number | null = null;
   let stopped = false;
 
   function clearTimers() {
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
     if (pollTimer !== null) window.clearTimeout(pollTimer);
-    reconnectTimer = null;
     pollTimer = null;
   }
 
   function closeSource() {
-    if (source) source.close();
-    source = null;
+    abort?.abort();
+    abort = null;
     connected.value = false;
   }
 
@@ -67,37 +69,56 @@ export function useChainJobStream(jobId: Ref<string | null>): {
 
   async function pollOnce(id: string) {
     try {
-      detail.value = await getChainJob(id);
+      detail.value = await getChainJob(id, target?.value);
     } catch {
       // The reconnect loop remains authoritative; a failed poll should not
       // tear down a stream that may come back.
     }
   }
 
-  function scheduleReconnect(id: string) {
+  function schedulePoll(id: string) {
     if (stopped) return;
-    clearTimers();
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
     pollTimer = window.setTimeout(() => void pollOnce(id), 250);
-    reconnectTimer = window.setTimeout(() => connect(id), 1_000);
   }
 
   function connect(id: string) {
     closeSource();
     if (stopped) return;
-    source = new EventSource(chainJobEventsUrl(id));
-    source.addEventListener("open", () => {
-      connected.value = true;
-    });
-    source.addEventListener("chain_job", (message) => {
-      try {
-        applyEvent(JSON.parse((message as MessageEvent).data) as ChainJobEvent);
-      } catch {
-        // Bad frames are ignored; the poll fallback re-synchronizes state.
-      }
-    });
-    source.addEventListener("error", () => {
-      closeSource();
-      scheduleReconnect(id);
+    const controller = new AbortController();
+    abort = controller;
+    const route = target?.value;
+    void fetchEventSource(chainJobEventsUrl(id, route), {
+      signal: controller.signal,
+      openWhenHidden: true,
+      headers: route?.apiKey ? { "x-api-key": route.apiKey } : {},
+      onopen: async (response) => {
+        if (!response.ok)
+          throw new Error(`Sequence events failed: ${response.status}`);
+        connected.value = true;
+      },
+      onmessage: (message) => {
+        if (message.event !== "chain_job") return;
+        try {
+          applyEvent(JSON.parse(message.data) as ChainJobEvent);
+        } catch {
+          // Bad frames are ignored; the poll fallback re-synchronizes state.
+        }
+      },
+      onclose: () => {
+        connected.value = false;
+        if (!controller.signal.aborted)
+          throw new Error("Sequence event stream closed.");
+      },
+      onerror: () => {
+        connected.value = false;
+        if (!controller.signal.aborted) {
+          schedulePoll(id);
+          return 1_000;
+        }
+      },
+    }).catch(() => {
+      connected.value = false;
     });
   }
 
@@ -107,8 +128,8 @@ export function useChainJobStream(jobId: Ref<string | null>): {
   }
 
   watch(
-    jobId,
-    (id) => {
+    [jobId, () => target?.value?.baseUrl, () => target?.value?.apiKey],
+    ([id]) => {
       clearTimers();
       closeSource();
       detail.value = null;

@@ -129,20 +129,31 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     ).toBe(true);
   });
 
-  it("pluralizes the stage count in the summary line (1 stage vs N stages)", async () => {
+  it("starts a new sequence with two clips and plain-language transitions", async () => {
     vi.spyOn(api, "fetchChainLimits").mockResolvedValue(ltx2Limits());
     const w = mount(ScriptComposer, { props: props() });
     await flushPromises();
 
-    const summary = () => w.find('[data-test="script-summary"]').text();
-    expect(summary()).toContain("1 stage");
-    expect(summary()).not.toContain("1 stages");
+    expect(w.findAll('[data-test="stage-card"]')).toHaveLength(2);
+    expect(w.get('[data-test="script-summary"]').text()).toContain("2 clips");
+    expect(w.text()).toContain("Continue motion");
+    expect(w.get('[data-test="script-generate"]').text()).toBe(
+      "Generate sequence",
+    );
+  });
 
-    const addStage = w
-      .findAll("button")
-      .find((b) => b.text().includes("Add stage"))!;
-    await addStage.trigger("click");
-    expect(summary()).toContain("2 stages");
+  it("requires every clip prompt before generation", async () => {
+    vi.spyOn(api, "fetchChainLimits").mockResolvedValue(ltx2Limits());
+    const w = mount(ScriptComposer, { props: props() });
+    await flushPromises();
+
+    expect(w.get('[data-test="sequence-validation"]').text()).toContain(
+      "Describe clip 1",
+    );
+    expect(
+      (w.get('[data-test="script-generate"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("clears stale enable_audio from the persisted draft when the current model has no audio path", async () => {

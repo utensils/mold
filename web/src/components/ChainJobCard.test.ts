@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChainJobCard from "./ChainJobCard.vue";
 import type { ChainJobDetail } from "../types";
@@ -166,5 +166,34 @@ describe("ChainJobCard retake controls", () => {
     expect(
       interruptedWrapper.find("[data-test='chain-job-dismiss']").exists(),
     ).toBe(false);
+  });
+
+  it("revokes old preview URLs when the durable job changes", async () => {
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValueOnce("blob:job-1")
+      .mockReturnValueOnce("blob:job-2");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Blob(["preview"]))),
+    );
+    const first = job("cut");
+    first.stages[0]!.has_preview = true;
+    const wrapper = mount(ChainJobCard, { props: { job: first } });
+    await flushPromises();
+
+    const second = { ...job("cut"), id: "job-2" };
+    second.stages[0]!.has_preview = true;
+    await wrapper.setProps({ job: second });
+    await flushPromises();
+
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:job-1");
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
   });
 });
