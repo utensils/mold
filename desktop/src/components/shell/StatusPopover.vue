@@ -30,9 +30,9 @@ let statusTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * The status mirrors the concrete host selected in the Create header. Auto
  * and Most capable have no concrete host until routing happens, so those modes
- * follow the most recently submitted live job and otherwise show the primary.
- * The embedded-engine recovery poll below stays bound to the primary
- * connection no matter what is displayed.
+ * follow the most recently submitted live job with a routed host id and
+ * otherwise show the primary. The embedded-engine recovery poll below stays
+ * bound to the primary connection no matter what is displayed.
  */
 const displayHost = computed(() => {
   const selected = normalizeTargetHost(appPrefs.settings?.generateTargetHost, hosts.all);
