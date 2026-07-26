@@ -175,18 +175,17 @@ fn run_gpu_owner(
         }
         generation = generation.saturating_add(1);
     }
-    let cached = worker
-        .model_cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
-    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
-        // Destructors may call CUDA. A poisoned primary context is never
-        // touched again; process teardown reclaims these.
-        contain_poisoned_cuda(cached);
-    } else {
+    if !worker.poisoned.load(Ordering::SeqCst) && !worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        let cached = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         drop(cached);
     }
+    // A poisoned primary context is never touched again. In that case keep
+    // the cache intact so no container operation can trigger a CUDA-backed
+    // destructor; process teardown reclaims it.
     tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
 }
 
@@ -2709,6 +2708,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -3315,6 +3315,10 @@ mod tests {
                 }),
                 0,
             );
+            worker
+                .owner_thread_id
+                .set(std::thread::current().id())
+                .expect("test binds admin load to the owner thread");
 
             let result = load_blocking(&worker, "poison-load", &Config::default());
 
