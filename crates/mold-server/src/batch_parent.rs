@@ -141,41 +141,34 @@ impl DurableBatchParent {
     pub fn recover(directory: &Path) -> anyhow::Result<Self> {
         let records = load_parent_journal(&directory.join(PARENT_JOURNAL_FILE))?;
         let journal_snapshot = records.last().map(|record| record.snapshot.clone());
-        let disk_snapshot = std::fs::read(directory.join(PARENT_SNAPSHOT_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<BatchParentSnapshot>(&bytes).ok());
-        let reconstructed_snapshot = disk_snapshot.is_none();
-        let snapshot = disk_snapshot
-            .clone()
-            .or_else(|| journal_snapshot.clone())
-            .with_context(|| {
-                format!(
-                    "batch parent has no recoverable state in {}",
-                    directory.display()
-                )
-            })?;
-        anyhow::ensure!(
-            snapshot.version == PARENT_JOURNAL_VERSION,
-            "unsupported batch parent journal version {}",
-            snapshot.version
-        );
-        validate_parent_snapshot(&snapshot)?;
-        let journal_needs_heal = journal_snapshot.as_ref() != Some(&snapshot);
-        let journal_state = records
-            .last()
-            .map_or(snapshot.state, |record| record.snapshot.state);
-        let reducer = BatchParentReducer {
-            parent_id: snapshot.parent_id,
-            total_children: snapshot.total_children,
-            attempt_generation: snapshot.attempt_generation,
-            state: snapshot.state,
-            children: snapshot.children,
-            child_lease_generations: snapshot.child_lease_generations,
-            active: snapshot.active,
-            cancellation_tokens: BTreeMap::new(),
-            retry_counts: snapshot.retry_counts,
-            terminal_after_fence: snapshot.terminal_after_fence,
+        let snapshot_path = directory.join(PARENT_SNAPSHOT_FILE);
+        let disk_snapshot = match std::fs::read(&snapshot_path) {
+            Ok(bytes) => match serde_json::from_slice::<BatchParentSnapshot>(&bytes) {
+                Ok(snapshot) => {
+                    validate_parent_snapshot(&snapshot)?;
+                    Some(snapshot)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        snapshot = %snapshot_path.display(),
+                        %error,
+                        "ignoring unreadable batch parent snapshot in favor of its journal"
+                    );
+                    None
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
         };
+        let (snapshot, rewrite_snapshot, append_disk_ahead) =
+            reconcile_parent_snapshot(&records, journal_snapshot.as_ref(), disk_snapshot.as_ref())
+                .with_context(|| {
+                    format!(
+                        "reconciling batch parent snapshot and journal in {}",
+                        directory.display()
+                    )
+                })?;
+        let reducer = reducer_from_parent_snapshot(&snapshot);
         let mut durable = Self {
             reducer,
             directory: directory.to_path_buf(),
@@ -184,27 +177,21 @@ impl DurableBatchParent {
                 .map_or(0, |record| record.sequence.saturating_add(1)),
             poisoned: false,
         };
-        if reconstructed_snapshot {
+        if rewrite_snapshot {
             atomic_write_parent_json(
                 &durable.directory.join(PARENT_SNAPSHOT_FILE),
                 &durable.reducer.snapshot(),
             )?;
-        } else if journal_needs_heal {
-            durable.persist_transition(journal_state)?;
+        }
+        if append_disk_ahead {
+            let from = records
+                .last()
+                .map_or(BatchParentState::Queued, |record| record.snapshot.state);
+            durable.persist_transition(from)?;
         }
         if !durable.reducer.active.is_empty() {
             let from = durable.reducer.state;
-            for child_index in std::mem::take(&mut durable.reducer.active) {
-                durable.reducer.children[child_index] = ChildState::Cancelled;
-            }
-            durable.reducer.cancellation_tokens.clear();
-            durable.reducer.terminal_after_fence =
-                Some(if durable.reducer.state == BatchParentState::Cancelling {
-                    BatchParentState::Cancelled
-                } else {
-                    BatchParentState::Failed
-                });
-            durable.reducer.state = BatchParentState::Fenced;
+            durable.reducer.fence_lost_active_leases()?;
             durable.persist_transition(from)?;
         }
         Ok(durable)
@@ -630,6 +617,31 @@ impl BatchParentReducer {
             token.cancel();
         }
     }
+
+    fn fence_lost_active_leases(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.active.is_empty()
+                && matches!(
+                    self.state,
+                    BatchParentState::Running
+                        | BatchParentState::Cancelling
+                        | BatchParentState::Failing
+                ),
+            "batch parent cannot fence lost leases from {:?}",
+            self.state
+        );
+        for child_index in std::mem::take(&mut self.active) {
+            self.children[child_index] = ChildState::Cancelled;
+        }
+        self.cancellation_tokens.clear();
+        self.terminal_after_fence = Some(if self.state == BatchParentState::Cancelling {
+            BatchParentState::Cancelled
+        } else {
+            BatchParentState::Failed
+        });
+        self.state = BatchParentState::Fenced;
+        Ok(())
+    }
 }
 
 fn validate_parent_snapshot(snapshot: &BatchParentSnapshot) -> anyhow::Result<()> {
@@ -693,6 +705,119 @@ fn validate_parent_snapshot(snapshot: &BatchParentSnapshot) -> anyhow::Result<()
     Ok(())
 }
 
+fn reducer_from_parent_snapshot(snapshot: &BatchParentSnapshot) -> BatchParentReducer {
+    BatchParentReducer {
+        parent_id: snapshot.parent_id.clone(),
+        total_children: snapshot.total_children,
+        attempt_generation: snapshot.attempt_generation,
+        state: snapshot.state,
+        children: snapshot.children.clone(),
+        child_lease_generations: snapshot.child_lease_generations.clone(),
+        active: snapshot.active.clone(),
+        cancellation_tokens: snapshot
+            .active
+            .iter()
+            .map(|index| (*index, InferenceCancellationToken::default()))
+            .collect(),
+        retry_counts: snapshot.retry_counts.clone(),
+        terminal_after_fence: snapshot.terminal_after_fence,
+    }
+}
+
+fn is_initial_parent_snapshot(snapshot: &BatchParentSnapshot) -> bool {
+    BatchParentReducer::new(snapshot.parent_id.clone(), snapshot.total_children)
+        .map(|reducer| reducer.snapshot() == *snapshot)
+        .unwrap_or(false)
+}
+
+fn is_legal_parent_successor(previous: &BatchParentSnapshot, next: &BatchParentSnapshot) -> bool {
+    let base = reducer_from_parent_snapshot(previous);
+    let matches = |candidate: &BatchParentReducer| candidate.snapshot() == *next;
+
+    let mut candidate = base.clone();
+    if candidate.start().is_ok() && matches(&candidate) {
+        return true;
+    }
+    for child_index in 0..previous.total_children {
+        let mut candidate = base.clone();
+        if candidate.grant(child_index).is_ok() && matches(&candidate) {
+            return true;
+        }
+    }
+    for child_index in previous.active.iter().copied() {
+        let lease = BatchChildLease {
+            parent_id: previous.parent_id.clone(),
+            child_index,
+            attempt_generation: previous.attempt_generation,
+            lease_generation: previous.child_lease_generations[child_index],
+        };
+        for completion in [
+            ChildCompletion::Succeeded,
+            ChildCompletion::Failed,
+            ChildCompletion::Cancelled,
+        ] {
+            let mut candidate = base.clone();
+            if candidate.complete(&lease, completion).is_ok() && matches(&candidate) {
+                return true;
+            }
+        }
+    }
+    let mut candidate = base.clone();
+    if candidate.request_cancel().is_ok() && matches(&candidate) {
+        return true;
+    }
+    let mut candidate = base.clone();
+    if candidate.begin_retry().is_ok() && matches(&candidate) {
+        return true;
+    }
+    let mut candidate = base.clone();
+    if candidate.finalize_fence().is_ok() && matches(&candidate) {
+        return true;
+    }
+    let mut candidate = base.clone();
+    if candidate.begin_commit().is_ok() && matches(&candidate) {
+        return true;
+    }
+    let mut candidate = base.clone();
+    if candidate.mark_committed().is_ok() && matches(&candidate) {
+        return true;
+    }
+    let mut candidate = base;
+    candidate.fence_lost_active_leases().is_ok() && matches(&candidate)
+}
+
+fn reconcile_parent_snapshot(
+    records: &[BatchParentJournalRecord],
+    journal_snapshot: Option<&BatchParentSnapshot>,
+    disk_snapshot: Option<&BatchParentSnapshot>,
+) -> anyhow::Result<(BatchParentSnapshot, bool, bool)> {
+    match (journal_snapshot, disk_snapshot) {
+        (None, None) => anyhow::bail!("batch parent has no recoverable state"),
+        (None, Some(disk)) => {
+            anyhow::ensure!(
+                is_initial_parent_snapshot(disk),
+                "batch parent disk snapshot is not the initial journal state"
+            );
+            Ok((disk.clone(), false, true))
+        }
+        (Some(journal), None) => Ok((journal.clone(), true, false)),
+        (Some(journal), Some(disk)) if journal == disk => Ok((journal.clone(), false, false)),
+        (Some(journal), Some(disk)) if records.iter().any(|record| record.snapshot == *disk) => {
+            // A stale but valid atomic snapshot must never supersede the later
+            // append-only authority. Rewrite it; do not append backward state.
+            Ok((journal.clone(), true, false))
+        }
+        (Some(journal), Some(disk)) if is_legal_parent_successor(journal, disk) => {
+            // atomic snapshot replacement precedes the journal append. This is
+            // the one valid crash window where disk is exactly one event ahead.
+            Ok((disk.clone(), false, true))
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("batch parent disk snapshot diverges from its durable journal")
+        }
+    }
+}
+
 fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalRecord>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -733,6 +858,21 @@ fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalReco
                     anyhow::ensure!(
                         record.from == previous.snapshot.state,
                         "batch parent journal transition chain is broken at {}",
+                        path.display()
+                    );
+                    anyhow::ensure!(
+                        is_legal_parent_successor(&previous.snapshot, &record.snapshot),
+                        "batch parent journal contains an illegal state mutation at record {} in {}",
+                        record.sequence,
+                        path.display()
+                    );
+                } else {
+                    anyhow::ensure!(
+                        record.from == BatchParentState::Queued
+                            && record.to == BatchParentState::Queued
+                            && record.attempt_generation == 0
+                            && is_initial_parent_snapshot(&record.snapshot),
+                        "batch parent journal has an invalid initial record at {}",
                         path.display()
                     );
                 }
@@ -800,6 +940,14 @@ fn sync_parent_dir(_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn append_parent_record(path: &Path, record: &BatchParentJournalRecord) {
+        let mut bytes = serde_json::to_vec(record).unwrap();
+        bytes.push(b'\n');
+        let mut journal = OpenOptions::new().append(true).open(path).unwrap();
+        journal.write_all(&bytes).unwrap();
+        journal.sync_all().unwrap();
+    }
 
     fn running_parent(children: usize) -> BatchParentReducer {
         let mut parent = BatchParentReducer::new("parent", children).unwrap();
@@ -1046,5 +1194,113 @@ mod tests {
 
         assert!(load_parent_journal(&journal_path).is_err());
         assert_eq!(std::fs::read(&journal_path).unwrap(), before);
+    }
+
+    #[test]
+    fn parent_journal_rejects_terminal_state_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let (lease, _) = parent.grant(0).unwrap();
+        parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+        parent.begin_commit().unwrap();
+        parent.mark_committed().unwrap();
+
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let records = load_parent_journal(&journal_path).unwrap();
+        let mut snapshot = records.last().unwrap().snapshot.clone();
+        snapshot.state = BatchParentState::Running;
+        append_parent_record(
+            &journal_path,
+            &BatchParentJournalRecord {
+                sequence: records.len() as u64,
+                attempt_generation: snapshot.attempt_generation,
+                from: BatchParentState::Committed,
+                to: BatchParentState::Running,
+                snapshot,
+            },
+        );
+
+        assert!(load_parent_journal(&journal_path).is_err());
+    }
+
+    #[test]
+    fn parent_journal_rejects_unreachable_running_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let records = load_parent_journal(&journal_path).unwrap();
+        let mut snapshot = records.last().unwrap().snapshot.clone();
+        snapshot.children.fill(ChildState::Succeeded);
+        append_parent_record(
+            &journal_path,
+            &BatchParentJournalRecord {
+                sequence: records.len() as u64,
+                attempt_generation: snapshot.attempt_generation,
+                from: BatchParentState::Running,
+                to: BatchParentState::Running,
+                snapshot,
+            },
+        );
+
+        assert!(load_parent_journal(&journal_path).is_err());
+    }
+
+    #[test]
+    fn parent_journal_rejects_immutable_identity_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let records = load_parent_journal(&journal_path).unwrap();
+        let mut snapshot = records.last().unwrap().snapshot.clone();
+        snapshot.parent_id = "other".into();
+        append_parent_record(
+            &journal_path,
+            &BatchParentJournalRecord {
+                sequence: records.len() as u64,
+                attempt_generation: snapshot.attempt_generation,
+                from: BatchParentState::Running,
+                to: BatchParentState::Running,
+                snapshot,
+            },
+        );
+
+        assert!(load_parent_journal(&journal_path).is_err());
+    }
+
+    #[test]
+    fn parent_recovery_never_prefers_a_stale_valid_disk_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        let initial = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE))
+            .unwrap()
+            .first()
+            .unwrap()
+            .snapshot
+            .clone();
+        parent.start().unwrap();
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &initial).unwrap();
+
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+
+        assert_eq!(recovered.state(), BatchParentState::Running);
+        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
+        assert_eq!(records.len(), 2, "recovery must not append backward state");
+    }
+
+    #[test]
+    fn parent_recovery_rejects_a_divergent_valid_disk_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
+        let mut divergent = records.last().unwrap().snapshot.clone();
+        divergent.state = BatchParentState::Fenced;
+        divergent.terminal_after_fence = Some(BatchParentState::Failed);
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &divergent).unwrap();
+
+        assert!(DurableBatchParent::recover(dir.path()).is_err());
     }
 }

@@ -136,6 +136,16 @@ enum BatchJournalEvent {
     CleanupStarted,
 }
 
+#[derive(Clone, Debug)]
+struct BatchJournalReplay {
+    manifest: BatchAttemptManifest,
+    manifest_history: Vec<BatchAttemptManifest>,
+    published_children: BTreeSet<usize>,
+    post_publish_snapshot: bool,
+    metadata_committed: bool,
+    cleanup_started: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ReservationOwner {
     parent_id: String,
@@ -184,6 +194,9 @@ pub struct BatchTransaction {
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
     journaled_final_children: BTreeSet<usize>,
+    post_publish_snapshot: bool,
+    metadata_committed: bool,
+    cleanup_started: bool,
     reconstructed_from_journal: bool,
     journal_needs_heal: bool,
     poisoned: bool,
@@ -246,6 +259,13 @@ impl BatchTransaction {
         let mut children = Vec::with_capacity(records.len());
         let mut reserved_names: Vec<String> = Vec::with_capacity(records.len());
         for (index, record) in records.iter_mut().enumerate() {
+            // Transaction-owned staging establishes fresh filesystem identity.
+            // Caller-provided DB/stat fields cannot become part of the initial
+            // snapshot because the protocol derives them from staged/final
+            // files at its durable boundaries.
+            record.id = None;
+            record.file_mtime_ms = None;
+            record.file_size_bytes = None;
             let final_name =
                 match reserve_final_name(output_dir, &record.filename, &reservation_owner) {
                     Ok(name) => name,
@@ -284,6 +304,9 @@ impl BatchTransaction {
             manifest,
             next_journal_sequence: 0,
             journaled_final_children: BTreeSet::new(),
+            post_publish_snapshot: false,
+            metadata_committed: false,
+            cleanup_started: false,
             reconstructed_from_journal: false,
             journal_needs_heal: false,
             poisoned: false,
@@ -446,29 +469,37 @@ impl BatchTransaction {
             self.manifest.children[child_index]
                 .record
                 .stat_from_disk(&final_path);
-            self.append_journal(BatchJournalEvent::FinalPublished { child_index })?;
-            self.journaled_final_children.insert(child_index);
-            self.inject_commit_error(CommitFailpoint::FinalJournalFsync(child_index))?;
+            if !self.journaled_final_children.contains(&child_index) {
+                self.append_journal(BatchJournalEvent::FinalPublished { child_index })?;
+                self.journaled_final_children.insert(child_index);
+                self.inject_commit_error(CommitFailpoint::FinalJournalFsync(child_index))?;
+            }
         }
         sync_dir(&self.output_dir)?;
         self.inject_commit_error(CommitFailpoint::OutputDirectoryFsync)?;
         // Make the stat data used for the all-row transaction durable before
         // SQLite can observe it. Recovery replays this exact snapshot.
-        self.persist_manifest()?;
-        self.inject_commit_error(CommitFailpoint::MetadataManifestFsync)?;
-
-        if let Some(db) = db.as_ref() {
-            let records: Vec<_> = self
-                .manifest
-                .children
-                .iter()
-                .map(|child| child.record.clone())
-                .collect();
-            db.upsert_batch(&records)?;
+        if !self.post_publish_snapshot {
+            self.persist_manifest()?;
+            self.post_publish_snapshot = true;
+            self.inject_commit_error(CommitFailpoint::MetadataManifestFsync)?;
         }
-        self.inject_commit_error(CommitFailpoint::DatabaseTransaction)?;
-        self.append_journal(BatchJournalEvent::MetadataCommitted)?;
-        self.inject_commit_error(CommitFailpoint::DatabaseJournalFsync)?;
+
+        if !self.metadata_committed {
+            if let Some(db) = db.as_ref() {
+                let records: Vec<_> = self
+                    .manifest
+                    .children
+                    .iter()
+                    .map(|child| child.record.clone())
+                    .collect();
+                db.upsert_batch(&records)?;
+            }
+            self.inject_commit_error(CommitFailpoint::DatabaseTransaction)?;
+            self.append_journal(BatchJournalEvent::MetadataCommitted)?;
+            self.metadata_committed = true;
+            self.inject_commit_error(CommitFailpoint::DatabaseJournalFsync)?;
+        }
 
         self.manifest.state = BatchManifestState::Committed;
         self.persist_manifest()?;
@@ -625,7 +656,10 @@ impl BatchTransaction {
             self.manifest.state == BatchManifestState::Committed,
             "only a committed attempt can be archived"
         );
-        self.append_journal(BatchJournalEvent::CleanupStarted)?;
+        if !self.cleanup_started {
+            self.append_journal(BatchJournalEvent::CleanupStarted)?;
+            self.cleanup_started = true;
+        }
         if retain_manifest {
             let archive_dir = committed_manifests_dir(&self.output_dir, &self.manifest.parent_id);
             fs::create_dir_all(&archive_dir)?;
@@ -653,80 +687,47 @@ impl BatchTransaction {
             .context("manifest has no attempt directory")?
             .to_path_buf();
         let journal = load_journal(&attempt_dir.join(JOURNAL_FILE))?;
-        let disk_manifest = fs::read(manifest_path).ok().and_then(|bytes| {
-            let manifest = serde_json::from_slice::<BatchAttemptManifest>(&bytes).ok()?;
-            match validate_loaded_manifest(output_dir, &attempt_dir, &manifest) {
-                Ok(()) => Some(manifest),
+        let journal_replay = replay_batch_journal(output_dir, &attempt_dir, &journal)
+            .with_context(|| {
+                format!(
+                    "validating atomic batch journal {}",
+                    attempt_dir.join(JOURNAL_FILE).display()
+                )
+            })?;
+        let disk_manifest = match fs::read(manifest_path) {
+            Ok(bytes) => match serde_json::from_slice::<BatchAttemptManifest>(&bytes) {
+                Ok(manifest) => match validate_loaded_manifest(output_dir, &attempt_dir, &manifest)
+                {
+                    Ok(()) => Some(manifest),
+                    Err(error) => {
+                        tracing::warn!(
+                            manifest = %manifest_path.display(),
+                            %error,
+                            "ignoring invalid atomic batch manifest in favor of its journal"
+                        );
+                        None
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(
                         manifest = %manifest_path.display(),
                         %error,
-                        "ignoring invalid atomic batch manifest in favor of its journal"
+                        "ignoring unreadable atomic batch manifest in favor of its journal"
                     );
                     None
                 }
-            }
-        });
-        let journal_manifest = journal.iter().rev().find_map(|record| match &record.event {
-            BatchJournalEvent::ManifestSnapshot { manifest } => Some(manifest.clone()),
-            _ => None,
-        });
-        if let Some(manifest) = journal_manifest.as_ref() {
-            validate_loaded_manifest(output_dir, &attempt_dir, manifest).with_context(|| {
-                format!(
-                    "validating atomic batch journal snapshot {}",
-                    attempt_dir.join(JOURNAL_FILE).display()
-                )
-            })?;
-        }
-        let (manifest, reconstructed_from_journal) = match (disk_manifest, journal_manifest.clone())
-        {
-            (Some(manifest), _) => (manifest, false),
-            (None, Some(manifest)) => (manifest, true),
-            (None, None) => {
-                anyhow::bail!(
-                    "batch attempt has neither a readable manifest nor a recoverable journal: {}; \
-                     move this attempt directory out of {} after inspecting it",
-                    attempt_dir.display(),
-                    output_dir.join(TRANSACTION_DIR).display()
-                )
-            }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
         };
-        validate_loaded_manifest(output_dir, &attempt_dir, &manifest)?;
-        for record in &journal {
-            ensure!(
-                record.attempt_generation == manifest.attempt_generation,
-                "batch journal mixes attempt generations in {}",
-                attempt_dir.display()
-            );
-            match &record.event {
-                BatchJournalEvent::ManifestSnapshot { manifest: snapshot } => {
-                    validate_loaded_manifest(output_dir, &attempt_dir, snapshot).with_context(
-                        || {
-                            format!(
-                                "validating batch journal record {} in {}",
-                                record.sequence,
-                                attempt_dir.display()
-                            )
-                        },
-                    )?
-                }
-                BatchJournalEvent::FinalPublished { child_index } => {
-                    ensure!(
-                        *child_index < manifest.children.len(),
-                        "batch journal publishes out-of-range child {child_index} in {}",
+        let (manifest, reconstructed_from_journal, journal_needs_heal, replay) =
+            reconcile_batch_manifest(output_dir, &attempt_dir, journal_replay, disk_manifest)
+                .with_context(|| {
+                    format!(
+                        "reconciling atomic batch manifest and journal in {}",
                         attempt_dir.display()
-                    );
-                }
-                BatchJournalEvent::MetadataCommitted | BatchJournalEvent::CleanupStarted => {}
-            }
-        }
-        let journal_needs_heal = match journal_manifest.as_ref() {
-            Some(journal_manifest) => {
-                serde_json::to_value(journal_manifest)? != serde_json::to_value(&manifest)?
-            }
-            None => true,
-        };
+                    )
+                })?;
         ensure!(
             manifest.version == MANIFEST_VERSION,
             "unsupported batch manifest version {}",
@@ -735,19 +736,15 @@ impl BatchTransaction {
         let next_journal_sequence = journal
             .last()
             .map_or(0, |record| record.sequence.saturating_add(1));
-        let journaled_final_children = journal
-            .iter()
-            .filter_map(|record| match &record.event {
-                BatchJournalEvent::FinalPublished { child_index } => Some(*child_index),
-                _ => None,
-            })
-            .collect();
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
             manifest,
             next_journal_sequence,
-            journaled_final_children,
+            journaled_final_children: replay.published_children,
+            post_publish_snapshot: replay.post_publish_snapshot,
+            metadata_committed: replay.metadata_committed,
+            cleanup_started: replay.cleanup_started,
             reconstructed_from_journal,
             journal_needs_heal,
             poisoned: false,
@@ -755,6 +752,352 @@ impl BatchTransaction {
             commit_failpoint: None,
         })
     }
+}
+
+fn manifest_eq(left: &BatchAttemptManifest, right: &BatchAttemptManifest) -> anyhow::Result<bool> {
+    Ok(serde_json::to_value(left)? == serde_json::to_value(right)?)
+}
+
+fn record_eq_ignoring_file_stat(
+    left: &GenerationRecord,
+    right: &GenerationRecord,
+) -> anyhow::Result<bool> {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.file_mtime_ms = None;
+    left.file_size_bytes = None;
+    right.file_mtime_ms = None;
+    right.file_size_bytes = None;
+    Ok(serde_json::to_value(left)? == serde_json::to_value(right)?)
+}
+
+fn same_attempt_identity(
+    left: &BatchAttemptManifest,
+    right: &BatchAttemptManifest,
+) -> anyhow::Result<bool> {
+    if left.version != right.version
+        || left.parent_id != right.parent_id
+        || left.attempt_generation != right.attempt_generation
+        || left.normalized_request != right.normalized_request
+        || left.children.len() != right.children.len()
+    {
+        return Ok(false);
+    }
+    for (left, right) in left.children.iter().zip(&right.children) {
+        if left.child_index != right.child_index
+            || left.staging_name != right.staging_name
+            || left.final_name != right.final_name
+            || !record_eq_ignoring_file_stat(&left.record, &right.record)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn manifests_equal_except_state(
+    previous: &BatchAttemptManifest,
+    next: &BatchAttemptManifest,
+) -> anyhow::Result<bool> {
+    let mut next = next.clone();
+    next.state = previous.state;
+    manifest_eq(previous, &next)
+}
+
+fn is_initial_batch_manifest(manifest: &BatchAttemptManifest) -> bool {
+    manifest.state == BatchManifestState::Staging
+        && manifest.children.iter().all(|child| {
+            child.checksum_sha256.is_none()
+                && child.size_bytes.is_none()
+                && child.record.file_mtime_ms.is_none()
+                && child.record.file_size_bytes.is_none()
+        })
+}
+
+fn is_staging_successor(
+    previous: &BatchAttemptManifest,
+    next: &BatchAttemptManifest,
+) -> anyhow::Result<bool> {
+    if previous.state != BatchManifestState::Staging
+        || next.state != BatchManifestState::Staging
+        || !same_attempt_identity(previous, next)?
+    {
+        return Ok(false);
+    }
+    let mut staged_child = None;
+    for (index, (previous, next)) in previous.children.iter().zip(&next.children).enumerate() {
+        if manifest_child_eq(previous, next)? {
+            continue;
+        }
+        if staged_child.is_some()
+            || previous.checksum_sha256.is_some()
+            || previous.size_bytes.is_some()
+            || previous.record.file_size_bytes.is_some()
+            || previous.record.file_mtime_ms != next.record.file_mtime_ms
+            || next.checksum_sha256.is_none()
+            || next.size_bytes.is_none()
+            || next.record.file_size_bytes != next.size_bytes.map(|size| size as i64)
+            || !record_eq_ignoring_file_stat(&previous.record, &next.record)?
+        {
+            return Ok(false);
+        }
+        staged_child = Some(index);
+    }
+    Ok(staged_child.is_some())
+}
+
+fn manifest_child_eq(
+    left: &BatchManifestChild,
+    right: &BatchManifestChild,
+) -> anyhow::Result<bool> {
+    Ok(serde_json::to_value(left)? == serde_json::to_value(right)?)
+}
+
+fn is_post_publish_snapshot(
+    previous: &BatchAttemptManifest,
+    next: &BatchAttemptManifest,
+) -> anyhow::Result<bool> {
+    if previous.state != BatchManifestState::Committing
+        || next.state != BatchManifestState::Committing
+        || !same_attempt_identity(previous, next)?
+    {
+        return Ok(false);
+    }
+    for (previous, next) in previous.children.iter().zip(&next.children) {
+        if previous.checksum_sha256 != next.checksum_sha256
+            || previous.size_bytes != next.size_bytes
+            || previous.record.file_size_bytes != next.record.file_size_bytes
+            || !record_eq_ignoring_file_stat(&previous.record, &next.record)?
+            || match (previous.record.file_mtime_ms, next.record.file_mtime_ms) {
+                (Some(previous), Some(next)) => previous != next,
+                (Some(_), None) => true,
+                (None, _) => false,
+            }
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+impl BatchJournalReplay {
+    fn initial(manifest: BatchAttemptManifest) -> Self {
+        Self {
+            manifest_history: vec![manifest.clone()],
+            manifest,
+            published_children: BTreeSet::new(),
+            post_publish_snapshot: false,
+            metadata_committed: false,
+            cleanup_started: false,
+        }
+    }
+
+    fn apply_manifest_snapshot(
+        &mut self,
+        output_dir: &Path,
+        attempt_dir: &Path,
+        next: &BatchAttemptManifest,
+    ) -> anyhow::Result<()> {
+        validate_loaded_manifest(output_dir, attempt_dir, next)?;
+        ensure!(
+            same_attempt_identity(&self.manifest, next)?,
+            "batch journal changes immutable attempt identity"
+        );
+        ensure!(
+            !self.cleanup_started,
+            "batch journal contains an event after cleanup started"
+        );
+        let legal = match (self.manifest.state, next.state) {
+            (BatchManifestState::Staging, BatchManifestState::Staging) => {
+                is_staging_successor(&self.manifest, next)?
+            }
+            (BatchManifestState::Staging, BatchManifestState::Prepared) => {
+                manifests_equal_except_state(&self.manifest, next)?
+                    && next
+                        .children
+                        .iter()
+                        .all(|child| child.checksum_sha256.is_some())
+            }
+            (BatchManifestState::Staging, BatchManifestState::Failed)
+            | (BatchManifestState::Prepared, BatchManifestState::Failed) => {
+                self.published_children.is_empty()
+                    && !self.metadata_committed
+                    && manifests_equal_except_state(&self.manifest, next)?
+            }
+            (BatchManifestState::Prepared, BatchManifestState::Committing) => {
+                manifests_equal_except_state(&self.manifest, next)?
+            }
+            (BatchManifestState::Committing, BatchManifestState::Committing) => {
+                self.published_children.len() == self.manifest.children.len()
+                    && !self.post_publish_snapshot
+                    && !self.metadata_committed
+                    && is_post_publish_snapshot(&self.manifest, next)?
+            }
+            (BatchManifestState::Committing, BatchManifestState::Committed) => {
+                self.post_publish_snapshot
+                    && self.metadata_committed
+                    && manifests_equal_except_state(&self.manifest, next)?
+            }
+            (BatchManifestState::Committing, BatchManifestState::Failed) => {
+                self.published_children.is_empty()
+                    && !self.metadata_committed
+                    && manifests_equal_except_state(&self.manifest, next)?
+            }
+            _ => false,
+        };
+        ensure!(
+            legal,
+            "illegal batch manifest transition {:?} -> {:?}",
+            self.manifest.state,
+            next.state
+        );
+        if self.manifest.state == BatchManifestState::Committing
+            && next.state == BatchManifestState::Committing
+        {
+            self.post_publish_snapshot = true;
+        }
+        self.manifest = next.clone();
+        self.manifest_history.push(next.clone());
+        Ok(())
+    }
+
+    fn apply_event(
+        &mut self,
+        output_dir: &Path,
+        attempt_dir: &Path,
+        event: &BatchJournalEvent,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !self.cleanup_started,
+            "batch journal contains an event after cleanup started"
+        );
+        match event {
+            BatchJournalEvent::ManifestSnapshot { manifest } => {
+                self.apply_manifest_snapshot(output_dir, attempt_dir, manifest)
+            }
+            BatchJournalEvent::FinalPublished { child_index } => {
+                ensure!(
+                    self.manifest.state == BatchManifestState::Committing
+                        && !self.post_publish_snapshot
+                        && !self.metadata_committed,
+                    "batch final publication is outside the committing publication phase"
+                );
+                ensure!(
+                    *child_index < self.manifest.children.len(),
+                    "batch journal publishes out-of-range child {child_index}"
+                );
+                ensure!(
+                    *child_index == self.published_children.len(),
+                    "batch journal publishes child {child_index} out of order or more than once"
+                );
+                ensure!(
+                    self.published_children.insert(*child_index),
+                    "batch journal publishes child {child_index} more than once"
+                );
+                Ok(())
+            }
+            BatchJournalEvent::MetadataCommitted => {
+                ensure!(
+                    self.manifest.state == BatchManifestState::Committing
+                        && self.published_children.len() == self.manifest.children.len()
+                        && self.post_publish_snapshot
+                        && !self.metadata_committed,
+                    "batch metadata commit is out of order or duplicated"
+                );
+                self.metadata_committed = true;
+                Ok(())
+            }
+            BatchJournalEvent::CleanupStarted => {
+                ensure!(
+                    self.manifest.state == BatchManifestState::Committed && self.metadata_committed,
+                    "batch cleanup starts before the commit is durable"
+                );
+                self.cleanup_started = true;
+                Ok(())
+            }
+        }
+    }
+}
+
+fn replay_batch_journal(
+    output_dir: &Path,
+    attempt_dir: &Path,
+    records: &[BatchJournalRecord],
+) -> anyhow::Result<Option<BatchJournalReplay>> {
+    let mut replay: Option<BatchJournalReplay> = None;
+    for record in records {
+        if let Some(replay) = replay.as_mut() {
+            ensure!(
+                record.attempt_generation == replay.manifest.attempt_generation,
+                "batch journal mixes attempt generations"
+            );
+            replay
+                .apply_event(output_dir, attempt_dir, &record.event)
+                .with_context(|| format!("replaying batch journal record {}", record.sequence))?;
+            continue;
+        }
+        let BatchJournalEvent::ManifestSnapshot { manifest } = &record.event else {
+            anyhow::bail!("batch journal does not begin with a manifest snapshot");
+        };
+        validate_loaded_manifest(output_dir, attempt_dir, manifest)?;
+        ensure!(
+            record.sequence == 0
+                && record.attempt_generation == manifest.attempt_generation
+                && is_initial_batch_manifest(manifest),
+            "batch journal has an invalid initial manifest"
+        );
+        replay = Some(BatchJournalReplay::initial(manifest.clone()));
+    }
+    Ok(replay)
+}
+
+fn reconcile_batch_manifest(
+    output_dir: &Path,
+    attempt_dir: &Path,
+    journal_replay: Option<BatchJournalReplay>,
+    disk_manifest: Option<BatchAttemptManifest>,
+) -> anyhow::Result<(BatchAttemptManifest, bool, bool, BatchJournalReplay)> {
+    match (journal_replay, disk_manifest) {
+        (None, None) => anyhow::bail!(
+            "batch attempt has neither a readable manifest nor a recoverable journal: {}; \
+             move this attempt directory out of {} after inspecting it",
+            attempt_dir.display(),
+            output_dir.join(TRANSACTION_DIR).display()
+        ),
+        (None, Some(disk)) => {
+            ensure!(
+                is_initial_batch_manifest(&disk),
+                "journal-free disk manifest is not an initial batch snapshot"
+            );
+            let replay = BatchJournalReplay::initial(disk.clone());
+            Ok((disk, false, true, replay))
+        }
+        (Some(replay), None) => Ok((replay.manifest.clone(), true, false, replay)),
+        (Some(replay), Some(disk)) if manifest_eq(&replay.manifest, &disk)? => {
+            Ok((replay.manifest.clone(), false, false, replay))
+        }
+        (Some(replay), Some(disk)) if manifest_history_contains(&replay, &disk)? => {
+            Ok((replay.manifest.clone(), true, false, replay))
+        }
+        (Some(mut replay), Some(disk)) => {
+            replay
+                .apply_manifest_snapshot(output_dir, attempt_dir, &disk)
+                .context("disk manifest is neither journal state nor one legal snapshot ahead")?;
+            Ok((disk, false, true, replay))
+        }
+    }
+}
+
+fn manifest_history_contains(
+    replay: &BatchJournalReplay,
+    disk: &BatchAttemptManifest,
+) -> anyhow::Result<bool> {
+    for manifest in &replay.manifest_history {
+        if manifest_eq(manifest, disk)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// An error before the manifest enters `committing` is ordinary. An error
@@ -842,14 +1185,30 @@ pub async fn recover_transactions(
     let mut report = RecoveryReport::default();
     for path in manifests {
         let mut transaction = BatchTransaction::load(output_dir, &path)?;
-        if transaction.reconstructed_from_journal || transaction.journal_needs_heal {
-            transaction.persist_manifest().with_context(|| {
+        if transaction.reconstructed_from_journal {
+            atomic_write_json(
+                &transaction.attempt_dir.join(MANIFEST_FILE),
+                &transaction.manifest,
+            )
+            .with_context(|| {
                 format!(
                     "rewriting batch manifest reconstructed from {}",
                     transaction.attempt_dir.join(JOURNAL_FILE).display()
                 )
             })?;
             transaction.reconstructed_from_journal = false;
+        }
+        if transaction.journal_needs_heal {
+            transaction
+                .append_journal(BatchJournalEvent::ManifestSnapshot {
+                    manifest: transaction.manifest.clone(),
+                })
+                .with_context(|| {
+                    format!(
+                        "healing batch journal from atomic manifest {}",
+                        transaction.attempt_dir.join(MANIFEST_FILE).display()
+                    )
+                })?;
             transaction.journal_needs_heal = false;
         }
         match transaction.manifest.state {
@@ -1340,8 +1699,11 @@ fn validate_loaded_manifest(
         );
         match (&child.checksum_sha256, child.size_bytes) {
             (None, None) => ensure!(
-                manifest.state == BatchManifestState::Staging,
-                "non-staging batch child {} has no checksum",
+                matches!(
+                    manifest.state,
+                    BatchManifestState::Staging | BatchManifestState::Failed
+                ),
+                "non-staging/non-failed batch child {} has no checksum",
                 child.child_index
             ),
             (Some(checksum), Some(size)) => {
@@ -1501,6 +1863,51 @@ mod tests {
             RecordSource::Server,
             1,
         )
+    }
+
+    fn append_raw_batch_record(attempt_dir: &Path, record: &BatchJournalRecord) {
+        let mut bytes = serde_json::to_vec(record).unwrap();
+        bytes.push(b'\n');
+        let mut journal = OpenOptions::new()
+            .append(true)
+            .open(attempt_dir.join(JOURNAL_FILE))
+            .unwrap();
+        journal.write_all(&bytes).unwrap();
+        journal.sync_all().unwrap();
+    }
+
+    fn next_batch_sequence(transaction: &BatchTransaction) -> u64 {
+        load_journal(&transaction.attempt_dir.join(JOURNAL_FILE))
+            .unwrap()
+            .len() as u64
+    }
+
+    fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
+        transaction.stage_bytes(0, bytes).unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction.manifest.state = BatchManifestState::Committing;
+        transaction.persist_manifest().unwrap();
+        let final_path = transaction
+            .output_dir
+            .join(&transaction.manifest.children[0].final_name);
+        fs::hard_link(transaction.staging_path(0).unwrap(), &final_path).unwrap();
+        File::open(&final_path).unwrap().sync_all().unwrap();
+        transaction.manifest.children[0]
+            .record
+            .stat_from_disk(&final_path);
+        transaction
+            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+            .unwrap();
+        transaction.persist_manifest().unwrap();
+    }
+
+    fn commit_journal_without_cleanup(transaction: &mut BatchTransaction, bytes: &[u8]) {
+        journal_post_publish_snapshot(transaction, bytes);
+        transaction
+            .append_journal(BatchJournalEvent::MetadataCommitted)
+            .unwrap();
+        transaction.manifest.state = BatchManifestState::Committed;
+        transaction.persist_manifest().unwrap();
     }
 
     #[tokio::test]
@@ -1779,7 +2186,7 @@ mod tests {
         let mut loaded =
             BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
                 .unwrap();
-        loaded.persist_manifest().unwrap();
+        loaded.stage_bytes(0, b"one").unwrap();
 
         let records = load_journal(&journal_path).unwrap();
         assert_eq!(records.len(), 2);
@@ -1919,12 +2326,7 @@ mod tests {
             vec![record("one.png", 0)],
         )
         .unwrap();
-        transaction.stage_bytes(0, b"one").unwrap();
-        transaction.mark_prepared().unwrap();
-        let staged = transaction.staging_path(0).unwrap();
-        fs::hard_link(&staged, dir.path().join("one.png")).unwrap();
-        transaction.manifest.state = BatchManifestState::Committed;
-        transaction.persist_manifest().unwrap();
+        commit_journal_without_cleanup(&mut transaction, b"one");
         fs::remove_file(dir.path().join("one.png")).unwrap();
 
         let error = recover_transactions(
@@ -2049,5 +2451,458 @@ mod tests {
         assert!(validate_available_space(expected, expected).is_err());
         assert!(validate_available_space(expected * 2 + DISK_SAFETY_FLOOR_BYTES, expected).is_ok());
         assert!(validate_available_space(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn batch_journal_rejects_manifest_state_regression() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        let mut regressed = transaction.manifest.clone();
+        regressed.state = BatchManifestState::Staging;
+        append_raw_batch_record(
+            &transaction.attempt_dir,
+            &BatchJournalRecord {
+                sequence: next_batch_sequence(&transaction),
+                attempt_generation: 0,
+                event: BatchJournalEvent::ManifestSnapshot {
+                    manifest: regressed,
+                },
+            },
+        );
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_non_monotonic_staging_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        let mut changed = transaction.manifest.clone();
+        changed.children[0].checksum_sha256 = Some("a".repeat(64));
+        append_raw_batch_record(
+            &transaction.attempt_dir,
+            &BatchJournalRecord {
+                sequence: next_batch_sequence(&transaction),
+                attempt_generation: 0,
+                event: BatchJournalEvent::ManifestSnapshot { manifest: changed },
+            },
+        );
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_immutable_attempt_identity_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({"prompt": "original"}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        for drift in 0..3 {
+            let mut drifted = transaction.manifest.clone();
+            match drift {
+                0 => drifted.normalized_request = serde_json::json!({"prompt": "changed"}),
+                1 => drifted.children[0].staging_name = "other.stage".into(),
+                2 => {
+                    drifted.children[0].final_name = "other.png".into();
+                    drifted.children[0].record.filename = "other.png".into();
+                }
+                _ => unreachable!(),
+            }
+            append_raw_batch_record(
+                &transaction.attempt_dir,
+                &BatchJournalRecord {
+                    sequence: next_batch_sequence(&transaction),
+                    attempt_generation: 0,
+                    event: BatchJournalEvent::ManifestSnapshot { manifest: drifted },
+                },
+            );
+            assert!(BatchTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE)
+            )
+            .is_err());
+            fs::write(
+                transaction.attempt_dir.join(JOURNAL_FILE),
+                serde_json::to_vec(&BatchJournalRecord {
+                    sequence: 0,
+                    attempt_generation: 0,
+                    event: BatchJournalEvent::ManifestSnapshot {
+                        manifest: transaction.manifest.clone(),
+                    },
+                })
+                .unwrap()
+                .into_iter()
+                .chain(std::iter::once(b'\n'))
+                .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn batch_journal_rejects_publication_before_committing() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        append_raw_batch_record(
+            &transaction.attempt_dir,
+            &BatchJournalRecord {
+                sequence: next_batch_sequence(&transaction),
+                attempt_generation: 0,
+                event: BatchJournalEvent::FinalPublished { child_index: 0 },
+            },
+        );
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_out_of_order_and_duplicate_publications() {
+        for published in [vec![1], vec![0, 0]] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut transaction = BatchTransaction::begin(
+                dir.path(),
+                "parent",
+                0,
+                serde_json::json!({}),
+                vec![record("one.png", 0), record("two.png", 1)],
+            )
+            .unwrap();
+            transaction.stage_bytes(0, b"one").unwrap();
+            transaction.stage_bytes(1, b"two").unwrap();
+            transaction.mark_prepared().unwrap();
+            transaction.manifest.state = BatchManifestState::Committing;
+            transaction.persist_manifest().unwrap();
+            for child_index in published {
+                append_raw_batch_record(
+                    &transaction.attempt_dir,
+                    &BatchJournalRecord {
+                        sequence: next_batch_sequence(&transaction),
+                        attempt_generation: 0,
+                        event: BatchJournalEvent::FinalPublished { child_index },
+                    },
+                );
+            }
+
+            assert!(BatchTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE)
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn batch_journal_rejects_premature_or_duplicate_metadata_commit() {
+        for duplicate in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut transaction = BatchTransaction::begin(
+                dir.path(),
+                "parent",
+                0,
+                serde_json::json!({}),
+                vec![record("one.png", 0)],
+            )
+            .unwrap();
+            if duplicate {
+                transaction.stage_bytes(0, b"one").unwrap();
+                transaction.mark_prepared().unwrap();
+                transaction.manifest.state = BatchManifestState::Committing;
+                transaction.persist_manifest().unwrap();
+                transaction
+                    .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+                    .unwrap();
+                transaction.persist_manifest().unwrap();
+            }
+            transaction
+                .append_journal(BatchJournalEvent::MetadataCommitted)
+                .unwrap();
+            if duplicate {
+                transaction
+                    .append_journal(BatchJournalEvent::MetadataCommitted)
+                    .unwrap();
+            }
+
+            assert!(BatchTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE)
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn batch_journal_rejects_metadata_before_post_publish_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction.manifest.state = BatchManifestState::Committing;
+        transaction.persist_manifest().unwrap();
+        transaction
+            .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+            .unwrap();
+        transaction
+            .append_journal(BatchJournalEvent::MetadataCommitted)
+            .unwrap();
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_committed_snapshot_before_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        journal_post_publish_snapshot(&mut transaction, b"one");
+        let mut committed = transaction.manifest.clone();
+        committed.state = BatchManifestState::Committed;
+        append_raw_batch_record(
+            &transaction.attempt_dir,
+            &BatchJournalRecord {
+                sequence: next_batch_sequence(&transaction),
+                attempt_generation: 0,
+                event: BatchJournalEvent::ManifestSnapshot {
+                    manifest: committed,
+                },
+            },
+        );
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_cleanup_before_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        append_raw_batch_record(
+            &transaction.attempt_dir,
+            &BatchJournalRecord {
+                sequence: next_batch_sequence(&transaction),
+                attempt_generation: 0,
+                event: BatchJournalEvent::CleanupStarted,
+            },
+        );
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batch_journal_rejects_duplicate_cleanup_and_all_trailing_events() {
+        for trailing_event in [
+            BatchJournalEvent::CleanupStarted,
+            BatchJournalEvent::MetadataCommitted,
+            BatchJournalEvent::FinalPublished { child_index: 0 },
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut transaction = BatchTransaction::begin(
+                dir.path(),
+                "parent",
+                0,
+                serde_json::json!({}),
+                vec![record("one.png", 0)],
+            )
+            .unwrap();
+            commit_journal_without_cleanup(&mut transaction, b"one");
+            append_raw_batch_record(
+                &transaction.attempt_dir,
+                &BatchJournalRecord {
+                    sequence: next_batch_sequence(&transaction),
+                    attempt_generation: 0,
+                    event: BatchJournalEvent::CleanupStarted,
+                },
+            );
+            append_raw_batch_record(
+                &transaction.attempt_dir,
+                &BatchJournalRecord {
+                    sequence: next_batch_sequence(&transaction),
+                    attempt_generation: 0,
+                    event: trailing_event,
+                },
+            );
+
+            assert!(BatchTransaction::load(
+                dir.path(),
+                &transaction.attempt_dir.join(MANIFEST_FILE)
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn batch_load_heals_exactly_one_atomic_manifest_record_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
+        let bytes = fs::read(&journal_path).unwrap();
+        let mut records: Vec<_> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
+        records.pop();
+        fs::write(&journal_path, records.concat()).unwrap();
+
+        let mut loaded =
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .unwrap();
+
+        assert!(loaded.journal_needs_heal);
+        assert_eq!(loaded.manifest.children[0].size_bytes, Some(3));
+        loaded
+            .append_journal(BatchJournalEvent::ManifestSnapshot {
+                manifest: loaded.manifest.clone(),
+            })
+            .unwrap();
+        let records = load_journal(&journal_path).unwrap();
+        replay_batch_journal(dir.path(), &transaction.attempt_dir, &records)
+            .unwrap()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_partial_staging_snapshot_is_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0), record("two.png", 1)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.manifest.state = BatchManifestState::Failed;
+        transaction.persist_manifest().unwrap();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report, RecoveryReport::default());
+        assert!(!transaction.attempt_dir.exists());
+    }
+
+    #[test]
+    fn batch_load_never_prefers_a_stale_valid_disk_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let initial = transaction.manifest.clone();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &initial).unwrap();
+
+        let loaded =
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .unwrap();
+
+        assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
+        assert!(!loaded.journal_needs_heal);
+    }
+
+    #[test]
+    fn batch_load_rejects_a_divergent_valid_disk_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        let mut divergent = transaction.manifest.clone();
+        divergent.state = BatchManifestState::Staging;
+        divergent.children[0].checksum_sha256 = Some("a".repeat(64));
+        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &divergent).unwrap();
+
+        assert!(
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .is_err()
+        );
     }
 }
