@@ -54,6 +54,7 @@ clients, and custom integrations on one generation contract.
 | `GET`    | `/api/resources`                          | Latest RAM/GPU resource snapshot                                                                                  |
 | `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
 | `GET`    | `/api/devices`                            | Stable runtime-visible device inventory with nullable cached telemetry                                            |
+| `PATCH`  | `/api/devices/:id`                        | Persist and apply a scheduler-V2 GPU enable/disable lifecycle request                                             |
 | `GET`    | `/api/events`                             | Server-wide lifecycle events (job + gallery) as SSE                                                               |
 | `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane and/or dispatch position for a queued job                                           |

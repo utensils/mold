@@ -963,6 +963,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_all_disabled_boot_keeps_v2_lifecycle_and_starts_only_enabled_target() {
+        const GPU_0: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GPU_1: &str = "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let runtime_gpu =
+            |ordinal: usize, id: &str, name: &str| mold_inference::device::DiscoveredGpu {
+                ordinal,
+                stable_id: Some(id.into()),
+                raw_cuda_uuid: Some([ordinal as u8; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+                identity_error: None,
+                backend: mold_core::GpuBackend::Cuda,
+                name: name.into(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            };
+        let selected = vec![
+            runtime_gpu(0, GPU_0, "disabled startup GPU 0"),
+            runtime_gpu(1, GPU_1, "disabled startup GPU 1"),
+        ];
+        let discovered = selected
+            .iter()
+            .map(|gpu| crate::device_registry::DiscoveredDevice {
+                stable_id: gpu.stable_id.clone(),
+                backend: gpu.backend,
+                visible_ordinal: Some(gpu.ordinal),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                pci_bus_id: None,
+                name: gpu.name.clone(),
+                compute_capability: gpu.compute_capability,
+                total_memory_bytes: Some(gpu.total_vram_bytes),
+                startup_allowed: true,
+                telemetry_ordinal: None,
+            })
+            .collect();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let preferences = mold_db::DevicePreferences::new(&db);
+        preferences.set(GPU_0, false).unwrap();
+        preferences.set(GPU_1, false).unwrap();
+        let registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(
+                discovered,
+            )),
+            Arc::new(Some(db)),
+        ));
+
+        let startup_selection = crate::startup_device_selection(&selected, &registry);
+        assert!(
+            startup_selection.enabled.is_empty(),
+            "persisted-disabled devices must not construct startup GPU owners or contexts"
+        );
+        assert_eq!(
+            startup_selection
+                .persisted_disabled
+                .iter()
+                .map(|gpu| gpu.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["disabled startup GPU 0", "disabled startup GPU 1"]
+        );
+        let plan = crate::startup_plan(
+            &mold_core::GpuSelection::All,
+            selected.len(),
+            selected.len(),
+            true,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        assert!(plan.start_gpu_workers);
+        assert!(plan.start_v2_coordinator);
+        assert!(!plan.start_legacy_dispatcher);
+
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        pool.workers
+            .install_factory(
+                crate::gpu_pool::WorkerFactory {
+                    devices: crate::v2_lifecycle_devices(&selected),
+                    shared_pool: Arc::new(Mutex::new(
+                        mold_inference::shared_pool::SharedPool::new(),
+                    )),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(pool.workers.is_empty());
+        assert!(matches!(
+            scheduler_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = pool.clone();
+        state.device_registry = registry;
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let app = app_with_state(state);
+
+        let devices = app
+            .clone()
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(devices.status(), StatusCode::OK);
+        let body = json_body(devices).await;
+        assert_eq!(body["devices"].as_array().unwrap().len(), 2);
+        for device in body["devices"].as_array().unwrap() {
+            assert_eq!(device["desired_enabled"], false);
+            assert_eq!(device["admin_state"], "disabled");
+            assert_eq!(device["schedulable"], false);
+        }
+
+        let enabled = app
+            .oneshot(
+                Request::patch(format!("/api/devices/{GPU_1}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::ACCEPTED);
+        let enabled = json_body(enabled).await;
+        assert_eq!(enabled["id"], GPU_1);
+        assert_eq!(enabled["desired_enabled"], true);
+        assert_eq!(enabled["admin_state"], "starting");
+
+        let (ready_id, ready_epoch) = match scheduler_rx.recv().await.unwrap() {
+            crate::scheduler::WorkerEvent::Ready {
+                device_id,
+                owner_epoch,
+                ..
+            } => (device_id, owner_epoch),
+            _ => panic!("re-enabled target must publish epoch-qualified Ready"),
+        };
+        assert_eq!(ready_id, GPU_1);
+        let workers = pool.worker_snapshot();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(crate::scheduler::worker_device_id(&workers[0]), GPU_1);
+        workers[0].request_shutdown();
+        assert!(pool.workers.wait_and_reap(GPU_1, ready_epoch));
+        assert!(pool.workers.is_empty());
+    }
+
+    #[tokio::test]
     async fn device_patch_enable_returns_starting_without_waiting_for_owner_ready() {
         let id = "cuda:dddddddddddddddddddddddddddddddd";
         let gpu = mold_inference::device::DiscoveredGpu {

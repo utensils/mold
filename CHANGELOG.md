@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPU lifecycle administration is now durable and scheduler-V2-owned.** Authenticated `PATCH /api/devices/:id` and `mold gpu list|enable|disable` expose the same stable-ID lifecycle: disabling removes a device from new scheduling immediately, lets active work finish, then drops device-backed state and joins its owner; desired enablement persists across restarts, and disabling every selected GPU leaves the coordinator and device API available in maintenance mode with zero GPU contexts. Re-enabling starts a fresh owner/context for that device, and lifecycle changes publish server events. Dynamic enable/disable is available only with `MOLD_DISPATCH_MODE=v2`; legacy/observe reject it, and a device excluded by the startup selector still requires a restart.
 - **iPhone Create now supports explicit multi-clip video sequences.** The
   touch-native Single / Sequence switch starts with two required clips,
   filters to compatible installed video models, keeps duration and seed tools

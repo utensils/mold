@@ -217,18 +217,24 @@ fn startup_plan(
     }
 }
 
-fn startup_enabled_devices<'a>(
+struct StartupDeviceSelection<'a> {
+    enabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
+    persisted_disabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
+}
+
+fn startup_device_selection<'a>(
     selected: &'a [mold_inference::device::DiscoveredGpu],
     registry: &device_registry::DeviceRegistry,
-) -> Vec<&'a mold_inference::device::DiscoveredGpu> {
-    selected
-        .iter()
-        .filter(|gpu| {
-            gpu.stable_id
-                .as_deref()
-                .is_none_or(|device_id| registry.desired_enabled(device_id))
-        })
-        .collect()
+) -> StartupDeviceSelection<'a> {
+    let (enabled, persisted_disabled) = selected.iter().partition(|gpu| {
+        gpu.stable_id
+            .as_deref()
+            .is_none_or(|device_id| registry.desired_enabled(device_id))
+    });
+    StartupDeviceSelection {
+        enabled,
+        persisted_disabled,
+    }
 }
 
 fn v2_lifecycle_devices(
@@ -322,7 +328,17 @@ pub async fn run_server(
         std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
         metadata_db.clone(),
     ));
-    let startup_devices = startup_enabled_devices(&selected, &device_registry);
+    let startup_device_selection = startup_device_selection(&selected, &device_registry);
+    for gpu in &startup_device_selection.persisted_disabled {
+        info!(
+            gpu = gpu.ordinal,
+            device_id = gpu.stable_id.as_deref().unwrap_or("unknown"),
+            name = %gpu.name,
+            reason = "persisted desired enablement is disabled",
+            "GPU owner skipped at startup"
+        );
+    }
+    let startup_devices = startup_device_selection.enabled;
 
     let startup = startup_plan(
         &gpu_selection,
@@ -1112,7 +1128,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cors_layer, classify_startup_mode, startup_enabled_devices, startup_plan,
+        build_cors_layer, classify_startup_mode, startup_device_selection, startup_plan,
         trace_request_path, v2_lifecycle_devices, GpuOwnerThreads, StartupMode,
     };
     use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
@@ -1402,7 +1418,8 @@ mod tests {
                 dispatch_mode,
             );
             assert!(plan.start_gpu_workers);
-            let worker_ids: BTreeSet<_> = startup_enabled_devices(&all, &registry)
+            let worker_ids: BTreeSet<_> = startup_device_selection(&all, &registry)
+                .enabled
                 .into_iter()
                 .filter_map(|gpu| gpu.stable_id.as_deref())
                 .collect();
@@ -1412,11 +1429,24 @@ mod tests {
         // Explicit startup allowlists are resolved before preferences. A
         // disabled allowed device gets no owner; an excluded device is never
         // reintroduced by its enabled-by-default preference.
-        assert!(startup_enabled_devices(&all[1..], &registry).is_empty());
-        assert!(startup_enabled_devices(&[], &registry).is_empty());
+        assert!(startup_device_selection(&all[1..], &registry)
+            .enabled
+            .is_empty());
+        assert!(startup_device_selection(&[], &registry).enabled.is_empty());
 
         registry.set_desired_enabled(GPU_0, false).unwrap();
-        assert!(startup_enabled_devices(&all, &registry).is_empty());
+        assert!(startup_device_selection(&all, &registry).enabled.is_empty());
+
+        let startup_selection = startup_device_selection(&all, &registry);
+        assert!(startup_selection.enabled.is_empty());
+        assert_eq!(
+            startup_selection
+                .persisted_disabled
+                .iter()
+                .map(|gpu| (gpu.stable_id.as_deref().unwrap(), gpu.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(GPU_0, "GPU 0"), (GPU_1, "GPU 1")]
+        );
 
         // V2 retains the complete startup-selected inventory for dynamic
         // re-enable even though neither disabled device owns a worker.

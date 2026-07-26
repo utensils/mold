@@ -1382,6 +1382,76 @@ mod tests {
 
     const GB: u64 = 1_000_000_000;
 
+    struct IsolatedModelEnvironment {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl IsolatedModelEnvironment {
+        fn new(home: &std::path::Path) -> Self {
+            const CLEARED_KEYS: &[&str] = &[
+                "MOLD_TRANSFORMER_PATH",
+                "MOLD_VAE_PATH",
+                "MOLD_CLIP_PATH",
+                "MOLD_CLIP_TOKENIZER_PATH",
+                "MOLD_CLIP2_PATH",
+                "MOLD_CLIP2_TOKENIZER_PATH",
+                "MOLD_T5_PATH",
+                "MOLD_T5_TOKENIZER_PATH",
+                "MOLD_TEXT_TOKENIZER_PATH",
+                "MOLD_DECODER_PATH",
+                "MOLD_SPATIAL_UPSCALER_PATH",
+                "MOLD_TEMPORAL_UPSCALER_PATH",
+                "MOLD_DISTILLED_LORA_PATH",
+            ];
+            let lock = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut previous = Vec::with_capacity(CLEARED_KEYS.len() + 3);
+            for key in ["MOLD_HOME", "HF_HOME", "HF_HUB_CACHE"] {
+                previous.push((key, std::env::var_os(key)));
+            }
+            for &key in CLEARED_KEYS {
+                previous.push((key, std::env::var_os(key)));
+            }
+            unsafe {
+                std::env::set_var("MOLD_HOME", home);
+                std::env::set_var("HF_HOME", home.join("hf-home"));
+                std::env::set_var("HF_HUB_CACHE", home.join("hf-home/hub"));
+                for key in CLEARED_KEYS {
+                    std::env::remove_var(key);
+                }
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IsolatedModelEnvironment {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, value) in self.previous.drain(..).rev() {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    fn force_explicit_companion_paths(models_dir: &std::path::Path, companion: &str) {
+        // `mold_core::download` intentionally caches the process-wide managed
+        // model directory in a OnceLock. Marking this test-local companion as
+        // an incomplete pull prevents manifest discovery from consulting that
+        // cache and makes ModelPaths resolve the explicit Config.models entry.
+        let marker = mold_core::download::pulling_marker_path_in(models_dir, companion);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(marker, b"test fixture").unwrap();
+    }
+
     #[test]
     fn installed_ltx2_catalog_models_advertise_checkpoint_audio_assets() {
         let dir = tempfile::tempdir().unwrap();
@@ -3158,8 +3228,7 @@ mod tests {
     fn resolve_intent_picks_flux_vae_companion_when_primary_is_transformer_only() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3187,21 +3256,13 @@ mod tests {
         let vae_path = models_dir.join("flux-vae/ae.safetensors");
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_preserves_flux_schnell_subfamily() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-1153358/flux/civitai/1153358/agfluxSchnell_realistic23.safetensors");
@@ -3232,21 +3293,13 @@ mod tests {
             Some(true),
             "flux1-s catalog entries must select FLUX schnell config, not dev guidance config"
         );
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_applies_flux_dev_subfamily_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path =
             models_dir.join("cv-2319074/flux/civitai/2319074/jibMixFlux_v12SRPO.safetensors");
@@ -3278,19 +3331,13 @@ mod tests {
         assert_eq!(cfg.default_guidance, Some(3.5));
         assert_eq!(cfg.default_width, Some(1024));
         assert_eq!(cfg.default_height, Some(1024));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_populates_qwen_runtime_companion_paths() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
         let primary_path =
             models_dir.join("cv-2110043/qwen-image/civitai/2110043/qwenImage_fp8.safetensors");
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
@@ -3320,6 +3367,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        force_explicit_companion_paths(models_dir, "qwen-image-runtime");
 
         let mut entry = flux_unet_only_catalog_entry("2110043", "qwenImage_fp8.safetensors");
         entry.family = mold_catalog::families::Family::QwenImage;
@@ -3340,6 +3388,7 @@ mod tests {
     fn resolve_intent_populates_wuerstchen_runtime_companion_paths() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
         let primary_path = models_dir.join(
             "hf-example/wuerstchen-prior/wuerstchen/example/wuerstchen-prior/prior.safetensors",
         );
@@ -3383,6 +3432,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        force_explicit_companion_paths(models_dir, "wuerstchen-runtime");
 
         let mut entry = flux_unet_only_catalog_entry("unused", "prior.safetensors");
         entry.id = mold_catalog::entry::CatalogId::from("hf:example/wuerstchen-prior");
@@ -3414,8 +3464,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let mut config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
@@ -3526,13 +3575,6 @@ mod tests {
             cfg.text_encoder_files.as_deref(),
             Some(expected_text_encoder_files.as_slice())
         );
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     /// Task 5 (Step 1): resolution surfaces the *specific* missing
@@ -3543,6 +3585,7 @@ mod tests {
     fn resolve_intent_returns_error_naming_missing_required_companion() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3551,9 +3594,6 @@ mod tests {
             &primary_path,
             &["double_blocks.0.img_attn.proj.weight", "img_in.weight"],
         );
-
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
 
         // Empty config — none of t5, clip-l, flux-vae are installed.
         let config = mold_core::Config {
@@ -3574,13 +3614,6 @@ mod tests {
             "error must name a specific missing companion, got: {msg}"
         );
         assert!(matches!(err, ResolveError::CompanionConfigMissing { .. }));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     /// Task 6: with the lazy intent / resolve flow, a second request
@@ -3592,8 +3625,7 @@ mod tests {
     fn cv_id_resolves_when_files_arrive_after_initial_request() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let entry =
             flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3627,21 +3659,13 @@ mod tests {
         let cfg_second = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap();
         assert_eq!(cfg_second.transformer.as_deref(), primary_path.to_str());
         assert_eq!(cfg_second.vae.as_deref(), vae_path.to_str());
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_intent_rejects_truncated_sidecar_primary() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _saved = std::env::var("MOLD_HOME").ok();
-        unsafe { std::env::set_var("MOLD_HOME", models_dir.to_string_lossy().as_ref()) };
+        let _environment = IsolatedModelEnvironment::new(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3670,13 +3694,6 @@ mod tests {
 
         let err = resolve_intent_to_paths("cv:994561", &intent, &config).unwrap_err();
         assert!(matches!(err, ResolveError::PrimaryFileMissing { .. }));
-
-        unsafe {
-            match _saved {
-                Some(v) => std::env::set_var("MOLD_HOME", v),
-                None => std::env::remove_var("MOLD_HOME"),
-            }
-        }
     }
 
     // ── InstallError translation tests (Task 4) ────────────────────────────
