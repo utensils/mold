@@ -880,13 +880,11 @@ fn process_job(
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
@@ -914,7 +912,6 @@ fn process_job(
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
@@ -963,7 +960,6 @@ fn process_job(
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         if count_worker_failure {
             record_failure(worker);
         }
@@ -990,7 +986,6 @@ fn process_job(
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
@@ -1014,7 +1009,6 @@ fn process_job(
             model = %model_name,
             "skipping generation after model readiness — client disconnected"
         );
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         clear_active_generation(worker);
         return;
     }
@@ -1033,7 +1027,6 @@ fn process_job(
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         clear_active_generation(worker);
         return;
     };
@@ -1154,9 +1147,6 @@ fn process_job(
 
     // Clear active generation.
     clear_active_generation(worker);
-
-    // Decrement in-flight.
-    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
 
     match result {
         Ok(Ok(mut response)) => {
