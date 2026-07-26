@@ -274,7 +274,37 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
         ("Models Loaded".to_string(), loaded, false),
     ];
 
-    if let Some(gpu) = &status.gpu_info {
+    if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+        let mut groups: Vec<(&str, usize, u64, u64)> = Vec::new();
+        for gpu in gpus {
+            if let Some((_, count, used, total)) =
+                groups.iter_mut().find(|(name, _, _, _)| *name == gpu.name)
+            {
+                *count += 1;
+                *used += gpu.vram_used_bytes;
+                *total += gpu.vram_total_bytes;
+            } else {
+                groups.push((&gpu.name, 1, gpu.vram_used_bytes, gpu.vram_total_bytes));
+            }
+        }
+        let summary = groups
+            .into_iter()
+            .map(|(name, count, used, total)| {
+                let fleet = if count > 1 {
+                    format!("{count}× {name}")
+                } else {
+                    name.to_string()
+                };
+                format!(
+                    "{fleet} ({}MB / {}MB VRAM)",
+                    used / 1024_u64.pow(2),
+                    total / 1024_u64.pow(2)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fields.push(("GPUs".to_string(), summary, false));
+    } else if let Some(gpu) = &status.gpu_info {
         fields.push((
             "GPU".to_string(),
             format!(
@@ -827,7 +857,24 @@ mod tests {
             uptime_secs: 3661,
             hostname: Some("hal9000".to_string()),
             memory_status: Some("VRAM: 16.0 GB free".to_string()),
-            gpus: None,
+            gpus: Some(vec![
+                mold_core::GpuWorkerStatus {
+                    ordinal: 0,
+                    name: "RTX 4090".to_string(),
+                    vram_total_bytes: 24 * 1024_u64.pow(3),
+                    vram_used_bytes: 8 * 1024_u64.pow(3),
+                    loaded_model: Some("flux-schnell:q8".to_string()),
+                    state: mold_core::GpuWorkerState::Generating,
+                },
+                mold_core::GpuWorkerStatus {
+                    ordinal: 1,
+                    name: "RTX 4090".to_string(),
+                    vram_total_bytes: 24 * 1024_u64.pow(3),
+                    vram_used_bytes: 4 * 1024_u64.pow(3),
+                    loaded_model: None,
+                    state: mold_core::GpuWorkerState::Idle,
+                },
+            ]),
             queue_depth: None,
             queue_capacity: None,
             queue_paused: None,
@@ -844,7 +891,10 @@ mod tests {
             .fields
             .iter()
             .any(|(k, v, _)| k == "Uptime" && v == "1h 1m"));
-        assert!(embed.fields.iter().any(|(k, _, _)| k == "GPU"));
+        assert!(embed
+            .fields
+            .iter()
+            .any(|(k, v, _)| { k == "GPUs" && v == "2× RTX 4090 (12288MB / 49152MB VRAM)" }));
         assert_eq!(embed.color, COLOR_INFO);
     }
 

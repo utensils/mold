@@ -316,7 +316,26 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             return;
         }
         (_, Some(status)) => {
-            if let Some(gpu) = &status.gpu_info {
+            if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+                for gpu in gpus {
+                    lines.push(kv_owned(
+                        theme,
+                        &format!("GPU {}", gpu.ordinal),
+                        gpu.name.clone(),
+                        false,
+                    ));
+                    let vram = vram_label(
+                        gpu.vram_used_bytes / 1024_u64.pow(2),
+                        gpu.vram_total_bytes / 1024_u64.pow(2),
+                    );
+                    lines.push(kv_owned(
+                        theme,
+                        &format!("VRAM {}", gpu.ordinal),
+                        vram,
+                        false,
+                    ));
+                }
+            } else if let Some(gpu) = &status.gpu_info {
                 lines.push(kv_owned(theme, "GPU", gpu.name.clone(), false));
                 let vram = vram_label(gpu.vram_used_mb, gpu.vram_total_mb);
                 lines.push(kv_owned(theme, "VRAM", vram, false));
@@ -419,7 +438,31 @@ pub(crate) fn host_detail_line(url: &str, status: Option<&mold_core::ServerStatu
         return hostport;
     };
     let mut segs: Vec<String> = Vec::new();
-    if let Some(gpu) = &status.gpu_info {
+    if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+        let mut groups: Vec<(&str, usize)> = Vec::new();
+        for gpu in gpus {
+            if let Some((_, count)) = groups.iter_mut().find(|(name, _)| *name == gpu.name) {
+                *count += 1;
+            } else {
+                groups.push((&gpu.name, 1));
+            }
+        }
+        segs.push(
+            groups
+                .into_iter()
+                .map(|(name, count)| {
+                    if count > 1 {
+                        format!("{count}× {name}")
+                    } else {
+                        name.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" + "),
+        );
+        let total = gpus.iter().map(|gpu| gpu.vram_total_bytes).sum::<u64>();
+        segs.push(format!("{:.0} GB", total as f64 / 1_073_741_824.0));
+    } else if let Some(gpu) = &status.gpu_info {
         segs.push(gpu.name.clone());
         segs.push(format!("{:.0} GB", gpu.vram_total_mb as f64 / 1024.0));
     }
@@ -635,6 +678,39 @@ mod tests {
         let line = host_detail_line("http://bender:7680", Some(&s));
         assert!(line.contains("Metal"), "{line}");
         assert!(line.ends_with("bender:7680"), "{line}");
+    }
+
+    #[test]
+    fn host_detail_line_summarizes_every_gpu_worker() {
+        let mut s = status(Some(mold_core::GpuInfo {
+            name: "NVIDIA RTX 3090".into(),
+            vram_total_mb: 24576,
+            vram_used_mb: 8192,
+            backend: Some(mold_core::GpuBackend::Cuda),
+        }));
+        s.gpus = Some(vec![
+            mold_core::GpuWorkerStatus {
+                ordinal: 0,
+                name: "NVIDIA RTX 3090".into(),
+                vram_total_bytes: 24 * 1024_u64.pow(3),
+                vram_used_bytes: 8 * 1024_u64.pow(3),
+                loaded_model: Some("flux-dev:q4".into()),
+                state: mold_core::GpuWorkerState::Generating,
+            },
+            mold_core::GpuWorkerStatus {
+                ordinal: 1,
+                name: "NVIDIA RTX 3090".into(),
+                vram_total_bytes: 24 * 1024_u64.pow(3),
+                vram_used_bytes: 4 * 1024_u64.pow(3),
+                loaded_model: None,
+                state: mold_core::GpuWorkerState::Idle,
+            },
+        ]);
+
+        assert_eq!(
+            host_detail_line("http://hal9000:7680", Some(&s)),
+            "2× NVIDIA RTX 3090 · 48 GB · CUDA · hal9000:7680"
+        );
     }
 
     #[test]
