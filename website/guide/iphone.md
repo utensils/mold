@@ -168,8 +168,11 @@ the Pull action downloads.
 
 The family list comes from the browsed host. If that host is unreachable when
 Models opens — or its saved key has not been read from the Keychain yet — the
-list falls back to the families present in the results already on screen and
-reloads itself, together with a failed search, as soon as the host answers.
+list falls back to every family Mold has seen this session, from both catalog
+results and the installed models on your hosts. That set only grows, so
+choosing a family never shrinks the list to that one choice, and it can offer
+families that are not on the current page. The real list, and any search that
+failed, reload as soon as the host answers.
 
 The host selector controls where Models browses. Pulling a model can target a
 different ready host without changing the host selected in Create. With more

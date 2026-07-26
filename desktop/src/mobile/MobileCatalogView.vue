@@ -996,7 +996,7 @@ watch(mediaType, () => {
  *  probe reached it. */
 const catalogRoute = computed(() => {
   const host = selectedHost.value;
-  return host ? [host.id, host.baseUrl, host.apiKey, host.online ? "up" : "down"].join(" ") : "";
+  return host ? JSON.stringify([host.id, host.baseUrl, host.apiKey, host.online]) : "";
 });
 
 let routedHostId = props.selectedHostId;

@@ -76,8 +76,10 @@ pushed screen opened from the header.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
   sort (the family list and a failed search reload themselves when the browsed
-  host's address, key, or reachability changes, and the family list falls back
-  to the families seen in results when the host taxonomy cannot be read), gives every card and detail sheet a model-kind badge, explicitly marks
+  host's address, key, or reachability changes; when the host taxonomy cannot
+  be read the family list falls back to a session-sticky set accumulated from
+  catalog results and installed inventories, which may include families absent
+  from the current page and never collapses to the active filter), gives every card and detail sheet a model-kind badge, explicitly marks
   mature entries `18+ NSFW`, surfaces available description/source/license/tags/
   format/popularity and type-aware weights, and routes pull/load/unload/remove
   actions to the owning or selected host. Detail-sheet variant chips select an exact manifest
