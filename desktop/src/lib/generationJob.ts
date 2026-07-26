@@ -123,9 +123,7 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
     case "download_progress": {
       job.status = "queued";
       const percent =
-        event.bytes_total > 0
-          ? Math.round((event.bytes_downloaded / event.bytes_total) * 100)
-          : 0;
+        event.bytes_total > 0 ? Math.round((event.bytes_downloaded / event.bytes_total) * 100) : 0;
       job.stage = `Downloading ${event.filename} (${percent}%)`;
       break;
     }

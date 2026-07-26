@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
@@ -68,36 +74,8 @@ async function loadDevices(): Promise<void> {
   }
 }
 
-function canMutate(device: DeviceInfo): boolean {
-  if (device.admin_state === "startup_excluded") return false;
-  if (
-    deviceCapabilities.value?.devices?.lifecycle &&
-    deviceCapabilities.value?.dispatch?.v2_authoritative
-  )
-    return true;
-  return !device.desired_enabled && deviceCapabilities.value?.devices?.restart_enable === true;
-}
-
-function actionLabel(device: DeviceInfo): string {
-  if (
-    !device.desired_enabled &&
-    !deviceCapabilities.value?.devices?.lifecycle &&
-    deviceCapabilities.value?.devices?.restart_enable
-  )
-    return "Enable on restart";
-  return device.desired_enabled ? "Disable" : "Enable";
-}
-
-function stateLabel(device: DeviceInfo): string {
-  if (device.admin_state === "draining") return "Finishing current work";
-  if (device.admin_state === "starting") return "Starting";
-  if (device.admin_state === "startup_excluded") return "Excluded at startup";
-  if (device.health !== "healthy") return device.health;
-  return device.admin_state;
-}
-
 async function toggleDevice(device: DeviceInfo): Promise<void> {
-  if (!props.host || !canMutate(device)) return;
+  if (!props.host || !canMutateDevice(device, deviceCapabilities.value)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -232,15 +210,7 @@ watch(() => props.host?.id, loadDevices, { immediate: true });
     >
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-devices-title">GPU devices</h2>
-        <p v-if="deviceCapabilities?.devices?.lifecycle">
-          Busy devices finish their current stage before switching off.
-        </p>
-        <p v-else>
-          <template v-if="deviceCapabilities?.devices?.restart_enable">
-            Live controls require Scheduler V2. Disabled GPUs can be enabled for the next restart.
-          </template>
-          <template v-else>Live GPU controls are unavailable on this server.</template>
-        </p>
+        <p>{{ deviceLifecycleMessage(deviceCapabilities) }}</p>
       </div>
       <p v-if="deviceError" class="status-line error-text" role="alert">{{ deviceError }}</p>
       <ul class="mobile-data-list">
@@ -249,17 +219,19 @@ watch(() => props.host?.id, loadDevices, { immediate: true });
             <strong>{{ device.name }}</strong>
             <span>
               {{ device.ordinal == null ? device.backend.toUpperCase() : `GPU ${device.ordinal}` }}
-              · {{ stateLabel(device) }}
+              · {{ deviceStateLabel(device) }}
             </span>
           </div>
           <button
             type="button"
             class="secondary-button"
             :data-test="`mobile-settings-device-toggle-${device.ordinal ?? device.id}`"
-            :disabled="!canMutate(device) || deviceMutations.has(device.id)"
+            :disabled="
+              !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
+            "
             @click="toggleDevice(device)"
           >
-            {{ actionLabel(device) }}
+            {{ deviceActionLabel(device, deviceCapabilities) }}
           </button>
         </li>
       </ul>

@@ -3,6 +3,10 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter, type Router } from "vue-router";
 
+const { listDevices, setDeviceEnabled } = vi.hoisted(() => ({
+  listDevices: vi.fn(),
+  setDeviceEnabled: vi.fn(),
+}));
 const apiJsonTo = vi.fn();
 vi.mock("../lib/api/client", () => ({
   ApiError: class ApiError extends Error {},
@@ -13,10 +17,8 @@ vi.mock("../lib/api/client", () => ({
   currentTarget: () => ({ baseUrl: "http://127.0.0.1:49152", apiKey: null }),
 }));
 vi.mock("@studio/api/devices", () => ({
-  // This fixture models a legacy host, so the jobs store must fall back to
-  // the exact ordinals in the canned `/api/status` response.
-  listDevices: () => Promise.reject(new Error("legacy server in tests")),
-  setDeviceEnabled: vi.fn(),
+  listDevices,
+  setDeviceEnabled,
 }));
 
 interface SseCall {
@@ -62,11 +64,48 @@ import { useComposerStore } from "../stores/composer";
 import { useConnectionStore } from "../stores/connection";
 import { useHostModelsStore } from "../stores/hostModels";
 import { useHostsStore } from "../stores/hosts";
-import type { ModelEntry, ServerStatus } from "../lib/api/types";
+import type { DeviceInfo } from "@studio/api/devices";
+import type { ModelEntry, ServerCapabilities, ServerStatus } from "../lib/api/types";
 
 const stub = { template: "<div />" };
 
 const REMOTE_ID = "hal9000-7680";
+
+const DEVICE: DeviceInfo = {
+  id: "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  backend: "cuda",
+  ordinal: 0,
+  device_kind: "full_gpu",
+  nvml_uuid: "GPU-a",
+  physical_uuid: "GPU-a",
+  mig_uuid: null,
+  mig_parent_uuid: null,
+  mig_profile: null,
+  name: "NVIDIA RTX 3090",
+  pci_bus_id: null,
+  compute_capability: "8.6",
+  memory: {
+    total_bytes: 24_000_000_000,
+    used_bytes: 4_000_000_000,
+    mold_used_bytes: null,
+    other_used_bytes: null,
+  },
+  telemetry: { utilization_percent: 10, temperature_c: null, power_w: null },
+  desired_enabled: true,
+  admin_state: "enabled",
+  health: "healthy",
+  activity: "idle",
+  schedulable: true,
+  unschedulable_reason: null,
+  loaded_models: [],
+  active_work_id: null,
+  planned_work_ids: [],
+};
+
+interface DeviceFixture {
+  devices: DeviceInfo[];
+  capabilities?: ServerCapabilities;
+}
 
 interface WireQueueEntry {
   id: string;
@@ -122,6 +161,7 @@ let router: Router;
 async function mountView(
   path = `/hosts/${REMOTE_ID}`,
   entries: ModelEntry[] = [model("flux-dev:q8", "flux"), model("z-image:q8", "z-image")],
+  deviceFixture?: DeviceFixture,
 ) {
   router = createRouter({
     history: createMemoryHistory(),
@@ -177,7 +217,11 @@ async function mountView(
     ],
     instanceId: "0f7a2c31-instance-uuid",
     hostname: "hal9000",
+    ...(deviceFixture ? { devices: deviceFixture.devices } : {}),
   };
+  if (deviceFixture?.capabilities) {
+    hosts.capabilities[REMOTE_ID] = deviceFixture.capabilities;
+  }
   // fetchedAt now → the view's hostModels.refresh() skips these (not stale).
   const hostModels = useHostModelsStore();
   hostModels.byHost[REMOTE_ID] = {
@@ -201,6 +245,8 @@ function lastStream(path = "/api/resources/stream"): SseCall {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listDevices.mockRejectedValue(new Error("legacy server in tests"));
+  setDeviceEnabled.mockResolvedValue(undefined);
   unloadModel.mockResolvedValue(undefined);
   sseCalls.length = 0;
   appSettingsGet.mockResolvedValue({
@@ -209,6 +255,130 @@ beforeEach(() => {
     generateTargetHost: null,
   });
   installApi();
+});
+
+describe("HostDetailView GPU lifecycle controls", () => {
+  const authoritative: ServerCapabilities = {
+    gallery: { can_delete: true },
+    devices: { available: true, lifecycle: true, restart_enable: false },
+    dispatch: { active_mode: "v2", v2_authoritative: true, observes_v2_decisions: false },
+  };
+  const restartOnly: ServerCapabilities = {
+    gallery: { can_delete: true },
+    devices: { available: true, lifecycle: true, restart_enable: true },
+    dispatch: {
+      active_mode: "observe",
+      v2_authoritative: false,
+      observes_v2_decisions: true,
+    },
+  };
+
+  it("allows live disable only for an authoritative Scheduler V2 host", async () => {
+    listDevices.mockResolvedValue({ devices: [DEVICE], plan_version: 1 });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [
+        DEVICE,
+        {
+          ...DEVICE,
+          id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          ordinal: 1,
+          admin_state: "startup_excluded",
+          desired_enabled: false,
+          schedulable: false,
+        },
+      ],
+      capabilities: authoritative,
+    });
+
+    const live = wrapper.get("[data-test='device-toggle-0']");
+    expect(live.attributes("disabled")).toBeUndefined();
+    expect(live.text()).toBe("Disable");
+    expect(wrapper.text()).toContain(
+      "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.",
+    );
+    expect(wrapper.get("[data-test='device-toggle-1']").attributes("disabled")).toBeDefined();
+
+    await live.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+      DEVICE.id,
+      false,
+    );
+    expect(listDevices).toHaveBeenCalled();
+  });
+
+  it("blocks disable in Observe mode but offers disabled GPUs restart-only recovery", async () => {
+    const disabled = {
+      ...DEVICE,
+      desired_enabled: false,
+      admin_state: "disabled" as const,
+      schedulable: false,
+    };
+    const pendingRestart = {
+      ...DEVICE,
+      id: "cuda:cccccccccccccccccccccccccccccccc",
+      ordinal: 2,
+      restart_required: true,
+      health: "unavailable" as const,
+      schedulable: false,
+      unschedulable_reason: "device_unavailable",
+    };
+    listDevices.mockResolvedValue({
+      devices: [
+        DEVICE,
+        { ...disabled, id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ordinal: 1 },
+        pendingRestart,
+      ],
+      plan_version: 1,
+    });
+    const wrapper = await mountView(undefined, undefined, {
+      devices: [
+        DEVICE,
+        { ...disabled, id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ordinal: 1 },
+        pendingRestart,
+      ],
+      capabilities: restartOnly,
+    });
+
+    const disable = wrapper.get("[data-test='device-toggle-0']");
+    expect(disable.text()).toBe("Disable");
+    expect(disable.attributes("disabled")).toBeDefined();
+    await disable.trigger("click");
+    expect(setDeviceEnabled).not.toHaveBeenCalled();
+
+    const restartEnable = wrapper.get("[data-test='device-toggle-1']");
+    expect(restartEnable.text()).toBe("Enable on restart");
+    expect(restartEnable.attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain(
+      "Live GPU controls require Scheduler V2. Disabled GPUs can be enabled for the next server restart.",
+    );
+    await restartEnable.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      { baseUrl: "http://hal9000:7680", apiKey: "sekrit" },
+      "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      true,
+    );
+
+    const pending = wrapper.get("[data-test='device-toggle-2']");
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).toContain("Restart required");
+    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).not.toContain("unavailable");
+  });
+
+  it("treats older hosts with missing lifecycle capabilities as unsupported", async () => {
+    listDevices.mockResolvedValue({ devices: [DEVICE], plan_version: 1 });
+    const wrapper = await mountView(undefined, undefined, { devices: [DEVICE] });
+    const button = wrapper.get("[data-test='device-toggle-0']");
+
+    expect(button.text()).toBe("Disable");
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("Live GPU controls are unavailable on this server.");
+    await button.trigger("click");
+    expect(setDeviceEnabled).not.toHaveBeenCalled();
+  });
 });
 
 describe("HostDetailView header", () => {

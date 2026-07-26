@@ -7,6 +7,12 @@ import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -65,6 +71,7 @@ const hostId = computed(() => String(route.params.id ?? ""));
 const host = computed(() => hosts.all.find((h) => h.id === hostId.value) ?? null);
 const telemetry = computed(() => hosts.telemetry[hostId.value]);
 const devices = computed(() => telemetry.value?.devices ?? null);
+const deviceCapabilities = computed(() => hosts.capabilities[hostId.value] ?? null);
 const deviceMutations = ref(new Set<string>());
 
 // ── Live telemetry (this host's resources stream) ─────────────────────────
@@ -349,17 +356,9 @@ function toggleTarget() {
   void appPrefs.update({ generateTargetHost: isTarget.value ? null : hostId.value });
 }
 
-function deviceStateLabel(device: DeviceInfo): string {
-  if (device.admin_state === "draining") return "Finishing current work";
-  if (device.admin_state === "starting") return "Starting";
-  if (device.admin_state === "startup_excluded") return "Excluded at startup";
-  if (device.health !== "healthy") return device.health;
-  return device.admin_state;
-}
-
 async function toggleDevice(device: DeviceInfo) {
   const target = hostTarget();
-  if (!target || device.admin_state === "startup_excluded") return;
+  if (!target || !canMutateDevice(device, deviceCapabilities.value)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -644,6 +643,9 @@ async function forget() {
                 <h2 class="edge-code">GPU DEVICES</h2>
                 <div class="border-edge h-px flex-1 border-t" />
               </div>
+              <p class="mb-2 text-caption text-ink-3" data-test="device-lifecycle-note">
+                {{ deviceLifecycleMessage(deviceCapabilities) }}
+              </p>
               <div class="flex flex-col divide-y divide-edge">
                 <div
                   v-for="device in devices"
@@ -663,11 +665,11 @@ async function forget() {
                     class="rounded-control border border-edge px-3 py-1.5 text-caption font-semibold text-ink transition-colors hover:border-edge-strong disabled:opacity-40"
                     :data-test="`device-toggle-${device.ordinal ?? device.id}`"
                     :disabled="
-                      device.admin_state === 'startup_excluded' || deviceMutations.has(device.id)
+                      !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
                     "
                     @click="toggleDevice(device)"
                   >
-                    {{ device.desired_enabled ? "Disable" : "Enable" }}
+                    {{ deviceActionLabel(device, deviceCapabilities) }}
                   </button>
                 </div>
               </div>

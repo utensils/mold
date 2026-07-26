@@ -58,15 +58,9 @@ const telemetryGpus = computed(() => {
   if (!host) return [];
   if (displayingRemote.value) {
     const telemetry = hosts.telemetry[host.id];
-    return gpuSnapshotsFromWorkers(
-      telemetry?.gpuInfo,
-      telemetry?.gpuWorkers,
-    );
+    return gpuSnapshotsFromWorkers(telemetry?.gpuInfo, telemetry?.gpuWorkers);
   }
-  return gpuSnapshotsFromWorkers(
-    status.value?.gpu_info,
-    status.value?.gpus,
-  );
+  return gpuSnapshotsFromWorkers(status.value?.gpu_info, status.value?.gpus);
 });
 
 /** Every GPU on the display host — the popover gets one VRAM row per GPU and

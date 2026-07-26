@@ -419,6 +419,86 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get("[data-test='device-toggle-1']").text()).toBe("Enable");
   });
 
+  it("shows persisted restart recovery instead of an unavailable disable action", async () => {
+    const pendingRestart = {
+      id: "cuda:GPU-3090",
+      backend: "cuda",
+      ordinal: 1,
+      device_kind: "full_gpu",
+      nvml_uuid: "GPU-3090",
+      physical_uuid: "GPU-3090",
+      mig_uuid: null,
+      mig_parent_uuid: null,
+      mig_profile: null,
+      name: "NVIDIA RTX 3090",
+      pci_bus_id: "0000:02:00.0",
+      compute_capability: "8.6",
+      memory: {
+        total_bytes: 24_000_000_000,
+        used_bytes: 4_000_000_000,
+        mold_used_bytes: null,
+        other_used_bytes: null,
+      },
+      telemetry: {
+        utilization_percent: 10,
+        temperature_c: 45,
+        power_w: 80,
+      },
+      desired_enabled: true,
+      restart_required: true,
+      admin_state: "enabled",
+      health: "unavailable",
+      activity: "idle",
+      schedulable: false,
+      unschedulable_reason: "device_unavailable",
+      loaded_models: [],
+      active_work_id: null,
+      planned_work_ids: [],
+    };
+    let deviceLoads = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/devices") {
+        deviceLoads += 1;
+        return Promise.resolve({
+          devices: [
+            deviceLoads === 1
+              ? {
+                  ...pendingRestart,
+                  desired_enabled: false,
+                  restart_required: false,
+                  admin_state: "disabled",
+                  health: "healthy",
+                  unschedulable_reason: "device_disabled",
+                }
+              : pendingRestart,
+          ],
+          plan_version: deviceLoads,
+        });
+      }
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          devices: { available: true, lifecycle: true, restart_enable: true },
+          dispatch: { active_mode: "observe", v2_authoritative: false },
+        });
+      return existingApi(target, path);
+    });
+
+    const view = await mountDetail();
+    const action = view.get("[data-test='device-toggle-1']");
+    expect(action.text()).toBe("Enable on restart");
+    await action.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(studioTarget, "cuda:GPU-3090", true);
+
+    const pending = view.get("[data-test='device-toggle-1']");
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    const row = view.get("[data-test='device-row']");
+    expect(row.text()).toContain("Restart required");
+    expect(row.text()).not.toContain("unavailable");
+  });
+
   it("uses the live queue count after the queue API responds", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));

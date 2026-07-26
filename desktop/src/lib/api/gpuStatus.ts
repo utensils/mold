@@ -1,16 +1,9 @@
 import { inferBackendFromGpuName } from "../hosts";
-import type {
-  GpuInfo,
-  GpuSnapshot,
-  GpuWorkerStatus,
-  ServerStatus,
-} from "./types";
+import type { GpuInfo, GpuSnapshot, GpuWorkerStatus, ServerStatus } from "./types";
 
 const BYTES_PER_DECIMAL_MB = 1_000_000;
 
-export function bestGpuBackend(
-  gpus: ReadonlyArray<{ backend?: string | null }>,
-): string | null {
+export function bestGpuBackend(gpus: ReadonlyArray<{ backend?: string | null }>): string | null {
   let best: string | null = null;
   let bestRank = -1;
   for (const gpu of gpus) {
@@ -30,8 +23,7 @@ export function gpuSnapshotsFromWorkers(
   workers: GpuWorkerStatus[] | null | undefined,
 ): GpuSnapshot[] {
   if (workers?.length) {
-    const backend =
-      info?.backend ?? inferBackendFromGpuName(info?.name ?? workers[0]!.name);
+    const backend = info?.backend ?? inferBackendFromGpuName(info?.name ?? workers[0]!.name);
     return workers.map((gpu) => ({
       ordinal: gpu.ordinal,
       name: gpu.name,
@@ -55,20 +47,14 @@ export function gpuSnapshotsFromWorkers(
   ];
 }
 
-export function gpuSnapshotsFromStatus(
-  status: ServerStatus | null | undefined,
-): GpuSnapshot[] {
-  return status
-    ? gpuSnapshotsFromWorkers(status.gpu_info, status.gpus)
-    : [];
+export function gpuSnapshotsFromStatus(status: ServerStatus | null | undefined): GpuSnapshot[] {
+  return status ? gpuSnapshotsFromWorkers(status.gpu_info, status.gpus) : [];
 }
 
 export function gpuFleetLabel(gpus: readonly GpuSnapshot[]): string {
   if (!gpus.length) return "";
   const names = [...new Set(gpus.map((gpu) => gpu.name))];
-  return names.length === 1 && gpus.length > 1
-    ? `${gpus.length}× ${names[0]}`
-    : names.join(" + ");
+  return names.length === 1 && gpus.length > 1 ? `${gpus.length}× ${names[0]}` : names.join(" + ");
 }
 
 /** Aggregate memory for compact cards while preserving per-device rows elsewhere. */

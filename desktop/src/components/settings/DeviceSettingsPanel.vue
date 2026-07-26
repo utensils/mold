@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 
@@ -17,34 +23,9 @@ const capabilities = computed(() => {
   return host ? (hosts.capabilities[host.id] ?? null) : null;
 });
 
-function canMutate(device: DeviceInfo): boolean {
-  if (device.admin_state === "startup_excluded") return false;
-  if (capabilities.value?.devices?.lifecycle && capabilities.value?.dispatch?.v2_authoritative)
-    return true;
-  return !device.desired_enabled && capabilities.value?.devices?.restart_enable === true;
-}
-
-function actionLabel(device: DeviceInfo): string {
-  if (
-    !device.desired_enabled &&
-    !capabilities.value?.devices?.lifecycle &&
-    capabilities.value?.devices?.restart_enable
-  )
-    return "Enable on restart";
-  return device.desired_enabled ? "Disable" : "Enable";
-}
-
-function stateLabel(device: DeviceInfo): string {
-  if (device.admin_state === "draining") return "Finishing current work";
-  if (device.admin_state === "starting") return "Starting";
-  if (device.admin_state === "startup_excluded") return "Excluded at startup";
-  if (device.health !== "healthy") return device.health;
-  return device.admin_state;
-}
-
 async function toggle(device: DeviceInfo) {
   const host = localHost.value;
-  if (!host?.baseUrl || !canMutate(device)) return;
+  if (!host?.baseUrl || !canMutateDevice(device, capabilities.value)) return;
   const enabled = !device.desired_enabled;
   mutations.value = new Set(mutations.value).add(device.id);
   try {
@@ -68,16 +49,7 @@ async function toggle(device: DeviceInfo) {
   <section v-if="devices !== null" class="mb-5" data-test="settings-device-controls">
     <h3 class="mb-1 text-body font-semibold text-ink">GPU devices</h3>
     <p class="mb-2 text-caption text-ink-3">
-      <template v-if="capabilities?.devices?.lifecycle">
-        Disabling a busy GPU lets its current stage finish, then removes it from scheduling.
-      </template>
-      <template v-else>
-        <template v-if="capabilities?.devices?.restart_enable">
-          Live GPU controls require Scheduler V2. Disabled GPUs can be enabled for the next server
-          restart.
-        </template>
-        <template v-else> Live GPU controls are unavailable on this server. </template>
-      </template>
+      {{ deviceLifecycleMessage(capabilities) }}
     </p>
     <div class="divide-edge divide-y rounded-control border border-edge">
       <div
@@ -90,17 +62,17 @@ async function toggle(device: DeviceInfo) {
           <div class="truncate text-body text-ink">{{ device.name }}</div>
           <div class="edge-code mt-0.5">
             {{ device.ordinal == null ? device.backend : `GPU ${device.ordinal}` }}
-            · {{ stateLabel(device) }}
+            · {{ deviceStateLabel(device) }}
           </div>
         </div>
         <button
           type="button"
           class="rounded-control border border-edge px-3 py-1.5 text-caption font-semibold text-ink disabled:opacity-40"
           :data-test="`settings-device-toggle-${device.ordinal ?? device.id}`"
-          :disabled="!canMutate(device) || mutations.has(device.id)"
+          :disabled="!canMutateDevice(device, capabilities) || mutations.has(device.id)"
           @click="toggle(device)"
         >
-          {{ actionLabel(device) }}
+          {{ deviceActionLabel(device, capabilities) }}
         </button>
       </div>
     </div>

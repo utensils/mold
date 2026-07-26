@@ -1103,6 +1103,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonauthoritative_live_degraded_owner_does_not_claim_restart_recovery() {
+        for (label, mode) in [
+            ("legacy", crate::dispatch_mode::DispatchMode::Legacy),
+            ("observe", crate::dispatch_mode::DispatchMode::Observe),
+        ] {
+            let worker = gpu_worker_stub(0);
+            worker.consecutive_failures.store(3, Ordering::SeqCst);
+            *worker.degraded_until.write().unwrap() =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool;
+            install_worker_registry(&mut state);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tokio::sync::mpsc::channel(1).0,
+                mode,
+                false,
+                mode == crate::dispatch_mode::DispatchMode::Observe,
+            );
+
+            let response = app_with_state(state)
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["devices"][0]["desired_enabled"], true, "{label}");
+            assert_eq!(body["devices"][0]["health"], "degraded", "{label}");
+            assert_eq!(body["devices"][0]["schedulable"], false, "{label}");
+            assert_eq!(
+                body["devices"][0]["restart_required"], false,
+                "{label}: a live cooldown owner recovers without a process restart"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn persisted_all_disabled_boot_keeps_v2_lifecycle_and_starts_only_enabled_target() {
         const GPU_0: &str = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         const GPU_1: &str = "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

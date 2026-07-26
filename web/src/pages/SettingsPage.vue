@@ -20,6 +20,12 @@ import {
   setDeviceEnabled,
   type DeviceInfo,
 } from "@studio/api/devices";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "@studio/api/client";
 import type { ServerCapabilities } from "../types";
 import { originUrl } from "../lib/hostRegistry";
@@ -157,31 +163,8 @@ async function loadDevices() {
   }
 }
 
-function canMutateDevice(device: DeviceInfo): boolean {
-  if (device.admin_state === "startup_excluded") return false;
-  if (
-    deviceCapabilities.value?.devices?.lifecycle &&
-    deviceCapabilities.value?.dispatch?.v2_authoritative
-  )
-    return true;
-  return (
-    !device.desired_enabled &&
-    deviceCapabilities.value?.devices?.restart_enable === true
-  );
-}
-
-function deviceActionLabel(device: DeviceInfo): string {
-  if (
-    !device.desired_enabled &&
-    !deviceCapabilities.value?.devices?.lifecycle &&
-    deviceCapabilities.value?.devices?.restart_enable
-  )
-    return "Enable on restart";
-  return device.desired_enabled ? "Disable" : "Enable";
-}
-
 async function toggleDevice(device: DeviceInfo) {
-  if (!canMutateDevice(device)) return;
+  if (!canMutateDevice(device, deviceCapabilities.value)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -194,14 +177,6 @@ async function toggleDevice(device: DeviceInfo) {
     next.delete(device.id);
     deviceMutations.value = next;
   }
-}
-
-function deviceStateLabel(device: DeviceInfo): string {
-  if (device.admin_state === "draining") return "Finishing current work";
-  if (device.admin_state === "starting") return "Starting";
-  if (device.admin_state === "startup_excluded") return "Excluded at startup";
-  if (device.health !== "healthy") return device.health;
-  return device.admin_state;
 }
 
 onMounted(() => {
@@ -369,18 +344,8 @@ onMounted(() => {
     <template v-if="devices !== null">
       <p class="kicker">Advanced · GPU devices</p>
       <CardSurface class="settings__card" data-test="settings-device-controls">
-        <p
-          v-if="!deviceCapabilities?.devices?.lifecycle"
-          class="device-state"
-          data-test="settings-device-lifecycle-note"
-        >
-          <template v-if="deviceCapabilities?.devices?.restart_enable">
-            Live GPU controls require Scheduler V2. Disabled GPUs can be enabled
-            for the next server restart.
-          </template>
-          <template v-else>
-            Live GPU controls are unavailable on this server.
-          </template>
+        <p class="device-state" data-test="settings-device-lifecycle-note">
+          {{ deviceLifecycleMessage(deviceCapabilities) }}
         </p>
         <div
           v-for="device in devices"
@@ -404,11 +369,12 @@ onMounted(() => {
             class="btn"
             :data-test="`settings-device-toggle-${device.ordinal ?? device.id}`"
             :disabled="
-              !canMutateDevice(device) || deviceMutations.has(device.id)
+              !canMutateDevice(device, deviceCapabilities) ||
+              deviceMutations.has(device.id)
             "
             @click="toggleDevice(device)"
           >
-            {{ deviceActionLabel(device) }}
+            {{ deviceActionLabel(device, deviceCapabilities) }}
           </button>
         </div>
       </CardSurface>

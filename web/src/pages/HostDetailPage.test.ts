@@ -486,7 +486,13 @@ describe("HostDetailPage — queue", () => {
         desired_enabled: false,
         admin_state: "disabled",
         schedulable: false,
+      }),
+      makeDevice(2, {
+        desired_enabled: true,
         restart_required: true,
+        health: "unavailable",
+        schedulable: false,
+        unschedulable_reason: "device_unavailable",
       }),
     ];
     const w = await mountDetail();
@@ -501,6 +507,15 @@ describe("HostDetailPage — queue", () => {
       expect.any(Object),
       "cuda:1",
       true,
+    );
+    const pending = w.get('[data-test="device-toggle-2"]');
+    expect(pending.text()).toBe("Enabled on restart");
+    expect(pending.attributes("disabled")).toBeDefined();
+    expect(w.findAll('[data-test="device-row"]')[2]!.text()).toContain(
+      "Restart required",
+    );
+    expect(w.findAll('[data-test="device-row"]')[2]!.text()).not.toContain(
+      "unavailable",
     );
   });
 });

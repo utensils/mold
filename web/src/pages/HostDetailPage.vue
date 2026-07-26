@@ -42,6 +42,12 @@ import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import {
+  canMutateDevice,
+  deviceActionLabel,
+  deviceLifecycleMessage,
+  deviceStateLabel,
+} from "@studio/lib/deviceLifecycle";
 
 const route = useRoute();
 const router = useRouter();
@@ -92,23 +98,6 @@ const canReorder = computed(() => !!caps.value?.queue?.can_reorder);
 const isTarget = computed(() => targetId.value === hostId);
 const paused = computed(() => poll?.status.value?.queue_paused === true);
 const deviceMutations = ref(new Set<string>());
-function canMutateDevice(device: DeviceInfo): boolean {
-  if (device.admin_state === "startup_excluded") return false;
-  if (caps.value?.devices?.lifecycle && caps.value?.dispatch?.v2_authoritative)
-    return true;
-  return (
-    !device.desired_enabled && caps.value?.devices?.restart_enable === true
-  );
-}
-function deviceActionLabel(device: DeviceInfo): string {
-  if (
-    !device.desired_enabled &&
-    !caps.value?.devices?.lifecycle &&
-    caps.value?.devices?.restart_enable
-  )
-    return "Enable on restart";
-  return device.desired_enabled ? "Disable" : "Enable";
-}
 
 const address = computed(() => {
   if (!host) return "";
@@ -212,7 +201,7 @@ async function onTogglePause() {
 }
 
 async function onToggleDevice(device: DeviceInfo) {
-  if (!host || !canMutateDevice(device)) return;
+  if (!host || !canMutateDevice(device, caps.value)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -232,14 +221,6 @@ async function onToggleDevice(device: DeviceInfo) {
     next.delete(device.id);
     deviceMutations.value = next;
   }
-}
-
-function deviceStateLabel(device: DeviceInfo): string {
-  if (device.admin_state === "draining") return "Finishing current work";
-  if (device.admin_state === "starting") return "Starting";
-  if (device.admin_state === "startup_excluded") return "Excluded at startup";
-  if (device.health !== "healthy") return device.health;
-  return device.admin_state;
 }
 
 async function onCancelAll() {
@@ -483,17 +464,8 @@ onBeforeUnmount(() => {
           data-test="device-controls"
         >
           <div class="md-label">GPU devices</div>
-          <small
-            v-if="!caps?.devices?.lifecycle"
-            data-test="device-lifecycle-note"
-          >
-            <template v-if="caps?.devices?.restart_enable">
-              Live controls require Scheduler V2. Disabled GPUs can be enabled
-              for the next server restart.
-            </template>
-            <template v-else>
-              Live GPU controls are unavailable on this server.
-            </template>
+          <small data-test="device-lifecycle-note">
+            {{ deviceLifecycleMessage(caps) }}
           </small>
           <div class="md-models__list">
             <div
@@ -518,11 +490,12 @@ onBeforeUnmount(() => {
                 class="md-action"
                 :data-test="`device-toggle-${device.ordinal ?? device.id}`"
                 :disabled="
-                  !canMutateDevice(device) || deviceMutations.has(device.id)
+                  !canMutateDevice(device, caps) ||
+                  deviceMutations.has(device.id)
                 "
                 @click="onToggleDevice(device)"
               >
-                {{ deviceActionLabel(device) }}
+                {{ deviceActionLabel(device, caps) }}
               </button>
             </div>
           </div>

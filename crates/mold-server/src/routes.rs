@@ -2443,10 +2443,17 @@ fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
     if state.scheduled_work.v2_authoritative() {
         return;
     }
+    let live_owners: std::collections::BTreeSet<String> = state
+        .gpu_pool
+        .worker_snapshot()
+        .iter()
+        .map(|worker| crate::scheduler::worker_device_id(worker))
+        .collect();
     for device in &mut snapshot.devices {
         device.restart_required = device.desired_enabled
-            && !device.schedulable
-            && device.admin_state != DeviceAdminState::StartupExcluded;
+            && device.admin_state != DeviceAdminState::StartupExcluded
+            && !live_owners.contains(&device.id)
+            && !state.gpu_pool.workers.is_starting(&device.id);
     }
 }
 

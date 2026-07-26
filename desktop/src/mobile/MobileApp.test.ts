@@ -3810,9 +3810,7 @@ describe("MobileApp machines telemetry", () => {
     await openMachines();
 
     const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
-    expect(telemetry.get(".host-telemetry-mem").text()).toBe(
-      "30.0 / 104.0 GB",
-    );
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe("30.0 / 104.0 GB");
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("29");
   });
 

@@ -16,10 +16,7 @@ import ConnectMachineModal from "../components/machines/ConnectMachineModal.vue"
 import QueueColumn from "../components/machines/QueueColumn.vue";
 import PodCostMeter from "../components/machines/PodCostMeter.vue";
 import { ipc, type DiscoveredHost, type SavedHost } from "../lib/ipc";
-import {
-  gpuFleetLabel,
-  gpuSnapshotsFromWorkers,
-} from "../lib/api/gpuStatus";
+import { gpuFleetLabel, gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { addressLabel, prepareHosts, versionLabel } from "../lib/discovery";
 import { formatGB } from "../lib/format";
 import { hostIdFromUrl, inferBackendFromGpuName } from "../lib/hosts";
@@ -63,10 +60,7 @@ function openDetail(host: HostView) {
 // ── Card telemetry (from the app-wide status poll) ────────────────────────
 function hostGpus(id: string) {
   const telemetry = hosts.telemetry[id];
-  return gpuSnapshotsFromWorkers(
-    telemetry?.gpuInfo,
-    telemetry?.gpuWorkers,
-  );
+  return gpuSnapshotsFromWorkers(telemetry?.gpuInfo, telemetry?.gpuWorkers);
 }
 
 /** Right-aligned hardware line: "RTX 4090 · Metal" / "RTX 4090 · host:port". */
@@ -77,9 +71,7 @@ function hardwareLine(host: HostView): string {
   if (fleet) parts.push(fleet);
   if (host.kind === "local") {
     if (gpus[0]) {
-      parts.push(
-        (gpus[0].backend ?? inferBackendFromGpuName(gpus[0].name)).toUpperCase(),
-      );
+      parts.push((gpus[0].backend ?? inferBackendFromGpuName(gpus[0].name)).toUpperCase());
     }
   } else if (host.baseUrl) {
     parts.push(host.baseUrl.replace(/^https?:\/\//, ""));
