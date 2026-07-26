@@ -183,11 +183,11 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        Which GPUs the server should use. Accepts a comma-separated list
-        of ordinals (e.g. "0,1") or "all". Null means auto-detect every
-        visible GPU. Sets MOLD_GPUS when non-null. Each GPU gets a
-        dedicated worker thread with its own ModelCache; jobs are routed
-        across workers using idle-first + VRAM-fit placement.
+        Which GPUs the server should use. Accepts "all", "none", or a
+        comma-separated list of visible ordinals and stable cuda:/metal:/
+        NVIDIA GPU-/MIG- device IDs. Null means auto-detect every visible
+        GPU. Sets MOLD_GPUS when non-null. Each selected GPU gets a dedicated
+        worker thread with its own ModelCache.
       '';
       example = "0,1";
     };
