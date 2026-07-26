@@ -132,6 +132,8 @@ for label in \
     jq -n --arg artifact_sha "$sm86_binary_sha" '{
       expected_target: "sm_86",
       observed_targets: ["sm_86"],
+      malformed_modules: [],
+      incomplete_modules: [],
       artifact_sha256: $artifact_sha,
       loaded: true,
       attempts: [{loaded: true, cuda_result: 0}]
@@ -186,6 +188,8 @@ negative_probe_path="$evidence_dir/sm89-driver-negative.json"
 jq -n --arg artifact_sha "$sm89_binary_sha" '{
   expected_target: "sm_89",
   observed_targets: ["sm_89"],
+  malformed_modules: [],
+  incomplete_modules: [],
   artifact_sha256: $artifact_sha,
   expect_incompatible: true,
   loaded: false,
@@ -386,6 +390,48 @@ if "$validator" "$valid_report" >/dev/null 2>&1; then
 fi
 cp "$test_root/ptx-evidence.backup" "$ptx_evidence"
 cp "$report_backup" "$valid_report"
+
+assert_forged_probe_inventory_rejected() {
+  local label="$1"
+  local probe_path="$2"
+  local report_filter="$3"
+  local inventory_field="$4"
+  local backup="$test_root/probe-inventory.backup"
+  cp "$probe_path" "$backup"
+  jq --arg field "$inventory_field" \
+    '.[$field] = [{"offset": 42, "reason": ("forged " + $field)}]' \
+    "$backup" >"$probe_path"
+  local forged_sha
+  forged_sha="$(sha256sum "$probe_path" | awk '{print $1}')"
+  jq --arg sha "$forged_sha" "$report_filter" \
+    "$report_backup" >"$valid_report"
+  if "$validator" "$valid_report" >/dev/null 2>&1; then
+    echo "validator accepted non-empty PTX inventory: $label" >&2
+    exit 1
+  fi
+  cp "$backup" "$probe_path"
+  cp "$report_backup" "$valid_report"
+}
+assert_forged_probe_inventory_rejected \
+  "sm86 positive malformed probe" \
+  "$ptx_evidence" \
+  '.tests.sm86_ptx_image_smoke.embedded_ptx_probe_sha256 = $sha' \
+  malformed_modules
+assert_forged_probe_inventory_rejected \
+  "sm86 positive incomplete probe" \
+  "$ptx_evidence" \
+  '.tests.sm86_ptx_image_smoke.embedded_ptx_probe_sha256 = $sha' \
+  incomplete_modules
+assert_forged_probe_inventory_rejected \
+  "sm89 negative malformed probe" \
+  "$negative_probe_path" \
+  '.compatibility_controls.sm89_driver_negative.probe_sha256 = $sha' \
+  malformed_modules
+assert_forged_probe_inventory_rejected \
+  "sm89 negative incomplete probe" \
+  "$negative_probe_path" \
+  '.compatibility_controls.sm89_driver_negative.probe_sha256 = $sha' \
+  incomplete_modules
 
 printf 'not a png, not CUDA\n' >"$test_root/not-a-png"
 if "$repo_root/scripts/verify-png-artifact.py" \

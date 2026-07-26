@@ -195,7 +195,7 @@ select_cuda_arch_for_caps() {
         COUNT=$((COUNT + 1))
         if ! printf '%s\n' "${CC}" | grep -Eq '^[0-9]+\.[0-9]+$'; then
             echo "Error: no published Mold CUDA archive is proven compatible with visible compute capability '${CC}'." >&2
-            echo "  Use CUDA_VISIBLE_DEVICES to expose supported devices, or make a source build with a verified CUDA_COMPUTE_CAP target list." >&2
+            echo "  Use CUDA_VISIBLE_DEVICES to expose one compatible architecture family, or make a separate source build for each intended family with CUDA_COMPUTE_CAP set to one numeric target (for example 86)." >&2
             return 1
         fi
         MAJOR="${CC%%.*}"
@@ -207,7 +207,7 @@ select_cuda_arch_for_caps() {
         if ! awk -v major="${MAJOR}" -v minor="${MINOR}" \
             'BEGIN { exit !(major <= 4294967295 && minor <= 4294967295) }'; then
             echo "Error: no published Mold CUDA archive is proven compatible with visible compute capability '${CC}'." >&2
-            echo "  Use CUDA_VISIBLE_DEVICES to expose supported devices, or make a source build with a verified CUDA_COMPUTE_CAP target list." >&2
+            echo "  Use CUDA_VISIBLE_DEVICES to expose one compatible architecture family, or make a separate source build for each intended family with CUDA_COMPUTE_CAP set to one numeric target (for example 86)." >&2
             return 1
         fi
         case "${MAJOR}.${MINOR}" in
@@ -230,7 +230,7 @@ select_cuda_arch_for_caps() {
                 ;;
             *)
                 echo "Error: no published Mold CUDA archive is proven compatible with visible compute capability '${CC}'." >&2
-                echo "  Use CUDA_VISIBLE_DEVICES to expose supported devices, or make a source build with a verified CUDA_COMPUTE_CAP target list." >&2
+                echo "  Use CUDA_VISIBLE_DEVICES to expose one compatible architecture family, or make a separate source build for each intended family with CUDA_COMPUTE_CAP set to one numeric target (for example 86)." >&2
                 return 1
                 ;;
         esac
@@ -253,7 +253,8 @@ select_cuda_arch_for_caps() {
     else
         echo "Error: no published Mold CUDA archive is proven compatible with every visible GPU (${CAPS})." >&2
         echo "  Use CUDA_VISIBLE_DEVICES to expose one compatible architecture family," >&2
-        echo "  or make a source build with a verified CUDA_COMPUTE_CAP target list." >&2
+        echo "  or make a separate source build for each intended family with" >&2
+        echo "  CUDA_COMPUTE_CAP set to one numeric target (for example 86)." >&2
         return 1
     fi
 }

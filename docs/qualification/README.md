@@ -8,6 +8,29 @@ Extract the sm86 binary from one exact stable release. Install one image model,
 one video model, and prepare a valid
 `mold.chain.v1` script for that video model, then run:
 
+The runner does not override dimensions inside `--chain-script`. Its decoded
+chain acceptance check requires exactly 256×256 output, so the script must set
+both dimensions under `[chain]`:
+
+```toml
+schema = "mold.chain.v1"
+
+[chain]
+model = "ltx-video-0.9.6:bf16"
+width = 256
+height = 256
+fps = 24
+steps = 2
+guidance = 3.0
+strength = 1.0
+motion_tail_frames = 0
+output_format = "mp4"
+
+[[stage]]
+prompt = "mold CUDA qualification chain"
+frames = 9
+```
+
 ```bash
 scripts/qualify-cuda-sm86.sh \
   --release-tag v0.20.2 \

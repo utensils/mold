@@ -522,6 +522,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CUDA_COMPUTE_CAP=${{ matrix.cuda_cap }}
+            MOLD_DISTRIBUTION_IMAGE_VERSION=${{ env.MOLD_DISTRIBUTION_IMAGE_VERSION }}
           cache-from: type=gha,scope=docker${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=docker${{ matrix.suffix }}
 

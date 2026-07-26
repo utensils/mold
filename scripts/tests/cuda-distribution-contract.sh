@@ -118,6 +118,8 @@ require_release_job_text "docker" \
 require_release_job_text "docker" \
   'type=raw,value=sha-${{ github.sha }}${{ matrix.suffix }}'
 require_release_job_text "docker" \
+  'MOLD_DISTRIBUTION_IMAGE_VERSION=${{ env.MOLD_DISTRIBUTION_IMAGE_VERSION }}'
+require_release_job_text "docker" \
   'Create once and verify immutable stable tag'
 require_release_job_text "docker" \
   '--prefer-index=false'
@@ -209,6 +211,9 @@ require_text "desktop/src-tauri/src/runpod.rs" \
   'resolve_distribution_image_reference'
 require_text "crates/mold-core/src/cuda_distribution.rs" \
   'refusing mutable tag fallback'
+require_text "Dockerfile" 'ARG MOLD_DISTRIBUTION_IMAGE_VERSION=latest'
+require_text "Dockerfile" \
+  'ENV MOLD_DISTRIBUTION_IMAGE_VERSION=${MOLD_DISTRIBUTION_IMAGE_VERSION}'
 require_text "crates/mold-cli/Cargo.toml" 'nvml = ["mold-server/nvml"]'
 require_text "crates/mold-cli/Cargo.toml" '"nvml"'
 require_text "crates/mold-cli/Cargo.toml" 'flash-attn = ["mold-inference/flash-attn", "cuda"]'
@@ -237,6 +242,10 @@ require_text "scripts/qualify-cuda-sm86.sh" 'sm86_video_smoke'
 require_text "scripts/qualify-cuda-sm86.sh" 'sm86_chained_video_smoke'
 require_text "docs/qualification/cuda-sm86-report.schema.json" \
   '"hardware_qualified"'
+require_text "docs/qualification/README.md" 'width = 256'
+require_text "docs/qualification/README.md" 'height = 256'
+[[ -x "$repo_root/scripts/tests/cuda-ptx-parser-contract.py" ]] \
+  || fail "embedded PTX parser contract is not executable"
 
 test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT

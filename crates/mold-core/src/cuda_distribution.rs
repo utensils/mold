@@ -134,6 +134,7 @@ pub fn distribution_image_version() -> &'static str {
 }
 
 pub const OFFICIAL_IMAGE_REPOSITORY: &str = "ghcr.io/utensils/mold";
+const STABLE_MANIFEST_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, serde::Deserialize)]
 struct ContainerDigestManifest {
@@ -230,6 +231,29 @@ fn image_reference_from_digest_manifest(
     ))
 }
 
+async fn fetch_stable_container_digest_manifest(
+    url: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    let response = reqwest::Client::builder()
+        .user_agent(format!("mold/{}", crate::build_info::VERSION))
+        .timeout(timeout)
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("fetch stable container digest manifest: {error}"))?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "stable container digest manifest returned HTTP {}; refusing mutable tag fallback",
+        response.status()
+    );
+    response
+        .text()
+        .await
+        .map_err(|error| anyhow::anyhow!("read stable container digest manifest: {error}"))
+}
+
 /// Resolve the exact image reference submitted to a cloud provider.
 ///
 /// Rolling `latest*` builds intentionally use mutable tags. Official stable
@@ -261,19 +285,8 @@ pub async fn resolve_distribution_image_reference(
     let url = format!(
         "https://github.com/utensils/mold/releases/download/{release_tag}/mold-container-digests.json"
     );
-    let response = reqwest::Client::builder()
-        .user_agent(format!("mold/{}", crate::build_info::VERSION))
-        .build()?
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("fetch stable container digest manifest: {error}"))?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "stable container digest manifest returned HTTP {}; refusing mutable tag fallback",
-        response.status()
-    );
-    let manifest_json = response.text().await?;
+    let manifest_json =
+        fetch_stable_container_digest_manifest(&url, STABLE_MANIFEST_HTTP_TIMEOUT).await?;
     image_reference_from_digest_manifest(repository, gpu_name, version, &manifest_json)
 }
 
@@ -333,8 +346,8 @@ fn incompatible_fleet_message(caps: &[String]) -> String {
     format!(
         "no published Mold CUDA archive is proven compatible with every visible GPU \
          (compute capabilities: {}). Use CUDA_VISIBLE_DEVICES to expose one compatible \
-         architecture family, or make a source build for the intended fleet with \
-         CUDA_COMPUTE_CAP set to a verified fat-binary target list",
+         architecture family, or make a separate source build for each intended family \
+         with CUDA_COMPUTE_CAP set to a single numeric target (for example 86)",
         caps.join(", ")
     )
 }
@@ -671,6 +684,33 @@ mod tests {
         .is_err());
     }
 
+    #[tokio::test]
+    async fn stable_manifest_fetch_has_a_bounded_total_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let stalled_server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let started = std::time::Instant::now();
+        let error = fetch_stable_container_digest_manifest(
+            &format!("http://{address}/mold-container-digests.json"),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        stalled_server.abort();
+
+        assert!(error
+            .to_string()
+            .contains("fetch stable container digest manifest"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "manifest fetch did not honor its bounded timeout"
+        );
+    }
+
     #[test]
     fn release_arch_matrix_is_explicit() {
         let cases = [
@@ -747,7 +787,10 @@ mod tests {
         ] {
             let error = release_arch_for_compute_caps(caps).unwrap_err();
             assert!(
-                error.contains("source build") && error.contains("CUDA_COMPUTE_CAP"),
+                error.contains("source build")
+                    && error.contains("CUDA_COMPUTE_CAP")
+                    && error.contains("single numeric target")
+                    && !error.contains("target list"),
                 "{error}"
             );
         }

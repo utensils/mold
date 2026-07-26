@@ -458,6 +458,8 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
             if (
                 probe.get("expected_target") != "sm_86"
                 or probe.get("observed_targets") != ["sm_86"]
+                or probe.get("malformed_modules") != []
+                or probe.get("incomplete_modules") != []
                 or not probe.get("loaded")
                 or probe.get("artifact_sha256")
                 != report["artifacts"]["sm86"]["actual_sha256"]
@@ -492,6 +494,8 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
             or not negative["expected_incompatibility"]
             or negative_probe.get("expected_target") != "sm_89"
             or negative_probe.get("observed_targets") != ["sm_89"]
+            or negative_probe.get("malformed_modules") != []
+            or negative_probe.get("incomplete_modules") != []
             or negative_probe.get("artifact_sha256")
             != report["artifacts"]["sm89"]["actual_sha256"]
             or negative_probe.get("loaded")

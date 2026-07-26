@@ -301,6 +301,12 @@ $(row 1 12.0)"; do
   fi
   grep -Fq 'source build' <<<"$output" \
     || { echo "mixed-fleet error omitted source-build guidance" >&2; exit 1; }
+  grep -Fq 'CUDA_COMPUTE_CAP set to one numeric target' <<<"$output" \
+    || { echo "mixed-fleet error omitted truthful single-target guidance" >&2; exit 1; }
+  if grep -Fq 'target list' <<<"$output"; then
+    echo "mixed-fleet error suggests an unsupported CUDA_COMPUTE_CAP target list" >&2
+    exit 1
+  fi
 done
 
 if output="$(
