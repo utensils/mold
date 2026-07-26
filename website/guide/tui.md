@@ -292,8 +292,8 @@ loaded model, active work, and lifecycle state.
 | Tab   | Switch focus between the host list and the detail lanes  |
 | c     | Connect a machine (also in the ⌘K palette from anywhere) |
 | d     | Forget the selected host (confirms; deletes its API key) |
-| g     | Select the next GPU on the current machine                |
-| e     | Enable or disable the selected GPU                        |
+| g     | Select the next GPU on the current machine               |
+| e     | Enable or disable the selected GPU                       |
 | r     | Refresh telemetry and queue now                          |
 | x     | Cancel the selected queued job (detail focus, confirms)  |
 | Esc   | Back to Create                                           |

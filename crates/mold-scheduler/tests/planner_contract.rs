@@ -674,6 +674,30 @@ fn same_version_changed_candidates_are_rejected_before_they_can_under_reserve() 
 }
 
 #[test]
+fn eligibility_normalization_orders_distinct_available_vram_edges() {
+    let low = candidate("gpu-0", 1).with_device_available_vram(12 * GIB);
+    let high = candidate("gpu-0", 1).with_device_available_vram(24 * GIB);
+    let indexed_input = snapshot(
+        vec![device("gpu-0")],
+        vec![work("job", 0, vec![low.clone(), high.clone()])],
+        8,
+    );
+    let index = EligibilityIndex::from_snapshot(&indexed_input);
+    let reordered_input = snapshot(
+        vec![device("gpu-0")],
+        vec![work("job", 0, vec![high, low])],
+        8,
+    );
+
+    assert_eq!(
+        Planner::default()
+            .plan_with_index(&reordered_input, &index)
+            .expect("candidate source order must not invalidate an equivalent index"),
+        Planner::default().plan(&reordered_input).unwrap()
+    );
+}
+
+#[test]
 fn eligibility_index_work_set_mismatches_are_typed() {
     let input = snapshot(
         vec![device("gpu-0")],

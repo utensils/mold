@@ -2257,8 +2257,6 @@ impl Coordinator {
                 }
                 continue;
             }
-            self.clear_dispatch_retry();
-
             let mut granted = Vec::new();
             let mut grant_failed = false;
             let mut fatal_during_grant = false;
@@ -2509,9 +2507,22 @@ impl Coordinator {
                 if fatal_during_grant {
                     return None;
                 }
+                if granted.is_empty() {
+                    replans_this_turn = replans_this_turn.saturating_add(1);
+                    if replans_this_turn >= MAX_DISPATCH_REPLANS_PER_TURN {
+                        self.defer_dispatch_retry();
+                        return None;
+                    }
+                } else {
+                    // Successful grants make finite queue progress; do not let
+                    // a later transport failure consume the no-progress retry
+                    // budget for the remaining Ready capacity.
+                    replans_this_turn = 0;
+                }
                 continue;
             }
 
+            self.clear_dispatch_retry();
             for update in &plan.bypass_updates {
                 if let Some(pending) = self.pending.get_mut(update.work_id.as_str()) {
                     pending.bypass_count = update.new_count;
@@ -3855,6 +3866,81 @@ mod tests {
             .pending_owner_work
             .contains_key("utility-racing-chain"));
         worker.release_in_flight();
+    }
+
+    #[tokio::test]
+    async fn exhausted_legacy_chain_bypass_yields_with_bounded_dispatch_backoff() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "utility-behind-chain",
+                "real-esrgan-x4plus:fp16",
+                2 << 30,
+                OwnerWork::Probe {
+                    id: "utility-behind-chain".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+
+        let waiter = crate::gpu_pool::LegacyChainWaiter::new();
+        worker.register_legacy_chain_waiter(&waiter);
+        for _ in 0..crate::gpu_pool::MAX_OWNER_BYPASSES_FOR_CHAIN {
+            assert!(worker.try_claim_owner_in_flight());
+            worker.release_in_flight();
+        }
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+
+        coordinator.dispatch_retry_round = 2;
+        coordinator.dispatch_retry_not_before_ms = Some(0);
+        let plan_version_before = coordinator.plan_version;
+        assert_eq!(coordinator.dispatch_ready().await, None);
+
+        assert_eq!(
+            coordinator.plan_version.saturating_sub(plan_version_before),
+            u64::from(MAX_DISPATCH_REPLANS_PER_TURN)
+        );
+        assert_eq!(coordinator.dispatch_retry_round, 3);
+        assert!(coordinator
+            .dispatch_retry_not_before_ms
+            .is_some_and(|deadline| deadline > monotonic_ms()));
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert!(worker_rx.try_recv().is_err());
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("utility-behind-chain"));
+
+        let yielded_plan_version = coordinator.plan_version;
+        assert_eq!(coordinator.dispatch_ready().await, None);
+        assert_eq!(coordinator.plan_version, yielded_plan_version);
+        worker.unregister_legacy_chain_waiter(&waiter);
     }
 
     #[test]

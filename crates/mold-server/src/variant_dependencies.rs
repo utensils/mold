@@ -276,19 +276,31 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
         .filter_map(|device| {
             let ordinal = device.ordinal?;
             let total = device.memory.total_bytes?;
-            let available = device
-                .memory
-                .used_bytes
-                .map(|used| total.saturating_sub(used))
-                .or_else(|| {
-                    state
-                        .gpu_pool
-                        .workers
-                        .iter()
-                        .find(|worker| worker.gpu.ordinal == ordinal)
-                        .map(|worker| worker.gpu.free_vram_bytes)
+            let worker = state
+                .gpu_pool
+                .workers
+                .iter()
+                .find(|worker| worker.gpu.ordinal == ordinal);
+            let fallback_free = worker.as_ref().map(|worker| worker.gpu.free_vram_bytes);
+            let reclaimable_cache_bytes = worker
+                .as_ref()
+                .map(|worker| {
+                    worker
+                        .model_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .active_vram_bytes()
                 })
                 .unwrap_or(0);
+            let available = match device.memory.used_bytes {
+                Some(used) => effective_preparation_available_vram(
+                    total,
+                    Some(used),
+                    device.memory.mold_used_bytes,
+                    reclaimable_cache_bytes,
+                ),
+                None => fallback_free.unwrap_or(0),
+            };
             Some(DeviceFact {
                 id: device.id,
                 ordinal,
@@ -296,6 +308,25 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
             })
         })
         .collect()
+}
+
+fn effective_preparation_available_vram(
+    total_vram_bytes: u64,
+    used_vram_bytes: Option<u64>,
+    mold_used_bytes: Option<u64>,
+    active_cache_bytes: u64,
+) -> u64 {
+    let sampled_free_bytes = used_vram_bytes
+        .map(|used| total_vram_bytes.saturating_sub(used))
+        .unwrap_or(0);
+    let reclaimable_cache_bytes = mold_used_bytes
+        .map(|used_by_mold| active_cache_bytes.min(used_by_mold))
+        .unwrap_or(0);
+    crate::scheduler::effective_available_vram_bytes(
+        sampled_free_bytes,
+        reclaimable_cache_bytes,
+        total_vram_bytes,
+    )
 }
 
 fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> {
@@ -865,6 +896,26 @@ mod tests {
     use super::*;
     use mold_core::{DevicePlacement, DeviceRef, ModelConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn preparation_capacity_includes_only_measured_reclaimable_warm_cache() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(
+            effective_preparation_available_vram(
+                24 * GIB,
+                Some(20 * GIB),
+                Some(16 * GIB),
+                16 * GIB,
+            ),
+            20 * GIB,
+            "auto-variant preparation must use the same free plus reclaimable-cache metric as admission"
+        );
+        assert_eq!(
+            effective_preparation_available_vram(24 * GIB, Some(20 * GIB), None, 16 * GIB),
+            4 * GIB,
+            "unattributed process memory must never be assumed reclaimable"
+        );
+    }
 
     #[test]
     fn variant_fit_selection_is_capacity_generic() {

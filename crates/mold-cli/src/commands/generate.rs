@@ -670,8 +670,25 @@ pub async fn run(
             last_seed_used = response.seed_used;
             last_model = response.model.clone();
 
-            // Capture video from the last response (video models produce one clip per run)
-            if response.video.is_some() {
+            // Persist every successful clip before the next batch item can
+            // fail. The aggregate retains the last clip only for the common
+            // response shape; it is not the durability boundary.
+            if let Some(video) = response.video.as_ref() {
+                if batch > 1 {
+                    save_and_preview_video(
+                        video,
+                        &output,
+                        model,
+                        batch,
+                        i,
+                        preview,
+                        Some(PersistArgs {
+                            request: &iter_req,
+                            seed_used: response.seed_used,
+                            generation_time_ms: response.generation_time_ms,
+                        }),
+                    )?;
+                }
                 last_video = response.video;
             }
 
@@ -711,62 +728,26 @@ pub async fn run(
     // Output: video or image.
     if let Some(ref video) = response.video {
         // --- Video output ---
-        if piped && output.is_none() {
+        if batch > 1 {
+            // Batch clips were persisted per item before aggregation.
+        } else if piped && output.is_none() {
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(&video.data)?;
             stdout.flush()?;
         } else {
-            let filename = match output {
-                Some(ref path) if path == "-" => {
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&video.data)?;
-                    stdout.flush()?;
-                    None
-                }
-                Some(ref path) => Some(path.clone()),
-                None => Some(default_filename(
-                    model,
-                    mold_core::time::now_epoch_ms_u64(),
-                    video.format.extension(),
-                    1,
-                    0,
-                )),
-            };
-            if let Some(ref filename) = filename {
-                if std::path::Path::new(filename).exists() {
-                    status!("{} Overwriting: {}", theme::icon_alert(), filename);
-                }
-                std::fs::write(filename, &video.data)?;
-                status!(
-                    "{} Saved: {} ({} frames, {}x{}, {} fps)",
-                    theme::icon_done(),
-                    filename.bold(),
-                    video.frames,
-                    video.width,
-                    video.height,
-                    video.fps,
-                );
-                crate::metadata_db::record_local_save(
-                    std::path::Path::new(filename),
-                    &req,
-                    response.seed_used,
-                    response.generation_time_ms,
-                    video.format,
-                    Some((video.width, video.height)),
-                );
-            }
-            if preview {
-                // Show first frame preview (viuer doesn't support animation).
-                // Fallback to the video data itself for GIF/APNG/WebP (decodable
-                // as images) when thumbnail/gif_preview are absent (non-SSE path).
-                if !video.gif_preview.is_empty() {
-                    preview_image(&video.gif_preview);
-                } else if !video.thumbnail.is_empty() {
-                    preview_image(&video.thumbnail);
-                } else {
-                    preview_image(&video.data);
-                }
-            }
+            save_and_preview_video(
+                video,
+                &output,
+                model,
+                1,
+                0,
+                preview,
+                Some(PersistArgs {
+                    request: &req,
+                    seed_used: response.seed_used,
+                    generation_time_ms: response.generation_time_ms,
+                }),
+            )?;
         }
     } else {
         // --- Image output ---
@@ -1212,6 +1193,102 @@ fn local_batch_requests(
         .collect()
 }
 
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+#[allow(clippy::too_many_arguments)]
+fn finalize_local_batch_outputs(
+    req: &GenerateRequest,
+    batch_requests: &[GenerateRequest],
+    mut completed: Vec<(u32, GenerateResponse)>,
+    first_error: Option<anyhow::Error>,
+    output: &Option<String>,
+    output_format: OutputFormat,
+    preview: bool,
+    persist_metadata: bool,
+    batch: u32,
+    base_seed: u64,
+) -> Result<GenerateResponse> {
+    completed.sort_by_key(|(index, _)| *index);
+    let successful_items = completed
+        .iter()
+        .map(|(index, _)| (index + 1).to_string())
+        .collect::<Vec<_>>();
+
+    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
+    let mut last_video: Option<mold_core::VideoData> = None;
+    let mut total_time_ms = 0;
+    let mut last_seed_used = base_seed;
+    let mut last_model = String::new();
+
+    for (i, mut response) in completed {
+        total_time_ms += response.generation_time_ms;
+        last_seed_used = response.seed_used;
+        last_model = response.model.clone();
+        let item_request = batch_requests.get(i as usize).ok_or_else(|| {
+            anyhow::anyhow!("completed local batch item {} is out of range", i + 1)
+        })?;
+
+        if let Some(video) = response.video.as_ref() {
+            if batch > 1 {
+                save_and_preview_video(
+                    video,
+                    output,
+                    &req.model,
+                    batch,
+                    i,
+                    preview,
+                    persist_metadata.then_some(PersistArgs {
+                        request: item_request,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
+            }
+            last_video = response.video.take();
+        }
+
+        for mut img in response.images {
+            img.index = i;
+            if batch > 1 {
+                save_and_preview_image(
+                    &img,
+                    output,
+                    &req.model,
+                    batch,
+                    output_format,
+                    preview,
+                    persist_metadata.then_some(PersistArgs {
+                        request: item_request,
+                        seed_used: response.seed_used,
+                        generation_time_ms: response.generation_time_ms,
+                    }),
+                )?;
+            }
+            all_images.push(img);
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error.context(format!(
+            "local batch preserved {} successful output item(s) ({}) with exact per-item prompt/seed provenance",
+            successful_items.len(),
+            if successful_items.is_empty() {
+                "none".to_string()
+            } else {
+                successful_items.join(", ")
+            }
+        )));
+    }
+
+    Ok(GenerateResponse {
+        images: all_images,
+        video: last_video,
+        generation_time_ms: total_time_ms,
+        model: last_model,
+        seed_used: last_seed_used,
+        gpu: None,
+    })
+}
+
 #[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
 async fn generate_local_batch(
@@ -1485,71 +1562,18 @@ async fn generate_local_batch(
     if let Some(error) = owners.shutdown_and_join().await {
         first_error.get_or_insert(error);
     }
-    completed.sort_by_key(|(index, _)| *index);
-    let successful_items = completed
-        .iter()
-        .map(|(index, _)| (index + 1).to_string())
-        .collect::<Vec<_>>();
-
-    let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
-    let mut last_video: Option<mold_core::VideoData> = None;
-    let mut total_time_ms = 0;
-    let mut last_seed_used = base_seed;
-    let mut last_model = String::new();
-
-    for (i, response) in completed {
-        total_time_ms += response.generation_time_ms;
-        last_seed_used = response.seed_used;
-        last_model = response.model.clone();
-
-        // Capture video response if present
-        if response.video.is_some() {
-            last_video = response.video;
-        }
-
-        for mut img in response.images {
-            img.index = i;
-            // Save and preview each image immediately during batch generation
-            // (single-image mode is handled by the caller's post-loop section)
-            if batch > 1 {
-                save_and_preview_image(
-                    &img,
-                    output,
-                    &req.model,
-                    batch,
-                    output_format,
-                    preview,
-                    Some(PersistArgs {
-                        request: &batch_requests[i as usize],
-                        seed_used: response.seed_used,
-                        generation_time_ms: response.generation_time_ms,
-                    }),
-                )?;
-            }
-            all_images.push(img);
-        }
-    }
-
-    if let Some(error) = first_error {
-        return Err(error.context(format!(
-            "local batch preserved {} successful output item(s) ({}) with exact per-item prompt/seed provenance",
-            successful_items.len(),
-            if successful_items.is_empty() {
-                "none".to_string()
-            } else {
-                successful_items.join(", ")
-            }
-        )));
-    }
-
-    Ok(GenerateResponse {
-        images: all_images,
-        video: last_video,
-        generation_time_ms: total_time_ms,
-        model: last_model,
-        seed_used: last_seed_used,
-        gpu: None,
-    })
+    finalize_local_batch_outputs(
+        req,
+        &batch_requests,
+        completed,
+        first_error,
+        output,
+        output_format,
+        preview,
+        true,
+        batch,
+        base_seed,
+    )
 }
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
@@ -1611,6 +1635,84 @@ struct PersistArgs<'a> {
     request: &'a GenerateRequest,
     seed_used: u64,
     generation_time_ms: u64,
+}
+
+fn save_and_preview_video(
+    video: &mold_core::VideoData,
+    output: &Option<String>,
+    model: &str,
+    batch: u32,
+    index: u32,
+    preview: bool,
+    persist: Option<PersistArgs<'_>>,
+) -> anyhow::Result<()> {
+    let filename = match output {
+        Some(path) if path == "-" => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&video.data)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+        Some(path) if batch == 1 => path.clone(),
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("output");
+            let leaf = format!("{stem}-{index}.{}", video.format.extension());
+            path.parent()
+                .filter(|directory| !directory.as_os_str().is_empty())
+                .map(|directory| directory.join(&leaf))
+                .unwrap_or_else(|| std::path::PathBuf::from(&leaf))
+                .to_string_lossy()
+                .into_owned()
+        }
+        None => default_filename(
+            model,
+            mold_core::time::now_epoch_ms_u64(),
+            video.format.extension(),
+            batch,
+            index,
+        ),
+    };
+
+    if std::path::Path::new(&filename).exists() {
+        status!("{} Overwriting: {}", theme::icon_alert(), filename);
+    }
+    std::fs::write(&filename, &video.data)?;
+    status!(
+        "{} Saved: {} ({} frames, {}x{}, {} fps)",
+        theme::icon_done(),
+        filename.bold(),
+        video.frames,
+        video.width,
+        video.height,
+        video.fps,
+    );
+    if let Some(persist) = persist {
+        crate::metadata_db::record_local_save(
+            std::path::Path::new(&filename),
+            persist.request,
+            persist.seed_used,
+            persist.generation_time_ms,
+            video.format,
+            Some((video.width, video.height)),
+        );
+    }
+    if preview {
+        // Show first frame preview (viuer doesn't support animation).
+        // Fallback to the video data itself for GIF/APNG/WebP when neither
+        // precomputed preview is available.
+        if !video.gif_preview.is_empty() {
+            preview_image(&video.gif_preview);
+        } else if !video.thumbnail.is_empty() {
+            preview_image(&video.thumbnail);
+        } else {
+            preview_image(&video.data);
+        }
+    }
+    Ok(())
 }
 
 /// Save a single image to disk and optionally preview it inline.
@@ -1995,6 +2097,63 @@ mod tests {
         assert_eq!(requests[1].seed, Some(42));
         assert_eq!(requests[0].batch_size, 1);
         assert_eq!(requests[1].batch_size, 1);
+    }
+
+    #[test]
+    fn partial_local_video_batch_persists_success_before_returning_failure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let output = Some(temp.path().join("clip.mp4").to_string_lossy().into_owned());
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"ltx-video:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first clip".to_string(), "second clip".to_string()];
+        let batch_requests = local_batch_requests(&request, 2, 91, Some(&prompts));
+        let response = GenerateResponse {
+            images: Vec::new(),
+            video: Some(mold_core::VideoData {
+                data: b"successful-video".to_vec(),
+                format: OutputFormat::Mp4,
+                width: 512,
+                height: 512,
+                frames: 9,
+                fps: 24,
+                thumbnail: Vec::new(),
+                gif_preview: Vec::new(),
+                has_audio: false,
+                duration_ms: None,
+                audio_sample_rate: None,
+                audio_channels: None,
+            }),
+            generation_time_ms: 123,
+            model: "ltx-video:bf16".to_string(),
+            seed_used: 91,
+            gpu: Some(0),
+        };
+
+        let error = finalize_local_batch_outputs(
+            &request,
+            &batch_requests,
+            vec![(0, response)],
+            Some(anyhow::anyhow!("local item 2 failed")),
+            &output,
+            OutputFormat::Mp4,
+            false,
+            false,
+            2,
+            91,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            std::fs::read(temp.path().join("clip-0.mp4")).unwrap(),
+            b"successful-video"
+        );
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("local item 2 failed"));
+        assert!(rendered.contains("successful output item(s) (1)"));
+        assert_eq!(batch_requests[0].prompt, "first clip");
+        assert_eq!(batch_requests[0].seed, Some(91));
     }
 
     #[tokio::test]

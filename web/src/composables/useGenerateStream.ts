@@ -159,7 +159,9 @@ function applyProgress(job: Job, evt: SseProgressEvent) {
       break;
     case "download_progress": {
       const percent =
-        evt.bytes_total > 0 ? Math.round((evt.bytes_downloaded / evt.bytes_total) * 100) : 0;
+        evt.bytes_total > 0
+          ? Math.round((evt.bytes_downloaded / evt.bytes_total) * 100)
+          : 0;
       p.stage = `Downloading ${evt.filename} (${percent}%)`;
       break;
     }
