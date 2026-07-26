@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
 
+#[cfg(test)]
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
@@ -319,7 +320,7 @@ fn post_upscale_model_to_pull(
     Ok(Some(model_name))
 }
 
-async fn ensure_post_upscale_model_downloaded(
+pub(crate) async fn ensure_post_upscale_model_downloaded(
     state: &AppState,
     req: &mold_core::GenerateRequest,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
@@ -826,6 +827,7 @@ async fn single_gpu_loaded_models(state: &AppState) -> std::collections::HashSet
 /// either it's in the worker's cache as Gpu-resident OR it's the worker's
 /// `active_generation` (covering the take-and-restore window where the
 /// cache entry briefly disappears).
+#[cfg(test)]
 fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     for worker in &state.gpu_pool.workers {
@@ -1382,6 +1384,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 /// right one warm.
 ///
 /// Exits when the sender half of the channel is dropped (server shutdown).
+#[cfg(test)]
 pub async fn run_queue_dispatcher(
     job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
@@ -1392,6 +1395,7 @@ pub async fn run_queue_dispatcher(
     run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
 }
 
+#[cfg(test)]
 async fn run_queue_dispatcher_with_tuning(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
@@ -1523,6 +1527,7 @@ async fn run_queue_dispatcher_with_tuning(
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            lease: None,
         });
 
         let mut skip: Vec<usize> = if preferred_gpu.is_none() {
@@ -2684,6 +2689,7 @@ mod tests {
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            lease: None,
         };
         worker.job_tx.send(filler_job).unwrap();
 

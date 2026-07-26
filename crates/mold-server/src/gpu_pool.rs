@@ -168,6 +168,10 @@ pub struct GpuJob {
     /// Server-wide event broadcast so the worker's save path can emit
     /// `gallery_added` alongside the DB upsert (mirrors `AppState.events`).
     pub events: Arc<crate::events::EventBroadcaster>,
+    /// Version fence proving this job was granted by the authoritative
+    /// scheduler after the worker published the matching Ready generation.
+    /// `None` exists only for legacy unit tests and the single-GPU adapter.
+    pub lease: Option<crate::scheduler::LeaseFence>,
 }
 
 /// Pool of GPU workers with placement strategy.

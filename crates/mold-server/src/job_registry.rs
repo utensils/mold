@@ -18,6 +18,7 @@
 use crate::events::EventBroadcaster;
 use mold_core::ServerEvent;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
@@ -122,6 +123,8 @@ pub enum QueueReorderError {
 /// state rather than propagating the panic into the dispatcher hot path.
 pub struct JobRegistry {
     inner: RwLock<Vec<EntryInternal>>,
+    mutation_sequence: AtomicU64,
+    mutation_notify: Arc<Notify>,
     /// Optional lifecycle broadcast (`GET /api/events`). Emitting from the
     /// registry — rather than each call site — guarantees every submit /
     /// promote / terminal path produces exactly one event. `None` keeps
@@ -136,6 +139,8 @@ impl JobRegistry {
     pub fn new() -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            mutation_sequence: AtomicU64::new(0),
+            mutation_notify: Arc::new(Notify::new()),
             events: None,
         })
     }
@@ -145,6 +150,8 @@ impl JobRegistry {
     pub fn with_events(events: Arc<EventBroadcaster>) -> SharedJobRegistry {
         Arc::new(Self {
             inner: RwLock::new(Vec::new()),
+            mutation_sequence: AtomicU64::new(0),
+            mutation_notify: Arc::new(Notify::new()),
             events: Some(events),
         })
     }
@@ -211,6 +218,7 @@ impl JobRegistry {
                 cancel: cancel.clone(),
             });
         }
+        self.mark_mutated();
         self.emit(ServerEvent::JobQueued { id, model });
         cancel
     }
@@ -236,6 +244,7 @@ impl JobRegistry {
             let entry = entries.remove(pos);
             entry.cancel.notify_one();
         }
+        self.mark_mutated();
         self.emit(ServerEvent::JobEnded { id: id.to_string() });
         Ok(())
     }
@@ -264,6 +273,9 @@ impl JobRegistry {
         for id in &cancelled_ids {
             self.emit(ServerEvent::JobEnded { id: id.clone() });
         }
+        if !cancelled_ids.is_empty() {
+            self.mark_mutated();
+        }
         cancelled_ids.len()
     }
 
@@ -280,6 +292,7 @@ impl JobRegistry {
             })
         };
         if let Some(model) = model {
+            self.mark_mutated();
             self.emit(ServerEvent::JobStarted {
                 id: id.to_string(),
                 model,
@@ -293,14 +306,17 @@ impl JobRegistry {
         id: &str,
         target_gpu: Option<usize>,
     ) -> Result<(), TargetGpuUpdateError> {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let Some(e) = entries.iter_mut().find(|e| e.id == id) else {
-            return Err(TargetGpuUpdateError::NotFound);
-        };
-        if e.state == JobLifecycle::Running {
-            return Err(TargetGpuUpdateError::AlreadyRunning);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(e) = entries.iter_mut().find(|e| e.id == id) else {
+                return Err(TargetGpuUpdateError::NotFound);
+            };
+            if e.state == JobLifecycle::Running {
+                return Err(TargetGpuUpdateError::AlreadyRunning);
+            }
+            e.target_gpu = target_gpu;
         }
-        e.target_gpu = target_gpu;
+        self.mark_mutated();
         Ok(())
     }
 
@@ -318,44 +334,47 @@ impl JobRegistry {
     /// The relative order of the other queued jobs is preserved. Moving a job
     /// that is already at `position` is a successful no-op.
     pub fn reorder_queued(&self, id: &str, position: usize) -> Result<(), QueueReorderError> {
-        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
-        let Some(from) = entries.iter().position(|e| e.id == id) else {
-            return Err(QueueReorderError::NotFound);
-        };
-        if entries[from].state == JobLifecycle::Running {
-            return Err(QueueReorderError::AlreadyRunning);
+        {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let Some(from) = entries.iter().position(|e| e.id == id) else {
+                return Err(QueueReorderError::NotFound);
+            };
+            if entries[from].state == JobLifecycle::Running {
+                return Err(QueueReorderError::AlreadyRunning);
+            }
+            // Vec indices occupied by queued entries, in order — running entries
+            // are skipped so `position` indexes purely among movable jobs.
+            let queued_slots: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.state == JobLifecycle::Queued)
+                .map(|(i, _)| i)
+                .collect();
+            // `from` is queued (checked above), so it is present here.
+            let cur = queued_slots
+                .iter()
+                .position(|&i| i == from)
+                .expect("queued job must appear in its own queued-slot list");
+            let target = position.min(queued_slots.len() - 1);
+            if cur == target {
+                return Ok(());
+            }
+            // Pull the job out, then reinsert at the Vec index that makes it the
+            // `target`-th queued entry among the survivors.
+            let entry = entries.remove(from);
+            let remaining_slots: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.state == JobLifecycle::Queued)
+                .map(|(i, _)| i)
+                .collect();
+            let dest = remaining_slots
+                .get(target)
+                .copied()
+                .unwrap_or(entries.len());
+            entries.insert(dest, entry);
         }
-        // Vec indices occupied by queued entries, in order — running entries
-        // are skipped so `position` indexes purely among movable jobs.
-        let queued_slots: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.state == JobLifecycle::Queued)
-            .map(|(i, _)| i)
-            .collect();
-        // `from` is queued (checked above), so it is present here.
-        let cur = queued_slots
-            .iter()
-            .position(|&i| i == from)
-            .expect("queued job must appear in its own queued-slot list");
-        let target = position.min(queued_slots.len() - 1);
-        if cur == target {
-            return Ok(());
-        }
-        // Pull the job out, then reinsert at the Vec index that makes it the
-        // `target`-th queued entry among the survivors.
-        let entry = entries.remove(from);
-        let remaining_slots: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.state == JobLifecycle::Queued)
-            .map(|(i, _)| i)
-            .collect();
-        let dest = remaining_slots
-            .get(target)
-            .copied()
-            .unwrap_or(entries.len());
-        entries.insert(dest, entry);
+        self.mark_mutated();
         Ok(())
     }
 
@@ -397,6 +416,7 @@ impl JobRegistry {
         // idempotent — only the call that actually dropped the entry emits,
         // so subscribers see exactly one `job_ended` per job.
         if removed {
+            self.mark_mutated();
             self.emit(ServerEvent::JobEnded { id: id.to_string() });
         }
     }
@@ -417,6 +437,22 @@ impl JobRegistry {
             .filter(|e| e.state == JobLifecycle::Queued)
             .map(|e| e.id.clone())
             .collect()
+    }
+
+    /// Monotonic signal consumed by the scheduler coordinator. Unlike a
+    /// snapshot comparison, this cannot miss two rapid mutations that happen
+    /// to restore the same visible queue shape.
+    pub fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence.load(Ordering::SeqCst)
+    }
+
+    pub fn mutation_notifier(&self) -> Arc<Notify> {
+        self.mutation_notify.clone()
+    }
+
+    fn mark_mutated(&self) {
+        self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        self.mutation_notify.notify_one();
     }
 
     /// Snapshot the registry as a wire-shaped listing. Positions are assigned
@@ -471,6 +507,27 @@ mod tests {
         assert_eq!(snap.entries[0].state, JobLifecycle::Queued);
         assert_eq!(snap.entries[1].id, "b");
         assert_eq!(snap.entries[1].position, 1);
+    }
+
+    #[test]
+    fn scheduler_mutation_sequence_observes_target_reorder_and_cancel() {
+        let reg = JobRegistry::new();
+        let initial = reg.mutation_sequence();
+        reg.register("a", "flux-dev:fp16");
+        reg.register("b", "sdxl:q8");
+        let after_enqueue = reg.mutation_sequence();
+        assert!(after_enqueue >= initial + 2);
+
+        reg.set_target_gpu("a", Some(1)).unwrap();
+        let after_target = reg.mutation_sequence();
+        assert!(after_target > after_enqueue);
+
+        reg.reorder_queued("b", 0).unwrap();
+        let after_reorder = reg.mutation_sequence();
+        assert!(after_reorder > after_target);
+
+        reg.cancel_queued("a").unwrap();
+        assert!(reg.mutation_sequence() > after_reorder);
     }
 
     #[test]

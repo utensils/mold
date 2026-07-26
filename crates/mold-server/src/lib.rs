@@ -28,6 +28,7 @@ pub mod routes;
 pub mod routes_chain;
 pub mod routes_chain_jobs;
 pub mod routes_config;
+pub mod scheduler;
 mod signals;
 pub mod state;
 pub mod web_ui;
@@ -96,12 +97,13 @@ pub async fn run_server(
 
     let mut workers = Vec::new();
     let mut _gpu_thread_handles = Vec::new();
+    let (scheduler_worker_tx, scheduler_worker_rx) =
+        tokio::sync::mpsc::unbounded_channel::<scheduler::WorkerEvent>();
 
-    // Per-worker channel is a tiny buffer: one in-flight plus one immediate
-    // handoff. The global queue cap is enforced by `QueueHandle` against
-    // `queue_size`; per-worker overflow triggers the dispatcher's cross-worker
-    // retry path in `run_queue_dispatcher`.
-    const PER_WORKER_CHANNEL_SIZE: usize = 2;
+    // Capacity one transports one acknowledged grant. It is not a worker
+    // queue: the coordinator may send only after consuming the worker's
+    // matching Ready generation.
+    const PER_WORKER_CHANNEL_SIZE: usize = 1;
 
     let max_cached = state::resolve_max_cached_models();
     for gpu in &selected {
@@ -124,7 +126,8 @@ pub async fn run_server(
             job_tx,
         });
 
-        let handle = gpu_worker::spawn_gpu_thread(worker.clone(), job_rx);
+        let handle =
+            gpu_worker::spawn_gpu_thread(worker.clone(), job_rx, scheduler_worker_tx.clone());
         _gpu_thread_handles.push(handle);
         workers.push(worker);
     }
@@ -385,7 +388,11 @@ pub async fn run_server(
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
     if gpu_pool.worker_count() > 0 {
-        tokio::spawn(queue::run_queue_dispatcher(job_rx, worker_state));
+        tokio::spawn(scheduler::run_scheduler_coordinator(
+            job_rx,
+            scheduler_worker_rx,
+            worker_state,
+        ));
     } else {
         tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
     }

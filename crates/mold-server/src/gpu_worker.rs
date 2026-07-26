@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub fn spawn_gpu_thread(
     worker: Arc<GpuWorker>,
     job_rx: std::sync::mpsc::Receiver<GpuJob>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("gpu-worker-{}", worker.gpu.ordinal))
@@ -32,8 +33,65 @@ pub fn spawn_gpu_thread(
                 name = %worker.gpu.name,
                 "GPU worker thread started"
             );
-            for job in job_rx.iter() {
-                process_job(&worker, job);
+            let device_id = crate::scheduler::worker_device_id(&worker);
+            let mut generation = 1_u64;
+            loop {
+                if scheduler_tx
+                    .send(crate::scheduler::WorkerEvent::Ready {
+                        device_id: device_id.clone(),
+                        ordinal: worker.gpu.ordinal,
+                        worker_generation: generation,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let Ok(job) = job_rx.recv() else {
+                    break;
+                };
+                if let Some(fence) = job.lease.as_ref() {
+                    if fence.device_id != device_id || fence.worker_generation != generation {
+                        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                            device_id: device_id.clone(),
+                            ordinal: worker.gpu.ordinal,
+                            worker_generation: generation,
+                            job: Box::new(job),
+                            reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
+                        });
+                        continue;
+                    }
+                    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
+                        device_id: device_id.clone(),
+                        ordinal: worker.gpu.ordinal,
+                        worker_generation: generation,
+                        work_id: fence.work_id.clone(),
+                        plan_version: fence.plan_version,
+                    });
+                }
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    process_job(&worker, job);
+                }));
+                if outcome.is_err() {
+                    // A panic may have crossed arbitrary Candle/cudarc state.
+                    // Treat the owner context as fatal and let supervision
+                    // restart the process; never attempt an in-process reset.
+                    worker.poisoned.store(true, Ordering::SeqCst);
+                    worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+                    worker.fatal_cuda_shutdown.notify_waiters();
+                    tracing::error!(
+                        gpu = worker.gpu.ordinal,
+                        "GPU owner thread panicked; quarantining context and stopping server"
+                    );
+                }
+                let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
+                    device_id: device_id.clone(),
+                    ordinal: worker.gpu.ordinal,
+                    worker_generation: generation,
+                });
+                if outcome.is_err() || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+                    break;
+                }
+                generation = generation.saturating_add(1);
             }
             tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
         })
@@ -1421,6 +1479,7 @@ mod tests {
             queue: QueueHandle::new(queue_tx),
             registry: JobRegistry::new(),
             events: crate::events::EventBroadcaster::new(),
+            lease: None,
         }
     }
 
@@ -1432,6 +1491,101 @@ mod tests {
             height: 512,
             index: 0,
         }
+    }
+
+    #[test]
+    fn worker_rejects_stale_generation_before_touching_inference() {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(1);
+        let worker = Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal: 0,
+                stable_id: Some("cuda:00000000000000000000000000000001".to_string()),
+                raw_cuda_uuid: Some([1; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+                identity_error: None,
+                backend: mold_core::GpuBackend::Cuda,
+                name: "protocol-test".to_string(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24 << 30,
+                free_vram_bytes: 24 << 30,
+            },
+            model_cache: Arc::new(Mutex::new(ModelCache::new(1))),
+            resident_model: Arc::new(RwLock::new(None)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(1),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx);
+        let ready = event_rx.blocking_recv().expect("initial Ready event");
+        assert!(matches!(
+            ready,
+            crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            }
+        ));
+
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"must not run","model":"flux-dev:q4","width":512,"height":512,"steps":4,"guidance":3.5,"batch_size":1}"#,
+        )
+        .unwrap();
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        worker
+            .job_tx
+            .send(GpuJob {
+                id: "stale".to_string(),
+                model: request.model.clone(),
+                request,
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: None,
+                result_tx,
+                output_dir: None,
+                config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                metadata_db: Arc::new(None),
+                queue: QueueHandle::new(queue_tx),
+                registry: JobRegistry::new(),
+                events: crate::events::EventBroadcaster::new(),
+                lease: Some(crate::scheduler::LeaseFence {
+                    work_id: "stale".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                }),
+            })
+            .unwrap();
+
+        let returned = match event_rx.blocking_recv().expect("stale rejection") {
+            crate::scheduler::WorkerEvent::Rejected { job, .. } => {
+                assert_eq!(job.id, "stale");
+                *job
+            }
+            _ => panic!("worker must reject the stale grant"),
+        };
+        assert!(
+            result_rx.try_recv().is_err(),
+            "stale grant must be rejected before inference produces a result"
+        );
+        drop(event_rx);
+        // Wake the worker once after the coordinator receiver is gone. Its
+        // rejection send fails and the next Ready publication terminates the
+        // owner loop without ever entering `process_job`.
+        worker.job_tx.send(returned).unwrap();
+        handle
+            .join()
+            .expect("worker exits when coordinator is gone");
     }
 
     #[test]
@@ -1542,6 +1696,7 @@ mod tests {
                 queue: queue.clone(),
                 registry: registry.clone(),
                 events: crate::events::EventBroadcaster::new(),
+                lease: None,
             },
         );
 
