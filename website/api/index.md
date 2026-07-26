@@ -855,6 +855,17 @@ Example response:
 Older single-GPU clients can still read `gpu_info`; multi-GPU-aware clients
 should prefer `gpus[]`, `queue_depth`, and `queue_capacity`.
 
+`GET /api/resources` and `GET /api/resources/stream` expose only the GPU
+inventory that CUDA made visible when the server started. CUDA builds sample
+NVML by the raw CUDA/NVIDIA UUID rather than a physical ordinal, so numeric
+`CUDA_VISIBLE_DEVICES` reordering and `GPU-...` selectors preserve the correct
+process-local ordinal and hidden physical cards are not published. The
+`nvidia-smi` fallback applies the same UUID filter and converts its MiB values
+to binary bytes. A MIG worker accepts only telemetry carrying its matching
+`MIG-...` UUID; Mold does not substitute the parent GPU's full-memory sample.
+When the installed NVML adapter cannot prove a MIG parent UUID or profile,
+`mig_parent_uuid` and `mig_profile` remain `null`.
+
 ## `/api/devices`
 
 `GET /api/devices` is the stable multi-device resource. Device `id` values are

@@ -49,6 +49,10 @@ macOS and Linux:
 
 Mold also ships a responsive web studio with every `mold serve`, a
 keyboard-first terminal UI, a REST/SSE API, and a remote iPhone companion.
+On CUDA servers, resource telemetry is joined to CUDA's startup-visible
+devices by UUID. `CUDA_VISIBLE_DEVICES` remains a hard boundary even when it
+reorders cards or uses GPU/MIG UUID selectors: hidden GPUs are not published,
+and a MIG worker never inherits its parent GPU's full-memory sample.
 
 ## Install
 

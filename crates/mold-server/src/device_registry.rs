@@ -43,33 +43,43 @@ pub struct DiscoveredDevice {
 }
 
 impl DiscoveredDevice {
-    pub fn from_runtime_gpu(
+    pub(crate) fn from_runtime_gpu(
         gpu: &mold_inference::device::DiscoveredGpu,
         startup_allowed: bool,
-        telemetry_ordinal: Option<usize>,
+        telemetry: Option<&crate::resources::TelemetryTarget>,
     ) -> Self {
-        let device_kind = match gpu.device_kind {
-            Some(mold_inference::device::CudaDeviceKind::FullGpu) => DeviceKind::FullGpu,
-            Some(mold_inference::device::CudaDeviceKind::Mig) => DeviceKind::Mig,
-            Some(mold_inference::device::CudaDeviceKind::UnknownCuda) => DeviceKind::UnknownCuda,
-            None => DeviceKind::Metal,
+        let device_kind = if telemetry.is_some_and(|target| target.mig_uuid.is_some()) {
+            DeviceKind::Mig
+        } else if telemetry.is_some_and(|target| target.physical_uuid.is_some()) {
+            DeviceKind::FullGpu
+        } else {
+            match gpu.device_kind {
+                Some(mold_inference::device::CudaDeviceKind::FullGpu) => DeviceKind::FullGpu,
+                Some(mold_inference::device::CudaDeviceKind::Mig) => DeviceKind::Mig,
+                Some(mold_inference::device::CudaDeviceKind::UnknownCuda) => {
+                    DeviceKind::UnknownCuda
+                }
+                None => DeviceKind::Metal,
+            }
         };
         Self {
             stable_id: gpu.stable_id.clone(),
             backend: gpu.backend,
             visible_ordinal: Some(gpu.ordinal),
             device_kind,
-            nvml_uuid: None,
-            physical_uuid: None,
-            mig_uuid: None,
+            nvml_uuid: telemetry.and_then(|target| target.nvml_uuid.clone()),
+            physical_uuid: telemetry.and_then(|target| target.physical_uuid.clone()),
+            mig_uuid: telemetry.and_then(|target| target.mig_uuid.clone()),
             mig_parent_uuid: None,
             mig_profile: None,
-            pci_bus_id: gpu.pci_bus_id.clone(),
+            pci_bus_id: telemetry
+                .and_then(|target| target.pci_bus_id.clone())
+                .or_else(|| gpu.pci_bus_id.clone()),
             name: gpu.name.clone(),
             compute_capability: gpu.compute_capability,
             total_memory_bytes: Some(gpu.total_vram_bytes),
             startup_allowed,
-            telemetry_ordinal,
+            telemetry_ordinal: telemetry.map(|target| target.logical_ordinal),
         }
     }
 }
@@ -380,8 +390,8 @@ impl DeviceRegistry {
         let device = devices.devices.first()?;
         Some(GpuInfo {
             name: device.name.clone(),
-            vram_total_mb: device.memory.total_bytes.unwrap_or(0) / 1_000_000,
-            vram_used_mb: device.memory.used_bytes.unwrap_or(0) / 1_000_000,
+            vram_total_mb: device.memory.total_bytes.unwrap_or(0) / (1024 * 1024),
+            vram_used_mb: device.memory.used_bytes.unwrap_or(0) / (1024 * 1024),
             backend: Some(device.backend),
         })
     }
@@ -466,13 +476,10 @@ fn runtime_backend() -> GpuBackend {
 }
 
 fn worker_telemetry_ordinal(backend: GpuBackend, ordinal: usize) -> Option<usize> {
-    if backend == GpuBackend::Metal {
-        return Some(ordinal);
-    }
-    crate::resources::physical_ordinal_for_worker(
-        ordinal,
-        std::env::var("CUDA_VISIBLE_DEVICES").ok().as_deref(),
-    )
+    let _ = backend;
+    // Resource snapshots are projected back onto process-local ordinals by
+    // UUID before publication. Never translate to a physical NVML ordinal.
+    Some(ordinal)
 }
 
 #[cfg(test)]
@@ -498,7 +505,14 @@ mod tests {
             free_vram_bytes: 20_000_000_000,
         };
 
-        let mapped = DiscoveredDevice::from_runtime_gpu(&gpu, true, Some(7));
+        let telemetry = crate::resources::TelemetryTarget::cuda(
+            7,
+            gpu.raw_cuda_uuid.unwrap(),
+            mold_inference::device::CudaDeviceKind::FullGpu,
+            gpu.name.clone(),
+            gpu.total_vram_bytes,
+        );
+        let mapped = DiscoveredDevice::from_runtime_gpu(&gpu, true, Some(&telemetry));
 
         assert_eq!(mapped.stable_id, gpu.stable_id);
         assert_eq!(mapped.backend, GpuBackend::Cuda);
@@ -508,6 +522,54 @@ mod tests {
         assert_eq!(mapped.pci_bus_id.as_deref(), Some("00000000:01:00.0"));
         assert!(mapped.startup_allowed);
         assert_eq!(mapped.telemetry_ordinal, Some(7));
+    }
+
+    #[test]
+    fn mig_registry_fixture_keeps_unavailable_parent_and_profile_metadata_null() {
+        let raw_uuid = [0xaa; 16];
+        let gpu = mold_inference::device::DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some(mold_inference::device::stable_cuda_id(raw_uuid)),
+            raw_cuda_uuid: Some(raw_uuid),
+            device_kind: Some(mold_inference::device::CudaDeviceKind::Mig),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: "NVIDIA B200 MIG 1g.23gb".into(),
+            compute_capability: Some((10, 0)),
+            pci_bus_id: Some("00000000:01:00.0".into()),
+            total_vram_bytes: 23 * 1024 * 1024 * 1024,
+            free_vram_bytes: 20 * 1024 * 1024 * 1024,
+        };
+        let mut telemetry = crate::resources::TelemetryTarget::cuda(
+            0,
+            raw_uuid,
+            mold_inference::device::CudaDeviceKind::Mig,
+            gpu.name.clone(),
+            gpu.total_vram_bytes,
+        );
+        telemetry.nvml_uuid = Some("MIG-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into());
+        telemetry.mig_uuid = telemetry.nvml_uuid.clone();
+
+        let mapped = DiscoveredDevice::from_runtime_gpu(&gpu, true, Some(&telemetry));
+
+        assert_eq!(mapped.device_kind, DeviceKind::Mig);
+        assert_eq!(
+            mapped.mig_uuid.as_deref(),
+            Some("MIG-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        );
+        assert_eq!(mapped.nvml_uuid, mapped.mig_uuid);
+        assert!(
+            mapped.physical_uuid.is_none(),
+            "a MIG UUID must not be presented as its physical parent UUID"
+        );
+        assert!(
+            mapped.mig_parent_uuid.is_none(),
+            "nvml-wrapper 0.10 cannot resolve the MIG parent; never guess it"
+        );
+        assert!(
+            mapped.mig_profile.is_none(),
+            "nvml-wrapper 0.10 cannot resolve the MIG profile; never guess it"
+        );
     }
 
     fn discovered(stable_id: Option<&str>, startup_allowed: bool) -> DiscoveredDevice {
@@ -616,5 +678,50 @@ mod tests {
         assert_eq!(first.devices[0].id, second.devices[0].id);
         assert_eq!(first.devices[0].health, DeviceHealth::Unavailable);
         assert!(!first.devices[0].schedulable);
+    }
+
+    #[test]
+    fn legacy_gpu_info_preserves_mebibytes_for_real_24_gib_device() {
+        let state = DeviceState {
+            devices: vec![DeviceInfo {
+                id: "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                backend: GpuBackend::Cuda,
+                ordinal: Some(0),
+                device_kind: DeviceKind::FullGpu,
+                nvml_uuid: Some("GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
+                physical_uuid: Some("GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: "NVIDIA GeForce RTX 3090".into(),
+                pci_bus_id: None,
+                compute_capability: Some("8.6".into()),
+                memory: DeviceMemoryInfo {
+                    total_bytes: Some(24 * 1024 * 1024 * 1024),
+                    used_bytes: Some(8 * 1024 * 1024 * 1024),
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: DeviceTelemetry {
+                    utilization_percent: None,
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                admin_state: DeviceAdminState::Enabled,
+                health: DeviceHealth::Healthy,
+                activity: DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: Vec::new(),
+                active_work_id: None,
+                planned_work_ids: Vec::new(),
+            }],
+            plan_version: 0,
+        };
+
+        let legacy = DeviceRegistry::legacy_gpu_info(&state).unwrap();
+        assert_eq!(legacy.vram_total_mb, 24_576);
+        assert_eq!(legacy.vram_used_mb, 8_192);
     }
 }

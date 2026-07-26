@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["mold-inference/cuda"]
+cuda = ["mold-inference/cuda", "nvml"]
 metal = ["mold-inference/metal"]
 expand = ["mold-inference/expand"]
 mp4 = ["mold-inference/mp4"]

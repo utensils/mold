@@ -1,7 +1,8 @@
 //! Unit tests for the resources module.
 
-use crate::resources::ResourceBroadcaster;
+use crate::resources::{ResourceBroadcaster, TelemetryTarget};
 use mold_core::{GpuBackend, GpuSnapshot, RamSnapshot, ResourceSnapshot};
+use mold_inference::device::CudaDeviceKind;
 
 fn fake_snapshot() -> ResourceSnapshot {
     ResourceSnapshot {
@@ -99,7 +100,10 @@ fn build_snapshot_populates_hostname_and_timestamp() {
 async fn aggregator_publishes_within_first_tick() {
     let bcast = crate::resources::ResourceBroadcaster::new();
     let mut rx = bcast.subscribe();
-    let handle = crate::resources::spawn_aggregator(bcast.clone());
+    let handle = crate::resources::spawn_aggregator(
+        bcast.clone(),
+        std::sync::Arc::new(crate::resources::TelemetryInventory::default()),
+    );
 
     // Advance virtual time past one tick interval (1 s).
     tokio::time::advance(std::time::Duration::from_millis(1_100)).await;
@@ -165,24 +169,104 @@ fn ram_snapshot_satisfies_invariants() {
     );
 }
 
+fn raw_uuid(hex: &str) -> [u8; 16] {
+    assert_eq!(hex.len(), 32);
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    bytes
+}
+
+fn cuda_target(logical_ordinal: usize, uuid: &str, kind: CudaDeviceKind) -> TelemetryTarget {
+    TelemetryTarget::cuda(
+        logical_ordinal,
+        raw_uuid(uuid),
+        kind,
+        format!("visible GPU {logical_ordinal}"),
+        24 * 1024 * 1024 * 1024,
+    )
+}
+
 #[test]
-fn physical_gpu_ordinal_honors_cuda_visible_devices_remapping() {
-    assert_eq!(
-        crate::resources::physical_ordinal_for_worker(0, Some("2,0")),
-        Some(2)
+fn visible_smi_projection_joins_reordered_numeric_devices_by_uuid() {
+    let targets = vec![
+        cuda_target(
+            0,
+            "22222222222222222222222222222222",
+            CudaDeviceKind::FullGpu,
+        ),
+        cuda_target(
+            1,
+            "00000000000000000000000000000000",
+            CudaDeviceKind::FullGpu,
+        ),
+    ];
+    let samples = crate::resources::SmiSource::parse_visible_snapshot(
+        "0, GPU-00000000-0000-0000-0000-000000000000, physical zero, 24576, 100\n\
+         1, GPU-11111111-1111-1111-1111-111111111111, hidden one, 24576, 200\n\
+         2, GPU-22222222-2222-2222-2222-222222222222, physical two, 24576, 300",
+        &targets,
     );
-    assert_eq!(
-        crate::resources::physical_ordinal_for_worker(1, Some("2,0")),
-        Some(0)
+
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].ordinal, 0);
+    assert_eq!(samples[0].name, "physical two");
+    assert_eq!(samples[0].vram_used, 300 * 1024 * 1024);
+    assert_eq!(samples[1].ordinal, 1);
+    assert_eq!(samples[1].name, "physical zero");
+}
+
+#[test]
+fn visible_smi_projection_never_exposes_hidden_physical_devices() {
+    let targets = vec![cuda_target(
+        0,
+        "22222222222222222222222222222222",
+        CudaDeviceKind::FullGpu,
+    )];
+    let samples = crate::resources::SmiSource::parse_visible_snapshot(
+        "0, GPU-00000000-0000-0000-0000-000000000000, hidden zero, 24576, 100\n\
+         2, GPU-22222222-2222-2222-2222-222222222222, visible two, 24576, 300",
+        &targets,
     );
-    assert_eq!(
-        crate::resources::physical_ordinal_for_worker(0, None),
-        Some(0)
+
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].ordinal, 0);
+    assert_eq!(samples[0].name, "visible two");
+}
+
+#[test]
+fn visible_smi_projection_supports_gpu_uuid_visibility_selectors() {
+    let targets = vec![cuda_target(
+        0,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        CudaDeviceKind::FullGpu,
+    )];
+    let samples = crate::resources::SmiSource::parse_visible_snapshot(
+        "7, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, selected by UUID, 24576, 42",
+        &targets,
     );
-    assert_eq!(
-        crate::resources::physical_ordinal_for_worker(0, Some("GPU-deadbeef")),
-        None,
-        "UUID selectors must skip the overlay rather than report another card"
+
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].ordinal, 0);
+    assert_eq!(samples[0].vram_used, 42 * 1024 * 1024);
+}
+
+#[test]
+fn mig_target_never_receives_physical_gpu_telemetry() {
+    let targets = vec![cuda_target(
+        0,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        CudaDeviceKind::Mig,
+    )];
+    let samples = crate::resources::SmiSource::parse_visible_snapshot(
+        "0, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, physical parent, 81920, 1000",
+        &targets,
+    );
+
+    assert!(
+        samples.is_empty(),
+        "a MIG worker must not inherit its parent GPU's full-memory telemetry"
     );
 }
 
@@ -192,8 +276,8 @@ fn parse_nvidia_smi_line_happy_path() {
     let parsed = crate::resources::parse_nvidia_smi_line(line).expect("parse should succeed");
     assert_eq!(parsed.0, 0);
     assert_eq!(parsed.1, "NVIDIA GeForce RTX 3090");
-    assert_eq!(parsed.2, 24_564_000_000);
-    assert_eq!(parsed.3, 14_248_000_000);
+    assert_eq!(parsed.2, 24_564 * 1024 * 1024);
+    assert_eq!(parsed.3, 14_248 * 1024 * 1024);
 }
 
 #[test]
@@ -211,8 +295,8 @@ fn smi_snapshot_sets_per_process_fields_to_none() {
     );
     assert_eq!(gpus.len(), 2);
     assert_eq!(gpus[0].ordinal, 0);
-    assert_eq!(gpus[0].vram_total, 24_564_000_000);
-    assert_eq!(gpus[0].vram_used, 14_248_000_000);
+    assert_eq!(gpus[0].vram_total, 24_564 * 1024 * 1024);
+    assert_eq!(gpus[0].vram_used, 14_248 * 1024 * 1024);
     assert_eq!(gpus[0].vram_used_by_mold, None);
     assert_eq!(gpus[0].vram_used_by_other, None);
     assert_eq!(gpus[1].ordinal, 1);
@@ -241,5 +325,48 @@ fn nvml_source_returns_zero_gpus_when_nvml_init_fails() {
         Err(_) => {
             // NVML absent — acceptable on CI, treat as skip.
         }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "cuda", feature = "nvml"))]
+fn live_nvml_join_matches_every_visible_full_cuda_gpu_by_uuid() {
+    let discovered = mold_inference::device::discover_gpus();
+    if discovered.is_empty() {
+        return;
+    }
+    let Ok(source) = crate::resources::NvmlSource::try_new() else {
+        return;
+    };
+    let inventory = crate::resources::TelemetryInventory::from_discovered(&discovered);
+    let snapshots = source.snapshot_visible(std::process::id(), inventory.targets());
+
+    assert!(
+        snapshots
+            .iter()
+            .all(|snapshot| discovered.iter().any(|gpu| gpu.ordinal == snapshot.ordinal)),
+        "NVML projection published a GPU outside CUDA's visible inventory"
+    );
+    for gpu in discovered.iter().filter(|gpu| {
+        gpu.raw_cuda_uuid.is_some()
+            && gpu.device_kind != Some(mold_inference::device::CudaDeviceKind::Mig)
+    }) {
+        let target = inventory.target(gpu.ordinal).unwrap();
+        assert!(
+            target.nvml_uuid.is_some(),
+            "visible CUDA GPU {} did not resolve to an NVML UUID",
+            gpu.ordinal
+        );
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.ordinal == gpu.ordinal)
+            .unwrap_or_else(|| {
+                panic!(
+                    "visible CUDA GPU {} did not receive UUID-joined telemetry",
+                    gpu.ordinal
+                )
+            });
+        assert_eq!(snapshot.backend, GpuBackend::Cuda);
+        assert!(snapshot.vram_total >= snapshot.vram_used);
     }
 }

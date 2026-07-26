@@ -616,7 +616,7 @@ mod tests {
                     pci_bus_id: Some("00000000:01:00.0".into()),
                     name: "NVIDIA GeForce RTX 3090".into(),
                     compute_capability: Some((8, 6)),
-                    total_memory_bytes: Some(24_000_000_000),
+                    total_memory_bytes: Some(24 * 1024 * 1024 * 1024),
                     startup_allowed: true,
                     telemetry_ordinal: Some(0),
                 },
@@ -692,10 +692,10 @@ mod tests {
                 ordinal: 0,
                 name: "test-gpu-0".into(),
                 backend: mold_core::GpuBackend::Cuda,
-                vram_total: 24_000_000_000,
-                vram_used: 9_000_000_000,
-                vram_used_by_mold: Some(8_000_000_000),
-                vram_used_by_other: Some(1_000_000_000),
+                vram_total: 24 * 1024 * 1024 * 1024,
+                vram_used: 9 * 1024 * 1024 * 1024,
+                vram_used_by_mold: Some(8 * 1024 * 1024 * 1024),
+                vram_used_by_other: Some(1024 * 1024 * 1024),
                 gpu_utilization: Some(41),
             }],
             system_ram: mold_core::RamSnapshot {
@@ -717,11 +717,11 @@ mod tests {
         .await;
         assert_eq!(
             devices["devices"][0]["memory"]["used_bytes"],
-            9_000_000_000_u64
+            9 * 1024 * 1024 * 1024_u64
         );
         assert_eq!(
             devices["devices"][0]["memory"]["mold_used_bytes"],
-            8_000_000_000_u64
+            8 * 1024 * 1024 * 1024_u64
         );
         assert_eq!(
             devices["devices"][0]["telemetry"]["utilization_percent"],
@@ -735,10 +735,13 @@ mod tests {
         )
         .await;
         assert_eq!(status["gpu_info"]["name"], "test-gpu-0");
-        assert_eq!(status["gpu_info"]["vram_total_mb"], 24_000);
-        assert_eq!(status["gpu_info"]["vram_used_mb"], 9_000);
+        assert_eq!(status["gpu_info"]["vram_total_mb"], 24_576);
+        assert_eq!(status["gpu_info"]["vram_used_mb"], 9_216);
         assert_eq!(status["gpus"][0]["ordinal"], 0);
-        assert_eq!(status["gpus"][0]["vram_used_bytes"], 9_000_000_000_u64);
+        assert_eq!(
+            status["gpus"][0]["vram_used_bytes"],
+            9 * 1024 * 1024 * 1024_u64
+        );
         assert!(
             status["gpu_info"].get("id").is_none(),
             "legacy gpu_info shape must not gain device fields"
@@ -5774,6 +5777,91 @@ mod tests {
         assert_eq!(body["hostname"], "unit-test");
         assert_eq!(body["timestamp"], 12345);
         assert!(body["system_ram"].is_object());
+    }
+
+    #[tokio::test]
+    async fn resource_routes_expose_only_frozen_cuda_visible_inventory() {
+        use futures::StreamExt as _;
+
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let visible_uuid = [0xaa; 16];
+        let targets = vec![crate::resources::TelemetryTarget::cuda(
+            0,
+            visible_uuid,
+            mold_inference::device::CudaDeviceKind::FullGpu,
+            "visible GPU".into(),
+            24 * 1024 * 1024 * 1024,
+        )];
+        let gpus = crate::resources::SmiSource::parse_visible_snapshot(
+            "0, GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb, hidden physical GPU, 24576, 900\n\
+             7, GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, visible UUID GPU, 24576, 300",
+            &targets,
+        );
+        assert_eq!(gpus.len(), 1, "test setup must apply the frozen inventory");
+
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            crate::state::QueueHandle::new(tokio::sync::mpsc::channel(1).0),
+            std::sync::Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new(),
+            }),
+            200,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "unit-test".into(),
+            timestamp: 12345,
+            gpus,
+            system_ram: mold_core::RamSnapshot {
+                total: 1,
+                used: 0,
+                used_by_mold: 0,
+                used_by_other: 0,
+            },
+            cpu: None,
+        });
+        let app = create_router(state);
+
+        let one_shot = json_body(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/resources")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(one_shot["gpus"].as_array().unwrap().len(), 1);
+        assert_eq!(one_shot["gpus"][0]["ordinal"], 0);
+        assert_eq!(one_shot["gpus"][0]["name"], "visible UUID GPU");
+        assert!(
+            !one_shot.to_string().contains("hidden physical GPU"),
+            "one-shot resources leaked a CUDA-hidden physical GPU"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resources/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("cached resource SSE frame should arrive immediately")
+            .expect("resource SSE stream should yield a frame")
+            .expect("resource SSE frame should be readable");
+        let frame = String::from_utf8_lossy(&bytes);
+        assert!(frame.contains("visible UUID GPU"));
+        assert!(
+            !frame.contains("hidden physical GPU"),
+            "resource stream leaked a CUDA-hidden physical GPU"
+        );
     }
 
     #[tokio::test]

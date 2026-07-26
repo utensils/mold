@@ -519,6 +519,11 @@ MIG rules:
   not its parent GPU’s full memory.
 - A physical parent containing multiple visible MIG workers may show aggregate
   telemetry, but capacity remains per instance.
+- The Phase A `nvml-wrapper` adapter does not expose MIG parent/profile lookup.
+  Until a typed API can prove those fields, `mig_parent_uuid` and `mig_profile`
+  remain null. Sampling still joins the exact CUDA v2 compute-instance UUID;
+  a missing MIG match produces no live overlay rather than borrowing the
+  parent GPU's full-memory telemetry.
 
 ### 7.4 Startup selection
 

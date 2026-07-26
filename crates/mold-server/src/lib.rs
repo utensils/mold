@@ -285,19 +285,15 @@ pub async fn run_server(
     // rather than inventing an ordinal identity.
     let selected_ordinals: std::collections::BTreeSet<_> =
         selected.iter().map(|gpu| gpu.ordinal).collect();
-    let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+    let telemetry_inventory =
+        std::sync::Arc::new(resources::TelemetryInventory::from_discovered(&discovered));
     let inventory = discovered
         .iter()
         .map(|gpu| {
-            let telemetry_ordinal = if gpu.backend == mold_core::GpuBackend::Metal {
-                Some(gpu.ordinal)
-            } else {
-                resources::physical_ordinal_for_worker(gpu.ordinal, visible_devices.as_deref())
-            };
             device_registry::DiscoveredDevice::from_runtime_gpu(
                 gpu,
                 selected_ordinals.contains(&gpu.ordinal),
-                telemetry_ordinal,
+                telemetry_inventory.target(gpu.ordinal),
             )
         })
         .collect();
@@ -507,7 +503,8 @@ pub async fn run_server(
     // Spawn the resource telemetry aggregator (1 Hz). Keep the `JoinHandle`
     // bound so we can `.abort()` it when `axum::serve` returns — otherwise
     // the task outlives server shutdown and keeps ticking until process exit.
-    let resources_aggregator = resources::spawn_aggregator(state.resources.clone());
+    let resources_aggregator =
+        resources::spawn_aggregator(state.resources.clone(), telemetry_inventory);
 
     // Start a long-lived DNS-SD browser independently of advertising. A
     // loopback-bound primary still needs to surface the server machine's LAN
