@@ -37,7 +37,12 @@ import {
   type RoutableGpu,
   type RoutableHost,
 } from "../lib/hostRouting";
-import type { GpuInfo, ModelInfoExtended } from "../types";
+import type {
+  GpuInfo,
+  GpuWorkerStatus,
+  ModelInfoExtended,
+  ServerStatus,
+} from "../types";
 
 /** `gpu_info` plus the additive `backend` field newer servers report. */
 type GpuInfoWithBackend = GpuInfo & { backend?: string | null };
@@ -133,6 +138,32 @@ function gpuFrom(
   };
 }
 
+/**
+ * Collapse a legacy status response only at the host-routing boundary.
+ *
+ * A model still has to fit on one worker, so "Most capable" compares the
+ * largest usable device rather than aggregate VRAM. `/api/status.gpu_info`
+ * historically describes GPU 0; using it when the additive `gpus` array is
+ * present would make every other card invisible to routing.
+ */
+function gpuFromStatus(status: ServerStatus): RoutableGpu | null {
+  const legacy = status.gpu_info as GpuInfoWithBackend | null | undefined;
+  const workers = status.gpus?.filter(
+    (worker: GpuWorkerStatus) => worker.state !== "degraded",
+  );
+  if (!workers?.length) {
+    return status.gpus?.length ? null : gpuFrom(legacy);
+  }
+  const strongest = workers.reduce((best, worker) =>
+    worker.vram_total_bytes > best.vram_total_bytes ? worker : best,
+  );
+  return {
+    backend: legacy?.backend ?? null,
+    name: strongest.name,
+    vramTotalMb: strongest.vram_total_bytes / 1024 ** 2,
+  };
+}
+
 async function pollHost(entry: HostEntry): Promise<void> {
   const [status, models] = await Promise.allSettled([
     hostStatus(entry),
@@ -144,7 +175,7 @@ async function pollHost(entry: HostEntry): Promise<void> {
       [entry.id]: {
         status: "ready",
         queueDepth: status.value.queue_depth ?? null,
-        gpu: gpuFrom(status.value.gpu_info as GpuInfoWithBackend | null),
+        gpu: gpuFromStatus(status.value),
       },
     };
   } else {

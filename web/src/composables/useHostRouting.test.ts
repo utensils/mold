@@ -258,6 +258,62 @@ describe("useHostRouting", () => {
     expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
   });
 
+  it("ranks a multi-GPU host by its strongest usable device, not gpu_info", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    statuses.set(
+      ORIGIN_HOST_ID,
+      status({
+        // Legacy gpu_info is only GPU 0. It must not hide the 80 GB device.
+        gpu_info: {
+          backend: "cuda",
+          name: "NVIDIA RTX A2000",
+          vram_total_mb: 12288,
+          vram_used_mb: 0,
+        },
+        gpus: [
+          {
+            ordinal: 0,
+            name: "NVIDIA RTX A2000",
+            vram_total_bytes: 12 * 1024 ** 3,
+            vram_used_bytes: 0,
+            state: "idle",
+          },
+          {
+            ordinal: 1,
+            name: "NVIDIA B200",
+            vram_total_bytes: 80 * 1024 ** 3,
+            vram_used_bytes: 0,
+            state: "idle",
+          },
+        ],
+      }),
+    );
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    statuses.set(
+      studio.id,
+      status({
+        gpu_info: {
+          backend: "cuda",
+          name: "NVIDIA RTX 4090",
+          vram_total_mb: 24576,
+          vram_used_mb: 0,
+        },
+      }),
+    );
+    models.set(studio.id, [model("flux-dev:q4")]);
+    setGenerateTargetId(CAPABLE_TARGET_ID);
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.hosts.value[0]?.gpu).toEqual({
+      backend: "cuda",
+      name: "NVIDIA B200",
+      vramTotalMb: 80 * 1024,
+    });
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(ORIGIN_HOST_ID);
+  });
+
   it("reads a forgotten sticky pick as Auto", async () => {
     setGenerateTargetId("ghost-host-7680");
     statuses.set(ORIGIN_HOST_ID, status());
