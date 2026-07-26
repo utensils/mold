@@ -7,7 +7,7 @@ repository.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Local AI image generation CLI — FLUX, SDXL, SD3.5, Z-Image diffusion models on your GPU"
+description = "CLI-native local AI image and video generation for people, scripts, and agents"
 
 [[bin]]
 name = "mold"

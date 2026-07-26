@@ -1,7 +1,8 @@
 # Models
 
-mold supports 11 model families spanning different architectures, quality levels,
-and VRAM requirements — including both image and video generation.
+mold supports a broad range of model families spanning different architectures,
+quality levels, and VRAM requirements — including both image and video
+generation.
 
 ::: tip Community models from Civitai
 The models documented here are not the limit. Open **Models → Discover** in

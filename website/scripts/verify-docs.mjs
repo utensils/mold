@@ -58,6 +58,7 @@ const configSource = readFileSync(
   join(websiteDir, '.vitepress/config.ts'),
   'utf8'
 )
+const normalizedConfigSource = configSource.replace(/\s+/gu, ' ')
 const sidebarLinks = [...configSource.matchAll(/link:\s*'([^']+)'/g)]
   .map((m) => m[1])
   .filter((link) => link.startsWith('/'))
@@ -70,6 +71,47 @@ for (const link of sidebarLinks) {
 
 if (!configSource.includes("hostname: 'https://utensils.io/mold/'")) {
   fail('sitemap hostname must be https://utensils.io/mold/')
+}
+
+const requiredSocialMetadata = [
+  "property: 'og:title'",
+  "property: 'og:description'",
+  "property: 'og:image'",
+  "content: 'https://utensils.io/mold/screenshots/mold-studio-desktop.png'",
+  "property: 'og:url'",
+  "name: 'twitter:card'",
+  "content: 'summary_large_image'",
+  "name: 'twitter:image'",
+]
+for (const metadata of requiredSocialMetadata) {
+  if (!normalizedConfigSource.includes(metadata)) {
+    fail(`site config missing social metadata: ${metadata}`)
+  }
+}
+
+const homeSource = readRel('index.md')
+if (
+  !homeSource.includes('text: Local AI Image & Video Generation on Your GPU')
+) {
+  fail('homepage hero must describe local image and video generation')
+}
+if (homeSource.includes('11 Model Families')) {
+  fail('homepage must not hard-code a model-family count')
+}
+
+for (const relPath of ['guide/index.md', 'models/index.md']) {
+  if (readRel(relPath).toLowerCase().includes('11 model families')) {
+    fail(`${relPath} must not hard-code a model-family count`)
+  }
+}
+
+const expectedPackageDescription =
+  'CLI-native local AI image and video generation for people, scripts, and agents'
+for (const relPath of ['Cargo.toml', 'crates/mold-cli/Cargo.toml']) {
+  const manifest = readFileSync(join(repoRoot, relPath), 'utf8')
+  if (!manifest.includes(`description = "${expectedPackageDescription}"`)) {
+    fail(`${relPath} must use the canonical package description`)
+  }
 }
 
 const visibleLinks = new Set(sidebarLinks)

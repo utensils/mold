@@ -14,7 +14,56 @@ export default defineConfig({
     },
   },
 
-  head: [['link', { rel: 'icon', href: '/mold/logo-transparent.png' }]],
+  head: [
+    ['link', { rel: 'icon', href: '/mold/logo-transparent.png' }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    [
+      'meta',
+      {
+        property: 'og:title',
+        content: 'mold — CLI-native local AI image and video generation',
+      },
+    ],
+    [
+      'meta',
+      {
+        property: 'og:description',
+        content:
+          'CLI-native local AI image and video generation for people, scripts, and agents.',
+      },
+    ],
+    [
+      'meta',
+      {
+        property: 'og:image',
+        content: 'https://utensils.io/mold/screenshots/mold-studio-desktop.png',
+      },
+    ],
+    ['meta', { property: 'og:url', content: 'https://utensils.io/mold/' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    [
+      'meta',
+      {
+        name: 'twitter:title',
+        content: 'mold — CLI-native local AI image and video generation',
+      },
+    ],
+    [
+      'meta',
+      {
+        name: 'twitter:description',
+        content:
+          'CLI-native local AI image and video generation for people, scripts, and agents.',
+      },
+    ],
+    [
+      'meta',
+      {
+        name: 'twitter:image',
+        content: 'https://utensils.io/mold/screenshots/mold-studio-desktop.png',
+      },
+    ],
+  ],
 
   lastUpdated: true,
 
