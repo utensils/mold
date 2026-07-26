@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 
 const props = defineProps<{ message: string }>();
 const copied = ref(false);
 const copyFailed = ref(false);
+
+watch(
+  () => props.message,
+  () => {
+    copied.value = false;
+    copyFailed.value = false;
+  },
+);
 
 async function copyError() {
   try {

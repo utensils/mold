@@ -35,4 +35,21 @@ describe("GenerateErrorNotice", () => {
 
     expect(wrapper.get("[data-test='recovery-action']").text()).toBe("Recover");
   });
+
+  it("clears transient clipboard feedback when the error changes", async () => {
+    const wrapper = mount(GenerateErrorNotice, {
+      props: { message: "The first generation failed." },
+    });
+
+    await wrapper.get("[data-test='copy-generate-error']").trigger("click");
+    expect(wrapper.get("[data-test='copy-generate-error']").attributes("aria-label")).toBe(
+      "Error copied",
+    );
+
+    await wrapper.setProps({ message: "The retry failed differently." });
+
+    expect(wrapper.get("[data-test='copy-generate-error']").attributes("aria-label")).toBe(
+      "Copy error message",
+    );
+  });
 });
