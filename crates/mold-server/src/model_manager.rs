@@ -999,18 +999,18 @@ pub(crate) async fn ensure_model_ready(
             if let Some(paths) = cached_paths.as_ref() {
                 preflight_memory_guard_after_drop(model_name, paths, 0, hint)?;
             } else {
-                let _ = mold_inference::device::post_drop_free_vram_bytes(0);
+                #[cfg(feature = "cuda")]
+                mold_inference::device::post_drop_free_vram_bytes(0)
+                    .map_err(|error| ApiError::insufficient_memory(error.to_string()))?;
             }
-            let load_strategy = cached_paths
-                .as_ref()
-                .map(|paths| {
-                    select_server_load_strategy_for_budget(
-                        paths,
-                        effective_load_available_bytes(0, 0),
-                        hint,
-                    )
-                })
-                .unwrap_or(mold_inference::LoadStrategy::Eager);
+            let load_strategy = match cached_paths.as_ref() {
+                Some(paths) => select_server_load_strategy_for_budget(
+                    paths,
+                    effective_load_available_bytes(0, 0)?,
+                    hint,
+                ),
+                None => mold_inference::LoadStrategy::Eager,
+            };
             if load_strategy == mold_inference::LoadStrategy::Sequential {
                 tracing::info!(
                     model = %model_name,
@@ -1221,17 +1221,6 @@ pub(crate) async fn pull_model(
 /// Unload the active model from GPU. The engine remains in the cache (unloaded)
 /// so it can be reloaded quickly on the next request.
 pub(crate) async fn unload_model(state: &AppState) -> String {
-    // Always clear the cached upscaler engine to free GPU memory,
-    // regardless of whether a diffusion model is loaded.
-    // Use try_lock() to avoid blocking the async runtime if an upscale
-    // is in progress (the spawn_blocking thread holds this lock).
-    if let Ok(mut upscaler) = state.upscaler_cache.try_lock() {
-        if let Some(mut engine) = upscaler.take() {
-            engine.unload();
-            tracing::info!("upscaler cache cleared");
-        }
-    }
-
     let mut cache = state.model_cache.lock().await;
     match cache.unload_active() {
         Some(name) => {
@@ -1284,7 +1273,7 @@ async fn create_and_load_engine(
     preflight_memory_guard_after_drop(model_name, &paths, 0, hint)?;
     let load_strategy = select_server_load_strategy_for_device(
         &paths,
-        effective_load_available_bytes(0, 0),
+        effective_load_available_bytes(0, 0)?,
         mold_inference::device::total_vram_bytes(0),
         hint,
     );
@@ -1729,6 +1718,18 @@ mod tests {
         assert!(
             result.is_err(),
             "unrecovered or externally-owned VRAM must remain unavailable"
+        );
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn metal_unified_memory_has_no_second_post_drop_admission_gate() {
+        let (_dir, paths) = flux_shaped_paths_with_sizes(100, 10, 20, 5);
+        let result = preflight_memory_guard_after_drop("metal-swap", &paths, 0, None);
+        assert!(
+            result.is_ok(),
+            "Metal uses the additive unified-memory guard before unload; an \
+             instantaneous post-drop sample must not add a spurious second gate"
         );
     }
 
@@ -2722,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn server_load_strategy_uses_device_total_when_live_available_missing() {
+    fn server_load_strategy_never_substitutes_total_when_live_available_missing() {
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2735,12 +2736,7 @@ mod tests {
         let strategy =
             select_server_load_strategy_for_device(&paths, None, Some(24 * GB), Some(hint));
 
-        assert_eq!(
-            strategy,
-            mold_inference::LoadStrategy::Sequential,
-            "when live free-memory probing is unavailable, the worker should still \
-             use known device total VRAM instead of defaulting to eager"
-        );
+        assert_eq!(strategy, mold_inference::LoadStrategy::Eager);
     }
 
     /// Build LTX-2-shaped paths: a single 46 GB single-file checkpoint

@@ -25,109 +25,140 @@ pub fn spawn_gpu_thread(
     std::thread::Builder::new()
         .name(format!("gpu-worker-{}", worker.gpu.ordinal))
         .spawn(move || {
-            // Bind this thread to its GPU ordinal so device operations can
-            // debug-assert callers don't drift onto a sibling GPU's context.
-            mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
-            tracing::info!(
-                gpu = worker.gpu.ordinal,
-                name = %worker.gpu.name,
-                "GPU worker thread started"
+            run_gpu_owner(
+                &worker,
+                job_rx,
+                scheduler_tx,
+                cache_idle_ttl,
+                Duration::from_secs(60),
             );
-            let device_id = crate::scheduler::worker_device_id(&worker);
-            let mut generation = 1_u64;
-            'owner: loop {
-                if worker.shutdown_requested.load(Ordering::SeqCst)
-                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
-                {
-                    break;
-                }
-                if scheduler_tx
-                    .send(crate::scheduler::WorkerEvent::Ready {
-                        device_id: device_id.clone(),
-                        ordinal: worker.gpu.ordinal,
-                        worker_generation: generation,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                let command = loop {
-                    match job_rx.recv_timeout(Duration::from_secs(60)) {
-                        Ok(command) => break command,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            if worker.shutdown_requested.load(Ordering::SeqCst)
-                                || worker.fatal_cuda_error.load(Ordering::SeqCst)
-                            {
-                                break 'owner;
-                            }
-                            evict_idle_on_worker(&worker, cache_idle_ttl);
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'owner,
+        })
+        .expect("failed to spawn GPU worker thread")
+}
+
+fn run_gpu_owner(
+    worker: &GpuWorker,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    cache_idle_ttl: Duration,
+    idle_poll: Duration,
+) {
+    // Bind this thread to its GPU ordinal so device operations can
+    // debug-assert callers don't drift onto a sibling GPU's context.
+    mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        name = %worker.gpu.name,
+        "GPU worker thread started"
+    );
+    let device_id = crate::scheduler::worker_device_id(worker);
+    let mut generation = 1_u64;
+    'owner: loop {
+        if worker.shutdown_requested.load(Ordering::SeqCst)
+            || worker.poisoned.load(Ordering::SeqCst)
+            || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            break;
+        }
+        if scheduler_tx
+            .send(crate::scheduler::WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: worker.gpu.ordinal,
+                worker_generation: generation,
+            })
+            .is_err()
+        {
+            break;
+        }
+        let command = loop {
+            match job_rx.recv_timeout(idle_poll) {
+                Ok(command) => break command,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if worker.shutdown_requested.load(Ordering::SeqCst)
+                        || worker.poisoned.load(Ordering::SeqCst)
+                        || worker.fatal_cuda_error.load(Ordering::SeqCst)
+                    {
+                        break 'owner;
                     }
-                };
-                let job = match command {
-                    GpuWorkerCommand::Grant(job) => job,
-                    GpuWorkerCommand::Shutdown => break,
-                };
-                if worker.shutdown_requested.load(Ordering::SeqCst)
-                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
-                {
-                    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
-                        device_id: device_id.clone(),
-                        ordinal: worker.gpu.ordinal,
-                        worker_generation: generation,
-                        job,
-                        reason: crate::scheduler::LeaseRejection::FatalCuda,
-                    });
-                    break;
+                    evict_idle_on_worker(worker, cache_idle_ttl);
                 }
-                if let Some(fence) = job.lease.as_ref() {
-                    if fence.device_id != device_id || fence.worker_generation != generation {
-                        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
-                            device_id: device_id.clone(),
-                            ordinal: worker.gpu.ordinal,
-                            worker_generation: generation,
-                            job,
-                            reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
-                        });
-                        continue;
-                    }
-                    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
-                        device_id: device_id.clone(),
-                        ordinal: worker.gpu.ordinal,
-                        worker_generation: generation,
-                        work_id: fence.work_id.clone(),
-                        plan_version: fence.plan_version,
-                    });
-                }
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_job(&worker, *job, &scheduler_tx);
-                }));
-                if outcome.is_err() {
-                    // A panic may have crossed arbitrary Candle/cudarc state.
-                    // Treat the owner context as fatal and let supervision
-                    // restart the process; never attempt an in-process reset.
-                    worker.poisoned.store(true, Ordering::SeqCst);
-                    worker.fatal_cuda_error.store(true, Ordering::SeqCst);
-                    worker.fatal_cuda_shutdown.notify_waiters();
-                    tracing::error!(
-                        gpu = worker.gpu.ordinal,
-                        "GPU owner thread panicked; quarantining context and stopping server"
-                    );
-                }
-                let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'owner,
+            }
+        };
+        let job = match command {
+            GpuWorkerCommand::Grant(job) => job,
+            GpuWorkerCommand::Shutdown => break,
+        };
+        if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: worker.gpu.ordinal,
+                worker_generation: generation,
+                job,
+                reason: crate::scheduler::LeaseRejection::FatalCuda,
+            });
+            break;
+        }
+        if worker.shutdown_requested.load(Ordering::SeqCst) {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: worker.gpu.ordinal,
+                worker_generation: generation,
+                job,
+                reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
+            });
+            break;
+        }
+        if let Some(fence) = job.lease.as_ref() {
+            if fence.device_id != device_id || fence.worker_generation != generation {
+                let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                     device_id: device_id.clone(),
                     ordinal: worker.gpu.ordinal,
                     worker_generation: generation,
+                    job,
+                    reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
                 });
-                if outcome.is_err() || worker.fatal_cuda_error.load(Ordering::SeqCst) {
-                    break;
-                }
-                generation = generation.saturating_add(1);
+                continue;
             }
-            tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
-        })
-        .expect("failed to spawn GPU worker thread")
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
+                device_id: device_id.clone(),
+                ordinal: worker.gpu.ordinal,
+                worker_generation: generation,
+                work_id: fence.work_id.clone(),
+                plan_version: fence.plan_version,
+            });
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_job(worker, *job, &scheduler_tx);
+        }));
+        if outcome.is_err() {
+            // A panic may have crossed arbitrary Candle/cudarc state.
+            // Treat the owner context as fatal and let supervision
+            // restart the process; never attempt an in-process reset.
+            worker.poisoned.store(true, Ordering::SeqCst);
+            worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+            worker.fatal_cuda_shutdown.notify_waiters();
+            tracing::error!(
+                gpu = worker.gpu.ordinal,
+                "GPU owner thread panicked; quarantining context and stopping server"
+            );
+        }
+        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
+            device_id: device_id.clone(),
+            ordinal: worker.gpu.ordinal,
+            worker_generation: generation,
+        });
+        if outcome.is_err()
+            || worker.shutdown_requested.load(Ordering::SeqCst)
+            || worker.poisoned.load(Ordering::SeqCst)
+            || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            break;
+        }
+        generation = generation.saturating_add(1);
+    }
+    tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
 }
 
 /// Evict parked engines on the worker thread that owns their device context.
@@ -135,10 +166,16 @@ pub fn spawn_gpu_thread(
 /// Engine destruction may call into CUDA while releasing tensors and library
 /// workspaces, so returning the boxes to an async maintenance task is not safe.
 fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        return;
+    }
     let _load_guard = worker
         .model_load_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        return;
+    }
     let evicted = {
         let mut cache = worker
             .model_cache
@@ -149,15 +186,33 @@ fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
     if evicted.is_empty() {
         return;
     }
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        contain_poisoned_cuda(evicted);
+        return;
+    }
     let count = evicted.len();
     drop(evicted);
-    let free_after_drop = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
-    tracing::info!(
-        gpu = worker.gpu.ordinal,
-        count,
-        free_vram_bytes = ?free_after_drop,
-        "evicted idle model cache entries on owning GPU worker"
-    );
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        return;
+    }
+    match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+        Ok(free_after_drop) => tracing::info!(
+            gpu = worker.gpu.ordinal,
+            count,
+            free_vram_bytes = free_after_drop,
+            "evicted idle model cache entries on owning GPU worker"
+        ),
+        Err(error) if error.is_fatal_cuda() => {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+        }
+        Err(error) => tracing::warn!(
+            gpu = worker.gpu.ordinal,
+            count,
+            %error,
+            "idle entries evicted but post-drop VRAM sample was unavailable"
+        ),
+    }
 }
 
 /// Convert an inference-crate progress event to an SSE wire event.
@@ -220,6 +275,142 @@ fn quarantine_poisoned_worker(worker: &GpuWorker) {
         gpu = worker.gpu.ordinal,
         "GPU worker quarantined after fatal CUDA context error; shutting down for process restart"
     );
+}
+
+/// Keep a CUDA-backed object alive until the OS tears down the quarantined
+/// process. Running its destructor after a fatal asynchronous driver error can
+/// re-enter the invalid context through tensor, cuBLAS, or allocator cleanup.
+/// This intentionally leaks only on the terminal process-restart path.
+fn contain_poisoned_cuda<T>(value: T) {
+    let _contained = std::mem::ManuallyDrop::new(value);
+}
+
+fn contain_worker_cache(worker: &GpuWorker) {
+    let remaining = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    contain_poisoned_cuda(remaining);
+}
+
+fn synchronize_after_oom(worker: &GpuWorker) -> bool {
+    match device::try_synchronize_device(worker.gpu.ordinal) {
+        Ok(()) => true,
+        Err(error) if error.is_fatal_cuda() => {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                gpu = worker.gpu.ordinal,
+                %error,
+                "CUDA synchronize after OOM was unavailable"
+            );
+            true
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn device_memory_api_error(error: device::DeviceMemoryError) -> crate::routes::ApiError {
+    if error.is_fatal_cuda() {
+        crate::routes::ApiError::internal(error.to_string())
+    } else {
+        crate::routes::ApiError::insufficient_memory(format!(
+            "GPU memory admission blocked because current free VRAM could not be measured: {error}"
+        ))
+    }
+}
+
+pub(crate) fn run_upscale_engine_safely(
+    worker: &GpuWorker,
+    mut engine: Box<dyn mold_inference::UpscaleEngine>,
+    request: &mold_core::UpscaleRequest,
+) -> anyhow::Result<mold_core::UpscaleResponse> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.upscale(request)));
+    match result {
+        Ok(Ok(response)) => {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.clear_on_progress();
+                engine.unload();
+            })) {
+                quarantine_poisoned_worker(worker);
+                contain_poisoned_cuda(engine);
+                contain_worker_cache(worker);
+                let message = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                anyhow::bail!("upscaler cleanup panicked; CUDA state quarantined: {message}");
+            }
+            Ok(response)
+        }
+        Ok(Err(error)) if is_fatal_cuda_error(&error) => {
+            quarantine_poisoned_worker(worker);
+            contain_poisoned_cuda(engine);
+            contain_worker_cache(worker);
+            Err(error)
+        }
+        Ok(Err(error)) => {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.clear_on_progress();
+                engine.unload();
+            })) {
+                quarantine_poisoned_worker(worker);
+                contain_poisoned_cuda(engine);
+                contain_worker_cache(worker);
+                let message = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                anyhow::bail!("upscaler cleanup panicked; CUDA state quarantined: {message}");
+            }
+            Err(error)
+        }
+        Err(payload) => {
+            quarantine_poisoned_worker(worker);
+            contain_poisoned_cuda(engine);
+            contain_worker_cache(worker);
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            anyhow::bail!("upscale panicked: {message}")
+        }
+    }
+}
+
+fn load_engine_safely(
+    worker: &GpuWorker,
+    mut engine: Box<dyn mold_inference::InferenceEngine>,
+) -> anyhow::Result<Box<dyn mold_inference::InferenceEngine>> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.load()));
+    match result {
+        Ok(Ok(())) => Ok(engine),
+        Ok(Err(error)) if is_fatal_cuda_error(&error) => {
+            quarantine_poisoned_worker(worker);
+            contain_poisoned_cuda(engine);
+            contain_worker_cache(worker);
+            Err(error)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(payload) => {
+            quarantine_poisoned_worker(worker);
+            contain_poisoned_cuda(engine);
+            contain_worker_cache(worker);
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            anyhow::bail!("engine load panicked; CUDA state quarantined: {message}")
+        }
+    }
 }
 
 pub(crate) fn quarantine_if_fatal_cuda_error(worker: &GpuWorker, error: &anyhow::Error) -> bool {
@@ -368,17 +559,7 @@ fn upscale_generated_image_on_worker(
             mold_core::build_info::version_string(),
         )),
     };
-    let upscale_result = engine.upscale(&req);
-    engine.clear_on_progress();
-    let fatal_cuda = upscale_result
-        .as_ref()
-        .err()
-        .is_some_and(is_fatal_cuda_error);
-    if fatal_cuda {
-        quarantine_poisoned_worker(worker);
-    } else {
-        engine.unload();
-    }
+    let upscale_result = run_upscale_engine_safely(worker, engine, &req);
     let upscaled = upscale_result.map_err(|e| format!("upscale failed: {e}"))?;
     apply_upscale_response_to_image_generation(&job.request, response, img, upscaled)
         .map_err(|e| format!("upscale failed: {e}"))
@@ -510,13 +691,16 @@ fn process_job(
             quarantine_poisoned_worker(worker);
             (fatal_cuda_user_message(&model_name), false)
         } else if is_oom {
-            mold_inference::device::try_synchronize_device(ordinal);
-            cuda_oom_user_message(
-                worker,
-                &model_name,
-                family_slug.as_deref(),
-                Some(&job.request),
-            )
+            if synchronize_after_oom(worker) {
+                cuda_oom_user_message(
+                    worker,
+                    &model_name,
+                    family_slug.as_deref(),
+                    Some(&job.request),
+                )
+            } else {
+                (fatal_cuda_user_message(&model_name), false)
+            }
         } else {
             (
                 format!("model load error: {}", clean_error_message(&e)),
@@ -687,9 +871,6 @@ fn process_job(
         "generation memory delta"
     );
 
-    // Clear progress callback.
-    cached_engine.engine.clear_on_progress();
-
     // A fatal driver error invalidates every CUDA object owned by this
     // context. Never put the triggering engine back into the cache: doing so
     // caused immediate CUBLAS_STATUS_NOT_INITIALIZED retries on the poisoned
@@ -697,18 +878,27 @@ fn process_job(
     // Candle/cudarc retain handles to it; an in-process reset would make those
     // handles dangling. Quarantine until process restart instead.
     let fatal_cuda = matches!(&result, Ok(Err(e)) if is_fatal_cuda_error(e));
-    if fatal_cuda {
-        // Signal process teardown before destructors touch the poisoned
-        // context; CUDA cleanup is best-effort after an illegal access.
+    let inference_panicked = result.is_err();
+    if fatal_cuda || inference_panicked {
+        // Signal process teardown, then retain every suspect CUDA-backed
+        // object for OS teardown. Even an apparently innocuous engine method
+        // or destructor may synchronize an invalid context.
         quarantine_poisoned_worker(worker);
-        drop(cached_engine);
-        let remaining = {
-            let mut cache = worker.model_cache.lock().unwrap();
-            cache.clear()
-        };
-        drop(remaining);
+        contain_poisoned_cuda(cached_engine);
+        contain_worker_cache(worker);
     } else {
-        let mut cache = worker.model_cache.lock().unwrap();
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cached_engine.engine.clear_on_progress();
+        })) {
+            quarantine_poisoned_worker(worker);
+            contain_poisoned_cuda(cached_engine);
+            contain_worker_cache(worker);
+            std::panic::resume_unwind(payload);
+        }
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.restore(cached_engine);
     }
 
@@ -877,13 +1067,16 @@ fn process_job(
             let (err_msg, count_worker_failure) = if fatal_cuda {
                 (fatal_cuda_user_message(&model_name), false)
             } else if is_oom {
-                mold_inference::device::try_synchronize_device(ordinal);
-                cuda_oom_user_message(
-                    worker,
-                    &model_name,
-                    family_slug.as_deref(),
-                    Some(&job.request),
-                )
+                if synchronize_after_oom(worker) {
+                    cuda_oom_user_message(
+                        worker,
+                        &model_name,
+                        family_slug.as_deref(),
+                        Some(&job.request),
+                    )
+                } else {
+                    (fatal_cuda_user_message(&model_name), false)
+                }
             } else {
                 (
                     format!("generation error: {}", clean_error_message(&e)),
@@ -902,7 +1095,6 @@ fn process_job(
         }
         Err(panic_payload) => {
             tracing::error!(gpu = ordinal, model = %model_name, "Inference panicked");
-            record_failure(worker);
             let msg = panic_payload
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
@@ -972,7 +1164,8 @@ fn preflight_memory_guard_with_eviction(
         // can block other cache users during the drop.
         drop(engine);
 
-        let _ = device::post_drop_free_vram_bytes(ordinal);
+        #[cfg(feature = "cuda")]
+        device::post_drop_free_vram_bytes(ordinal).map_err(device_memory_api_error)?;
     }
 }
 
@@ -981,14 +1174,15 @@ fn select_load_strategy_for_worker(
     model_name: &str,
     paths: &ModelPaths,
     hint: Option<crate::model_manager::ActivationHint>,
-) -> mold_inference::LoadStrategy {
+) -> anyhow::Result<mold_inference::LoadStrategy> {
     let active_vram = worker
         .model_cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .active_vram_bytes();
     let available =
-        crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal);
+        crate::model_manager::effective_load_available_bytes(active_vram, worker.gpu.ordinal)
+            .map_err(|error| anyhow::anyhow!(error.error))?;
     let strategy = crate::model_manager::select_server_load_strategy_for_device(
         paths,
         available,
@@ -1002,7 +1196,7 @@ fn select_load_strategy_for_worker(
             "server load strategy degraded to sequential to fit memory budget"
         );
     }
-    strategy
+    Ok(strategy)
 }
 
 /// Ensure a model is loaded on this worker's GPU.
@@ -1022,6 +1216,9 @@ pub fn ensure_model_ready_sync(
     let result = ensure_model_ready_sync_inner(worker, model_name, config, hint, request_has_lora);
     if result.is_ok() {
         worker.set_resident_model(Some(model_name));
+    } else if result.as_ref().is_err_and(is_fatal_cuda_error) {
+        quarantine_poisoned_worker(worker);
+        contain_worker_cache(worker);
     }
     result
 }
@@ -1099,12 +1296,14 @@ fn ensure_model_ready_sync_inner(
             )
             .map_err(|e| anyhow::anyhow!(e.error))?;
         } else {
-            let _ = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
+            #[cfg(feature = "cuda")]
+            device::post_drop_free_vram_bytes(worker.gpu.ordinal)
+                .map_err(|error| anyhow::anyhow!(error))?;
         }
-        let load_strategy = cached_paths
-            .as_ref()
-            .map(|paths| select_load_strategy_for_worker(worker, model_name, paths, hint))
-            .unwrap_or(mold_inference::LoadStrategy::Eager);
+        let load_strategy = match cached_paths.as_ref() {
+            Some(paths) => select_load_strategy_for_worker(worker, model_name, paths, hint)?,
+            None => mold_inference::LoadStrategy::Eager,
+        };
 
         if load_strategy == mold_inference::LoadStrategy::Sequential {
             let paths = cached_paths.ok_or_else(|| {
@@ -1129,7 +1328,7 @@ fn ensure_model_ready_sync_inner(
                 .map_err(|e| anyhow::anyhow!(e.error))?
                 .map(|(_, config)| config);
             let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
-            let mut engine = match mold_inference::create_engine_with_pool(
+            let engine = match mold_inference::create_engine_with_pool(
                 model_name.to_string(),
                 paths,
                 engine_config,
@@ -1155,14 +1354,21 @@ fn ensure_model_ready_sync_inner(
                 "recreating cached engine in sequential mode..."
             );
             let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-            if let Err(err) = engine.load() {
-                let evicted = {
-                    let mut cache = worker.model_cache.lock().unwrap();
-                    cache.insert(old_engine, 0)
-                };
-                drop(evicted);
-                return Err(err);
-            }
+            let engine = match load_engine_safely(worker, engine) {
+                Ok(engine) => engine,
+                Err(err) if worker.poisoned.load(Ordering::SeqCst) => {
+                    contain_poisoned_cuda(old_engine);
+                    return Err(err);
+                }
+                Err(err) => {
+                    let evicted = {
+                        let mut cache = worker.model_cache.lock().unwrap();
+                        cache.insert(old_engine, 0)
+                    };
+                    drop(evicted);
+                    return Err(err);
+                }
+            };
             let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
             drop(old_engine);
             let evicted = {
@@ -1174,7 +1380,7 @@ fn ensure_model_ready_sync_inner(
         }
 
         // Take the engine out and reload it.
-        let mut engine = {
+        let engine = {
             let mut cache = worker.model_cache.lock().unwrap();
             cache
                 .remove(model_name)
@@ -1189,7 +1395,7 @@ fn ensure_model_ready_sync_inner(
         // Sample VRAM baseline before load so we can record the new model's
         // per-load delta rather than the device-global usage.
         let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-        engine.load()?;
+        let engine = load_engine_safely(worker, engine)?;
 
         let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
         // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
@@ -1261,12 +1467,12 @@ fn ensure_model_ready_sync_inner(
         hint,
     )
     .map_err(|e| anyhow::anyhow!(e.error))?;
-    let load_strategy = select_load_strategy_for_worker(worker, model_name, &paths, hint);
+    let load_strategy = select_load_strategy_for_worker(worker, model_name, &paths, hint)?;
 
     let offload =
         crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora);
     let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
-    let mut engine = mold_inference::create_engine_with_pool(
+    let engine = mold_inference::create_engine_with_pool(
         model_name.to_string(),
         paths,
         engine_config,
@@ -1284,7 +1490,7 @@ fn ensure_model_ready_sync_inner(
     // Sample VRAM baseline before load so we can record the new model's
     // per-load delta rather than the device-global usage.
     let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-    engine.load()?;
+    let engine = load_engine_safely(worker, engine)?;
 
     let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
     // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
@@ -1323,22 +1529,43 @@ pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> a
 ///
 /// Returns the name of the model that was unloaded, or `None` if the GPU was
 /// already idle.
-pub fn unload_blocking(worker: &GpuWorker) -> Option<String> {
-    let _lock = worker.model_load_lock.lock().unwrap();
+pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
+    ensure_worker_not_poisoned(worker, "admin unload")?;
+    let _lock = worker
+        .model_load_lock
+        .lock()
+        .map_err(|error| anyhow::anyhow!("worker.model_load_lock poisoned: {error}"))?;
+    ensure_worker_not_poisoned(worker, "admin unload")?;
     let unloaded = {
-        let mut cache = worker.model_cache.lock().unwrap();
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .map_err(|error| anyhow::anyhow!("worker.model_cache poisoned: {error}"))?;
+        ensure_worker_not_poisoned(worker, "admin unload")?;
         cache.unload_active()
     };
     if unloaded.is_some() {
         worker.set_resident_model(None);
-        let free_after_drop = device::post_drop_free_vram_bytes(worker.gpu.ordinal);
-        tracing::info!(
-            gpu = worker.gpu.ordinal,
-            free_vram_bytes = ?free_after_drop,
-            "model unloaded; sampled post-drop VRAM"
-        );
+        ensure_worker_not_poisoned(worker, "admin unload")?;
+        match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+            Ok(free_after_drop) => tracing::info!(
+                gpu = worker.gpu.ordinal,
+                free_vram_bytes = free_after_drop,
+                "model unloaded; sampled post-drop VRAM"
+            ),
+            Err(error) if error.is_fatal_cuda() => {
+                quarantine_poisoned_worker(worker);
+                contain_worker_cache(worker);
+                return Err(anyhow::anyhow!(error));
+            }
+            Err(error) => tracing::warn!(
+                gpu = worker.gpu.ordinal,
+                %error,
+                "model unloaded but post-drop VRAM sample was unavailable"
+            ),
+        }
     }
-    unloaded
+    Ok(unloaded)
 }
 
 fn record_failure(worker: &GpuWorker) {
@@ -1436,17 +1663,14 @@ pub fn run_chain_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
         })?
     };
 
-    // Run the closure. Capture panics so we can still restore the engine
-    // before propagating — otherwise a panic leaks the engine out of the cache.
+    // Run the closure. A panic may have crossed arbitrary CUDA state, so it
+    // has the same terminal containment policy as a fatal driver error.
     //
     // `AssertUnwindSafe` suppresses the compiler's UnwindSafe check because
     // `&mut dyn InferenceEngine` (across Box + trait object) isn't unwind-safe
     // by default. This is acceptable here: we only promise to prevent the
     // CUDA primary-context reset SEGV race, not to guarantee engine internal
-    // state is pristine after a mid-generation panic. A panicked engine will
-    // surface as a bad generation result to the next caller — not a crash.
-    // `catch_unwind` + `resume_unwind` exists solely so the engine is
-    // restored to the cache before the panic propagates up.
+    // state is pristine after a mid-generation panic.
     let mut cached = cached;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         with_engine(cached.engine.as_mut())
@@ -1454,18 +1678,13 @@ pub fn run_chain_blocking<T, E: std::fmt::Display + std::fmt::Debug>(
 
     let fatal_cuda =
         matches!(&result, Ok(Err(error)) if has_fatal_cuda_error(&format!("{error:#}")));
-    if fatal_cuda {
+    let panicked = result.is_err();
+    if fatal_cuda || panicked {
         quarantine_poisoned_worker(worker);
-        drop(cached);
-        let remaining = worker
-            .model_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        drop(remaining);
+        contain_poisoned_cuda(cached);
+        contain_worker_cache(worker);
     } else {
-        // Restore on ordinary closure errors and panics. Fatal CUDA errors are
-        // the sole exception because the engine's context cannot be reused.
+        // Ordinary typed closure errors do not imply context corruption.
         let mut cache = worker
             .model_cache
             .lock()
@@ -1552,6 +1771,150 @@ mod tests {
     struct DropRecordingEngine {
         name: String,
         dropped_on: Arc<Mutex<Option<String>>>,
+    }
+
+    struct CudaCallbackRecordingEngine {
+        name: String,
+        unload_calls: Arc<AtomicUsize>,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for CudaCallbackRecordingEngine {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl InferenceEngine for CudaCallbackRecordingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("safety test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {
+            self.unload_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PoisoningUpscaler {
+        panic: bool,
+        unload_calls: Arc<AtomicUsize>,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for PoisoningUpscaler {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl mold_inference::UpscaleEngine for PoisoningUpscaler {
+        fn upscale(
+            &mut self,
+            _req: &mold_core::UpscaleRequest,
+        ) -> anyhow::Result<mold_core::UpscaleResponse> {
+            if self.panic {
+                panic!("injected upscaler panic");
+            }
+            anyhow::bail!("CUDA_ERROR_ILLEGAL_ADDRESS")
+        }
+
+        fn model_name(&self) -> &str {
+            "poisoning-upscaler"
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {
+            self.unload_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn scale_factor(&self) -> u32 {
+            4
+        }
+
+        fn set_on_progress(&mut self, _callback: mold_inference::progress::ProgressCallback) {}
+
+        fn clear_on_progress(&mut self) {}
+    }
+
+    struct PanickingGenerateEngine {
+        name: String,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    struct PoisoningLoadEngine {
+        name: String,
+        panic: bool,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for PoisoningLoadEngine {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl InferenceEngine for PoisoningLoadEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("load safety test never generates")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            false
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            if self.panic {
+                panic!("injected load panic");
+            }
+            anyhow::bail!("CUDA_ERROR_ILLEGAL_ADDRESS")
+        }
+    }
+
+    impl Drop for PanickingGenerateEngine {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl InferenceEngine for PanickingGenerateEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            panic!("injected generation panic")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     impl Drop for DropRecordingEngine {
@@ -1879,6 +2242,120 @@ mod tests {
     }
 
     #[test]
+    fn poisoned_idle_eviction_invokes_no_engine_or_device_cleanup() {
+        let dropped_on = Arc::new(Mutex::new(None));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(DropRecordingEngine {
+                name: "must-not-drop".to_string(),
+                dropped_on: dropped_on.clone(),
+            }),
+            0,
+        );
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+
+        evict_idle_on_worker(&worker, Duration::ZERO);
+
+        assert!(dropped_on.lock().unwrap().is_none());
+        assert_eq!(worker.model_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn poisoned_admin_unload_invokes_zero_cuda_backed_callbacks() {
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert_loaded(
+            "active".to_string(),
+            Box::new(CudaCallbackRecordingEngine {
+                name: "active".to_string(),
+                unload_calls: unload_calls.clone(),
+                drop_calls: drop_calls.clone(),
+            }),
+            123,
+        );
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+
+        let result = unload_blocking(&worker);
+
+        assert!(result.is_err());
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.model_cache.lock().unwrap().contains("active"));
+    }
+
+    #[test]
+    fn recv_timeout_observes_fatal_flag_without_eviction_or_next_ready() {
+        let dropped_on = Arc::new(Mutex::new(None));
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
+        let mut cache = ModelCache::new(3);
+        cache.insert(FakeSlowEngine::boxed("keep-one", Duration::ZERO), 0);
+        cache.insert(
+            Box::new(DropRecordingEngine {
+                name: "must-not-evict".to_string(),
+                dropped_on: dropped_on.clone(),
+            }),
+            0,
+        );
+        let worker = Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal: 0,
+                stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
+                raw_cuda_uuid: Some([0; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
+                name: "fake-gpu-0".to_string(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(cache)),
+            resident_model: Arc::new(RwLock::new(None)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker_for_thread = worker.clone();
+        let handle = std::thread::spawn(move || {
+            run_gpu_owner(
+                &worker_for_thread,
+                job_rx,
+                event_tx,
+                Duration::ZERO,
+                Duration::from_millis(10),
+            )
+        });
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+        handle.join().expect("owner exits on fatal timeout branch");
+
+        assert!(
+            event_rx.try_recv().is_err(),
+            "fatal worker must not re-advertise Ready"
+        );
+        assert!(dropped_on.lock().unwrap().is_none());
+        assert_eq!(worker.model_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     fn fatal_cuda_errors_are_classified_as_context_poisoning() {
         for message in [
             "DriverError(CUDA_ERROR_ILLEGAL_ADDRESS, an illegal memory access was encountered)",
@@ -2008,6 +2485,129 @@ mod tests {
         drop(queue_rx.recv().await);
     }
 
+    #[tokio::test]
+    async fn generation_panic_contains_engine_and_blocks_followup_job() {
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let worker = single_worker_pool_with_parked("parked", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert_loaded(
+            "panic-model".to_string(),
+            Box::new(PanickingGenerateEngine {
+                name: "panic-model".to_string(),
+                drop_calls: drop_calls.clone(),
+            }),
+            123,
+        );
+        worker.in_flight.store(1, Ordering::SeqCst);
+
+        let mut request = fake_upscale_job(Config::default(), "unused").request;
+        request.model = "panic-model".to_string();
+        request.upscale_model = None;
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+        queue
+            .submit(
+                GenerationJob {
+                    id: "placeholder".to_string(),
+                    request: request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: placeholder_tx,
+                    output_dir: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        let panic_request = request.clone();
+        tokio::task::spawn_blocking(move || {
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: "panic-job".to_string(),
+                    model: "panic-model".to_string(),
+                    request: panic_request,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    queue: queue.clone(),
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    lease: None,
+                },
+            );
+        })
+        .await
+        .unwrap();
+
+        let panic_error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("panicking engine unexpectedly generated"),
+        };
+        assert!(panic_error.contains("inference panicked"));
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.model_cache.lock().unwrap().is_empty());
+        drop(queue_rx.recv().await);
+
+        worker.in_flight.store(1, Ordering::SeqCst);
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let followup_queue = QueueHandle::new(queue_tx);
+        let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+        followup_queue
+            .submit(
+                GenerationJob {
+                    id: "placeholder-2".to_string(),
+                    request: request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: placeholder_tx,
+                    output_dir: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let worker_for_job = worker.clone();
+        tokio::task::spawn_blocking(move || {
+            process_job(
+                &worker_for_job,
+                GpuJob {
+                    id: "followup".to_string(),
+                    model: "panic-model".to_string(),
+                    request,
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx,
+                    output_dir: None,
+                    config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                    metadata_db: Arc::new(None),
+                    queue: followup_queue,
+                    registry: JobRegistry::new(),
+                    events: crate::events::EventBroadcaster::new(),
+                    lease: None,
+                },
+            );
+        })
+        .await
+        .unwrap();
+        let followup_error = match result_rx.await.unwrap() {
+            Err(error) => error,
+            Ok(_) => panic!("quarantined worker unexpectedly generated"),
+        };
+        assert!(followup_error.contains("quarantined"));
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        drop(queue_rx.recv().await);
+    }
+
     #[test]
     fn poisoned_worker_rejects_admin_and_chain_entry_points() {
         let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
@@ -2032,6 +2632,30 @@ mod tests {
         assert!(chain_error.to_string().contains("worker was quarantined"));
         assert!(!closure_ran.load(Ordering::SeqCst));
         assert!(worker.model_cache.lock().unwrap().contains("fake-model"));
+    }
+
+    #[test]
+    fn fatal_and_panicking_admin_loads_are_contained_without_engine_drop() {
+        for panic in [false, true] {
+            let drop_calls = Arc::new(AtomicUsize::new(0));
+            let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+            worker.model_cache.lock().unwrap().insert(
+                Box::new(PoisoningLoadEngine {
+                    name: "poison-load".to_string(),
+                    panic,
+                    drop_calls: drop_calls.clone(),
+                }),
+                0,
+            );
+
+            let result = load_blocking(&worker, "poison-load", &Config::default());
+
+            assert!(result.is_err());
+            assert!(worker.poisoned.load(Ordering::SeqCst));
+            assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+            assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+            assert!(worker.model_cache.lock().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -2096,6 +2720,36 @@ mod tests {
     }
 
     #[test]
+    fn fatal_and_panicking_upscalers_are_contained_without_cleanup_callbacks() {
+        for panic in [false, true] {
+            let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+            let unload_calls = Arc::new(AtomicUsize::new(0));
+            let drop_calls = Arc::new(AtomicUsize::new(0));
+            let request = mold_core::UpscaleRequest {
+                model: "poisoning-upscaler".to_string(),
+                image: vec![1, 2, 3],
+                output_format: OutputFormat::Png,
+                tile_size: None,
+                metadata: None,
+            };
+            let result = run_upscale_engine_safely(
+                &worker,
+                Box::new(PoisoningUpscaler {
+                    panic,
+                    unload_calls: unload_calls.clone(),
+                    drop_calls: drop_calls.clone(),
+                }),
+                &request,
+            );
+
+            assert!(result.is_err());
+            assert!(worker.poisoned.load(Ordering::SeqCst));
+            assert_eq!(unload_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
     fn run_chain_blocking_quarantines_fatal_cuda_closure_error() {
         let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
         let config = Config::default();
@@ -2112,6 +2766,40 @@ mod tests {
         assert!(worker.poisoned.load(Ordering::SeqCst));
         assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
         assert!(worker.model_cache.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_chain_panic_contains_engine_and_rejects_next_grant() {
+        let worker = single_worker_pool_with_parked("fake-model", Duration::ZERO);
+        let config = Config::default();
+
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run_chain_blocking(
+                &worker,
+                "fake-model",
+                &config,
+                None,
+                |_engine| -> anyhow::Result<()> { panic!("injected chain panic") },
+            );
+        }));
+        assert!(first.is_err());
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+        assert!(worker.model_cache.lock().unwrap().is_empty());
+
+        let next_closure_ran = AtomicBool::new(false);
+        let next = run_chain_blocking(
+            &worker,
+            "fake-model",
+            &config,
+            None,
+            |_engine| -> anyhow::Result<()> {
+                next_closure_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(next.is_err(), "poisoned worker must reject the next grant");
+        assert!(!next_closure_ran.load(Ordering::SeqCst));
     }
 
     /// Two concurrent callers into `run_chain_blocking` on the same worker

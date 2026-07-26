@@ -70,7 +70,7 @@ fn post_drop_sampling_preserves_live_cuda_handles() {
     let sampled = device::post_drop_free_vram_bytes(0);
     device::clear_thread_gpu_ordinal();
 
-    assert!(sampled.is_some(), "CUDA free-memory sample must succeed");
+    assert!(sampled.is_ok(), "CUDA free-memory sample must succeed");
     let values = live
         .affine(2.0, 1.0)
         .and_then(|tensor| tensor.to_vec1::<f32>())
@@ -95,7 +95,7 @@ fn sampling_one_gpu_preserves_sibling_gpu_handles() {
     let live1 = Tensor::from_slice(&[4.0_f32], 1, &cuda1).expect("GPU 1 tensor");
 
     device::init_thread_gpu_ordinal(0);
-    assert!(device::post_drop_free_vram_bytes(0).is_some());
+    assert!(device::post_drop_free_vram_bytes(0).is_ok());
     device::clear_thread_gpu_ordinal();
 
     assert_eq!(
@@ -105,5 +105,36 @@ fn sampling_one_gpu_preserves_sibling_gpu_handles() {
     assert_eq!(
         live1.to_vec1::<f32>().expect("GPU 1 handle survives"),
         vec![4.0]
+    );
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_allocation_and_drop_are_visible_to_authoritative_sampling() {
+    use candle_core::{DType, Device, Tensor};
+    use mold_inference::device;
+
+    if !candle_core::utils::cuda_is_available() {
+        return;
+    }
+
+    const ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+    let cuda = Device::new_cuda(0).expect("open CUDA device 0");
+    device::init_thread_gpu_ordinal(0);
+    let before = device::post_drop_free_vram_bytes(0).expect("baseline VRAM sample");
+    let tensor = Tensor::zeros((ALLOCATION_BYTES as usize / 4,), DType::F32, &cuda)
+        .expect("allocate CUDA tensor");
+    let during = device::post_drop_free_vram_bytes(0).expect("allocated VRAM sample");
+    assert!(
+        before.saturating_sub(during) >= ALLOCATION_BYTES / 2,
+        "driver sample did not observe the allocation: before={before}, during={during}"
+    );
+    drop(tensor);
+    let after = device::post_drop_free_vram_bytes(0).expect("post-drop VRAM sample");
+    device::clear_thread_gpu_ordinal();
+
+    assert!(
+        after >= before.saturating_sub(ALLOCATION_BYTES / 4),
+        "post-drop sample did not recover most of the allocation: before={before}, after={after}"
     );
 }

@@ -4,6 +4,34 @@ use mold_core::types::{GpuBackend, GpuSelection, GpuSelector};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
+/// A CUDA memory observation failed before Mold could make a safe admission
+/// decision.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DeviceMemoryError {
+    /// The CUDA context reported an asynchronous fault that makes every
+    /// retained handle suspect. Callers must quarantine the owner and stop
+    /// issuing CUDA calls until process restart.
+    #[error("fatal CUDA error during {operation}: {message}")]
+    FatalCuda {
+        operation: &'static str,
+        message: String,
+    },
+    /// The driver could not provide an authoritative current-free reading.
+    /// Admission must fail closed; nominal capacity and host RAM are not
+    /// substitutes for CUDA free VRAM.
+    #[error("CUDA memory sample unavailable during {operation}: {message}")]
+    Unavailable {
+        operation: &'static str,
+        message: String,
+    },
+}
+
+impl DeviceMemoryError {
+    pub fn is_fatal_cuda(&self) -> bool {
+        matches!(self, Self::FatalCuda { .. })
+    }
+}
+
 // ── Thread-local GPU ordinal guard ─────────────────────────────────────────
 //
 // Each GPU worker thread is pinned to a single ordinal. We stash that ordinal
@@ -1138,7 +1166,47 @@ pub fn keep_te_in_ram() -> bool {
         .unwrap_or(false)
 }
 
-/// Best-effort CUDA device synchronize, ignoring errors.
+#[cfg(feature = "cuda")]
+fn fatal_cuda_driver_message(message: &str) -> bool {
+    [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_ASSERT",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_INVALID_ADDRESS_SPACE",
+        "CUDA_ERROR_INVALID_PC",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+#[cfg(feature = "cuda")]
+fn memory_error(operation: &'static str, error: impl std::fmt::Display) -> DeviceMemoryError {
+    let message = error.to_string();
+    if fatal_cuda_driver_message(&message) {
+        DeviceMemoryError::FatalCuda { operation, message }
+    } else {
+        DeviceMemoryError::Unavailable { operation, message }
+    }
+}
+
+/// Run an authoritative post-drop observation. Kept separate from the CUDA
+/// bindings so fault-ordering can be tested without inducing a real illegal
+/// access: a failed synchronize must prevent the memory callback from running.
+#[doc(hidden)]
+pub fn post_drop_free_vram_bytes_with(
+    synchronize: impl FnOnce() -> Result<(), DeviceMemoryError>,
+    sample_free: impl FnOnce() -> Result<u64, DeviceMemoryError>,
+) -> Result<u64, DeviceMemoryError> {
+    synchronize()?;
+    sample_free()
+}
+
+/// Synchronize pending CUDA work.
 ///
 /// After a `CUDA_ERROR_OUT_OF_MEMORY` the CUDA context may have in-flight work
 /// that hasn't been flushed; subsequent allocations can inherit a poisoned
@@ -1146,22 +1214,22 @@ pub fn keep_te_in_ram() -> bool {
 /// any retry lets CUDA drain pending work and reset internal queues so the
 /// next allocation attempt starts clean.
 ///
-/// Errors are silently swallowed — this is a "best effort" hygiene step, not a
-/// hard requirement. The caller has already decided to surface an OOM error;
-/// a secondary synchronize failure shouldn't shadow the primary message.
-///
 /// On non-CUDA platforms this is a no-op.
 #[cfg(feature = "cuda")]
-pub fn try_synchronize_device(ordinal: usize) {
+pub fn try_synchronize_device(ordinal: usize) -> Result<(), DeviceMemoryError> {
     debug_assert_ordinal_matches_thread(ordinal, "try_synchronize_device");
-    if let Ok(context) = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal) {
-        let _ = context.synchronize();
-    }
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    context
+        .synchronize()
+        .map_err(|error| memory_error("device synchronize", error))
 }
 
 /// No-op on non-CUDA platforms.
 #[cfg(not(feature = "cuda"))]
-pub fn try_synchronize_device(_ordinal: usize) {}
+pub fn try_synchronize_device(_ordinal: usize) -> Result<(), DeviceMemoryError> {
+    Ok(())
+}
 
 /// Synchronize pending work after device-backed values have been dropped, then
 /// return the actual reserve-adjusted free VRAM reported by the driver.
@@ -1169,9 +1237,38 @@ pub fn try_synchronize_device(_ordinal: usize) {}
 /// Dropping Mold-owned objects does not imply that nominal total VRAM is
 /// available: driver workspaces, fragmentation, and external allocations
 /// remain unavailable pressure and are preserved in this measurement.
-pub fn post_drop_free_vram_bytes(ordinal: usize) -> Option<u64> {
-    try_synchronize_device(ordinal);
-    usable_free_vram_bytes(ordinal)
+#[cfg(feature = "cuda")]
+pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    debug_assert_ordinal_matches_thread(ordinal, "post_drop_free_vram_bytes");
+    // One retained context spans both calls. Using the global mem_get_info
+    // entry point after dropping this retain can sample whichever context the
+    // thread later binds and defeats the owner-thread invariant.
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    post_drop_free_vram_bytes_with(
+        || {
+            context
+                .synchronize()
+                .map_err(|error| memory_error("device synchronize", error))
+        },
+        || {
+            context
+                .mem_get_info()
+                .map(|(free, _)| usable_free_vram_from_raw(free as u64, reserved_vram_bytes()))
+                .map_err(|error| memory_error("free VRAM query", error))
+        },
+    )
+}
+
+/// Metal has unified memory and no CUDA stream to drain. The server deliberately
+/// does not use this as a second post-drop admission gate; this implementation
+/// remains useful to inference components that want a conservative observation.
+#[cfg(not(feature = "cuda"))]
+pub fn post_drop_free_vram_bytes(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    usable_free_vram_bytes(ordinal).ok_or_else(|| DeviceMemoryError::Unavailable {
+        operation: "free GPU memory query",
+        message: "this backend does not expose a memory sample".to_string(),
+    })
 }
 
 // ── VRAM query ───────────────────────────────────────────────────────────────
@@ -1183,14 +1280,11 @@ pub fn post_drop_free_vram_bytes(ordinal: usize) -> Option<u64> {
 /// On other non-CUDA platforms, no VRAM info available.
 #[cfg(feature = "cuda")]
 pub fn free_vram_bytes(ordinal: usize) -> Option<u64> {
-    // Create/bind the device context for the specified ordinal before querying.
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(free, _total)| free as u64)
-    } else {
-        None
-    }
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).ok()?;
+    context
+        .mem_get_info()
+        .ok()
+        .map(|(free, _total)| free as u64)
 }
 
 /// On macOS (unified memory), return available system memory (free + inactive).
@@ -1251,6 +1345,28 @@ pub fn usable_free_vram_bytes(ordinal: usize) -> Option<u64> {
     free_vram_bytes(ordinal).map(|free| usable_free_vram_from_raw(free, reserve))
 }
 
+/// Authoritative reserve-adjusted current-free reading used by CUDA admission.
+/// Unlike the compatibility `Option` API, failure is typed so callers cannot
+/// silently substitute host RAM or nominal device capacity.
+#[cfg(feature = "cuda")]
+pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    debug_assert_ordinal_matches_thread(ordinal, "usable_free_vram_bytes_result");
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .map_err(|error| memory_error("context retain", error))?;
+    context
+        .mem_get_info()
+        .map(|(free, _)| usable_free_vram_from_raw(free as u64, reserved_vram_bytes()))
+        .map_err(|error| memory_error("free VRAM query", error))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn usable_free_vram_bytes_result(ordinal: usize) -> Result<u64, DeviceMemoryError> {
+    usable_free_vram_bytes(ordinal).ok_or_else(|| DeviceMemoryError::Unavailable {
+        operation: "free GPU memory query",
+        message: "this backend does not expose a memory sample".to_string(),
+    })
+}
+
 fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
     free.saturating_sub(reserve)
 }
@@ -1263,14 +1379,10 @@ fn usable_free_vram_from_raw(free: u64, reserve: u64) -> u64 {
 /// pre-load baseline and a post-load reading via [`vram_load_delta`].
 #[cfg(feature = "cuda")]
 pub fn vram_in_use_bytes(ordinal: usize) -> u64 {
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(free, total)| total as u64 - free as u64)
-            .unwrap_or(0)
-    } else {
-        0
-    }
+    candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal)
+        .and_then(|context| context.mem_get_info())
+        .map(|(free, total)| total as u64 - free as u64)
+        .unwrap_or(0)
 }
 
 /// Non-CUDA stub — no VRAM tracking available.
@@ -1291,13 +1403,11 @@ pub fn vram_in_use_bytes(_ordinal: usize) -> u64 {
 /// budget in that case rather than treating `None` as unlimited.
 #[cfg(feature = "cuda")]
 pub fn total_vram_bytes(ordinal: usize) -> Option<u64> {
-    if candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).is_ok() {
-        candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
-            .ok()
-            .map(|(_free, total)| total as u64)
-    } else {
-        None
-    }
+    let context = candle_core::cuda_backend::cudarc::driver::CudaContext::new(ordinal).ok()?;
+    context
+        .mem_get_info()
+        .ok()
+        .map(|(_free, total)| total as u64)
 }
 
 /// Non-CUDA stub — no per-device total VRAM available outside CUDA.
@@ -3153,5 +3263,50 @@ mod tests {
             "MEMORY_BUDGET_HEADROOM changed — update the rejection error message \
              in mold-server::model_manager::check_model_memory_budget to match"
         );
+    }
+
+    #[test]
+    fn fatal_post_drop_synchronize_prevents_memory_query() {
+        let sample_calls = std::cell::Cell::new(0);
+        let result = post_drop_free_vram_bytes_with(
+            || {
+                Err(DeviceMemoryError::FatalCuda {
+                    operation: "device synchronize",
+                    message: "CUDA_ERROR_ILLEGAL_ADDRESS".to_string(),
+                })
+            },
+            || {
+                sample_calls.set(sample_calls.get() + 1);
+                Ok(24_000_000_000)
+            },
+        );
+
+        assert!(result.unwrap_err().is_fatal_cuda());
+        assert_eq!(
+            sample_calls.get(),
+            0,
+            "fatal synchronize must fence every later CUDA callback"
+        );
+    }
+
+    #[test]
+    fn unavailable_post_drop_sample_stays_typed() {
+        let result = post_drop_free_vram_bytes_with(
+            || Ok(()),
+            || {
+                Err(DeviceMemoryError::Unavailable {
+                    operation: "free VRAM query",
+                    message: "driver unavailable".to_string(),
+                })
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DeviceMemoryError::Unavailable {
+                operation: "free VRAM query",
+                ..
+            })
+        ));
     }
 }

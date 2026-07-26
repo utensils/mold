@@ -4553,7 +4553,7 @@ fn load_ltx2_av_transformer_with_loras(
                                     residency_plan.resident_count()
                                 ),
                             );
-                            try_synchronize_device(gpu_ordinal);
+                            try_synchronize_device(gpu_ordinal)?;
                             if !residency_plan.demote_largest_resident(&block_sizes) {
                                 return Err(err.into());
                             }

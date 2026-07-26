@@ -691,12 +691,19 @@ fn select_aux_worker(
         .ok_or_else(|| ApiError::internal("no GPU worker available for auxiliary workload"))
 }
 
-fn clear_global_upscaler_cache(state: &AppState) {
-    if let Ok(mut cache) = state.upscaler_cache.try_lock() {
-        if let Some(mut engine) = cache.take() {
-            engine.unload();
-            tracing::info!("upscaler cache cleared");
+async fn clear_global_upscaler_cache(state: &AppState) {
+    let cache = state.upscaler_cache.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        if let Ok(mut cache) = cache.try_lock() {
+            if let Some(mut engine) = cache.take() {
+                engine.unload();
+                tracing::info!("upscaler cache cleared");
+            }
         }
+    })
+    .await
+    {
+        tracing::warn!(%error, "upscaler cache teardown task panicked");
     }
 }
 
@@ -1117,20 +1124,13 @@ async fn upscale(
                 let _thread_gpu = ThreadGpuGuard;
                 let _load_lock = worker_clone.model_load_lock.lock().unwrap();
                 crate::gpu_worker::ensure_worker_not_poisoned(&worker_clone, &model_name_owned)?;
-                let mut engine = mold_inference::create_upscale_engine(
+                let engine = mold_inference::create_upscale_engine(
                     model_name_owned,
                     weights_path,
                     mold_inference::LoadStrategy::Eager,
                     worker_clone.gpu.ordinal,
                 )?;
-                let result = engine.upscale(&req);
-                let fatal_cuda = result.as_ref().err().is_some_and(|error| {
-                    crate::gpu_worker::quarantine_if_fatal_cuda_error(&worker_clone, error)
-                });
-                if !fatal_cuda {
-                    engine.unload();
-                }
-                result
+                crate::gpu_worker::run_upscale_engine_safely(&worker_clone, engine, &req)
             })
             .await;
         worker.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -1377,8 +1377,11 @@ async fn upscale_stream(
                             let _ = tx_progress.send(SseMessage::Progress(sse_event));
                         }));
 
-                        let mut fatal_cuda = false;
-                        match engine.upscale(&req_for_worker) {
+                        match crate::gpu_worker::run_upscale_engine_safely(
+                            &worker_clone,
+                            engine,
+                            &req_for_worker,
+                        ) {
                             Ok(resp) => {
                                 let image_b64 = base64::engine::general_purpose::STANDARD
                                     .encode(&resp.image.data);
@@ -1395,21 +1398,12 @@ async fn upscale_stream(
                                 ));
                             }
                             Err(e) => {
-                                fatal_cuda = crate::gpu_worker::quarantine_if_fatal_cuda_error(
-                                    &worker_clone,
-                                    &e,
-                                );
                                 let _ = tx_for_worker.send(SseMessage::Error(
                                     mold_core::SseErrorEvent {
                                         message: format!("upscale failed: {e}"),
                                     },
                                 ));
                             }
-                        }
-
-                        engine.clear_on_progress();
-                        if !fatal_cuda {
-                            engine.unload();
                         }
                     })
                     .await;
@@ -2030,8 +2024,6 @@ async fn unload_model(
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     tracing::debug!(model = ?req.model, gpu = ?req.gpu, "unload request");
-    clear_global_upscaler_cache(&state);
-
     // Multi-GPU path: target specific GPU or model across the pool.
     if state.gpu_pool.worker_count() > 0 {
         // Select the workers to unload from.
@@ -2070,7 +2062,8 @@ async fn unload_model(
                 crate::gpu_worker::unload_blocking(&worker_clone)
             })
             .await
-            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?;
+            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?
+            .map_err(|e| ApiError::internal(format!("unload failed: {e}")))?;
             if let Some(name) = result {
                 unloaded_pairs.push((worker.gpu.ordinal, name));
             }
@@ -2089,6 +2082,7 @@ async fn unload_model(
     }
 
     // Legacy single-GPU path.
+    clear_global_upscaler_cache(&state).await;
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -4044,6 +4038,7 @@ mod tests {
 
     struct TrackingUpscaler {
         unloaded: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        unloaded_on: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
     }
 
     impl mold_inference::UpscaleEngine for TrackingUpscaler {
@@ -4067,6 +4062,7 @@ mod tests {
         }
 
         fn unload(&mut self) {
+            *self.unloaded_on.lock().unwrap() = Some(std::thread::current().id());
             self.unloaded.store(true, Ordering::SeqCst);
         }
 
@@ -4079,8 +4075,8 @@ mod tests {
         fn clear_on_progress(&mut self) {}
     }
 
-    #[test]
-    fn clearing_upscaler_cache_unloads_before_drop() {
+    #[tokio::test]
+    async fn clearing_upscaler_cache_unloads_before_drop() {
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(
             mold_core::Config::default(),
@@ -4089,13 +4085,21 @@ mod tests {
             1,
         );
         let unloaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let unloaded_on = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let runtime_thread = std::thread::current().id();
         *state.upscaler_cache.lock().unwrap() = Some(Box::new(TrackingUpscaler {
             unloaded: unloaded.clone(),
+            unloaded_on: unloaded_on.clone(),
         }));
 
-        clear_global_upscaler_cache(&state);
+        clear_global_upscaler_cache(&state).await;
 
         assert!(unloaded.load(Ordering::SeqCst));
+        assert_ne!(
+            unloaded_on.lock().unwrap().as_ref(),
+            Some(&runtime_thread),
+            "upscaler teardown must not run on the async runtime thread"
+        );
         assert!(state.upscaler_cache.lock().unwrap().is_none());
     }
 

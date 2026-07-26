@@ -448,32 +448,36 @@ pub(crate) fn preflight_memory_guard(
 ) -> Result<(), ApiError> {
     #[cfg(feature = "cuda")]
     {
-        if let Some(effective_free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                effective_free,
-                hint,
-            );
-        }
+        let effective_free = authoritative_cuda_available(
+            mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
+        )?;
+        preflight_memory_guard_with_available(
+            model_name,
+            paths,
+            active_vram_bytes,
+            effective_free,
+            hint,
+        )
     }
 
-    // macOS unified memory: query system memory and add reclaimable footprint.
-    if let Some(available) = mold_inference::device::available_system_memory_bytes() {
-        if available > 0 {
-            return preflight_memory_guard_with_available(
-                model_name,
-                paths,
-                active_vram_bytes,
-                available,
-                hint,
-            );
+    #[cfg(not(feature = "cuda"))]
+    {
+        // macOS unified memory: query system memory and add reclaimable footprint.
+        if let Some(available) = mold_inference::device::available_system_memory_bytes() {
+            if available > 0 {
+                return preflight_memory_guard_with_available(
+                    model_name,
+                    paths,
+                    active_vram_bytes,
+                    available,
+                    hint,
+                );
+            }
         }
-    }
 
-    // No memory info available on this platform — skip the guard.
-    Ok(())
+        // No memory info available on this platform — skip the guard.
+        Ok(())
+    }
 }
 
 /// Re-check a load against the driver's actual free-memory reading after the
@@ -489,10 +493,22 @@ pub(crate) fn preflight_memory_guard_after_drop(
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
-    if let Some(available) = mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal) {
-        return preflight_memory_guard_with_available(model_name, paths, 0, available, hint);
+    #[cfg(feature = "cuda")]
+    {
+        let available = authoritative_cuda_available(
+            mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
+        )?;
+        preflight_memory_guard_with_available(model_name, paths, 0, available, hint)
     }
-    Ok(())
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Metal's unified-memory admission already used available system
+        // memory plus the active engine's reclaimable footprint in the first
+        // guard. A second instantaneous sample after `unload()` can lag page
+        // reclamation and falsely reject a swap.
+        let _ = (model_name, paths, gpu_ordinal, hint);
+        Ok(())
+    }
 }
 
 /// Effective memory budget to use when deciding whether a server engine can
@@ -503,17 +519,34 @@ pub(crate) fn preflight_memory_guard_after_drop(
 pub(crate) fn effective_load_available_bytes(
     active_vram_bytes: u64,
     #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] gpu_ordinal: usize,
-) -> Option<u64> {
+) -> Result<Option<u64>, ApiError> {
     #[cfg(feature = "cuda")]
     {
-        if let Some(free) = mold_inference::device::usable_free_vram_bytes(gpu_ordinal) {
-            return Some(free.saturating_add(active_vram_bytes));
-        }
+        let free = authoritative_cuda_available(
+            mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
+        )?;
+        Ok(Some(free.saturating_add(active_vram_bytes)))
     }
 
-    mold_inference::device::available_system_memory_bytes()
+    #[cfg(not(feature = "cuda"))]
+    Ok(mold_inference::device::available_system_memory_bytes()
         .filter(|available| *available > 0)
-        .map(|available| available.saturating_add(active_vram_bytes))
+        .map(|available| available.saturating_add(active_vram_bytes)))
+}
+
+#[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
+fn authoritative_cuda_available(
+    sample: Result<u64, mold_inference::device::DeviceMemoryError>,
+) -> Result<u64, ApiError> {
+    sample.map_err(|error| {
+        if error.is_fatal_cuda() {
+            ApiError::internal(error.to_string())
+        } else {
+            ApiError::insufficient_memory(format!(
+                "GPU memory admission blocked because current free VRAM could not be measured: {error}"
+            ))
+        }
+    })
 }
 
 /// Choose the server load strategy for the current memory budget.
@@ -599,7 +632,7 @@ pub(crate) fn select_server_load_strategy_for_device(
     ) {
         (Some(available), Some(total)) => Some(available.min(total)),
         (available, None) => available,
-        (None, Some(total)) => Some(total),
+        (None, Some(_)) => None,
     };
 
     select_server_load_strategy_for_budget(paths, capped_available, hint)
@@ -689,7 +722,7 @@ pub(crate) fn estimate_generation_memory_for_request(
         base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
-    let available = effective_load_available_bytes(0, 0);
+    let available = effective_load_available_bytes(0, 0).ok().flatten();
     let load_strategy = select_server_load_strategy_for_budget(paths, available, hint);
     let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
 
@@ -756,4 +789,41 @@ fn request_sensitive_activation_memory(
         .map(|loras| loras.len())
         .unwrap_or_else(|| usize::from(req.lora.is_some())) as u64;
     activation.saturating_add(lora_count.saturating_mul(128 * 1024 * 1024))
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_cuda_sample_blocks_admission_with_typed_api_error() {
+        let error = authoritative_cuda_available(Err(
+            mold_inference::device::DeviceMemoryError::Unavailable {
+                operation: "free VRAM query",
+                message: "injected unavailable sample".to_string(),
+            },
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, "INSUFFICIENT_MEMORY");
+        assert!(
+            error.error.contains("admission blocked"),
+            "got: {}",
+            error.error
+        );
+    }
+
+    #[test]
+    fn fatal_cuda_sample_is_not_downgraded_to_memory_pressure() {
+        let error = authoritative_cuda_available(Err(
+            mold_inference::device::DeviceMemoryError::FatalCuda {
+                operation: "device synchronize",
+                message: "CUDA_ERROR_ILLEGAL_ADDRESS".to_string(),
+            },
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error.error.contains("fatal CUDA error"));
+    }
 }
