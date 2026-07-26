@@ -153,6 +153,40 @@ describe("ChainsView multi-host video generation", () => {
     ).toBe(true);
   });
 
+  it("keeps local LTX-2 available when any local GPU is CUDA", async () => {
+    const ltx2 = {
+      ...videoModel,
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx-2",
+    };
+    const conn = useConnectionStore();
+    conn.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "local-key",
+    };
+    conn.status = "ready";
+    apiJson.mockImplementation((path: string) => {
+      if (path === "/api/models") return Promise.resolve([ltx2]);
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      if (path === "/api/resources") {
+        return Promise.resolve({
+          hostname: "local",
+          gpus: [{ backend: "metal" }, { backend: "cuda" }],
+          system_ram: {},
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const wrapper = mount(ChainsView, { shallow: true });
+    await flushPromises();
+
+    const option = wrapper.get(`option[value="${ltx2.name}"]`);
+    expect(option.attributes("disabled")).toBeUndefined();
+    expect(option.text()).not.toContain("CUDA only");
+  });
+
   it("shows a video model installed only on a connected remote host", async () => {
     installRemoteVideoHost();
 

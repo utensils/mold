@@ -30,6 +30,8 @@ import {
 } from "../lib/chainForm";
 import { fetchChainLimits } from "../lib/api/chains";
 import { apiJson } from "../lib/api/client";
+import { bestGpuBackend } from "../lib/api/gpuStatus";
+import { base64ToDataUrl } from "../lib/image";
 import { randomSeed } from "../stores/generation";
 import type { PickedImage } from "../lib/generateForm";
 import { mergeInstalledModels } from "../lib/generateModels";
@@ -233,7 +235,7 @@ watch(
       void models.fetch();
       void chains.fetchJobs();
       apiJson<ResourceSnapshot>("/api/resources")
-        .then((r) => (backend.value = r.gpus[0]?.backend ?? null))
+        .then((r) => (backend.value = bestGpuBackend(r.gpus)))
         .catch(() => {});
     }
   },

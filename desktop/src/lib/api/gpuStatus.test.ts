@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bestGpuBackend,
   gpuSnapshotsFromStatus,
   summarizeStatusGpuMemory,
 } from "./gpuStatus";
@@ -85,5 +86,13 @@ describe("multi-GPU status adapters", () => {
       usedMb: 16_000,
       totalMb: 64_000,
     });
+  });
+
+  it("selects CUDA capability even when a Metal device is listed first", () => {
+    expect(bestGpuBackend([{ backend: "metal" }, { backend: "cuda" }])).toBe(
+      "cuda",
+    );
+    expect(bestGpuBackend([{ backend: "metal" }])).toBe("metal");
+    expect(bestGpuBackend([])).toBeNull();
   });
 });

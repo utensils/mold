@@ -8,6 +8,22 @@ import type {
 
 const BYTES_PER_DECIMAL_MB = 1_000_000;
 
+export function bestGpuBackend(
+  gpus: ReadonlyArray<{ backend?: string | null }>,
+): string | null {
+  let best: string | null = null;
+  let bestRank = -1;
+  for (const gpu of gpus) {
+    const backend = gpu.backend ?? null;
+    const rank = backend === "cuda" ? 2 : backend === "metal" ? 1 : 0;
+    if (backend && rank > bestRank) {
+      best = backend;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
 /** Normalize additive `/api/status.gpus` rows for telemetry UIs. */
 export function gpuSnapshotsFromWorkers(
   info: GpuInfo | null | undefined,
