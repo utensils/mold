@@ -7,6 +7,7 @@ import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
 import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
+import { gpuSnapshotsFromWorkers } from "../../lib/api/gpuStatus";
 import { sseStream } from "../../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../../lib/format";
 import { normalizeTargetHost, pickDisplayHost } from "../../lib/hosts";
@@ -51,18 +52,21 @@ const anyJobRunning = computed(() =>
   generation.jobs.some((j) => j.status !== "complete" && j.status !== "error"),
 );
 
-/** MB-based `/api/status` GPU summary as a snapshot-shaped fallback, for
- *  display hosts whose resources stream is unavailable (older servers). */
-const telemetryGpu = computed(() => {
+/** Status-shaped fallback for display hosts whose resources stream is silent. */
+const telemetryGpus = computed(() => {
   const host = displayHost.value;
-  if (!host) return null;
-  const info = displayingRemote.value ? hosts.telemetry[host.id]?.gpuInfo : status.value?.gpu_info;
-  if (!info) return null;
-  return {
-    name: info.name,
-    vram_total: info.vram_total_mb * 1_000_000,
-    vram_used: info.vram_used_mb * 1_000_000,
-  };
+  if (!host) return [];
+  if (displayingRemote.value) {
+    const telemetry = hosts.telemetry[host.id];
+    return gpuSnapshotsFromWorkers(
+      telemetry?.gpuInfo,
+      telemetry?.gpuWorkers,
+    );
+  }
+  return gpuSnapshotsFromWorkers(
+    status.value?.gpu_info,
+    status.value?.gpus,
+  );
 });
 
 /** Every GPU on the display host — the popover gets one VRAM row per GPU and
@@ -70,8 +74,7 @@ const telemetryGpu = computed(() => {
  *  visible (jobs land on whichever worker is free, not GPU 0). */
 const gpus = computed(() => {
   if (snapshot.value?.gpus.length) return snapshot.value.gpus;
-  const t = telemetryGpu.value;
-  return t ? [{ ordinal: 0, ...t }] : [];
+  return telemetryGpus.value;
 });
 const vramUsed = computed(() => gpus.value.reduce((sum, g) => sum + g.vram_used, 0));
 const vramTotal = computed(() => gpus.value.reduce((sum, g) => sum + g.vram_total, 0));

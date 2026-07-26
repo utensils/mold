@@ -265,6 +265,40 @@ describe("StatusPopover host-aware display", () => {
     expect(rows[1]!.text()).toContain("41.5 GB / 46.1 GB");
   });
 
+  it("falls back to every status worker when a remote resource stream is silent", async () => {
+    const wrapper = mountPopover();
+    const hosts = addRemoteHost();
+    hosts.telemetry["hal9000-7680"]!.gpuWorkers = [
+      {
+        ordinal: 0,
+        name: "NVIDIA RTX 3090",
+        vram_total_bytes: 24_000_000_000,
+        vram_used_bytes: 8_000_000_000,
+        state: "generating",
+      },
+      {
+        ordinal: 1,
+        name: "NVIDIA B200",
+        vram_total_bytes: 80_000_000_000,
+        vram_used_bytes: 20_000_000_000,
+        state: "idle",
+      },
+    ];
+    useGenerationStore().jobs.push({
+      clientId: 1,
+      status: "denoising",
+      hostId: "hal9000-7680",
+      hostLabel: "hal9000",
+    } as never);
+    await flushPromises();
+    await openPopover(wrapper);
+
+    const rows = wrapper.findAll("[data-test='gpu-row']");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("NVIDIA RTX 3090");
+    expect(rows[1]!.text()).toContain("NVIDIA B200");
+  });
+
   it("aggregates the trigger mini-bar VRAM across all GPUs", async () => {
     const wrapper = mountPopover();
     await flushPromises();
