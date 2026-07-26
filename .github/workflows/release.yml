@@ -144,6 +144,9 @@ jobs:
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 86 target/release/build
+
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz -C target/release mold
 
@@ -230,6 +233,9 @@ jobs:
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
 
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 89 target/release/build
+
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz -C target/release mold
 
@@ -313,6 +319,9 @@ jobs:
           CUDA_COMPUTE_CAP: "100"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 100 target/release/build
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz -C target/release mold
@@ -399,6 +408,9 @@ jobs:
           CUDA_COMPUTE_CAP: "120"
           LIBRARY_PATH: /usr/local/cuda/lib64/stubs
         run: cargo build --release -p mold-ai --features cuda,preview,discord,expand,tui,webp,mp4,metrics,mdns
+
+      - name: Seal generated CUDA PTX manifest
+        run: scripts/seal-cuda-ptx-manifest.py target/release/mold 120 target/release/build
 
       - name: Package
         run: tar -czf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz -C target/release mold
@@ -523,8 +535,21 @@ jobs:
           build-args: |
             CUDA_COMPUTE_CAP=${{ matrix.cuda_cap }}
             MOLD_DISTRIBUTION_IMAGE_VERSION=${{ env.MOLD_DISTRIBUTION_IMAGE_VERSION }}
+            MOLD_GIT_SHA=${{ github.sha }}
           cache-from: type=gha,scope=docker${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=docker${{ matrix.suffix }}
+
+      - name: Verify built container source identity
+        env:
+          BUILT_IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$BUILT_IMAGE"
+          version="$(docker run --rm --entrypoint mold "$BUILT_IMAGE" version)"
+          grep -Fq "$GITHUB_SHA" <<<"$version" || {
+            echo "::error::container does not report exact source SHA $GITHUB_SHA: $version"
+            exit 1
+          }
 
       - name: Create once and verify immutable stable tag
         if: startsWith(github.ref, 'refs/tags/v')
@@ -736,11 +761,21 @@ jobs:
       - name: Generate checksums
         run: cd artifacts && sha256sum ./*.tar.gz ./*.dmg ./*.zip > SHA256SUMS
 
-      - name: Generate exact release provenance and container digest manifest
+      - name: Generate exact container digest manifest and release provenance
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
+          scripts/create-container-digest-manifest.sh \
+            artifacts/mold-container-digests.json \
+            "ghcr.io/$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            "$SOURCE_SHA" \
+            artifacts/container-digest-*.json
+          (
+            cd artifacts
+            sha256sum mold-container-digests.json >> SHA256SUMS
+          )
           scripts/create-release-provenance.sh \
             artifacts/mold-release-provenance.json \
             "$RELEASE_TAG" \
@@ -754,12 +789,6 @@ jobs:
             cd artifacts
             sha256sum mold-release-provenance.json >> SHA256SUMS
           )
-          scripts/create-container-digest-manifest.sh \
-            artifacts/mold-container-digests.json \
-            "ghcr.io/$GITHUB_REPOSITORY" \
-            "$RELEASE_TAG" \
-            "$SOURCE_SHA" \
-            artifacts/container-digest-*.json
 
       - name: Create release
         uses: softprops/action-gh-release@v2

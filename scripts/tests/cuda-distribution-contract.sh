@@ -83,6 +83,8 @@ for target in 86 89 100 120; do
   require_release_job_text "$job" \
     "mold-x86_64-unknown-linux-gnu-cuda-sm${target}.tar.gz"
   require_release_job_text "$job" \
+    "scripts/seal-cuda-ptx-manifest.py target/release/mold ${target} target/release/build"
+  require_release_job_text "$job" \
     "scripts/verify-cuda-release-binary.sh target/release/mold ${target}"
 done
 require_text "scripts/verify-cuda-release-binary.sh" \
@@ -93,6 +95,12 @@ require_text "scripts/verify-cuda-release-binary.sh" \
   'probe-cuda-embedded-ptx.py'
 require_text "scripts/verify-cuda-release-binary.sh" \
   '--extract-only'
+require_text "scripts/probe-cuda-embedded-ptx.py" \
+  '.mold_cuda_ptx'
+require_text "Dockerfile" \
+  'scripts/seal-cuda-ptx-manifest.py /build/target/release/mold'
+require_text "Dockerfile" \
+  'scripts/probe-cuda-embedded-ptx.py /build/target/release/mold'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
   'CUDA_ERROR_INVALID_PTX'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
@@ -120,6 +128,14 @@ require_release_job_text "docker" \
 require_release_job_text "docker" \
   'MOLD_DISTRIBUTION_IMAGE_VERSION=${{ env.MOLD_DISTRIBUTION_IMAGE_VERSION }}'
 require_release_job_text "docker" \
+  'MOLD_GIT_SHA=${{ github.sha }}'
+require_release_job_text "docker" \
+  'docker run --rm --entrypoint mold "$BUILT_IMAGE" version'
+require_release_job_text "docker" \
+  'grep -Fq "$GITHUB_SHA"'
+require_text "Dockerfile" 'ARG MOLD_GIT_SHA'
+require_text "Dockerfile" 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}'
+require_release_job_text "docker" \
   'Create once and verify immutable stable tag'
 require_release_job_text "docker" \
   '--prefer-index=false'
@@ -144,6 +160,8 @@ require_release_job_text "release-version" \
   'artifacts/mold-release-provenance.json'
 require_release_job_text "release-version" \
   'sha256sum mold-release-provenance.json >> SHA256SUMS'
+require_release_job_text "release-version" \
+  'sha256sum mold-container-digests.json >> SHA256SUMS'
 provenance_line="$(grep -n 'scripts/create-release-provenance.sh' "$repo_root/$release" | cut -d: -f1)"
 provenance_checksum_line="$(
   grep -n 'sha256sum mold-release-provenance.json >> SHA256SUMS' \
@@ -151,6 +169,18 @@ provenance_checksum_line="$(
 )"
 [[ "$provenance_checksum_line" -gt "$provenance_line" ]] \
   || fail "release provenance checksum must be appended after provenance generation"
+container_manifest_line="$(
+  grep -n 'scripts/create-container-digest-manifest.sh' "$repo_root/$release" | cut -d: -f1
+)"
+container_checksum_line="$(
+  grep -n 'sha256sum mold-container-digests.json >> SHA256SUMS' \
+    "$repo_root/$release" | cut -d: -f1
+)"
+[[ "$container_manifest_line" -lt "$provenance_line" ]] \
+  || fail "container digest manifest must be generated before release provenance"
+[[ "$container_checksum_line" -gt "$container_manifest_line" \
+  && "$container_checksum_line" -lt "$provenance_line" ]] \
+  || fail "container digest manifest must be checksum-bound before provenance generation"
 
 for phase_g_path in \
   .github/workflows/desktop-distribution.yml \
@@ -161,6 +191,7 @@ for phase_g_path in \
   crates/mold-core/src/cuda_distribution.rs \
   crates/mold-server/Cargo.toml \
   scripts/verify-cuda-release-binary.sh \
+  scripts/seal-cuda-ptx-manifest.py \
   scripts/probe-cuda-embedded-ptx.py \
   scripts/create-release-provenance.sh \
   scripts/create-container-digest-manifest.sh \
@@ -401,11 +432,16 @@ chmod +x "$test_root/verified-mold" "$test_root/native-only-mold" \
   "$test_root/verified-with-spa-noise-mold" \
   "$test_root"/wrong-ptx-*-mold
 
-PATH="$verifier_bin:$PATH" \
-  scripts/verify-cuda-release-binary.sh "$test_root/verified-mold" 86 >/dev/null
-PATH="$verifier_bin:$PATH" \
+if PATH="$verifier_bin:$PATH" \
   scripts/verify-cuda-release-binary.sh \
-    "$test_root/verified-with-spa-noise-mold" 86 >/dev/null
+    "$test_root/verified-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted unrelated heredoc PTX without a build-bound manifest"
+fi
+if PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh \
+    "$test_root/verified-with-spa-noise-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted unsealed PTX mixed with unrelated static text"
+fi
 if PATH="$verifier_bin:$PATH" \
   scripts/verify-cuda-release-binary.sh "$test_root/native-only-mold" 86 >/dev/null 2>&1; then
   fail "CUDA verifier accepted a binary without embedded target PTX"
@@ -446,16 +482,10 @@ fixture prefix
 fixture suffix
 EOF
 chmod +x "$test_root/embedded-ptx-fixture"
-probe_json="$(
-  scripts/probe-cuda-embedded-ptx.py \
-    "$test_root/embedded-ptx-fixture" 86 --extract-only
-)"
-jq -e '
-  .expected_target == "sm_86"
-  and .candidate_count == 1
-  and .candidates[0].ptx_sha256
-' <<<"$probe_json" >/dev/null \
-  || fail "embedded PTX probe did not extract the exact fixture module"
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/embedded-ptx-fixture" 86 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe accepted arbitrary executable bytes without a sealed manifest"
+fi
 if scripts/probe-cuda-embedded-ptx.py \
   "$test_root/embedded-ptx-fixture" 89 --extract-only >/dev/null 2>&1; then
   fail "embedded PTX probe accepted a target-mismatched fixture"
@@ -472,9 +502,12 @@ if scripts/probe-cuda-embedded-ptx.py \
   "$test_root/incomplete-ptx-mold" 86 --extract-only >/dev/null 2>&1; then
   fail "embedded PTX probe accepted an incomplete target module"
 fi
-scripts/probe-cuda-embedded-ptx.py \
-  "$test_root/verified-with-spa-noise-mold" 86 --extract-only >/dev/null \
-  || fail "embedded PTX probe treated unrelated SPA text as a PTX module"
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/verified-with-spa-noise-mold" 86 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe treated unrelated static text as build-bound PTX"
+fi
+
+TMPDIR="$test_root" python3 scripts/tests/cuda-ptx-parser-contract.py >/dev/null
 
 if [[ -n "${MOLD_REAL_SM86_BINARY:-}" ]]; then
   PATH="${SYSTEM_PATH:-$PATH}" scripts/verify-cuda-release-binary.sh \

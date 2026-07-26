@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = REPO_ROOT / "scripts/probe-cuda-embedded-ptx.py"
 VERIFIER_PATH = REPO_ROOT / "scripts/verify-cuda-release-binary.sh"
+SEAL_PATH = REPO_ROOT / "scripts/seal-cuda-ptx-manifest.py"
 
 
 def load_probe_module():
@@ -28,8 +29,8 @@ class EmbeddedPtxParserContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.probe_module = load_probe_module()
-        test_target = REPO_ROOT / "target"
-        test_target.mkdir(exist_ok=True)
+        test_target = Path(os.environ.get("TMPDIR", tempfile.gettempdir()))
+        test_target.mkdir(parents=True, exist_ok=True)
         cls.temp_dir_context = tempfile.TemporaryDirectory(
             prefix="cuda-ptx-contract-",
             dir=test_target,
@@ -62,19 +63,123 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
 
-    def fixture(self, name: str, ptx: str) -> Path:
+    def compile_unsealed_fixture(self, name: str, ptx_bytes: bytes) -> Path:
         path = self.temp_dir / name
+        c_source = self.temp_dir / f"{name}.c"
+        byte_literals = ",".join(f"0x{byte:02x}" for byte in ptx_bytes)
+        c_source.write_text(
+            "#include <string.h>\n"
+            f"__attribute__((used)) static const unsigned char generated_ptx[] = {{{byte_literals}}};\n"
+            '__attribute__((used)) static const char nvml_symbol[] = "nvmlDeviceGetCount_v2";\n'
+            "int main(int argc, char **argv) {\n"
+            "  volatile const void *keep[] = {generated_ptx, nvml_symbol};\n"
+            "  (void)keep;\n"
+            '  return argc == 2 && strcmp(argv[1], "version") == 0 ? 0 : 1;\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["cc", "-O0", "-o", str(path), str(c_source)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return path
+
+    def fixture(self, name: str, ptx: str) -> Path:
+        ptx_bytes = f"{ptx.rstrip()}\n".encode()
+        path = self.compile_unsealed_fixture(name, ptx_bytes)
+
+        inventory = self.probe_module.extract_entry_modules(ptx_bytes)
+        if (
+            not inventory["malformed_modules"]
+            and not inventory["incomplete_modules"]
+            and len(inventory["observed_targets"]) == 1
+        ):
+            compute_cap = str(inventory["observed_targets"][0]).removeprefix(
+                "sm_"
+            )
+            build_root = self.temp_dir / f"{name}-build"
+            output_dir = build_root / "candle-kernels-fixture" / "out"
+            output_dir.mkdir(parents=True)
+            (output_dir / "fixture.ptx").write_bytes(ptx_bytes)
+            (output_dir / "ptx.rs").write_text(
+                'pub const FIXTURE: &str = include_str!(concat!(env!("OUT_DIR"), "/fixture.ptx"));\n',
+                encoding="utf-8",
+            )
+            (output_dir.parent / "output").write_text(
+                f"cargo:rustc-env=CUDA_COMPUTE_CAP={compute_cap}\n",
+                encoding="utf-8",
+            )
+            seal = subprocess.run(
+                [
+                    str(SEAL_PATH),
+                    str(path),
+                    compute_cap,
+                    str(build_root),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "TMPDIR": str(self.temp_dir)},
+            )
+            if seal.returncode != 0:
+                raise AssertionError(seal.stderr)
+        return path
+
+    def test_unsealed_shell_heredoc_ptx_is_not_qualification_evidence(
+        self,
+    ) -> None:
+        fixture = self.temp_dir / "unsealed-heredoc"
         self._write_executable(
-            path,
+            fixture,
             "#!/usr/bin/env bash\n"
             "# nvmlDeviceGetCount_v2\n"
             '[[ "${1:-}" == version ]] && exit 0\n'
-            "exit 1\n"
             ": <<'PTX'\n"
-            f"{ptx.rstrip()}\n"
+            ".version 8.0\n"
+            ".target sm_86\n"
+            ".address_size 64\n"
+            ".visible .entry unrelated() { ret; }\n"
             "PTX\n",
         )
-        return path
+        self.assert_probe_and_verifier_reject(fixture, 86)
+
+    def test_unrelated_expected_target_cannot_replace_generated_kernel_ptx(
+        self,
+    ) -> None:
+        unrelated = (
+            b".version 8.0\n.target sm_86\n.address_size 64\n"
+            b".visible .entry unrelated() { ret; }\n"
+        )
+        actual_kernel = (
+            b".version 8.0\n.target sm_86\n.address_size 64\n"
+            b".visible .entry actual_kernel() { ret; }\n"
+        )
+        fixture = self.compile_unsealed_fixture(
+            "unrelated-instead-of-kernel", unrelated
+        )
+        build_root = self.temp_dir / "wrong-kernel-build"
+        output_dir = build_root / "candle-kernels-fixture" / "out"
+        output_dir.mkdir(parents=True)
+        (output_dir / "actual.ptx").write_bytes(actual_kernel)
+        (output_dir / "ptx.rs").write_text(
+            'pub const ACTUAL: &str = include_str!(concat!(env!("OUT_DIR"), "/actual.ptx"));\n',
+            encoding="utf-8",
+        )
+        (output_dir.parent / "output").write_text(
+            "cargo:rustc-env=CUDA_COMPUTE_CAP=86\n", encoding="utf-8"
+        )
+        seal = subprocess.run(
+            [str(SEAL_PATH), str(fixture), "86", str(build_root)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "TMPDIR": str(self.temp_dir)},
+        )
+        self.assertNotEqual(seal.returncode, 0, seal.stdout)
+        self.assertIn("no generated candle-kernels PTX", seal.stderr)
+        self.assert_probe_and_verifier_reject(fixture, 86)
 
     def probe(self, fixture: Path, compute_cap: int) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

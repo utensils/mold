@@ -89,6 +89,7 @@ jobs:
               - 'scripts/release/**'
               - 'scripts/verify-cuda-release-binary.sh'
               - 'scripts/probe-cuda-embedded-ptx.py'
+              - 'scripts/seal-cuda-ptx-manifest.py'
               - 'scripts/create-release-provenance.sh'
               - 'scripts/create-container-digest-manifest.sh'
               - 'scripts/validate-cuda-qualification-report.py'

@@ -32,6 +32,19 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def has_build_bound_kernel_manifest(probe: dict[str, Any]) -> bool:
+    manifest_sha = probe.get("kernel_manifest_sha256")
+    module_count = probe.get("kernel_module_count")
+    return (
+        probe.get("kernel_manifest_schema") == "mold.cuda.ptx-manifest.v1"
+        and isinstance(manifest_sha, str)
+        and re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is not None
+        and isinstance(module_count, int)
+        and not isinstance(module_count, bool)
+        and module_count > 0
+    )
+
+
 SUPPORTED_SCHEMA_KEYWORDS = {
     "$schema",
     "$id",
@@ -460,6 +473,7 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
                 or probe.get("observed_targets") != ["sm_86"]
                 or probe.get("malformed_modules") != []
                 or probe.get("incomplete_modules") != []
+                or not has_build_bound_kernel_manifest(probe)
                 or not probe.get("loaded")
                 or probe.get("artifact_sha256")
                 != report["artifacts"]["sm86"]["actual_sha256"]
@@ -496,6 +510,7 @@ def validate_report(report_path: Path, schema_path: Path) -> None:
             or negative_probe.get("observed_targets") != ["sm_89"]
             or negative_probe.get("malformed_modules") != []
             or negative_probe.get("incomplete_modules") != []
+            or not has_build_bound_kernel_manifest(negative_probe)
             or negative_probe.get("artifact_sha256")
             != report["artifacts"]["sm89"]["actual_sha256"]
             or negative_probe.get("loaded")

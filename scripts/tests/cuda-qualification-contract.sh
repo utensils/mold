@@ -132,6 +132,9 @@ for label in \
     jq -n --arg artifact_sha "$sm86_binary_sha" '{
       expected_target: "sm_86",
       observed_targets: ["sm_86"],
+      kernel_manifest_schema: "mold.cuda.ptx-manifest.v1",
+      kernel_manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      kernel_module_count: 1,
       malformed_modules: [],
       incomplete_modules: [],
       artifact_sha256: $artifact_sha,
@@ -188,6 +191,9 @@ negative_probe_path="$evidence_dir/sm89-driver-negative.json"
 jq -n --arg artifact_sha "$sm89_binary_sha" '{
   expected_target: "sm_89",
   observed_targets: ["sm_89"],
+  kernel_manifest_schema: "mold.cuda.ptx-manifest.v1",
+  kernel_manifest_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  kernel_module_count: 1,
   malformed_modules: [],
   incomplete_modules: [],
   artifact_sha256: $artifact_sha,

@@ -4,6 +4,7 @@ use mold_core::runpod::{
     NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use tokio::sync::OnceCell;
 
 use crate::commands::AppState;
@@ -186,6 +187,150 @@ fn apply_network_volume_constraints(input: &mut RunPodCreateInput, volume: &Netw
     input.volume_gb = 0;
 }
 
+trait RunPodLaunchClient {
+    async fn gpu_types(&self) -> anyhow::Result<Vec<GpuType>>;
+    async fn supported_pod_gpu_type_ids(&self)
+        -> anyhow::Result<std::collections::HashSet<String>>;
+    async fn create_pod(&self, request: &CreatePodRequest) -> anyhow::Result<Pod>;
+}
+
+impl RunPodLaunchClient for RunPodClient {
+    async fn gpu_types(&self) -> anyhow::Result<Vec<GpuType>> {
+        RunPodClient::gpu_types(self).await
+    }
+
+    async fn supported_pod_gpu_type_ids(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        RunPodClient::supported_pod_gpu_type_ids(self).await
+    }
+
+    async fn create_pod(&self, request: &CreatePodRequest) -> anyhow::Result<Pod> {
+        RunPodClient::create_pod(self, request).await
+    }
+}
+
+fn normalized_provider_identity(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn provider_gpu_id(gpu: &GpuType) -> Option<&str> {
+    gpu.id
+        .as_deref()
+        .or_else(|| (!gpu.gpu_id.trim().is_empty()).then_some(gpu.gpu_id.as_str()))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn resolve_provider_gpu<'a>(
+    gpu_types: &'a [GpuType],
+    submitted_id: &str,
+    submitted_display_name: &str,
+) -> Result<(&'a str, &'a str), String> {
+    let submitted_id = normalized_provider_identity(submitted_id);
+    if submitted_id.is_empty() {
+        return Err("Choose a GPU before launching.".into());
+    }
+    if normalized_provider_identity(submitted_display_name).is_empty() {
+        return Err(
+            "The selected GPU name is missing. Refresh RunPod inventory and try again.".into(),
+        );
+    }
+
+    let mut matches = gpu_types.iter().filter(|gpu| {
+        provider_gpu_id(gpu).is_some_and(|id| normalized_provider_identity(id) == submitted_id)
+    });
+    let gpu = matches.next().ok_or_else(|| {
+        "The selected GPU is no longer available. Refresh RunPod inventory and choose it again."
+            .to_string()
+    })?;
+    if matches.next().is_some() {
+        return Err(
+            "RunPod returned duplicate GPU identities. Refresh inventory before launching.".into(),
+        );
+    }
+    let provider_id = provider_gpu_id(gpu).expect("matched provider GPU has an id");
+    let provider_name = gpu.display_name.trim();
+    if provider_name.is_empty() {
+        return Err("RunPod returned a GPU without a display name. Refresh inventory.".into());
+    }
+    if normalized_provider_identity(provider_name)
+        != normalized_provider_identity(submitted_display_name)
+    {
+        return Err(format!(
+            "The selected GPU name does not match RunPod's current inventory ({provider_name}). Refresh and choose it again."
+        ));
+    }
+
+    // Both fields come from the fresh provider record. Checking the provider
+    // ID as well as its display label prevents an inconsistent inventory
+    // record from disguising a Grace CPU/GPU product as an amd64 B-series GPU.
+    for authoritative_identity in [provider_id, provider_name] {
+        mold_core::cuda_distribution::ensure_published_image_platform(authoritative_identity)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((provider_id, provider_name))
+}
+
+async fn prepare_pod_request_with_image_resolver<C, F, Fut>(
+    client: &C,
+    mut input: RunPodCreateInput,
+    hf_token: Option<String>,
+    image_resolver: F,
+) -> Result<CreatePodRequest, String>
+where
+    C: RunPodLaunchClient,
+    F: FnOnce(&str) -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
+    let gpu_types = client
+        .gpu_types()
+        .await
+        .map_err(|error| format!("Could not refresh RunPod GPU inventory: {error:#}"))?;
+    let (provider_id, provider_name) =
+        resolve_provider_gpu(&gpu_types, &input.gpu_type_id, &input.gpu_display_name)?;
+    let supported_ids = client
+        .supported_pod_gpu_type_ids()
+        .await
+        .map_err(|error| format!("Could not validate RunPod GPU launch support: {error:#}"))?;
+    if !supported_ids
+        .iter()
+        .any(|id| normalized_provider_identity(id) == normalized_provider_identity(provider_id))
+    {
+        return Err(
+            "The selected GPU is not currently accepted by RunPod's Pod API. Refresh inventory and choose another GPU."
+                .into(),
+        );
+    }
+    input.gpu_type_id = provider_id.to_string();
+    input.gpu_display_name = provider_name.to_string();
+    let image_name = image_resolver(provider_name).await?;
+    build_request(input, hf_token, image_name)
+}
+
+async fn launch_pod_with_image_resolver<C, F, Fut>(
+    client: &C,
+    input: RunPodCreateInput,
+    hf_token: Option<String>,
+    image_resolver: F,
+) -> Result<Pod, String>
+where
+    C: RunPodLaunchClient,
+    F: FnOnce(&str) -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
+    let request =
+        prepare_pod_request_with_image_resolver(client, input, hf_token, image_resolver).await?;
+    client
+        .create_pod(&request)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
 #[tauri::command]
 pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPodOverview, String> {
     let Some((client, credential_source)) = client(&state)? else {
@@ -252,12 +397,11 @@ pub async fn runpod_create(
     } else {
         None
     };
-    let image_name = resolve_published_image_for_gpu(&input.gpu_display_name).await?;
-    let request = build_request(input, hf_token, image_name)?;
-    client
-        .create_pod(&request)
-        .await
-        .map_err(|e| format!("{e:#}"))
+    launch_pod_with_image_resolver(&client, input, hf_token, |gpu_name| {
+        let gpu_name = gpu_name.to_string();
+        async move { resolve_published_image_for_gpu(&gpu_name).await }
+    })
+    .await
 }
 
 async fn resolve_published_image_for_gpu(gpu_display_name: &str) -> Result<String, String> {
@@ -374,6 +518,44 @@ pub async fn runpod_delete(state: tauri::State<'_, AppState>, id: String) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct FakeLaunchClient {
+        gpu_types: Vec<GpuType>,
+        supported_ids: std::collections::HashSet<String>,
+        create_calls: AtomicUsize,
+    }
+
+    impl RunPodLaunchClient for FakeLaunchClient {
+        async fn gpu_types(&self) -> anyhow::Result<Vec<GpuType>> {
+            Ok(self.gpu_types.clone())
+        }
+
+        async fn supported_pod_gpu_type_ids(
+            &self,
+        ) -> anyhow::Result<std::collections::HashSet<String>> {
+            Ok(self.supported_ids.clone())
+        }
+
+        async fn create_pod(&self, _request: &CreatePodRequest) -> anyhow::Result<Pod> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            unreachable!("rejected provider identity must not create a pod")
+        }
+    }
+
+    fn gpu(id: &str, display_name: &str) -> GpuType {
+        GpuType {
+            id: Some(id.into()),
+            display_name: display_name.into(),
+            gpu_id: String::new(),
+            memory_in_gb: 192,
+            secure_cloud: true,
+            community_cloud: false,
+            stock_status: Some("High".into()),
+            available: true,
+        }
+    }
 
     fn input() -> RunPodCreateInput {
         RunPodCreateInput {
@@ -421,12 +603,81 @@ mod tests {
             let error = resolve_published_image_for_gpu(name).await.unwrap_err();
             assert!(error.contains("linux/arm64"), "{name}: {error}");
         }
-        assert_eq!(
-            resolve_published_image_for_gpu("NVIDIA B200")
+        for name in ["NVIDIA B200", "NVIDIA B300"] {
+            assert_eq!(
+                resolve_published_image_for_gpu(name).await.unwrap(),
+                "ghcr.io/utensils/mold:latest-sm100"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_rejects_untrusted_provider_identity_before_create_pod() {
+        let cases = [
+            ("", "NVIDIA B200", "Choose a GPU"),
+            ("stale-id", "NVIDIA B200", "no longer available"),
+            ("b200-id", "", "GPU name is missing"),
+            ("b200-id", "NVIDIA GB200", "does not match"),
+            ("gb200-id", "NVIDIA B200", "does not match"),
+            ("b200-id", "NVIDIA B200", "not currently accepted"),
+            ("gh200-id", "NVIDIA GH200", "linux/arm64"),
+            ("gb200-id", "NVIDIA GB200", "linux/arm64"),
+            ("gb300-id", "NVIDIA GB300", "linux/arm64"),
+        ];
+
+        for (submitted_id, submitted_name, expected_error) in cases {
+            let client = FakeLaunchClient {
+                gpu_types: vec![
+                    gpu("b200-id", "NVIDIA B200"),
+                    gpu("gh200-id", "NVIDIA GH200"),
+                    gpu("gb200-id", "NVIDIA GB200"),
+                    gpu("gb300-id", "NVIDIA GB300"),
+                ],
+                ..Default::default()
+            };
+            let mut launch_input = input();
+            launch_input.gpu_type_id = submitted_id.into();
+            launch_input.gpu_display_name = submitted_name.into();
+
+            let error =
+                launch_pod_with_image_resolver(&client, launch_input, None, |_name| async {
+                    panic!("rejected identity must not resolve an image")
+                })
                 .await
-                .unwrap(),
-            "ghcr.io/utensils/mold:latest-sm100"
-        );
+                .unwrap_err();
+
+            assert!(
+                error.contains(expected_error),
+                "{submitted_id:?}/{submitted_name:?}: {error}"
+            );
+            assert_eq!(client.create_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_normalizes_provider_id_and_uses_authoritative_b200_identity() {
+        let client = FakeLaunchClient {
+            gpu_types: vec![gpu("  B200-ID  ", "NVIDIA B200")],
+            supported_ids: ["b200-id".into()].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut launch_input = input();
+        launch_input.gpu_type_id = " b200-id ".into();
+        launch_input.gpu_display_name = "  NVIDIA   B200 ".into();
+
+        let result = prepare_pod_request_with_image_resolver(&client, launch_input, None, |name| {
+            let name = name.to_string();
+            async move {
+                assert_eq!(name, "NVIDIA B200");
+                Ok("ghcr.io/utensils/mold:latest-sm100".into())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.gpu_type_ids, ["B200-ID"]);
+        assert_eq!(result.image_name, "ghcr.io/utensils/mold:latest-sm100");
+        assert_eq!(client.create_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

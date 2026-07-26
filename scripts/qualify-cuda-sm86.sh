@@ -253,6 +253,9 @@ run_sm89_driver_negative() {
       --arg artifact_sha "$sm89_actual_sha" '
         .expected_target == "sm_89"
         and .observed_targets == ["sm_89"]
+        and .kernel_manifest_schema == "mold.cuda.ptx-manifest.v1"
+        and (.kernel_manifest_sha256 | test("^[0-9a-f]{64}$"))
+        and .kernel_module_count > 0
         and .artifact_sha256 == $artifact_sha
         and .expect_incompatible == true
         and .loaded == false
@@ -330,7 +333,13 @@ run_smoke() {
     ptx_probe_exit=$?
     set -e
     if [[ "$ptx_probe_exit" -eq 0 ]] \
-      && jq -e '.expected_target == "sm_86" and .loaded == true' \
+      && jq -e '
+        .expected_target == "sm_86"
+        and .kernel_manifest_schema == "mold.cuda.ptx-manifest.v1"
+        and (.kernel_manifest_sha256 | test("^[0-9a-f]{64}$"))
+        and .kernel_module_count > 0
+        and .loaded == true
+      ' \
         "$ptx_probe_path" >/dev/null; then
       embedded_ptx_module_loaded=true
     fi

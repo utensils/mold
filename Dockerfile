@@ -40,8 +40,10 @@ FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
 ARG CUDA_COMPUTE_CAP=89
 ARG MOLD_DISTRIBUTION_IMAGE_VERSION=latest
+ARG MOLD_GIT_SHA=unknown
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
 ENV MOLD_DISTRIBUTION_IMAGE_VERSION=${MOLD_DISTRIBUTION_IMAGE_VERSION}
+ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies for building.
@@ -109,12 +111,18 @@ RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4
 
 # Now copy the real source code
 COPY crates/ crates/
+COPY scripts/seal-cuda-ptx-manifest.py scripts/seal-cuda-ptx-manifest.py
+COPY scripts/probe-cuda-embedded-ptx.py scripts/probe-cuda-embedded-ptx.py
 
 # Touch source files to invalidate the stub builds but keep dep artifacts
 RUN find crates/ -name "*.rs" -exec touch {} +
 
 # Build the real binary
 RUN cargo build --release -p mold-ai --features cuda,expand,discord,tui,webp,mp4,metrics
+RUN scripts/seal-cuda-ptx-manifest.py /build/target/release/mold \
+    "${CUDA_COMPUTE_CAP}" /build/target/release/build
+RUN scripts/probe-cuda-embedded-ptx.py /build/target/release/mold \
+    "${CUDA_COMPUTE_CAP}" --extract-only >/dev/null
 
 # Verify no unexpected missing libraries (libcuda.so.1 is expected to be
 # absent — it's the NVIDIA driver, injected at runtime by the container toolkit)
