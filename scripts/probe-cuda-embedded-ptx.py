@@ -28,9 +28,13 @@ INCOMPATIBLE_RESULTS = {
 VERSION_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.version\b([^\r\n]*)")
 VERSION_OPERAND_RE = re.compile(rb"^[ \t]+[0-9]+(?:\.[0-9]+)?[ \t]*$")
 TARGET_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.target[ \t]+([^\r\n]+)")
-TARGET_OPERAND_RE = re.compile(
-    rb"^(sm_([0-9]+))(?:[ \t]*,[^\r\n]*)?[ \t]*$"
-)
+TARGET_ARCHITECTURE_RE = re.compile(rb"sm_([0-9]+)")
+TARGET_PLATFORM_OPTIONS = {
+    b"texmode_unified",
+    b"texmode_independent",
+    b"debug",
+    b"map_f64_to_f32",
+}
 ADDRESS_DIRECTIVE_RE = re.compile(
     rb"(?m)^[ \t]*\.address_size[ \t]+([^\r\n]+)"
 )
@@ -65,10 +69,25 @@ def parse_target_operand(raw_directive: bytes) -> tuple[str | None, str]:
     """Return a normalized sm target and the printable raw operand."""
 
     printable = raw_directive.decode("ascii", "replace").strip()
-    match = TARGET_OPERAND_RE.fullmatch(raw_directive.strip())
+    specifiers = [
+        specifier.strip() for specifier in raw_directive.strip().split(b",")
+    ]
+    if not specifiers or any(not specifier for specifier in specifiers):
+        return None, printable
+    match = TARGET_ARCHITECTURE_RE.fullmatch(specifiers[0])
     if match is None:
         return None, printable
-    return match.group(1).decode("ascii"), printable
+    options = specifiers[1:]
+    if (
+        any(option not in TARGET_PLATFORM_OPTIONS for option in options)
+        or len(options) != len(set(options))
+        or (
+            b"texmode_unified" in options
+            and b"texmode_independent" in options
+        )
+    ):
+        return None, printable
+    return specifiers[0].decode("ascii"), printable
 
 
 def mask_ptx_non_code(segment: bytes) -> tuple[bytes, list[dict[str, object]]]:
@@ -187,7 +206,7 @@ def ptx_lexical_regions(data: bytes):
 
     for span_match in ASCII_SPAN_RE.finditer(data):
         segment = span_match.group(0)
-        if b".version" not in segment:
+        if VERSION_DIRECTIVE_RE.search(segment) is None:
             continue
         preamble_starts = [
             match.start()
@@ -226,10 +245,34 @@ def extract_entry_modules(data: bytes) -> dict[str, object]:
     # large ELF merely to mask comments, and prevents a random binary `/*`
     # sequence from changing lexical state across unrelated sections.
     for segment_start, segment in ptx_lexical_regions(data):
-        if b".version" not in segment:
+        raw_version_matches = list(VERSION_DIRECTIVE_RE.finditer(segment))
+        if not raw_version_matches:
             continue
         code, lexical_errors = mask_ptx_non_code(segment)
         version_matches = list(VERSION_DIRECTIVE_RE.finditer(code))
+        code_version_offsets = {match.start() for match in version_matches}
+        hidden_version_offsets = [
+            segment_start + match.start()
+            for match in raw_version_matches
+            if match.start() not in code_version_offsets
+        ]
+
+        # Lexical failures are structural failures for the complete bounded
+        # region. They must remain visible even when they occur after the end
+        # of an otherwise complete first entry, or when they mask every later
+        # `.version` so the code view has no version match to iterate.
+        for error in lexical_errors:
+            incomplete_modules.append(
+                {
+                    "offset": segment_start + int(error["offset"]),
+                    "reason": error["reason"],
+                    "hidden_version_offsets": [
+                        offset
+                        for offset in hidden_version_offsets
+                        if offset >= segment_start + int(error["offset"])
+                    ],
+                }
+            )
 
         for match_index, version_match in enumerate(version_matches):
             start = version_match.start()
@@ -250,30 +293,19 @@ def extract_entry_modules(data: bytes) -> dict[str, object]:
                     }
                 )
                 continue
-            errors = [
-                {
-                    **error,
-                    "offset": segment_start + int(error["offset"]),
-                }
-                for error in lexical_errors
-                if start <= int(error["offset"]) < search_end
-            ]
-
             entry_match = ENTRY_DIRECTIVE_RE.search(code, start, search_end)
             if entry_match is None:
                 incomplete_modules.append(
                     {
                         "offset": global_start,
-                        "reason": (
-                            errors[0]["reason"] if errors else "missing entry"
-                        ),
+                        "reason": "missing entry",
                     }
                 )
                 continue
 
             entry = entry_match.start()
             target_matches = list(
-                TARGET_DIRECTIVE_RE.finditer(code, start, entry)
+                TARGET_DIRECTIVE_RE.finditer(code, start, search_end)
             )
             if not target_matches:
                 incomplete_modules.append(
@@ -303,6 +335,15 @@ def extract_entry_modules(data: bytes) -> dict[str, object]:
                         "offset": global_start,
                         "reason": "malformed target directive",
                         "target_directive": raw_target,
+                    }
+                )
+                continue
+            if target_match.start() > entry:
+                malformed_modules.append(
+                    {
+                        "offset": global_start,
+                        "reason": "target directive follows entry",
+                        "target": target,
                     }
                 )
                 continue
@@ -353,11 +394,7 @@ def extract_entry_modules(data: bytes) -> dict[str, object]:
                 incomplete_modules.append(
                     {
                         "offset": global_start,
-                        "reason": (
-                            errors[0]["reason"]
-                            if errors
-                            else "entry has no body"
-                        ),
+                        "reason": "entry has no body",
                         "target": target,
                     }
                 )
@@ -378,25 +415,7 @@ def extract_entry_modules(data: bytes) -> dict[str, object]:
                 incomplete_modules.append(
                     {
                         "offset": global_start,
-                        "reason": (
-                            errors[0]["reason"]
-                            if errors
-                            else "entry body is incomplete"
-                        ),
-                        "target": target,
-                    }
-                )
-                continue
-            relevant_errors = [
-                error
-                for error in errors
-                if int(error["offset"]) < segment_start + end
-            ]
-            if relevant_errors:
-                malformed_modules.append(
-                    {
-                        "offset": global_start,
-                        "reason": relevant_errors[0]["reason"],
+                        "reason": "entry body is incomplete",
                         "target": target,
                     }
                 )
