@@ -3320,9 +3320,10 @@ async fn create_gallery_media_token(
 async fn list_gallery(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
-    // `MetadataDb::list` may invoke corruption recovery, so list takes the
-    // writer side rather than allowing a DB rebuild beside other observers.
-    let _gallery_writer = state.gallery_publication_gate.write().await;
+    // Query-time DB recovery is serialized by the DB recovery lock. The
+    // shared gallery side excludes an atomic batch publication without
+    // needlessly serializing ordinary listings and media reads.
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Ok(Json(Vec::new()));
@@ -3880,7 +3881,6 @@ pub fn spawn_thumbnail_warmup(
 
     let output_dir = config.effective_output_dir();
     tokio::spawn(async move {
-        let _gallery_reader = gallery_gate.read().await;
         let join = tokio::task::spawn_blocking(move || {
             if !output_dir.is_dir() {
                 return;
@@ -3904,6 +3904,10 @@ pub fn spawn_thumbnail_warmup(
                 if !is_raster && !is_video {
                     continue;
                 }
+                // Scope the barrier to one source check/decode. A large
+                // warmup must not monopolize the shared side and starve
+                // publication writers for its entire directory walk.
+                let _gallery_reader = gallery_gate.blocking_read();
                 let filename = path
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())

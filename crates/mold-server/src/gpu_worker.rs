@@ -92,6 +92,18 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         self.inner.clear_on_progress();
     }
 
+    fn set_cancellation_token(&mut self, token: mold_inference::InferenceCancellationToken) {
+        self.inner.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.inner.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> mold_inference::BatchExecutionCapability {
+        self.inner.batch_execution_capability()
+    }
+
     fn model_paths(&self) -> Option<&ModelPaths> {
         self.inner.model_paths()
     }
@@ -2968,6 +2980,68 @@ mod tests {
         assert_eq!(
             configured.configured_execution_fingerprint(),
             Some("plan-fingerprint")
+        );
+    }
+
+    #[test]
+    fn planned_engine_wrapper_forwards_batch_and_cancellation_contract() {
+        struct ContractEngine {
+            token_set: Arc<AtomicBool>,
+            token_cleared: Arc<AtomicBool>,
+        }
+        impl InferenceEngine for ContractEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+                unreachable!()
+            }
+            fn model_name(&self) -> &str {
+                "contract"
+            }
+            fn is_loaded(&self) -> bool {
+                true
+            }
+            fn load(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn set_cancellation_token(
+                &mut self,
+                _token: mold_inference::InferenceCancellationToken,
+            ) {
+                self.token_set.store(true, Ordering::SeqCst);
+            }
+            fn clear_cancellation_token(&mut self) {
+                self.token_cleared.store(true, Ordering::SeqCst);
+            }
+            fn batch_execution_capability(&self) -> mold_inference::BatchExecutionCapability {
+                mold_inference::BatchExecutionCapability {
+                    native_batch_sizes: &[1],
+                    cooperative_cancellation: false,
+                }
+            }
+        }
+
+        let token_set = Arc::new(AtomicBool::new(false));
+        let token_cleared = Arc::new(AtomicBool::new(false));
+        let mut wrapped = record_planned_engine_mode(
+            Box::new(ContractEngine {
+                token_set: token_set.clone(),
+                token_cleared: token_cleared.clone(),
+            }),
+            PlannedEngineMode {
+                load_strategy: mold_inference::LoadStrategy::Eager,
+                block_offload: false,
+            },
+            "contract",
+        );
+
+        wrapped.set_cancellation_token(mold_inference::InferenceCancellationToken::default());
+        wrapped.clear_cancellation_token();
+
+        assert!(token_set.load(Ordering::SeqCst));
+        assert!(token_cleared.load(Ordering::SeqCst));
+        assert!(
+            !wrapped
+                .batch_execution_capability()
+                .cooperative_cancellation
         );
     }
 

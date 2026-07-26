@@ -38,7 +38,9 @@ pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
 
-pub use engine::{BatchExecutionCapability, InferenceEngine, LoadStrategy};
+pub use engine::{
+    with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,
+};
 pub use error::InferenceError;
 pub use factory::{
     create_engine, create_engine_with_frozen_config, create_engine_with_pool, FrozenEngineConfig,
@@ -55,7 +57,7 @@ pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;
 pub use sdxl::SDXLEngine;
-pub use upscaler::{create_upscale_engine, UpscaleEngine};
+pub use upscaler::{create_upscale_engine, with_upscale_cancellation, UpscaleEngine};
 pub use wuerstchen::WuerstchenEngine;
 pub use zimage::ZImageEngine;
 

@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, VecDeque};
+use std::io::Write as _;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -145,14 +146,14 @@ fn save_image_to_dir_with_suffix(
             filename.trim_end_matches(&format!(".{ext}"))
         );
     }
-    let path = dir.join(&filename);
-    match std::fs::write(&path, &img.data) {
-        Ok(()) => tracing::info!("saved image to {}", path.display()),
+    let (filename, path) = match write_gallery_bytes_no_replace(dir, &filename, &img.data) {
+        Ok(saved) => saved,
         Err(e) => {
-            tracing::warn!("failed to save image to {}: {e}", path.display());
+            tracing::warn!("failed to save image to {}: {e}", dir.display());
             return None;
         }
-    }
+    };
+    tracing::info!("saved image to {}", path.display());
     let mut image_row = None;
     if let (Some(db), Some(meta)) = (db, metadata) {
         image_row = mold_db::persist::record_saved_output_returning(
@@ -262,12 +263,14 @@ pub(crate) fn save_video_to_dir(
     }
     let ts = mold_core::time::now_epoch_ms_u64();
     let ext = format.extension();
-    let filename = mold_core::default_output_filename(model, ts, ext, 1, 0);
-    let path = dir.join(&filename);
-    if let Err(e) = std::fs::write(&path, bytes) {
-        tracing::error!("failed to save video to {}: {e}", path.display());
-        return None;
-    }
+    let desired = mold_core::default_output_filename(model, ts, ext, 1, 0);
+    let (filename, path) = match write_gallery_bytes_no_replace(dir, &desired, bytes) {
+        Ok(saved) => saved,
+        Err(e) => {
+            tracing::error!("failed to save video to {}: {e}", dir.display());
+            return None;
+        }
+    };
     if !gif_preview.is_empty() {
         save_video_preview_gif(&filename, gif_preview);
     }
@@ -295,6 +298,28 @@ pub(crate) fn save_video_to_dir(
         });
     }
     Some(filename)
+}
+
+fn write_gallery_bytes_no_replace(
+    dir: &std::path::Path,
+    desired: &str,
+    bytes: &[u8],
+) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let reservation = crate::batch_transaction::reserve_gallery_final_name(dir, desired)?;
+    let filename = reservation.final_name().to_owned();
+    let path = dir.join(&filename);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
+    crate::batch_transaction::sync_gallery_directory(dir)?;
+    drop(reservation);
+    Ok((filename, path))
 }
 
 fn requested_post_upscale_model(req: &mold_core::GenerateRequest) -> Option<&str> {
@@ -3041,6 +3066,24 @@ mod tests {
         // Filename uses model-with-colon-replaced-by-dash + ms timestamp + .png.
         assert!(name_str.starts_with("mold-flux-dev-q4-"), "{name_str}");
         assert!(name_str.ends_with(".png"), "{name_str}");
+    }
+
+    #[test]
+    fn ordinary_gallery_save_never_takes_a_batch_reserved_name() {
+        let tmp = TempDir::new().unwrap();
+        let reservations = tmp
+            .path()
+            .join(crate::batch_transaction::TRANSACTION_DIR)
+            .join("reservations");
+        std::fs::create_dir_all(&reservations).unwrap();
+        std::fs::write(reservations.join("same.png.reserve"), b"reserved").unwrap();
+
+        let (filename, path) =
+            write_gallery_bytes_no_replace(tmp.path(), "same.png", b"ordinary").unwrap();
+
+        assert_eq!(filename, "same-1.png");
+        assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
+        assert!(!tmp.path().join("same.png").exists());
     }
 
     #[test]

@@ -834,7 +834,10 @@ pub async fn run_server(
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
                 tokio::spawn(async move {
-                    let _writer = gallery_gate.write().await;
+                    // Reconcile mutates SQLite but only observes gallery
+                    // files. The shared side keeps publication atomic while
+                    // allowing listings/media reads to remain available.
+                    let _reader = gallery_gate.read().await;
                     let join = tokio::task::spawn_blocking(move || {
                         if let Some(db) = db_arc.as_ref() {
                             db.reconcile(&dir)

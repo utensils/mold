@@ -51,9 +51,25 @@ pub trait UpscaleEngine: Send + Sync {
     fn clear_cancellation_token(&mut self) {}
 
     /// Declare tested native batch sizes for standalone and post-generation
-    /// upscale work. Test doubles inherit singleton behavior.
+    /// upscale work. Test doubles fail closed unless they override this.
     fn batch_execution_capability(&self) -> BatchExecutionCapability {
-        BatchExecutionCapability::SINGLETON_COOPERATIVE
+        BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+    }
+}
+
+/// Run one upscale attempt with a token installed and guarantee that a
+/// cancelled token cannot poison the cached engine's next invocation.
+pub fn with_upscale_cancellation<T>(
+    engine: &mut dyn UpscaleEngine,
+    token: InferenceCancellationToken,
+    operation: impl FnOnce(&mut dyn UpscaleEngine) -> T,
+) -> T {
+    engine.set_cancellation_token(token);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(engine)));
+    engine.clear_cancellation_token();
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
@@ -386,4 +402,88 @@ pub fn create_upscale_engine(
         load_strategy,
         gpu_ordinal,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    struct CancellationContractEngine {
+        set: Arc<AtomicBool>,
+        cleared: Arc<AtomicBool>,
+    }
+
+    impl UpscaleEngine for CancellationContractEngine {
+        fn upscale(
+            &mut self,
+            _req: &mold_core::UpscaleRequest,
+        ) -> Result<mold_core::UpscaleResponse> {
+            unreachable!()
+        }
+
+        fn model_name(&self) -> &str {
+            "contract"
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {}
+
+        fn scale_factor(&self) -> u32 {
+            4
+        }
+
+        fn set_on_progress(&mut self, _callback: ProgressCallback) {}
+
+        fn clear_on_progress(&mut self) {}
+
+        fn set_cancellation_token(&mut self, _token: InferenceCancellationToken) {
+            self.set.store(true, Ordering::SeqCst);
+        }
+
+        fn clear_cancellation_token(&mut self) {
+            self.cleared.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn upscale_cancellation_scope_always_clears_before_reuse() {
+        let set = Arc::new(AtomicBool::new(false));
+        let cleared = Arc::new(AtomicBool::new(false));
+        let mut engine = CancellationContractEngine {
+            set: set.clone(),
+            cleared: cleared.clone(),
+        };
+
+        with_upscale_cancellation(&mut engine, InferenceCancellationToken::default(), |_| ());
+
+        assert!(set.load(Ordering::SeqCst));
+        assert!(cleared.load(Ordering::SeqCst));
+        assert_eq!(
+            engine.batch_execution_capability(),
+            BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+        );
+
+        cleared.store(false, Ordering::SeqCst);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_upscale_cancellation(&mut engine, InferenceCancellationToken::default(), |_| {
+                panic!("injected upscaler panic")
+            })
+        }));
+        assert!(panic.is_err());
+        assert!(
+            cleared.load(Ordering::SeqCst),
+            "an unwinding upscale must clear its attempt token before engine reuse"
+        );
+    }
 }

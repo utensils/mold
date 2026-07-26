@@ -28,6 +28,13 @@ pub struct BatchExecutionCapability {
 }
 
 impl BatchExecutionCapability {
+    /// Conservative default for adapters and test doubles that have not
+    /// implemented an attempt-scoped cancellation hook.
+    pub const SINGLETON_NON_COOPERATIVE: Self = Self {
+        native_batch_sizes: &[1],
+        cooperative_cancellation: false,
+    };
+
     pub const SINGLETON_COOPERATIVE: Self = Self {
         native_batch_sizes: &[1],
         cooperative_cancellation: true,
@@ -81,10 +88,10 @@ pub trait InferenceEngine: Send + Sync {
     /// reused for another job.
     fn clear_cancellation_token(&mut self) {}
     /// Declare this engine family's tested batch and cancellation contract.
-    /// The default exists for lightweight test doubles; every production
-    /// family overrides it explicitly.
+    /// Adapters and test doubles default fail-closed; every production family
+    /// overrides this explicitly after implementing safe checkpoints.
     fn batch_execution_capability(&self) -> BatchExecutionCapability {
-        BatchExecutionCapability::SINGLETON_COOPERATIVE
+        BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
     }
     /// Return the model's resolved file paths, if available.
     /// Used by the server for pre-load memory checks on unified-memory systems.
@@ -116,6 +123,22 @@ pub trait InferenceEngine: Send + Sync {
     /// chaining return `None` and the caller responds with 422.
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         None
+    }
+}
+
+/// Run one attempt with a cancellation token installed, clearing it before
+/// the cached engine can be reused even when inference unwinds.
+pub fn with_inference_cancellation<T>(
+    engine: &mut dyn InferenceEngine,
+    token: InferenceCancellationToken,
+    operation: impl FnOnce(&mut dyn InferenceEngine) -> T,
+) -> T {
+    engine.set_cancellation_token(token);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(engine)));
+    engine.clear_cancellation_token();
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
@@ -266,6 +289,101 @@ mod tests {
         BatchExecutionCapability::SINGLETON_COOPERATIVE
             .validate()
             .unwrap();
+        BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn default_engine_does_not_claim_cooperative_cancellation() {
+        struct MinimalEngine;
+        impl InferenceEngine for MinimalEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
+                unreachable!()
+            }
+
+            fn model_name(&self) -> &str {
+                "minimal"
+            }
+
+            fn is_loaded(&self) -> bool {
+                true
+            }
+
+            fn load(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            MinimalEngine.batch_execution_capability(),
+            BatchExecutionCapability::SINGLETON_NON_COOPERATIVE
+        );
+    }
+
+    #[test]
+    fn cancellation_scope_clears_a_cancelled_token_before_engine_reuse() {
+        #[derive(Default)]
+        struct ReusableEngine {
+            token: Option<InferenceCancellationToken>,
+        }
+        impl InferenceEngine for ReusableEngine {
+            fn generate(&mut self, _req: &GenerateRequest) -> Result<GenerateResponse> {
+                self.token
+                    .as_ref()
+                    .map_or(Ok(()), InferenceCancellationToken::checkpoint)?;
+                unreachable!("the test only exercises cancellation")
+            }
+
+            fn model_name(&self) -> &str {
+                "reusable"
+            }
+
+            fn is_loaded(&self) -> bool {
+                true
+            }
+
+            fn load(&mut self) -> Result<()> {
+                Ok(())
+            }
+
+            fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+                self.token = Some(token);
+            }
+
+            fn clear_cancellation_token(&mut self) {
+                self.token = None;
+            }
+        }
+
+        let mut engine = ReusableEngine::default();
+        let cancelled = InferenceCancellationToken::default();
+        cancelled.cancel();
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test",
+            "model": "test",
+            "width": 64,
+            "height": 64,
+            "steps": 1,
+            "guidance": 1.0
+        }))
+        .unwrap();
+        let error =
+            with_inference_cancellation(&mut engine, cancelled, |engine| engine.generate(&request))
+                .unwrap_err();
+        assert!(crate::progress::is_inference_cancelled(&error));
+        assert!(engine.token.is_none());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_inference_cancellation(&mut engine, InferenceCancellationToken::default(), |_| {
+                panic!("injected inference panic")
+            })
+        }));
+        assert!(panic.is_err());
+        assert!(
+            engine.token.is_none(),
+            "an unwinding attempt must not poison the cached engine's next cancellation scope"
+        );
     }
 
     #[test]

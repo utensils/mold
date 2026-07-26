@@ -7,7 +7,7 @@
 mod tests {
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{Method, Request, StatusCode},
     };
     use base64::Engine as _;
     use mold_core::chain::{ChainRequest, ChainStage, TransitionMode};
@@ -6021,7 +6021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gallery_route_waits_for_atomic_publication_writer() {
+    async fn every_gallery_observer_and_mutator_waits_for_atomic_publication_writer() {
         let dir = tempfile::tempdir().unwrap();
         let config = mold_core::Config {
             output_dir: Some(dir.path().to_string_lossy().into_owned()),
@@ -6036,28 +6036,99 @@ mod tests {
         let gate = state.gallery_publication_gate.clone();
         let writer = gate.write().await;
         let app = app_with_state(state);
-        let mut request = tokio::spawn(async move {
+        let cases = [
+            (Method::GET, "/api/gallery", StatusCode::OK),
+            (
+                Method::GET,
+                "/api/gallery/image/missing.png",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::GET,
+                "/api/gallery/thumbnail/missing.png",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::GET,
+                "/api/gallery/preview/missing.mp4",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Method::DELETE,
+                "/api/gallery/image/missing.png",
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        let mut requests: Vec<_> = cases
+            .into_iter()
+            .map(|(method, uri, expected)| {
+                let app = app.clone();
+                (
+                    expected,
+                    tokio::spawn(async move {
+                        app.oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri(uri)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap()
+                    }),
+                )
+            })
+            .collect();
+
+        for (_, request) in &mut requests {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), request)
+                    .await
+                    .is_err(),
+                "a gallery route observed a transaction while its writer gate was held"
+            );
+        }
+        drop(writer);
+        for (expected, request) in requests {
+            let response = tokio::time::timeout(Duration::from_secs(1), request)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn gallery_listings_share_the_publication_reader_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+        let gate = state.gallery_publication_gate.clone();
+        let reader = gate.read().await;
+        let app = app_with_state(state);
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
             app.oneshot(
                 Request::builder()
                     .uri("/api/gallery")
                     .body(Body::empty())
                     .unwrap(),
-            )
-            .await
-            .unwrap()
-        });
+            ),
+        )
+        .await
+        .expect("a second gallery reader must not serialize behind the first")
+        .unwrap();
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut request)
-                .await
-                .is_err(),
-            "gallery listing observed a transaction while its writer gate was held"
-        );
-        drop(writer);
-        let response = tokio::time::timeout(Duration::from_secs(1), request)
-            .await
-            .unwrap()
-            .unwrap();
+        drop(reader);
         assert_eq!(response.status(), StatusCode::OK);
     }
 

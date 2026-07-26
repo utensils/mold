@@ -266,6 +266,30 @@ mod tests {
     }
 
     #[test]
+    fn denoise_loop_stops_at_the_next_safe_checkpoint_and_can_be_reused() {
+        let token = InferenceCancellationToken::default();
+        let mut reporter = ProgressReporter::default();
+        reporter.set_cancellation_token(token.clone());
+        let mut completed_steps = 0;
+
+        let result = (|| {
+            for step in 0..10 {
+                reporter.checkpoint()?;
+                completed_steps += 1;
+                if step == 3 {
+                    token.cancel();
+                }
+            }
+            Ok::<(), InferenceCancelled>(())
+        })();
+
+        assert_eq!(result, Err(InferenceCancelled));
+        assert_eq!(completed_steps, 4);
+        reporter.clear_cancellation_token();
+        assert!(reporter.checkpoint().is_ok());
+    }
+
+    #[test]
     fn test_callback_receives_stage_start() {
         let mut reporter = ProgressReporter::default();
         let (cb, log) = capturing_callback();
