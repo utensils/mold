@@ -257,6 +257,22 @@ describe("ModelDetailDrawer", () => {
       expect(mockCloseDetail).toHaveBeenCalled();
     });
 
+    it("keeps the drawer open and reports a rejected Pull", async () => {
+      mockDetail.value = catalogDetail();
+      mockStartDownload.mockRejectedValueOnce(
+        new Error("not a supported built-in model or LoRA"),
+      );
+      const w = mount(ModelDetailDrawer);
+      await w.find("[data-test=pull-btn]").trigger("click");
+      await flushPromises();
+
+      expect(mockCloseDetail).not.toHaveBeenCalled();
+      expect(mockToast).toHaveBeenCalledWith(
+        "error",
+        "not a supported built-in model or LoRA",
+      );
+    });
+
     it("selecting a variant changes the pull target", async () => {
       mockDetail.value = catalogDetail(makeEntry(), [
         { id: "hf:a", label: "safetensors" },

@@ -94,6 +94,10 @@ boundaries, restores model-aware settings, and exposes the full recorded
 generation metadata with prompt/seed copy and an Upscale handoff to Create.
 Create preflights peak VRAM against the selected machine, exposes LTX-2 camera
 motion presets, and reconnects to the last durable sequence after a reload.
+Sequence mode filters the picker to compatible video checkpoints, switches to
+one when available, and otherwise opens Discover already filtered to video
+models. Two-stage LTX-2 dev checkpoints remain available for single clips;
+sequences require a distilled or one-stage checkpoint.
 Machine chips filter that merged feed, tiles expose a context action menu, and
 the visible Library refreshes automatically as new prints land.
 Keyboard users get trapped focus, reliable Escape dismissal, opener focus
@@ -129,7 +133,8 @@ components. Type badges and explicit `18+ NSFW` labels remain consistent
 between List, Grid, and the detail drawer.
 Curated built-in variants take precedence over ambiguous multi-checkpoint
 Hugging Face repositories, so a pull targets one runnable model instead of an
-entire aggregate repository.
+entire aggregate repository. Aggregate repositories are not offered as Pull
+targets, and catalog download failures are reported in the interface.
 Every remembered remote host is retried immediately whenever the app launches,
 independently of This Mac's startup; unreachable hosts stay visible and retry.
 Pod-routed Create jobs show their live RunPod accrued cost in the activity strip.

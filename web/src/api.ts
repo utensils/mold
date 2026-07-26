@@ -60,6 +60,8 @@ export interface ChainLimits {
   transition_modes: string[];
   quantization_family: string;
   supports_audio: boolean;
+  supports_sequence: boolean;
+  sequence_unsupported_reason?: string | null;
 }
 
 export function imageUrl(filename: string): string {

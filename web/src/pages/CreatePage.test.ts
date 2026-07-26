@@ -16,7 +16,7 @@ import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
-import type { ChainJobDetail, GalleryImage } from "../types";
+import type { ChainJobDetail, GalleryImage, ModelInfoExtended } from "../types";
 import type { Job } from "../composables/useGenerateStream";
 
 vi.mock("vue-router", async (importOriginal) => ({
@@ -70,6 +70,7 @@ const chainJobDetailRef = vi.hoisted(
 );
 const chainJobIdRef = vi.hoisted(() => ({ value: null as string | null }));
 const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
+const refreshChainJobMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("../api", () => ({
   createChainJob: createChainJobMock,
@@ -105,6 +106,7 @@ vi.mock("../composables/useChainJobStream", () => ({
     return {
       detail: chainJobDetailRef,
       connected: { __v_isRef: true, value: true },
+      refresh: refreshChainJobMock,
     };
   },
 }));
@@ -169,6 +171,7 @@ describe("CreatePage layout and behavior", () => {
       }),
     );
     chainJobDetailRef.value = null;
+    refreshChainJobMock.mockClear();
     hostStatusMock.mockClear();
     hostModelsMock.mockClear();
     hostModelsMock.mockResolvedValue([]);
@@ -611,6 +614,125 @@ describe("CreatePage layout and behavior", () => {
     );
   });
 
+  it("switches an image model to an installed sequence-compatible model and filters the picker", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux2-klein:q4",
+        family: "flux2",
+        size_gb: 4,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "Image model",
+        supports_sequence: false,
+      },
+      {
+        name: "ltx-2.3-22b-dev:fp8",
+        family: "ltx2",
+        size_gb: 34,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 20,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        description: "Two-stage video model",
+        supports_sequence: false,
+      },
+      {
+        name: "ltx-2.3-22b-distilled:fp8",
+        family: "ltx2",
+        size_gb: 35,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 8,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        description: "Sequence model",
+        supports_sequence: true,
+      },
+    ]);
+    useGenerateForm().state.value.model = "flux2-klein:q4";
+    useGenerateForm().state.value.modelFamily = "flux2";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const sequence = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((button) => button.text() === "Sequence")!;
+    await sequence.trigger("click");
+    await flushPromises();
+
+    expect(useGenerateForm().state.value.model).toBe(
+      "ltx-2.3-22b-distilled:fp8",
+    );
+    const picker = wrapper.getComponent({ name: "CreateModelPicker" });
+    expect(
+      (picker.props("models") as ModelInfoExtended[]).map(
+        (model) => model.name,
+      ),
+    ).toEqual(["ltx-2.3-22b-distilled:fp8"]);
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
+      false,
+    );
+  });
+
+  it("links an empty sequence setup to filtered video checkpoint discovery", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux2-klein:q4",
+        family: "flux2",
+        size_gb: 4,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 4,
+        default_guidance: 1,
+        default_width: 1024,
+        default_height: 1024,
+        description: "Image model",
+        supports_sequence: false,
+      },
+    ]);
+    useGenerateForm().state.value.model = "flux2-klein:q4";
+    useGenerateForm().state.value.modelFamily = "flux2";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const sequence = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((button) => button.text() === "Sequence")!;
+    await sequence.trigger("click");
+
+    expect(
+      wrapper.get("[data-test='browse-sequence-models']").attributes("to"),
+    ).toBe("/models?tab=discover&type=video&kind=checkpoint&intent=sequence");
+  });
+
+  it("does not treat a restored 19B dev checkpoint as sequence-capable before inventory loads", async () => {
+    useGenerateForm().state.value.model = "ltx-2-19b-dev:fp8";
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const sequence = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((button) => button.text() === "Sequence")!;
+    await sequence.trigger("click");
+
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
+  });
+
   it("prepares a batch on the server and queues provenance on every sibling", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
@@ -953,6 +1075,35 @@ describe("CreatePage layout and behavior", () => {
     expect(
       wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
     ).toMatchObject({ id: "job-1", state: "queued" });
+
+    wrapper.getComponent({ name: "ChainJobCard" }).vm.$emit("updated");
+    expect(refreshChainJobMock).toHaveBeenCalledOnce();
+  });
+
+  it("dismisses settled durable jobs from Create without pretending to cancel them", async () => {
+    localStorage.setItem("mold.create.chain-job", "failed-job");
+    chainJobDetailRef.value = {
+      id: "failed-job",
+      state: "failed",
+      model: "ltx-2.3-22b-dev:fp8",
+      stage_count: 1,
+      current_stage: 0,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      error: "TwoStage is unsupported",
+      ephemeral: false,
+      stages: [],
+      finalizes: [],
+      retakes: [],
+      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
+    };
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper.getComponent({ name: "ChainJobCard" }).vm.$emit("dismiss");
+    await nextTick();
+
+    expect(localStorage.getItem("mold.create.chain-job")).toBeNull();
   });
 
   it("reattaches to the last durable chain job after a reload", async () => {
@@ -1278,7 +1429,7 @@ function pageStubs() {
     },
     CreateModelPicker: {
       name: "CreateModelPicker",
-      props: ["models", "model"],
+      props: ["models", "model", "browseTo", "emptyLabel"],
       template: "<div data-test='model-picker-stub' />",
     },
     ControlsAside: {
@@ -1296,6 +1447,7 @@ function pageStubs() {
     ChainJobCard: {
       name: "ChainJobCard",
       props: ["job"],
+      emits: ["dismiss"],
       template: '<div data-test="chain-job-card">{{ job.id }}</div>',
     },
     ExpandModal: {

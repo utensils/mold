@@ -32,4 +32,19 @@ describe("CreateModelPicker", () => {
     expect(option.text()).toBe("RealVisXL V5.0 by SG161222");
     expect(option.attributes("value")).toBe("cv:23423432");
   });
+
+  it("selects the empty-state option when a restored model is unavailable", () => {
+    const wrapper = mount(CreateModelPicker, {
+      props: {
+        models: [],
+        model: "ltx-2-19b-dev:fp8",
+        emptyLabel: "No sequence models installed",
+      },
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+
+    const select = wrapper.get("select").element as HTMLSelectElement;
+    expect(select.value).toBe("");
+    expect(wrapper.get("option").text()).toBe("No sequence models installed");
+  });
 });

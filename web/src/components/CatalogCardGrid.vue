@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useCatalog } from "../composables/useCatalog";
+import { toast } from "../lib/toasts";
 import CatalogCard from "./CatalogCard.vue";
 
 const cat = useCatalog();
@@ -40,8 +41,13 @@ function openCard(id: string) {
   void cat.openDetail(id);
 }
 
-function pullCard(id: string) {
-  void cat.startDownload(id);
+async function pullCard(id: string) {
+  try {
+    await cat.startDownload(id);
+    toast("success", "Download queued");
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  }
 }
 </script>
 

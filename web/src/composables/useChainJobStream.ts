@@ -5,6 +5,7 @@ import type { ChainJobDetail, ChainJobEvent } from "../types";
 export function useChainJobStream(jobId: Ref<string | null>): {
   detail: Ref<ChainJobDetail | null>;
   connected: Ref<boolean>;
+  refresh: () => Promise<void>;
 } {
   const detail = ref<ChainJobDetail | null>(null);
   const connected = ref(false);
@@ -100,6 +101,11 @@ export function useChainJobStream(jobId: Ref<string | null>): {
     });
   }
 
+  async function refresh() {
+    const id = jobId.value;
+    if (id) await pollOnce(id);
+  }
+
   watch(
     jobId,
     (id) => {
@@ -120,5 +126,5 @@ export function useChainJobStream(jobId: Ref<string | null>): {
     closeSource();
   });
 
-  return { detail, connected };
+  return { detail, connected, refresh };
 }

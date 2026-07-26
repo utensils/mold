@@ -174,6 +174,68 @@ async fn post(router: axum::Router, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
+fn hf_checkpoint(source_id: &str) -> mold_catalog::entry::CatalogEntry {
+    use mold_catalog::entry::{
+        Bundling, CatalogEntry, CatalogId, DownloadRecipe, FamilyRole, FileFormat, Kind,
+        LicenseFlags, Modality, Source,
+    };
+
+    CatalogEntry {
+        id: CatalogId::from(format!("hf:{source_id}")),
+        source: Source::Hf,
+        source_id: source_id.into(),
+        name: source_id.into(),
+        author: source_id.split_once('/').map(|(author, _)| author.into()),
+        family: mold_catalog::families::Family::Ltx2,
+        family_role: FamilyRole::Foundation,
+        sub_family: None,
+        modality: Modality::Video,
+        kind: Kind::Checkpoint,
+        file_format: FileFormat::Safetensors,
+        bundling: Bundling::Separated,
+        size_bytes: None,
+        download_count: 0,
+        rating: None,
+        likes: 0,
+        nsfw: false,
+        thumbnail_url: None,
+        description: None,
+        license: None,
+        license_flags: LicenseFlags::default(),
+        tags: vec![],
+        companions: vec![],
+        download_recipe: DownloadRecipe {
+            files: vec![],
+            needs_token: None,
+        },
+        supported: true,
+        created_at: None,
+        updated_at: None,
+        added_at: 0,
+        trained_words: vec![],
+        page_url: None,
+    }
+}
+
+#[test]
+fn aggregate_hugging_face_repositories_are_not_offered_for_download() {
+    let entry = hf_checkpoint("Lightricks/LTX-2.3");
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    assert!(!super::entry_download_supported(&entry));
+    assert_eq!(
+        super::live_entry_to_wire(&entry, tmp.path())["supported"],
+        false
+    );
+}
+
+#[test]
+fn known_transformer_repositories_are_offered_as_builtin_downloads() {
+    let entry = hf_checkpoint("black-forest-labs/FLUX.1-dev");
+
+    assert!(super::entry_download_supported(&entry));
+}
+
 #[tokio::test]
 async fn live_search_returns_normalized_civitai_rows() {
     let (state, _server, _tmp) = build_state().await;

@@ -523,6 +523,9 @@ drawer. Retired browser routes such as `/catalog` render Page Not Found. Every r
 a live HF + Civitai proxy through `GET /api/catalog/search` with a 5-min
 in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
+Sequence-mode browse links enter this view with Video + Models filters. The web
+Create picker contains only sequence-capable installed models and selects one
+when available.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. HF separated-bundling entries
@@ -544,6 +547,9 @@ automatically because the compatibility backend reconstructs BF16 block weights.
 Native multi-prompt chains accept one-stage and distilled LTX-2 checkpoints.
 Installed catalog checkpoints with opaque `cv:` / `hf:` IDs and no bundled
 spatial upscaler use the one-stage path and remain sequence-capable.
+Two-stage LTX-2 dev checkpoints are rejected before a durable sequence job is
+created. Aggregate Hugging Face repositories are marked unsupported for Pull;
+cards and details surface download failures as toasts.
 Single-file format detection is key-based (reads safetensors header only).
 
 **Auth:** `HF_TOKEN` for gated HF repos; `CIVITAI_TOKEN` for early-access

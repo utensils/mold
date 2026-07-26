@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, ref, watch } from "vue";
 import {
   cancelChainJob,
   chainJobStagePreviewUrl,
@@ -13,7 +14,32 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   updated: [];
+  dismiss: [];
 }>();
+
+const actionBusy = ref<"resume" | "cancel" | "retake" | null>(null);
+const actionError = ref<string | null>(null);
+const active = computed(
+  () => props.job.state === "queued" || props.job.state === "running",
+);
+const resumable = computed(() =>
+  ["failed", "interrupted", "cancelled"].includes(props.job.state),
+);
+const dismissible = computed(() =>
+  ["completed", "failed", "cancelled"].includes(props.job.state),
+);
+
+watch(
+  () => props.job.state,
+  () => {
+    actionBusy.value = null;
+    actionError.value = null;
+  },
+);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function nextTransition(stageIdx: number): string {
   return props.job.script.stage[stageIdx + 1]?.transition ?? "cut";
@@ -24,19 +50,46 @@ function spliceDisabled(stageIdx: number): boolean {
 }
 
 async function resume() {
-  await resumeChainJob(props.job.id);
-  emit("updated");
+  if (actionBusy.value) return;
+  actionBusy.value = "resume";
+  actionError.value = null;
+  try {
+    await resumeChainJob(props.job.id);
+    emit("updated");
+  } catch (error) {
+    actionError.value = errorMessage(error);
+  } finally {
+    actionBusy.value = null;
+  }
 }
 
 async function cancel() {
-  await cancelChainJob(props.job.id);
-  emit("updated");
+  if (!active.value || actionBusy.value) return;
+  actionBusy.value = "cancel";
+  actionError.value = null;
+  try {
+    await cancelChainJob(props.job.id);
+    emit("updated");
+  } catch (error) {
+    actionError.value = errorMessage(error);
+  } finally {
+    actionBusy.value = null;
+  }
 }
 
 async function retake(stageIdx: number, mode: "cascade" | "splice") {
-  if (mode === "splice" && spliceDisabled(stageIdx)) return;
-  await retakeChainJob(props.job.id, { stage_idx: stageIdx, mode });
-  emit("updated");
+  if (actionBusy.value || (mode === "splice" && spliceDisabled(stageIdx)))
+    return;
+  actionBusy.value = "retake";
+  actionError.value = null;
+  try {
+    await retakeChainJob(props.job.id, { stage_idx: stageIdx, mode });
+    emit("updated");
+  } catch (error) {
+    actionError.value = errorMessage(error);
+  } finally {
+    actionBusy.value = null;
+  }
 }
 </script>
 
@@ -54,23 +107,50 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
       </div>
       <div class="flex gap-2">
         <button
+          v-if="resumable"
           data-test="chain-job-resume"
           class="rounded border border-ce px-2 py-1 text-xs text-rebate disabled:opacity-40"
-          :disabled="job.state === 'running' || job.state === 'completed'"
+          :disabled="actionBusy !== null"
           @click="resume"
         >
-          Resume
+          {{ actionBusy === "resume" ? "Resuming…" : "Resume" }}
         </button>
         <button
+          v-if="active"
           data-test="chain-job-cancel"
           class="rounded border border-ce px-2 py-1 text-xs text-rebate disabled:opacity-40"
-          :disabled="job.state === 'completed' || job.state === 'cancelled'"
+          :disabled="actionBusy !== null"
           @click="cancel"
         >
-          Cancel
+          {{ actionBusy === "cancel" ? "Cancelling…" : "Cancel" }}
+        </button>
+        <button
+          v-else-if="dismissible"
+          data-test="chain-job-dismiss"
+          class="rounded border border-ce px-2 py-1 text-xs text-rebate"
+          @click="emit('dismiss')"
+        >
+          Dismiss
         </button>
       </div>
     </div>
+
+    <p
+      v-if="job.error"
+      data-test="chain-job-error"
+      class="mt-3 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs leading-relaxed text-red-200"
+      role="alert"
+    >
+      {{ job.error }}
+    </p>
+    <p
+      v-if="actionError"
+      data-test="chain-job-action-error"
+      class="mt-3 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200"
+      role="alert"
+    >
+      {{ actionError }}
+    </p>
 
     <ol data-test="chain-job-timeline" class="mt-3 grid gap-2">
       <li
@@ -98,11 +178,19 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
           <div class="truncate text-xs text-ink-3">
             {{ job.script.stage[stage.idx]?.prompt }}
           </div>
+          <div
+            v-if="stage.error && stage.error !== job.error"
+            class="mt-1 text-xs leading-relaxed text-red-200"
+            :data-test="`chain-job-stage-error-${stage.idx}`"
+          >
+            {{ stage.error }}
+          </div>
         </div>
         <div class="flex gap-2">
           <button
             class="rounded border border-edge px-2 py-1 text-xs text-ink-2"
             :data-test="`chain-job-retake-cascade-${stage.idx}`"
+            :disabled="active || actionBusy !== null"
             @click="retake(stage.idx, 'cascade')"
           >
             Retake
@@ -110,7 +198,9 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
           <button
             class="rounded border border-edge px-2 py-1 text-xs text-ink-2 disabled:opacity-40"
             :data-test="`chain-job-retake-splice-${stage.idx}`"
-            :disabled="spliceDisabled(stage.idx)"
+            :disabled="
+              active || actionBusy !== null || spliceDisabled(stage.idx)
+            "
             :title="
               spliceDisabled(stage.idx)
                 ? 'Splice retake requires the next transition to be cut or fade.'

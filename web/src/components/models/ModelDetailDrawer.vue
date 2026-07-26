@@ -344,8 +344,13 @@ async function handlePull() {
   const e = entry.value;
   if (!e) return;
   const target = isRepair.value ? e.id : (selectedVariantId.value ?? e.id);
-  await cat.startDownload(target);
-  cat.closeDetail();
+  try {
+    await cat.startDownload(target);
+    toast("success", isRepair.value ? "Repair queued" : "Download queued");
+    cat.closeDetail();
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+  }
 }
 
 async function handleComponentRepair(component: ModelComponentStatus) {

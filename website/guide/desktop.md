@@ -126,6 +126,11 @@ surface powers it, so anything the app does maps to a documented endpoint.
   import/export, and a durable jobs list with resume, cancel, and retake. Its
   picker includes video models installed on every connected host; limits,
   creation, events, previews, and job actions stay routed to the model's host.
+  Sequence mode limits the picker to compatible one-stage/distilled
+  checkpoints, switches to one when available, and otherwise opens Discover
+  with Video + Models filters. Job and action failures stay visible inline;
+  Cancel is guarded while its request is in flight and settled jobs can be
+  dismissed.
 - **History** (the Runs + Prompts drawer inside Library) — a fast, searchable
   list of past prompts from every ready host; ↩ refills the composer, while
   Up/Down recalls the same merged history inline.

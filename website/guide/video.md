@@ -4,7 +4,10 @@ title: Video Generation
 
 # Video Generation
 
-mold supports generating video clips using LTX Video and LTX-2 models. LTX-2 distilled models support chaining multiple clips together for longer videos with scene-by-scene direction.
+mold supports generating video clips using LTX Video and LTX-2 models. LTX-2
+distilled and one-stage checkpoints support chaining multiple clips together
+for longer videos with scene-by-scene direction. Two-stage dev checkpoints are
+single-clip pipelines and are rejected before a sequence job is created.
 
 ## Single-clip generation
 
@@ -117,6 +120,7 @@ Returns per-model caps used by all composer UIs:
   "max_stages": 16,
   "max_total_frames": 1552,
   "fade_frames_max": 32,
-  "transition_modes": ["smooth", "cut", "fade"]
+  "transition_modes": ["smooth", "cut", "fade"],
+  "supports_sequence": true
 }
 ```

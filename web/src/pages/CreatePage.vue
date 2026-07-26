@@ -491,7 +491,34 @@ const capabilities = computed(() =>
 // Chain (Sequence) generation is only meaningful for the video families that
 // stitch multiple clips. For everything else the Sequence tab stays
 // discoverable but explains itself instead of offering a dead Generate button.
-const supportsChain = computed(() => capabilities.value.supportsVideo);
+function modelSupportsSequence(model: ModelInfoExtended | null): boolean {
+  if (!model) return false;
+  if (typeof model.supports_sequence === "boolean")
+    return model.supports_sequence;
+  if (model.family === "ltx-video") return true;
+  if (model.family !== "ltx2") return false;
+  // Older servers do not expose model-specific sequence support. Built-in
+  // distilled checkpoints and single-file catalog checkpoints choose the
+  // supported Distilled/OneStage paths; built-in dev checkpoints choose
+  // TwoStage and must stay out of the sequence picker.
+  return (
+    model.name.includes("distilled") ||
+    model.name.startsWith("cv:") ||
+    model.name.startsWith("hf:")
+  );
+}
+
+const supportsChain = computed(() => {
+  if (currentModel.value) return modelSupportsSequence(currentModel.value);
+
+  // Keep imported or restored forms usable while the installed-model inventory
+  // is still loading. The server remains the final authority at submission.
+  const model = form.state.value.model.toLowerCase();
+  if (currentFamily.value === "ltx-video") return true;
+  if (currentFamily.value !== "ltx2") return false;
+
+  return !model.includes("-dev");
+});
 
 const gpuListForPlacement = computed(
   () =>
@@ -537,6 +564,16 @@ const estimateTarget = computed(() =>
 const installedModels = computed(() =>
   models.value.filter((m) => m.downloaded && isStandaloneGenerationModel(m)),
 );
+const sequenceModels = computed(() =>
+  installedModels.value.filter((model) => modelSupportsSequence(model)),
+);
+const composerModels = computed(() =>
+  composerMode.value === "script"
+    ? sequenceModels.value
+    : installedModels.value,
+);
+const sequenceBrowsePath =
+  "/models?tab=discover&type=video&kind=checkpoint&intent=sequence";
 
 // Cold start (spec §08 G10): nothing installed to generate with. Only after the
 // first load resolves, so the guide replaces the empty canvas rather than
@@ -564,6 +601,21 @@ watch(
     if (current && installedModels.value.some((m) => m.name === current))
       return;
     form.applyModelDefaults(first);
+  },
+  { immediate: true },
+);
+
+// Entering Sequence is an intent change: keep only compatible models in the
+// picker and move off an image/two-stage model automatically when a runnable
+// sequence checkpoint is already installed.
+watch(
+  [composerMode, sequenceModels, modelsLoaded],
+  () => {
+    if (composerMode.value !== "script" || !modelsLoaded.value) return;
+    const current = form.state.value.model;
+    if (sequenceModels.value.some((model) => model.name === current)) return;
+    const first = sequenceModels.value[0];
+    if (first) form.applyModelDefaults(first);
   },
   { immediate: true },
 );
@@ -1487,7 +1539,8 @@ onBeforeUnmount(() => {
                   back to single
                 </button>
                 <router-link
-                  to="/models"
+                  :to="sequenceBrowsePath"
+                  data-test="browse-sequence-models"
                   class="rounded-control border border-ce px-3 py-1.5 font-mono text-[11px] text-ink-2 transition hover:border-safelight hover:text-rebate"
                 >
                   browse video models →
@@ -1497,16 +1550,25 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <ScriptComposer
-          v-else-if="composerMode === 'script'"
-          ref="scriptComposerRef"
-          :model="form.state.value.model"
-          :width="form.state.value.width"
-          :height="form.state.value.height"
-          :fps="form.state.value.fps ?? 24"
-          @submit="onSubmitScript"
-          @expand="(idx: number, p: string) => onExpandStage(idx, p)"
-        />
+        <template v-else-if="composerMode === 'script'">
+          <CreateModelPicker
+            v-if="isPhone"
+            :models="sequenceModels"
+            :model="form.state.value.model"
+            :browse-to="sequenceBrowsePath"
+            empty-label="No sequence models installed"
+            @select="selectModel"
+          />
+          <ScriptComposer
+            ref="scriptComposerRef"
+            :model="form.state.value.model"
+            :width="form.state.value.width"
+            :height="form.state.value.height"
+            :fps="form.state.value.fps ?? 24"
+            @submit="onSubmitScript"
+            @expand="(idx: number, p: string) => onExpandStage(idx, p)"
+          />
+        </template>
 
         <template v-else>
           <ComposerCard
@@ -1530,8 +1592,10 @@ onBeforeUnmount(() => {
                 data-test="phone-create-controls"
               >
                 <CreateModelPicker
-                  :models="installedModels"
+                  :models="composerModels"
                   :model="form.state.value.model"
+                  browse-to="/models"
+                  empty-label="No models installed"
                   @select="selectModel"
                 />
                 <ControlsAside
@@ -1654,7 +1718,8 @@ onBeforeUnmount(() => {
         <ChainJobCard
           v-if="submittedChainJobDetail"
           :job="submittedChainJobDetail"
-          @updated="submittedChainJobId = submittedChainJobDetail?.id ?? null"
+          @updated="submittedChainJob.refresh()"
+          @dismiss="submittedChainJobId = null"
         />
 
         <section>
@@ -1675,8 +1740,16 @@ onBeforeUnmount(() => {
            the Advanced sheet, opened from the button inside ControlsAside. -->
       <div v-if="!isPhone" class="flex min-w-0 flex-col gap-4">
         <CreateModelPicker
-          :models="installedModels"
+          :models="composerModels"
           :model="form.state.value.model"
+          :browse-to="
+            composerMode === 'script' ? sequenceBrowsePath : '/models'
+          "
+          :empty-label="
+            composerMode === 'script'
+              ? 'No sequence models installed'
+              : 'No models installed'
+          "
           @select="selectModel"
         />
         <ControlsAside

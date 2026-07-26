@@ -469,10 +469,10 @@ pub async fn post_catalog_download(
             .into_response();
     };
 
-    if !entry.supported {
+    if !entry_download_supported(&entry) {
         return (
             StatusCode::CONFLICT,
-            "catalog entry is not supported by this build".to_string(),
+            catalog_download_unsupported_reason(&entry),
         )
             .into_response();
     }
@@ -484,7 +484,9 @@ pub async fn post_catalog_download(
     use mold_catalog::entry::{Kind, Source};
     let recipe_auth = match entry.source {
         Source::Hf => {
-            if mold_core::manifest::find_manifest(&entry.source_id).is_some() {
+            if mold_core::manifest::find_manifest(&entry.source_id).is_some()
+                || mold_core::manifest::find_manifest_by_hf_repo(&entry.source_id).is_some()
+            {
                 None
             } else if entry.kind == Kind::Lora {
                 Some(match entry.download_recipe.needs_token {
@@ -547,7 +549,9 @@ pub async fn post_catalog_download(
     // return a real error instead of a successful response with no queued job.
     let primary_job_id: Option<String> = match entry.source {
         Source::Hf => {
-            if let Some(manifest) = mold_core::manifest::find_manifest(&entry.source_id) {
+            if let Some(manifest) = mold_core::manifest::find_manifest(&entry.source_id)
+                .or_else(|| mold_core::manifest::find_manifest_by_hf_repo(&entry.source_id))
+            {
                 match state
                     .downloads
                     .enqueue_in_group_with_hf_fallback(
@@ -1083,7 +1087,7 @@ fn live_entry_to_wire(
         "companions": entry.companions,
         "companion_details": companion_details,
         "download_recipe": entry.download_recipe,
-        "supported": entry.supported,
+        "supported": entry_download_supported(entry),
         "installed": installed,
         "primary_path": primary_path,
         "created_at": entry.created_at,
@@ -1092,6 +1096,30 @@ fn live_entry_to_wire(
         "trained_words": entry.trained_words,
         "page_url": entry.page_url,
     })
+}
+
+fn entry_download_supported(entry: &mold_catalog::entry::CatalogEntry) -> bool {
+    use mold_catalog::entry::{Kind, Source};
+    if !entry.supported {
+        return false;
+    }
+    match entry.source {
+        Source::Civitai => true,
+        Source::Hf => {
+            entry.kind == Kind::Lora
+                || mold_core::manifest::find_manifest(&entry.source_id).is_some()
+                || mold_core::manifest::find_manifest_by_hf_repo(&entry.source_id).is_some()
+        }
+    }
+}
+
+fn catalog_download_unsupported_reason(entry: &mold_catalog::entry::CatalogEntry) -> String {
+    if matches!(entry.source, mold_catalog::entry::Source::Hf) {
+        return "This Hugging Face repository is an aggregate or unsupported checkpoint. \
+                Choose a runnable built-in model variant or a supported LoRA."
+            .into();
+    }
+    "This catalog entry is not supported by this build.".into()
 }
 
 pub(crate) fn sidecar_to_wire(
