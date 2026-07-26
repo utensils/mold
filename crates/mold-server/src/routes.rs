@@ -3268,10 +3268,12 @@ pub struct GalleryMediaTokenResponse {
     )
 )]
 async fn create_gallery_media_token(
+    State(state): State<AppState>,
     auth_state: Option<Extension<crate::auth::AuthState>>,
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(request): Json<GalleryMediaTokenRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     if !crate::auth::is_gallery_image_path(&request.path) {
         return Err(ApiError::validation(
             "media token path must match /api/gallery/image/:filename",
@@ -3318,6 +3320,9 @@ async fn create_gallery_media_token(
 async fn list_gallery(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<mold_core::GalleryImage>>, ApiError> {
+    // `MetadataDb::list` may invoke corruption recovery, so list takes the
+    // writer side rather than allowing a DB rebuild beside other observers.
+    let _gallery_writer = state.gallery_publication_gate.write().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Ok(Json(Vec::new()));
@@ -3371,6 +3376,7 @@ async fn get_gallery_image(
     headers: HeaderMap,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3543,6 +3549,7 @@ async fn delete_gallery_image(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_writer = state.gallery_publication_gate.write().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3618,6 +3625,7 @@ async fn get_gallery_thumbnail(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3734,6 +3742,7 @@ async fn get_gallery_preview(
     State(state): State<AppState>,
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
+    let _gallery_reader = state.gallery_publication_gate.read().await;
     let config = state.config.read().await;
     if config.is_output_disabled() {
         return Err(ApiError::not_found("image output is disabled"));
@@ -3860,52 +3869,62 @@ fn generate_video_thumbnail(
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.
-pub fn spawn_thumbnail_warmup(config: &mold_core::Config) {
+pub fn spawn_thumbnail_warmup(
+    config: &mold_core::Config,
+    gallery_gate: crate::batch_transaction::GalleryPublicationGate,
+) {
     if !thumbnail_warmup_enabled() {
         tracing::info!("thumbnail warmup disabled; thumbnails will be generated on demand");
         return;
     }
 
     let output_dir = config.effective_output_dir();
-    std::thread::spawn(move || {
-        if !output_dir.is_dir() {
-            return;
-        }
-        let thumb_dir = server_thumbnail_dir();
-        let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
-        for entry in walker.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+    tokio::spawn(async move {
+        let _gallery_reader = gallery_gate.read().await;
+        let join = tokio::task::spawn_blocking(move || {
+            if !output_dir.is_dir() {
+                return;
             }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase());
-            let is_raster = matches!(
-                ext.as_deref(),
-                Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
-            );
-            let is_video = matches!(ext.as_deref(), Some("mp4"));
-            if !is_raster && !is_video {
-                continue;
+            let thumb_dir = server_thumbnail_dir();
+            let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
+            for entry in walker.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_lowercase());
+                let is_raster = matches!(
+                    ext.as_deref(),
+                    Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
+                );
+                let is_video = matches!(ext.as_deref(), Some("mp4"));
+                if !is_raster && !is_video {
+                    continue;
+                }
+                let filename = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let thumb_path = thumb_dir.join(format!("{filename}.png"));
+                if thumb_path.is_file() {
+                    continue;
+                }
+                let result = if is_video {
+                    generate_video_thumbnail(path, &thumb_path)
+                } else {
+                    generate_server_thumbnail(path, &thumb_path)
+                };
+                if let Err(e) = result {
+                    tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
+                }
             }
-            let filename = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let thumb_path = thumb_dir.join(format!("{filename}.png"));
-            if thumb_path.is_file() {
-                continue;
-            }
-            let result = if is_video {
-                generate_video_thumbnail(path, &thumb_path)
-            } else {
-                generate_server_thumbnail(path, &thumb_path)
-            };
-            if let Err(e) = result {
-                tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
-            }
+        })
+        .await;
+        if let Err(error) = join {
+            tracing::warn!(%error, "thumbnail warmup task failed");
         }
         tracing::info!("thumbnail warmup complete");
     });

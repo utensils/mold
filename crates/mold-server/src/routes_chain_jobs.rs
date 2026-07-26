@@ -784,6 +784,7 @@ mod tests {
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         };
         let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));
 

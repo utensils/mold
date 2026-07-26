@@ -303,6 +303,7 @@ fn shim_build_response_and_cleanup(
         }
     };
     let (filename, output_metadata) = if let Some(dir) = output_dir {
+        let _gallery_writer = state.gallery_publication_gate.blocking_write();
         let metadata = req.stitched_output_metadata(actual_format, frame_count);
         let filename = save_video_to_dir(
             &dir,
@@ -1714,6 +1715,7 @@ mod tests {
             claims: Arc::new(crate::chain_job_runner::EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         };
         let handle = crate::chain_job_runner::spawn_runner(deps);
         let mut state = AppState::for_tests();

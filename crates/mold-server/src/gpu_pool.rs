@@ -247,6 +247,7 @@ pub struct GpuJob {
     /// on-disk save. `Arc<Option<...>>` mirrors `AppState.metadata_db` —
     /// `None` when the DB failed to open or is disabled.
     pub metadata_db: Arc<Option<MetadataDb>>,
+    pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
     /// Decrement the global queue counter when the worker finishes this job.
     pub queue: crate::state::QueueHandle,
     /// Job registry handle so the worker can flip state to Running on pickup

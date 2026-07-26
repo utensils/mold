@@ -1893,6 +1893,7 @@ fn finish_generation_success(
     );
     let mut saved_names = crate::queue::SavedOutputNames::default();
     if let Some(ref dir) = job.output_dir {
+        let _gallery_writer = job.gallery_publication_gate.blocking_write();
         let generation_time_ms = response.generation_time_ms as i64;
         let db = job.metadata_db.as_ref().as_ref();
         let events = Some(job.events.as_ref());
@@ -3437,6 +3438,7 @@ mod tests {
             output_dir: None,
             config: Arc::new(tokio::sync::RwLock::new(config)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             queue: QueueHandle::new(queue_tx),
             registry: JobRegistry::new(),
             events: crate::events::EventBroadcaster::new(),
@@ -3603,6 +3605,8 @@ mod tests {
                 output_dir: None,
                 config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                 metadata_db: Arc::new(None),
+                gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
+                ),
                 queue: QueueHandle::new(queue_tx),
                 registry: JobRegistry::new(),
                 events: crate::events::EventBroadcaster::new(),
@@ -4968,6 +4972,8 @@ mod tests {
                     output_dir: None,
                     config: Arc::new(tokio::sync::RwLock::new(config)),
                     metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
                     queue: queue.clone(),
                     registry,
                     events: crate::events::EventBroadcaster::new(),
@@ -5150,6 +5156,8 @@ mod tests {
                 output_dir: None,
                 config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                 metadata_db: Arc::new(None),
+                gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
+                ),
                 queue,
                 registry,
                 events: crate::events::EventBroadcaster::new(),
@@ -5323,6 +5331,8 @@ mod tests {
                 output_dir: None,
                 config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                 metadata_db: Arc::new(None),
+                gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
+                ),
                 queue: queue.clone(),
                 registry: registry.clone(),
                 events: crate::events::EventBroadcaster::new(),
@@ -5405,6 +5415,8 @@ mod tests {
                     output_dir: None,
                     config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                     metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
                     queue: queue.clone(),
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),
@@ -5463,6 +5475,8 @@ mod tests {
                     output_dir: None,
                     config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                     metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
                     queue: followup_queue,
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),

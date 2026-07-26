@@ -2750,6 +2750,7 @@ fn gpu_job_from_generation(
         output_dir: job.output_dir,
         config: state.config.clone(),
         metadata_db: state.metadata_db.clone(),
+        gallery_publication_gate: state.gallery_publication_gate.clone(),
         queue: state.queue.clone(),
         registry: state.job_registry.clone(),
         events: state.events.clone(),

@@ -4645,6 +4645,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -4714,6 +4715,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -4986,6 +4988,7 @@ mod tests {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: crate::downloads::DownloadQueue::new(),
             resources: crate::resources::ResourceBroadcaster::new(),
@@ -6015,6 +6018,47 @@ mod tests {
             0,
             "filesystem fallback must still apply size/header validation"
         );
+    }
+
+    #[tokio::test]
+    async fn gallery_route_waits_for_atomic_publication_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let queue = crate::state::QueueHandle::new(tx);
+        let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new(),
+        });
+        let state = AppState::empty(config, queue, gpu_pool, 200);
+        let gate = state.gallery_publication_gate.clone();
+        let writer = gate.write().await;
+        let app = app_with_state(state);
+        let mut request = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/gallery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut request)
+                .await
+                .is_err(),
+            "gallery listing observed a transaction while its writer gate was held"
+        );
+        drop(writer);
+        let response = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// `GET /api/gallery/preview/:filename` serves the cached `.preview.gif`

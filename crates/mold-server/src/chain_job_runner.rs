@@ -89,6 +89,7 @@ pub struct RunnerDeps {
     /// chain-scoped `events: JobEventBus` above) so finalized chain outputs
     /// emit `gallery_added`. `None` in unit tests that don't assert on it.
     pub server_events: Option<Arc<crate::events::EventBroadcaster>>,
+    pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
 }
 
 pub(crate) struct CreateJobParams {
@@ -1552,6 +1553,7 @@ fn finalize_job(
 
     if !manifest.ephemeral {
         if let Some(output_dir) = deps.output_dir.as_ref() {
+            let _gallery_writer = deps.gallery_publication_gate.blocking_write();
             let metadata = effective.stitched_output_metadata(OutputFormat::Mp4, frame_count);
             save_video_to_dir(
                 output_dir,
@@ -2869,6 +2871,7 @@ mod tests {
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         }
     }
 
@@ -3051,6 +3054,7 @@ mod tests {
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -3826,6 +3830,7 @@ mod tests {
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -4284,6 +4289,7 @@ mod tests {
             claims: Arc::new(EphemeralClaims::default()),
             output_dir: None,
             server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
         };
         let handle = spawn_runner(deps);
 

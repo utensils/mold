@@ -1,4 +1,6 @@
 pub mod auth;
+pub mod batch_parent;
+pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
 pub mod chain_job_runner;
@@ -618,6 +620,30 @@ pub async fn run_server(
     state.metadata_db = metadata_db;
     state.device_registry = device_registry;
 
+    // Batch recovery is a serving precondition, including when SQLite is
+    // disabled. No router, gallery observer, or generation worker is started
+    // until every durable attempt is either rolled back or rolled forward.
+    {
+        let config = state.config.read().await;
+        if !config.is_output_disabled() {
+            let output_dir = config.effective_output_dir();
+            drop(config);
+            std::fs::create_dir_all(&output_dir)?;
+            let report = batch_transaction::recover_transactions(
+                &output_dir,
+                &state.gallery_publication_gate,
+                state.metadata_db.clone(),
+            )
+            .await?;
+            tracing::info!(
+                rolled_back = report.rolled_back,
+                rolled_forward = report.rolled_forward,
+                healed_committed_rows = report.healed_committed_rows,
+                "batch transaction startup recovery complete"
+            );
+        }
+    }
+
     // Resolve the persistent instance id (ephemeral when the DB is
     // unavailable). Scoped per (data dir, port) so two servers sharing one
     // mold.db report distinct identities; the configured port is used, so an
@@ -693,6 +719,7 @@ pub async fn run_server(
                 claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
                 output_dir,
                 server_events: Some(state.events.clone()),
+                gallery_publication_gate: state.gallery_publication_gate.clone(),
             };
             state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
         } else {
@@ -797,7 +824,7 @@ pub async fn run_server(
             let output_dir = config.effective_output_dir();
             let _ = std::fs::create_dir_all(&output_dir);
             info!(output_dir = %output_dir.display(), "gallery output directory");
-            routes::spawn_thumbnail_warmup(&config);
+            routes::spawn_thumbnail_warmup(&config, state.gallery_publication_gate.clone());
 
             // Async reconcile: import any existing files into the DB and
             // drop rows whose backing files are missing. Runs on a blocking
@@ -805,7 +832,9 @@ pub async fn run_server(
             if state.metadata_db.is_some() {
                 let db_arc = state.metadata_db.clone();
                 let dir = output_dir.clone();
+                let gallery_gate = state.gallery_publication_gate.clone();
                 tokio::spawn(async move {
+                    let _writer = gallery_gate.write().await;
                     let join = tokio::task::spawn_blocking(move || {
                         if let Some(db) = db_arc.as_ref() {
                             db.reconcile(&dir)

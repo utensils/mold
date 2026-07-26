@@ -1289,6 +1289,7 @@ async fn process_job(state: &AppState, job: GenerationJob) {
             );
             let mut saved_names = SavedOutputNames::default();
             if let Some(ref dir) = job.output_dir {
+                let _gallery_writer = state.gallery_publication_gate.write().await;
                 let dir = dir.clone();
                 let model = job.request.model.clone();
                 let batch_size = job.request.batch_size;
@@ -1812,6 +1813,7 @@ async fn run_queue_dispatcher_with_tuning(
             output_dir: job.output_dir,
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
@@ -3858,6 +3860,7 @@ mod tests {
             output_dir: None,
             config: state.config.clone(),
             metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),

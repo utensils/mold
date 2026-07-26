@@ -234,6 +234,10 @@ pub struct AppState {
     /// when MOLD_HOME could not be resolved — callers must fall back to the
     /// filesystem walk in `routes::scan_gallery_dir`.
     pub metadata_db: Arc<Option<mold_db::MetadataDb>>,
+    /// Global logical publication barrier for every gallery observer and
+    /// mutator. Batch commits take the writer side until files, DB rows, and
+    /// the durable manifest agree.
+    pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
     /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
@@ -465,6 +469,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -506,6 +511,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -576,6 +582,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -619,6 +626,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -662,6 +670,7 @@ impl AppState {
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
             upscaler_cache: Arc::new(std::sync::Mutex::new(None)),
             metadata_db: Arc::new(None),
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             chain_jobs: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
