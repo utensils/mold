@@ -4299,6 +4299,15 @@ mod tests {
         );
         coordinator.dispatch_ready().await;
 
+        assert!(
+            !coordinator.pending_owner_work.contains_key(&child_id),
+            "ready follow-up must leave the pending set after dispatch"
+        );
+        assert_eq!(
+            coordinator.leases.len(),
+            1,
+            "ready follow-up must own one distinct lease after dispatch"
+        );
         match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
                 assert_eq!(grant.fence.work_id, child_id);
@@ -4762,6 +4771,9 @@ mod tests {
             },
             &mut immediate,
         );
+        // Rejection samples the real host. Keep this scheduling test
+        // independent of whichever processes share the test machine.
+        publish_ample_memory(&mut coordinator.memory);
 
         assert!(coordinator.leases.is_empty());
         assert!(coordinator.memory.reservations.is_empty());
@@ -4812,6 +4824,15 @@ mod tests {
             &mut immediate,
         );
         coordinator.dispatch_ready().await;
+        assert!(
+            !coordinator.pending.contains_key("plan-invalidated"),
+            "ready invalidated work must leave the pending set after redispatch"
+        );
+        assert_eq!(
+            coordinator.leases.len(),
+            1,
+            "redispatched invalidated work must own one lease"
+        );
         let second_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
             crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
@@ -4838,6 +4859,7 @@ mod tests {
             },
             &mut immediate,
         );
+        publish_ample_memory(&mut coordinator.memory);
         coordinator
             .pending
             .get_mut("plan-invalidated")

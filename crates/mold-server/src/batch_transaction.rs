@@ -892,6 +892,31 @@ impl BatchJournalReplay {
         }
     }
 
+    fn terminal_without_journal(manifest: BatchAttemptManifest) -> Self {
+        debug_assert!(matches!(
+            manifest.state,
+            BatchManifestState::Committed | BatchManifestState::Failed
+        ));
+        let committed = manifest.state == BatchManifestState::Committed;
+        Self {
+            manifest_history: vec![manifest.clone()],
+            published_children: if committed {
+                (0..manifest.children.len()).collect()
+            } else {
+                BTreeSet::new()
+            },
+            manifest,
+            post_publish_snapshot: committed,
+            metadata_committed: committed,
+            // A committed manifest can survive only because recursive
+            // teardown removed its journal first. Treat cleanup as already
+            // started so recovery verifies finals, archives, and removes the
+            // attempt without creating a journal that cannot reconstruct its
+            // lost prefix.
+            cleanup_started: committed,
+        }
+    }
+
     fn apply_manifest_snapshot(
         &mut self,
         output_dir: &Path,
@@ -1065,12 +1090,20 @@ fn reconcile_batch_manifest(
             output_dir.join(TRANSACTION_DIR).display()
         ),
         (None, Some(disk)) => {
-            ensure!(
-                is_initial_batch_manifest(&disk),
-                "journal-free disk manifest is not an initial batch snapshot"
-            );
-            let replay = BatchJournalReplay::initial(disk.clone());
-            Ok((disk, false, true, replay))
+            if is_initial_batch_manifest(&disk) {
+                let replay = BatchJournalReplay::initial(disk.clone());
+                Ok((disk, false, true, replay))
+            } else if matches!(
+                disk.state,
+                BatchManifestState::Committed | BatchManifestState::Failed
+            ) {
+                let replay = BatchJournalReplay::terminal_without_journal(disk.clone());
+                Ok((disk, false, false, replay))
+            } else {
+                anyhow::bail!(
+                    "journal-free disk manifest is neither an initial nor a terminal batch snapshot"
+                )
+            }
         }
         (Some(replay), None) => Ok((replay.manifest.clone(), true, false, replay)),
         (Some(replay), Some(disk)) if manifest_eq(&replay.manifest, &disk)? => {
@@ -1228,7 +1261,10 @@ pub async fn recover_transactions(
             }
             BatchManifestState::Committing => {
                 if let Err(error) = transaction.verify_all_staged() {
-                    if !transaction.any_final_exists() {
+                    let any_final_exists = transaction.any_final_exists();
+                    let has_durable_publication_evidence =
+                        !transaction.journaled_final_children.is_empty();
+                    if !any_final_exists && !has_durable_publication_evidence {
                         let _guard = gate.write().await;
                         transaction.manifest.state = BatchManifestState::Failed;
                         transaction.persist_manifest()?;
@@ -1243,11 +1279,20 @@ pub async fn recover_transactions(
                         continue;
                     }
                     return Err(error).with_context(|| {
-                        format!(
-                            "committing attempt {} has published files but unverifiable staging; \
-                             inspect the attempt before restarting",
-                            transaction.attempt_dir.display()
-                        )
+                        if has_durable_publication_evidence {
+                            format!(
+                                "committing attempt {} has durable publication evidence but neither \
+                                 a verifiable staged copy nor a recoverable final copy; retaining the \
+                                 attempt for operator inspection",
+                                transaction.attempt_dir.display()
+                            )
+                        } else {
+                            format!(
+                                "committing attempt {} has published files but unverifiable staging; \
+                                 inspect the attempt before restarting",
+                                transaction.attempt_dir.display()
+                            )
+                        }
                     });
                 }
                 match transaction.commit(gate, db.clone()).await {
@@ -1285,6 +1330,11 @@ pub async fn recover_transactions(
                 }
             }
             BatchManifestState::Failed => {
+                ensure!(
+                    !transaction.any_final_exists(),
+                    "failed batch attempt has a final-path artifact; refusing to remove durable evidence: {}",
+                    transaction.attempt_dir.display()
+                );
                 transaction.release_reservations();
                 transaction.cleanup_private_staging();
                 remove_failed_attempt(&transaction);
@@ -1577,6 +1627,7 @@ fn load_journal(path: &Path) -> anyhow::Result<Vec<BatchJournalRecord>> {
     let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
     let last_nonempty = lines.iter().rposition(|line| !line.is_empty());
     let mut offset = 0_u64;
+    let mut discarded_incomplete_tail = false;
     for (index, line) in lines.into_iter().enumerate() {
         if line.is_empty() {
             if offset < bytes.len() as u64 {
@@ -1613,12 +1664,21 @@ fn load_journal(path: &Path) -> anyhow::Result<Vec<BatchJournalRecord>> {
                 if let Some(parent) = path.parent() {
                     sync_dir(parent)?;
                 }
+                discarded_incomplete_tail = true;
                 break;
             }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("parsing batch journal {}", path.display()));
             }
+        }
+    }
+    if has_incomplete_tail && !discarded_incomplete_tail {
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        if let Some(parent) = path.parent() {
+            sync_dir(parent)?;
         }
     }
     Ok(records)
@@ -2103,6 +2163,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_retains_publication_evidence_when_staged_and_final_bytes_are_lost() {
+        for corrupt_staging in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut transaction = BatchTransaction::begin(
+                dir.path(),
+                "parent",
+                0,
+                serde_json::json!({}),
+                vec![record("one.png", 0)],
+            )
+            .unwrap();
+            transaction.stage_bytes(0, b"complete").unwrap();
+            transaction.mark_prepared().unwrap();
+            transaction.manifest.state = BatchManifestState::Committing;
+            transaction.persist_manifest().unwrap();
+            let staged = transaction.staging_path(0).unwrap();
+            let final_path = dir.path().join("one.png");
+            fs::hard_link(&staged, &final_path).unwrap();
+            File::open(&final_path).unwrap().sync_all().unwrap();
+            transaction
+                .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
+                .unwrap();
+            let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
+            let journal_before = fs::read(&journal_path).unwrap();
+            let reservation = reservation_path(dir.path(), "one.png");
+            fs::remove_file(&final_path).unwrap();
+            if corrupt_staging {
+                fs::write(&staged, b"corrupt").unwrap();
+            } else {
+                fs::remove_file(&staged).unwrap();
+            }
+
+            let error = recover_transactions(
+                dir.path(),
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(format!("{error:#}").contains("durable publication evidence"));
+            assert!(transaction.attempt_dir.exists());
+            assert!(reservation.exists());
+            assert_eq!(
+                fs::read(&journal_path).unwrap(),
+                journal_before,
+                "recovery must not append a Failed transition"
+            );
+            let loaded =
+                BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                    .unwrap();
+            assert_eq!(loaded.manifest.state, BatchManifestState::Committing);
+            assert_eq!(loaded.journaled_final_children, BTreeSet::from([0]));
+        }
+    }
+
+    #[tokio::test]
     async fn startup_rolls_back_unpublished_attempts_without_touching_retry() {
         let dir = tempfile::tempdir().unwrap();
         let mut stale = BatchTransaction::begin(
@@ -2188,6 +2305,35 @@ mod tests {
                 .unwrap();
         loaded.stage_bytes(0, b"one").unwrap();
 
+        let records = load_journal(&journal_path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sequence, 0);
+        assert_eq!(records[1].sequence, 1);
+    }
+
+    #[test]
+    fn parseable_journal_tail_without_newline_is_healed_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
+        let mut bytes = fs::read(&journal_path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&journal_path, bytes).unwrap();
+
+        let mut loaded =
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .unwrap();
+        loaded.stage_bytes(0, b"one").unwrap();
+
+        let bytes = fs::read(&journal_path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
         let records = load_journal(&journal_path).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].sequence, 0);
@@ -2856,6 +3002,116 @@ mod tests {
 
         assert_eq!(report, RecoveryReport::default());
         assert!(!transaction.attempt_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn terminal_committed_manifest_without_journal_finishes_durable_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        commit_journal_without_cleanup(&mut transaction, b"one");
+        transaction
+            .append_journal(BatchJournalEvent::CleanupStarted)
+            .unwrap();
+        transaction.cleanup_started = true;
+        let final_path = dir.path().join("one.png");
+        let reservation = reservation_path(dir.path(), "one.png");
+        assert!(final_path.is_file());
+        assert!(reservation.is_file());
+        fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
+        sync_dir(&transaction.attempt_dir).unwrap();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report, RecoveryReport::default());
+        assert_eq!(fs::read(final_path).unwrap(), b"one");
+        assert!(!reservation.exists());
+        assert!(!transaction.attempt_dir.exists());
+        let archived = committed_manifests_dir(dir.path(), "parent").join("0.json");
+        let manifest: BatchAttemptManifest =
+            serde_json::from_slice(&fs::read(archived).unwrap()).unwrap();
+        assert_eq!(manifest.state, BatchManifestState::Committed);
+    }
+
+    #[tokio::test]
+    async fn terminal_failed_manifest_without_journal_finishes_durable_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.manifest.state = BatchManifestState::Failed;
+        transaction.persist_manifest().unwrap();
+        let reservation = reservation_path(dir.path(), "one.png");
+        assert!(reservation.is_file());
+        fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
+        sync_dir(&transaction.attempt_dir).unwrap();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report, RecoveryReport::default());
+        assert!(!dir.path().join("one.png").exists());
+        assert!(!reservation.exists());
+        assert!(!transaction.attempt_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn terminal_failed_manifest_without_journal_retains_unexpected_final_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.manifest.state = BatchManifestState::Failed;
+        transaction.persist_manifest().unwrap();
+        let staged = transaction.staging_path(0).unwrap();
+        let final_path = dir.path().join("one.png");
+        fs::hard_link(staged, &final_path).unwrap();
+        File::open(&final_path).unwrap().sync_all().unwrap();
+        let reservation = reservation_path(dir.path(), "one.png");
+        fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
+        sync_dir(&transaction.attempt_dir).unwrap();
+
+        let error = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("final-path artifact"));
+        assert_eq!(fs::read(final_path).unwrap(), b"one");
+        assert!(reservation.exists());
+        assert!(transaction.attempt_dir.exists());
     }
 
     #[test]

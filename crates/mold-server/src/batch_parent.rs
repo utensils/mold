@@ -125,9 +125,27 @@ impl DurableBatchParent {
         parent_id: impl Into<String>,
         total_children: usize,
     ) -> anyhow::Result<Self> {
+        let reducer = BatchParentReducer::new(parent_id, total_children)?;
         std::fs::create_dir_all(directory)?;
         sync_parent_dir(directory)?;
-        let reducer = BatchParentReducer::new(parent_id, total_children)?;
+        anyhow::ensure!(
+            !directory.join(PARENT_SNAPSHOT_FILE).exists(),
+            "batch parent snapshot already exists in {}",
+            directory.display()
+        );
+        let journal_path = directory.join(PARENT_JOURNAL_FILE);
+        let journal = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&journal_path)
+            .with_context(|| {
+                format!(
+                    "claiming new batch parent journal {}; existing authority is never overwritten",
+                    journal_path.display()
+                )
+            })?;
+        journal.sync_all()?;
+        sync_parent_dir(directory)?;
         let mut durable = Self {
             reducer,
             directory: directory.to_path_buf(),
@@ -257,9 +275,18 @@ impl DurableBatchParent {
             !self.poisoned,
             "batch parent durable authority is poisoned after a persistence failure"
         );
-        let from = self.reducer.state;
+        let before = self.reducer.snapshot();
         let result = operation(&mut self.reducer)?;
-        if let Err(error) = self.persist_transition(from) {
+        // Stale attempt- and lease-generation completions are successful
+        // commands with cleanup dispositions, but deliberately do not mutate
+        // reducer authority. Every other successful command currently changes
+        // at least one serialized reducer field. Persist only real authority
+        // changes so the append-only journal remains a sequence of replayable
+        // reducer mutations.
+        if self.reducer.snapshot() == before {
+            return Ok(result);
+        }
+        if let Err(error) = self.persist_transition(before.state) {
             self.poisoned = true;
             return Err(error).context(
                 "persisting batch parent transition; this authority must be retired and recovered",
@@ -829,6 +856,7 @@ fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalReco
     let last_nonempty = lines.iter().rposition(|line| !line.is_empty());
     let mut records: Vec<BatchParentJournalRecord> = Vec::new();
     let mut offset = 0_u64;
+    let mut discarded_incomplete_tail = false;
     for (index, line) in lines.into_iter().enumerate() {
         if line.is_empty() {
             if offset < bytes.len() as u64 {
@@ -891,12 +919,21 @@ fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalReco
                 if let Some(parent) = path.parent() {
                     sync_parent_dir(parent)?;
                 }
+                discarded_incomplete_tail = true;
                 break;
             }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("parsing batch parent journal {}", path.display()));
             }
+        }
+    }
+    if has_incomplete_tail && !discarded_incomplete_tail {
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        if let Some(parent) = path.parent() {
+            sync_parent_dir(parent)?;
         }
     }
     Ok(records)
@@ -1302,5 +1339,110 @@ mod tests {
         atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &divergent).unwrap();
 
         assert!(DurableBatchParent::recover(dir.path()).is_err());
+    }
+
+    #[test]
+    fn parseable_parent_journal_tail_without_newline_is_healed_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let _parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let mut bytes = std::fs::read(&journal_path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        std::fs::write(&journal_path, bytes).unwrap();
+
+        let mut recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        recovered.start().unwrap();
+
+        let bytes = std::fs::read(&journal_path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        let records = load_parent_journal(&journal_path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sequence, 0);
+        assert_eq!(records[1].sequence, 1);
+    }
+
+    #[test]
+    fn create_refuses_to_overwrite_an_existing_parent_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "original", 1).unwrap();
+        parent.start().unwrap();
+        let snapshot_path = dir.path().join(PARENT_SNAPSHOT_FILE);
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let snapshot_before = std::fs::read(&snapshot_path).unwrap();
+        let journal_before = std::fs::read(&journal_path).unwrap();
+
+        assert!(DurableBatchParent::create(dir.path(), "replacement", 2).is_err());
+
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        assert_eq!(recovered.state(), BatchParentState::Running);
+        assert_eq!(recovered.reducer.snapshot().parent_id, "original");
+    }
+
+    #[test]
+    fn stale_attempt_completion_does_not_grow_the_durable_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let (first, _) = parent.grant(0).unwrap();
+        assert_eq!(
+            parent.complete(&first, ChildCompletion::Failed).unwrap(),
+            CompletionDisposition::RetryChild
+        );
+        let (child_retry, _) = parent.grant(0).unwrap();
+        assert_eq!(
+            parent
+                .complete(&child_retry, ChildCompletion::Failed)
+                .unwrap(),
+            CompletionDisposition::AttemptFenced
+        );
+        parent.begin_retry().unwrap();
+        parent.start().unwrap();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let before = load_parent_journal(&journal_path).unwrap().len();
+
+        let disposition = parent.complete(&first, ChildCompletion::Succeeded).unwrap();
+
+        assert_eq!(
+            disposition,
+            CompletionDisposition::StaleDeletePrivateArtifact
+        );
+        assert_eq!(parent.state(), BatchParentState::Running);
+        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        assert_eq!(recovered.state(), BatchParentState::Running);
+        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
+    }
+
+    #[test]
+    fn stale_lease_completion_does_not_grow_the_durable_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let (first, _) = parent.grant(0).unwrap();
+        assert_eq!(
+            parent.complete(&first, ChildCompletion::Failed).unwrap(),
+            CompletionDisposition::RetryChild
+        );
+        let (_child_retry, _) = parent.grant(0).unwrap();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let before = load_parent_journal(&journal_path).unwrap().len();
+
+        let disposition = parent.complete(&first, ChildCompletion::Succeeded).unwrap();
+
+        assert_eq!(
+            disposition,
+            CompletionDisposition::StaleDeletePrivateArtifact
+        );
+        assert_eq!(parent.state(), BatchParentState::Running);
+        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        assert_eq!(recovered.state(), BatchParentState::Fenced);
+        assert_eq!(
+            load_parent_journal(&journal_path).unwrap().len(),
+            before + 1,
+            "recovery appends only the real lost-lease fence"
+        );
     }
 }
