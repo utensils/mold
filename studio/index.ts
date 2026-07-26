@@ -1,4 +1,5 @@
 export * from "./api/client";
+export * from "./api/devices";
 export * from "./platform";
 export * from "./stores/runtime";
 export * from "./lib/promptCycler";
