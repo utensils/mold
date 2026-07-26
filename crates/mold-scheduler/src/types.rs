@@ -361,6 +361,65 @@ impl PlannerSnapshot {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlannerError {
+    DuplicateDeviceId {
+        device_id: DeviceId,
+    },
+    DuplicateWorkId {
+        work_id: WorkId,
+    },
+    StaleEligibilityIndex {
+        indexed_state_version: u64,
+        snapshot_state_version: u64,
+    },
+    EligibilityIndexMissingWork {
+        work_id: WorkId,
+    },
+    EligibilityIndexUnexpectedWork {
+        work_id: WorkId,
+    },
+    EligibilityIndexCandidatesChanged {
+        work_id: WorkId,
+    },
+}
+
+impl fmt::Display for PlannerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateDeviceId { device_id } => {
+                write!(formatter, "duplicate scheduler device ID: {device_id}")
+            }
+            Self::DuplicateWorkId { work_id } => {
+                write!(formatter, "duplicate scheduler work ID: {work_id}")
+            }
+            Self::StaleEligibilityIndex {
+                indexed_state_version,
+                snapshot_state_version,
+            } => write!(
+                formatter,
+                "eligibility index state version {indexed_state_version} does not match snapshot \
+                 state version {snapshot_state_version}"
+            ),
+            Self::EligibilityIndexMissingWork { work_id } => {
+                write!(formatter, "eligibility index is missing work {work_id}")
+            }
+            Self::EligibilityIndexUnexpectedWork { work_id } => {
+                write!(
+                    formatter,
+                    "eligibility index contains unknown work {work_id}"
+                )
+            }
+            Self::EligibilityIndexCandidatesChanged { work_id } => write!(
+                formatter,
+                "eligibility index candidates no longer match work {work_id}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlannerError {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AssignmentReason {
     Priority,
@@ -516,12 +575,140 @@ impl Plan {
         }
         Ok(())
     }
+
+    /// Validates the plan-wide and runtime-owned fences for one proposed lease.
+    ///
+    /// The coordinator must build `current` from the same reducer turn and
+    /// device/work identities as `lease`. Passing this method is required
+    /// immediately before the worker grant; plan construction alone never
+    /// authorizes CUDA work.
+    pub fn validate_lease_for_grant(
+        &self,
+        lease: &ImmediateLease,
+        current: &GrantValidationSnapshot,
+    ) -> Result<(), PlanValidationError> {
+        self.validate_for_grant(
+            current.state_version,
+            current.plan_version,
+            current.sample_generation,
+            current.ledger_sequence,
+        )?;
+        if current.work_id != lease.work_id {
+            return Err(PlanValidationError::GrantWorkMismatch {
+                planned: lease.work_id.clone(),
+                current: current.work_id.clone(),
+            });
+        }
+        if current.device_id != lease.device_id {
+            return Err(PlanValidationError::GrantDeviceMismatch {
+                planned: lease.device_id.clone(),
+                current: current.device_id.clone(),
+            });
+        }
+        if !self.immediate_leases.contains(lease) {
+            return Err(PlanValidationError::LeaseNotProposed {
+                work_id: lease.work_id.clone(),
+                device_id: lease.device_id.clone(),
+            });
+        }
+        if current.work_cancelled {
+            return Err(PlanValidationError::WorkCancelled {
+                work_id: lease.work_id.clone(),
+            });
+        }
+        if !current.work_ready {
+            return Err(PlanValidationError::WorkNotReady {
+                work_id: lease.work_id.clone(),
+            });
+        }
+        if current.worker_generation != lease.worker_generation {
+            return Err(PlanValidationError::StaleWorkerGeneration {
+                device_id: lease.device_id.clone(),
+                planned: lease.worker_generation,
+                current: current.worker_generation,
+            });
+        }
+        if !current.worker_ready {
+            return Err(PlanValidationError::WorkerNotReady {
+                device_id: lease.device_id.clone(),
+            });
+        }
+        if current.device_admin_state != DeviceAdminState::Enabled
+            || current.device_health != DeviceHealth::Healthy
+        {
+            return Err(PlanValidationError::DeviceNotSchedulable {
+                device_id: lease.device_id.clone(),
+                admin_state: current.device_admin_state,
+                health: current.device_health,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrantValidationSnapshot {
+    pub work_id: WorkId,
+    pub device_id: DeviceId,
+    pub state_version: u64,
+    pub plan_version: u64,
+    pub sample_generation: u64,
+    pub ledger_sequence: u64,
+    pub work_ready: bool,
+    pub work_cancelled: bool,
+    pub worker_generation: u64,
+    pub worker_ready: bool,
+    pub device_admin_state: DeviceAdminState,
+    pub device_health: DeviceHealth,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanValidationError {
-    StaleState { planned: u64, current: u64 },
-    StalePlan { planned: u64, current: u64 },
-    StaleMemorySample { planned: u64, current: u64 },
-    StaleMemoryLedger { planned: u64, current: u64 },
+    StaleState {
+        planned: u64,
+        current: u64,
+    },
+    StalePlan {
+        planned: u64,
+        current: u64,
+    },
+    StaleMemorySample {
+        planned: u64,
+        current: u64,
+    },
+    StaleMemoryLedger {
+        planned: u64,
+        current: u64,
+    },
+    LeaseNotProposed {
+        work_id: WorkId,
+        device_id: DeviceId,
+    },
+    GrantWorkMismatch {
+        planned: WorkId,
+        current: WorkId,
+    },
+    GrantDeviceMismatch {
+        planned: DeviceId,
+        current: DeviceId,
+    },
+    WorkNotReady {
+        work_id: WorkId,
+    },
+    WorkCancelled {
+        work_id: WorkId,
+    },
+    StaleWorkerGeneration {
+        device_id: DeviceId,
+        planned: u64,
+        current: u64,
+    },
+    WorkerNotReady {
+        device_id: DeviceId,
+    },
+    DeviceNotSchedulable {
+        device_id: DeviceId,
+        admin_state: DeviceAdminState,
+        health: DeviceHealth,
+    },
 }

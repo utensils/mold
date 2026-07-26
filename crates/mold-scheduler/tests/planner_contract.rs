@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use mold_scheduler::{
-    operation_budget, optimization_horizon, BlockedReason, CandidatePlacement, DeviceSnapshot,
-    EligibilityIndex, OptimizerState, PlanValidationError, Planner, PlannerConfig, PlannerSnapshot,
-    PlanningMode, PriorityClass, WorkId, WorkSnapshot,
+    operation_budget, optimization_horizon, BlockedReason, CandidatePlacement, DeviceAdminState,
+    DeviceHealth, DeviceSnapshot, EligibilityIndex, GrantValidationSnapshot, OptimizerState,
+    PlanValidationError, Planner, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode,
+    PriorityClass, WorkId, WorkSnapshot,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -60,7 +61,9 @@ fn supports_zero_one_two_eight_sixteen_and_sixty_four_devices() {
             })
             .collect::<Vec<_>>();
 
-        let plan = Planner::default().plan(&snapshot(devices, jobs, 128));
+        let plan = Planner::default()
+            .plan(&snapshot(devices, jobs, 128))
+            .expect("valid plan");
         assert_eq!(plan.immediate_leases.len(), count);
         assert_eq!(
             plan.immediate_leases
@@ -75,18 +78,20 @@ fn supports_zero_one_two_eight_sixteen_and_sixty_four_devices() {
 
 #[test]
 fn globally_rematches_a_flexible_job_around_a_specialist() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("gpu-0"), device("gpu-1")],
-        vec![
-            work(
-                "older-flexible",
-                0,
-                vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
-            ),
-            work("younger-specialist", 1, vec![candidate("gpu-0", 1)]),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work(
+                    "older-flexible",
+                    0,
+                    vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
+                ),
+                work("younger-specialist", 1, vec![candidate("gpu-0", 1)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
 
     assert_eq!(
         assignments(&plan),
@@ -99,18 +104,20 @@ fn globally_rematches_a_flexible_job_around_a_specialist() {
 
 #[test]
 fn rematching_selects_the_minimum_aggregate_host_ram_full_matching() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("gpu-0"), device("gpu-1")],
-        vec![
-            work(
-                "older-flexible",
-                0,
-                vec![candidate("gpu-0", 8), candidate("gpu-1", 1)],
-            ),
-            work("younger-specialist", 1, vec![candidate("gpu-0", 1)]),
-        ],
-        3,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work(
+                    "older-flexible",
+                    0,
+                    vec![candidate("gpu-0", 8), candidate("gpu-1", 1)],
+                ),
+                work("younger-specialist", 1, vec![candidate("gpu-0", 1)]),
+            ],
+            3,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases.len(), 2);
     assert_eq!(plan.reservation.total_host_ram_bytes, 2 * GIB);
@@ -120,6 +127,34 @@ fn rematching_selects_the_minimum_aggregate_host_ram_full_matching() {
             ("older-flexible".into(), "gpu-1".into()),
             ("younger-specialist".into(), "gpu-0".into()),
         ])
+    );
+}
+
+#[test]
+fn aggregate_host_ram_rechecks_the_actual_rematched_total() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work(
+                    "older-flexible",
+                    0,
+                    vec![candidate("gpu-0", 2), candidate("gpu-1", 6)],
+                ),
+                work("younger-specialist", 1, vec![candidate("gpu-0", 3)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        assignments(&plan),
+        BTreeMap::from([("older-flexible".into(), "gpu-0".into())])
+    );
+    assert_eq!(plan.reservation.total_host_ram_bytes, 2 * GIB);
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("younger-specialist")),
+        Some(&BlockedReason::AggregateHostRamReserved)
     );
 }
 
@@ -140,7 +175,9 @@ fn full_ready_set_matching_reaches_compatible_work_beyond_rank_200() {
         vec![candidate("gpu-0", 1)],
     ));
 
-    let plan = Planner::default().plan(&snapshot(vec![device("gpu-0")], jobs, 8));
+    let plan = Planner::default()
+        .plan(&snapshot(vec![device("gpu-0")], jobs, 8))
+        .expect("valid plan");
     assert_eq!(
         plan.immediate_leases[0].work_id.as_str(),
         "rank-250-compatible"
@@ -150,14 +187,16 @@ fn full_ready_set_matching_reaches_compatible_work_beyond_rank_200() {
 
 #[test]
 fn aggregate_host_ram_rejects_two_individually_admissible_jobs() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("gpu-0"), device("gpu-1")],
-        vec![
-            work("older-8", 0, vec![candidate("gpu-0", 8)]),
-            work("younger-8", 1, vec![candidate("gpu-1", 8)]),
-        ],
-        12,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work("older-8", 0, vec![candidate("gpu-0", 8)]),
+                work("younger-8", 1, vec![candidate("gpu-1", 8)]),
+            ],
+            12,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases.len(), 1);
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "older-8");
@@ -170,27 +209,29 @@ fn aggregate_host_ram_rejects_two_individually_admissible_jobs() {
 
 #[test]
 fn priority_does_not_replace_an_older_eight_gib_job_with_two_younger_four_gib_jobs() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("gpu-0"), device("gpu-1")],
-        vec![
-            work(
-                "older-8",
-                0,
-                vec![candidate("gpu-0", 8), candidate("gpu-1", 8)],
-            ),
-            work(
-                "younger-4-a",
-                1,
-                vec![candidate("gpu-0", 4), candidate("gpu-1", 4)],
-            ),
-            work(
-                "younger-4-b",
-                2,
-                vec![candidate("gpu-0", 4), candidate("gpu-1", 4)],
-            ),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work(
+                    "older-8",
+                    0,
+                    vec![candidate("gpu-0", 8), candidate("gpu-1", 8)],
+                ),
+                work(
+                    "younger-4-a",
+                    1,
+                    vec![candidate("gpu-0", 4), candidate("gpu-1", 4)],
+                ),
+                work(
+                    "younger-4-b",
+                    2,
+                    vec![candidate("gpu-0", 4), candidate("gpu-1", 4)],
+                ),
+            ],
+            8,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases.len(), 1);
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "older-8");
@@ -207,11 +248,13 @@ fn warm_wait_is_beneficial_bounded_and_expires_without_sleeping() {
         ..PlannerConfig::default()
     };
 
-    let held = Planner::new(config.clone()).plan(&snapshot(
-        vec![cold.clone(), warm.clone()],
-        vec![waiting.clone()],
-        8,
-    ));
+    let held = Planner::new(config.clone())
+        .plan(&snapshot(
+            vec![cold.clone(), warm.clone()],
+            vec![waiting.clone()],
+            8,
+        ))
+        .expect("valid plan");
     assert!(held.immediate_leases.is_empty());
     assert_eq!(held.warm_waits[0].deadline_ms, 1_500);
     assert_eq!(
@@ -221,23 +264,27 @@ fn warm_wait_is_beneficial_bounded_and_expires_without_sleeping() {
 
     let expired_snapshot =
         PlannerSnapshot::new(8, 12, 1_500, 8 * GIB, vec![cold, warm], vec![waiting]);
-    let expired = Planner::new(config).plan(&expired_snapshot);
+    let expired = Planner::new(config)
+        .plan(&expired_snapshot)
+        .expect("valid plan");
     assert_eq!(expired.immediate_leases[0].device_id.as_str(), "cold");
 }
 
 #[test]
 fn warm_wait_never_holds_when_cold_now_finishes_first() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![
-            device("cold"),
-            DeviceSnapshot::busy("warm", 24 * GIB, 10_000).with_warm("exec"),
-        ],
-        vec![
-            work("job", 0, vec![candidate("cold", 1), candidate("warm", 1)])
-                .with_warm_wait_started_at(1_000),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![
+                device("cold"),
+                DeviceSnapshot::busy("warm", 24 * GIB, 10_000).with_warm("exec"),
+            ],
+            vec![
+                work("job", 0, vec![candidate("cold", 1), candidate("warm", 1)])
+                    .with_warm_wait_started_at(1_000),
+            ],
+            8,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases[0].device_id.as_str(), "cold");
     assert!(plan.warm_waits.is_empty());
@@ -246,20 +293,22 @@ fn warm_wait_never_holds_when_cold_now_finishes_first() {
 #[test]
 fn third_bypass_forces_the_next_compatible_opening() {
     let warm = DeviceSnapshot::busy("warm", 24 * GIB, 1_500).with_warm("exec");
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("cold"), warm],
-        vec![
-            work(
-                "forced",
-                100,
-                vec![candidate("cold", 1), candidate("warm", 1)],
-            )
-            .with_bypass_count(3)
-            .with_warm_wait_started_at(1_000),
-            work("ordinary", 0, vec![candidate("cold", 1)]),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("cold"), warm],
+            vec![
+                work(
+                    "forced",
+                    100,
+                    vec![candidate("cold", 1), candidate("warm", 1)],
+                )
+                .with_bypass_count(3)
+                .with_warm_wait_started_at(1_000),
+                work("ordinary", 0, vec![candidate("cold", 1)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "forced");
     assert!(plan.warm_waits.is_empty());
@@ -267,23 +316,25 @@ fn third_bypass_forces_the_next_compatible_opening() {
 
 #[test]
 fn a_younger_start_on_a_declined_warm_wait_edge_increments_bypass_once() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![
-            device("cold"),
-            DeviceSnapshot::busy("warm", 24 * GIB, 1_500).with_warm("exec"),
-        ],
-        vec![
-            work(
-                "waiting",
-                0,
-                vec![candidate("cold", 1), candidate("warm", 1)],
-            )
-            .with_bypass_count(2)
-            .with_warm_wait_started_at(1_000),
-            work("younger", 1, vec![candidate("cold", 1)]),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![
+                device("cold"),
+                DeviceSnapshot::busy("warm", 24 * GIB, 1_500).with_warm("exec"),
+            ],
+            vec![
+                work(
+                    "waiting",
+                    0,
+                    vec![candidate("cold", 1), candidate("warm", 1)],
+                )
+                .with_bypass_count(2)
+                .with_warm_wait_started_at(1_000),
+                work("younger", 1, vec![candidate("cold", 1)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
 
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "younger");
     assert_eq!(plan.bypass_updates.len(), 1);
@@ -300,7 +351,7 @@ fn plan_versions_and_memory_generations_fence_stale_grants() {
     );
     input.host_memory.sample_generation = 19;
     input.host_memory.ledger_sequence = 23;
-    let plan = Planner::default().plan(&input);
+    let plan = Planner::default().plan(&input).expect("valid plan");
 
     assert_eq!(plan.plan_version, 11);
     assert_eq!(plan.state_version, 7);
@@ -359,13 +410,13 @@ fn input_and_index_mutation_order_do_not_change_the_plan() {
         8,
     );
 
-    let mut index_a = EligibilityIndex::new();
+    let mut index_a = EligibilityIndex::new(forward.state_version);
     for job in &jobs {
-        index_a.upsert_work(job);
+        index_a.upsert_work(forward.state_version, job);
     }
-    let mut index_b = EligibilityIndex::new();
+    let mut index_b = EligibilityIndex::new(forward.state_version);
     for job in jobs.iter().rev() {
-        index_b.upsert_work(job);
+        index_b.upsert_work(forward.state_version, job);
     }
 
     let planner = Planner::default();
@@ -375,11 +426,451 @@ fn input_and_index_mutation_order_do_not_change_the_plan() {
         planner.plan_with_index(&forward, &index_b)
     );
 
-    index_b.remove_work(&WorkId::from("work-a"));
-    index_b.upsert_work(&jobs[1]);
+    index_b.remove_work(forward.state_version, &WorkId::from("work-a"));
+    index_b.upsert_work(forward.state_version, &jobs[1]);
     assert_eq!(
         planner.plan_with_index(&forward, &index_a),
         planner.plan_with_index(&forward, &index_b)
+    );
+}
+
+#[test]
+fn stale_eligibility_index_is_rejected_before_it_can_under_reserve() {
+    let stale_input = PlannerSnapshot::new(
+        6,
+        10,
+        1_000,
+        8 * GIB,
+        vec![device("gpu-0"), device("gpu-1")],
+        vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+    );
+    let stale_index = EligibilityIndex::from_snapshot(&stale_input);
+    let current_input = snapshot(
+        vec![device("gpu-0"), device("gpu-1")],
+        vec![work("job", 0, vec![candidate("gpu-1", 8)])],
+        8,
+    );
+
+    assert_eq!(
+        Planner::default()
+            .plan_with_index(&current_input, &stale_index)
+            .expect_err("stale index must fail closed"),
+        PlannerError::StaleEligibilityIndex {
+            indexed_state_version: 6,
+            snapshot_state_version: 7,
+        }
+    );
+}
+
+#[test]
+fn same_version_changed_candidates_are_rejected_before_they_can_under_reserve() {
+    let stale_input = snapshot(
+        vec![device("gpu-0"), device("gpu-1")],
+        vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+        8,
+    );
+    let stale_index = EligibilityIndex::from_snapshot(&stale_input);
+    let current_input = snapshot(
+        vec![device("gpu-0"), device("gpu-1")],
+        vec![work("job", 0, vec![candidate("gpu-1", 8)])],
+        8,
+    );
+
+    assert_eq!(
+        Planner::default()
+            .plan_with_index(&current_input, &stale_index)
+            .expect_err("same-version candidate changes must fail closed"),
+        PlannerError::EligibilityIndexCandidatesChanged {
+            work_id: "job".into()
+        }
+    );
+}
+
+#[test]
+fn eligibility_index_work_set_mismatches_are_typed() {
+    let input = snapshot(
+        vec![device("gpu-0")],
+        vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+        8,
+    );
+    let missing = EligibilityIndex::new(input.state_version);
+    assert_eq!(
+        Planner::default()
+            .plan_with_index(&input, &missing)
+            .expect_err("missing work must fail closed"),
+        PlannerError::EligibilityIndexMissingWork {
+            work_id: "job".into()
+        }
+    );
+
+    let mut unexpected = EligibilityIndex::from_snapshot(&input);
+    unexpected.upsert_work(
+        input.state_version,
+        &work("other", 1, vec![candidate("gpu-0", 1)]),
+    );
+    assert_eq!(
+        Planner::default()
+            .plan_with_index(&input, &unexpected)
+            .expect_err("unexpected work must fail closed"),
+        PlannerError::EligibilityIndexUnexpectedWork {
+            work_id: "other".into()
+        }
+    );
+}
+
+#[test]
+fn duplicate_work_ids_are_rejected_before_leases_exist() {
+    let duplicate = snapshot(
+        vec![device("gpu-0"), device("gpu-1")],
+        vec![
+            work(
+                "same",
+                0,
+                vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
+            ),
+            work(
+                "same",
+                1,
+                vec![candidate("gpu-0", 1), candidate("gpu-1", 1)],
+            ),
+        ],
+        8,
+    );
+
+    assert_eq!(
+        Planner::default()
+            .plan(&duplicate)
+            .expect_err("duplicate work IDs must fail closed"),
+        PlannerError::DuplicateWorkId {
+            work_id: WorkId::from("same")
+        }
+    );
+}
+
+#[test]
+fn duplicate_device_ids_are_rejected_before_leases_exist() {
+    let duplicate = snapshot(
+        vec![device("gpu-0"), device("gpu-0")],
+        vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+        8,
+    );
+
+    assert_eq!(
+        Planner::default()
+            .plan(&duplicate)
+            .expect_err("duplicate device IDs must fail closed"),
+        PlannerError::DuplicateDeviceId {
+            device_id: "gpu-0".into()
+        }
+    );
+}
+
+#[test]
+fn optimizer_scores_future_makespan_for_every_candidate() {
+    let fast =
+        |device_id: &str| CandidatePlacement::new(device_id, "exec", 0).with_timing(0, 0, 100);
+    let slow =
+        |device_id: &str| CandidatePlacement::new(device_id, "exec", 0).with_timing(0, 0, 1_000);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work("immediate-0", 0, vec![fast("gpu-0")]),
+                work("immediate-1", 1, vec![fast("gpu-1")]),
+                work("future", 2, vec![fast("gpu-0"), slow("gpu-1")]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+    let future = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.assignments)
+        .find(|assignment| assignment.work_id == WorkId::from("future"))
+        .expect("future assignment");
+
+    assert_eq!(future.device_id.as_str(), "gpu-0");
+    assert_eq!(future.estimated_finish_ms, 1_200);
+}
+
+#[test]
+fn heterogeneous_single_future_assignment_matches_exhaustive_finish_oracle() {
+    for gpu_0_run_ms in [100, 500, 1_500] {
+        for gpu_1_run_ms in [100, 500, 1_500] {
+            let placement = |device_id: &str, predicted_run_ms| {
+                CandidatePlacement::new(device_id, "exec", 0).with_timing(0, 0, predicted_run_ms)
+            };
+            let plan = Planner::default()
+                .plan(&snapshot(
+                    vec![device("gpu-0"), device("gpu-1")],
+                    vec![
+                        work("immediate-0", 0, vec![placement("gpu-0", 100)]),
+                        work("immediate-1", 1, vec![placement("gpu-1", 300)]),
+                        work(
+                            "future",
+                            2,
+                            vec![
+                                placement("gpu-0", gpu_0_run_ms),
+                                placement("gpu-1", gpu_1_run_ms),
+                            ],
+                        ),
+                    ],
+                    8,
+                ))
+                .expect("valid plan");
+            let future = plan
+                .lanes
+                .iter()
+                .flat_map(|lane| &lane.assignments)
+                .find(|assignment| assignment.work_id == WorkId::from("future"))
+                .expect("future assignment");
+            let expected = [
+                (1_100 + gpu_0_run_ms, "gpu-0"),
+                (1_300 + gpu_1_run_ms, "gpu-1"),
+            ]
+            .into_iter()
+            .min()
+            .expect("two candidates");
+
+            assert_eq!(
+                (future.estimated_finish_ms, future.device_id.as_str()),
+                expected,
+                "gpu-0 run {gpu_0_run_ms}, gpu-1 run {gpu_1_run_ms}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_younger_start_counts_toward_the_bypass_limit() {
+    let waiting_candidate =
+        |device_id: &str| CandidatePlacement::new(device_id, "exec", 0).with_timing(1_000, 0, 100);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![
+                device("cold-0"),
+                device("cold-1"),
+                device("cold-2"),
+                device("cold-3"),
+                DeviceSnapshot::busy("warm", 24 * GIB, 1_500).with_warm("exec"),
+            ],
+            vec![
+                work(
+                    "waiting",
+                    0,
+                    vec![
+                        waiting_candidate("cold-0"),
+                        waiting_candidate("cold-1"),
+                        waiting_candidate("cold-2"),
+                        waiting_candidate("cold-3"),
+                        waiting_candidate("warm"),
+                    ],
+                )
+                .with_warm_wait_started_at(1_000),
+                work("younger-0", 1, vec![waiting_candidate("cold-0")]),
+                work("younger-1", 2, vec![waiting_candidate("cold-1")]),
+                work("younger-2", 3, vec![waiting_candidate("cold-2")]),
+                work("younger-3", 4, vec![waiting_candidate("cold-3")]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.immediate_leases.len(), 4);
+    assert_eq!(
+        plan.bypass_updates
+            .iter()
+            .map(|update| (update.previous_count, update.new_count))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (1, 2), (2, 3), (3, 3)]
+    );
+}
+
+#[test]
+fn ineligible_work_keeps_its_precise_reason_after_openings_fill() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![
+                work("first", 0, vec![candidate("gpu-0", 1)]),
+                work("bad-pin", 1, vec![candidate("missing", 1)]).with_hard_device("missing"),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("bad-pin")),
+        Some(&BlockedReason::HardPinUnavailable)
+    );
+}
+
+#[test]
+fn busy_only_work_reports_no_idle_device_after_other_openings_fill() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![
+                device("gpu-0"),
+                DeviceSnapshot::busy("gpu-1", 24 * GIB, 5_000),
+            ],
+            vec![
+                work("first", 0, vec![candidate("gpu-0", 1)]),
+                work("busy-only", 1, vec![candidate("gpu-1", 1)]),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("busy-only")),
+        Some(&BlockedReason::NoIdleDevice)
+    );
+}
+
+#[test]
+fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+            8,
+        ))
+        .expect("valid plan");
+    let lease = &plan.immediate_leases[0];
+    let current = GrantValidationSnapshot {
+        work_id: "job".into(),
+        device_id: "gpu-0".into(),
+        state_version: 7,
+        plan_version: 11,
+        sample_generation: 0,
+        ledger_sequence: 0,
+        work_ready: true,
+        work_cancelled: false,
+        worker_generation: lease.worker_generation,
+        worker_ready: true,
+        device_admin_state: DeviceAdminState::Enabled,
+        device_health: DeviceHealth::Healthy,
+    };
+
+    assert_eq!(plan.validate_lease_for_grant(lease, &current), Ok(()));
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                worker_generation: lease.worker_generation + 1,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::StaleWorkerGeneration {
+            device_id: "gpu-0".into(),
+            planned: lease.worker_generation,
+            current: lease.worker_generation + 1,
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                worker_ready: false,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::WorkerNotReady {
+            device_id: "gpu-0".into()
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                work_cancelled: true,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::WorkCancelled {
+            work_id: "job".into()
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                work_ready: false,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::WorkNotReady {
+            work_id: "job".into()
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                device_admin_state: DeviceAdminState::Draining,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::DeviceNotSchedulable {
+            device_id: "gpu-0".into(),
+            admin_state: DeviceAdminState::Draining,
+            health: DeviceHealth::Healthy,
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                device_health: DeviceHealth::Unavailable,
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::DeviceNotSchedulable {
+            device_id: "gpu-0".into(),
+            admin_state: DeviceAdminState::Enabled,
+            health: DeviceHealth::Unavailable,
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                work_id: "other-job".into(),
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::GrantWorkMismatch {
+            planned: "job".into(),
+            current: "other-job".into(),
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                device_id: "gpu-1".into(),
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::GrantDeviceMismatch {
+            planned: "gpu-0".into(),
+            current: "gpu-1".into(),
+        })
+    );
+    let mut unproposed = lease.clone();
+    unproposed.work_id = "other-job".into();
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            &unproposed,
+            &GrantValidationSnapshot {
+                work_id: "other-job".into(),
+                ..current
+            }
+        ),
+        Err(PlanValidationError::LeaseNotProposed {
+            work_id: "other-job".into(),
+            device_id: "gpu-0".into(),
+        })
     );
 }
 
@@ -406,17 +897,49 @@ fn watchdog_returns_the_same_priority_cardinality_preserving_seed_every_time() {
         mode: PlanningMode::WatchdogFallback,
         ..PlannerConfig::default()
     })
-    .plan(&input);
+    .plan(&input)
+    .expect("valid watchdog plan");
     let watchdog_again = Planner::new(PlannerConfig {
         mode: PlanningMode::WatchdogFallback,
         ..PlannerConfig::default()
     })
-    .plan(&input);
+    .plan(&input)
+    .expect("valid watchdog plan");
 
     assert_eq!(watchdog, watchdog_again);
     assert_eq!(watchdog.optimizer_state, OptimizerState::WatchdogFallback);
     assert_eq!(watchdog.immediate_leases.len(), 2);
     assert_eq!(watchdog.operations_evaluated, 0);
+}
+
+#[test]
+fn uniform_seed_proof_does_not_report_unperformed_operations() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0"), device("gpu-1")],
+            vec![
+                work(
+                    "work-0",
+                    0,
+                    vec![candidate("gpu-0", 0), candidate("gpu-1", 0)],
+                ),
+                work(
+                    "work-1",
+                    1,
+                    vec![candidate("gpu-0", 0), candidate("gpu-1", 0)],
+                ),
+                work(
+                    "work-2",
+                    2,
+                    vec![candidate("gpu-0", 0), candidate("gpu-1", 0)],
+                ),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(plan.optimizer_state, OptimizerState::SeedOnly);
+    assert_eq!(plan.operations_evaluated, 0);
 }
 
 #[test]
@@ -433,27 +956,29 @@ fn horizon_and_operation_budget_follow_the_locked_formula() {
 
 #[test]
 fn priority_class_precedes_manual_rank_and_stable_id_breaks_ties() {
-    let plan = Planner::default().plan(&snapshot(
-        vec![device("gpu-0")],
-        vec![
-            work("user-z", 0, vec![candidate("gpu-0", 1)]),
-            work("critical-b", 99, vec![candidate("gpu-0", 1)])
-                .with_priority(PriorityClass::Critical),
-            work("critical-a", 99, vec![candidate("gpu-0", 1)])
-                .with_priority(PriorityClass::Critical),
-        ],
-        8,
-    ));
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![
+                work("user-z", 0, vec![candidate("gpu-0", 1)]),
+                work("critical-b", 99, vec![candidate("gpu-0", 1)])
+                    .with_priority(PriorityClass::Critical),
+                work("critical-a", 99, vec![candidate("gpu-0", 1)])
+                    .with_priority(PriorityClass::Critical),
+            ],
+            8,
+        ))
+        .expect("valid plan");
     assert_eq!(plan.immediate_leases[0].work_id.as_str(), "critical-a");
 }
 
 #[test]
 fn no_fixed_size_device_assumption_in_eligibility_index() {
-    let mut index = EligibilityIndex::new();
+    let mut index = EligibilityIndex::new(7);
     let candidates = (0..257)
         .map(|index| candidate(&format!("gpu-{index:03}"), 0))
         .collect::<Vec<_>>();
-    index.upsert_work(&work("wide", 0, candidates));
+    index.upsert_work(7, &work("wide", 0, candidates));
     assert_eq!(
         index
             .candidates_for(&WorkId::from("wide"))
@@ -480,7 +1005,9 @@ fn exhaustive_small_oracle_matches_priority_admission_cardinality() {
             })
             .collect::<Vec<_>>();
         let expected = exhaustive_priority_cardinality(&jobs, 3);
-        let plan = Planner::default().plan(&snapshot(devices, jobs, 64));
+        let plan = Planner::default()
+            .plan(&snapshot(devices, jobs, 64))
+            .expect("valid plan");
         assert_eq!(plan.immediate_leases.len(), expected, "mask {mask:09b}");
     }
 }
@@ -537,7 +1064,7 @@ fn deterministic_two_hundred_and_ten_thousand_ready_harness() {
             })
             .collect::<Vec<_>>();
         let input = snapshot(devices, jobs, 128);
-        let index = EligibilityIndex::from_work(&input.work);
+        let index = EligibilityIndex::from_snapshot(&input);
         let planner = Planner::new(PlannerConfig {
             mode: PlanningMode::WatchdogFallback,
             ..PlannerConfig::default()
@@ -561,4 +1088,35 @@ fn deterministic_two_hundred_and_ten_thousand_ready_harness() {
             );
         }
     }
+
+    let devices = (0..64)
+        .map(|index| device(&format!("gpu-{index:03}")))
+        .collect::<Vec<_>>();
+    let jobs = (0..10_000)
+        .map(|index| {
+            let candidates = (0..64)
+                .map(|device_index| candidate(&format!("gpu-{device_index:03}"), 1))
+                .collect();
+            work(&format!("ram-blocked-{index:05}"), index as u64, candidates)
+        })
+        .collect::<Vec<_>>();
+    let input = snapshot(devices, jobs, 0);
+    let index = EligibilityIndex::from_snapshot(&input);
+    let started = Instant::now();
+    let plan = Planner::new(PlannerConfig {
+        mode: PlanningMode::WatchdogFallback,
+        ..PlannerConfig::default()
+    })
+    .plan_with_index(&input, &index)
+    .expect("valid host-RAM-blocked plan");
+    eprintln!(
+        "10000 host-RAM-blocked / 64 devices immediate seed: {:?}",
+        started.elapsed()
+    );
+    assert!(plan.immediate_leases.is_empty());
+    assert_eq!(plan.blocked.len(), 10_000);
+    assert!(plan
+        .blocked
+        .iter()
+        .all(|blocked| blocked.reason == BlockedReason::AggregateHostRamReserved));
 }

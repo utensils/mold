@@ -5,8 +5,8 @@ use crate::matching::{IncrementalMatcher, MatchCandidate, MatchWork, MatchingRes
 use crate::{
     AssignmentReason, BlockedReason, BlockedWork, BypassUpdate, CandidatePlacement, DeviceActivity,
     DeviceId, DeviceLane, DeviceSnapshot, ImmediateLease, MatchingReservation, OptimizerState,
-    Plan, PlannedAssignment, PlannerConfig, PlannerSnapshot, PlanningMode, ReservationItem,
-    WarmWait, WorkId, WorkSnapshot,
+    Plan, PlannedAssignment, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode,
+    ReservationItem, WarmWait, WorkId, WorkSnapshot,
 };
 
 #[derive(Clone, Debug)]
@@ -25,12 +25,19 @@ impl Planner {
         Self { config }
     }
 
-    pub fn plan(&self, snapshot: &PlannerSnapshot) -> Plan {
-        let index = EligibilityIndex::from_work(&snapshot.work);
+    pub fn plan(&self, snapshot: &PlannerSnapshot) -> Result<Plan, PlannerError> {
+        validate_snapshot_ids(snapshot)?;
+        let index = EligibilityIndex::from_snapshot(snapshot);
         self.plan_with_index(snapshot, &index)
     }
 
-    pub fn plan_with_index(&self, snapshot: &PlannerSnapshot, index: &EligibilityIndex) -> Plan {
+    pub fn plan_with_index(
+        &self,
+        snapshot: &PlannerSnapshot,
+        index: &EligibilityIndex,
+    ) -> Result<Plan, PlannerError> {
+        validate_snapshot_ids(snapshot)?;
+        validate_eligibility_index(snapshot, index)?;
         let devices = canonical_devices(&snapshot.devices);
         let device_map = devices
             .iter()
@@ -49,11 +56,8 @@ impl Planner {
         let mut blocked = work
             .iter()
             .filter(|item| !item.ready)
-            .map(|item| BlockedWork {
-                work_id: item.id.clone(),
-                reason: BlockedReason::NotReady,
-            })
-            .collect::<Vec<_>>();
+            .map(|item| (item.id.clone(), BlockedReason::NotReady))
+            .collect::<BTreeMap<_, _>>();
         let mut matcher = IncrementalMatcher::new(&idle_device_ids);
         let mut accepted_ids = BTreeSet::<WorkId>::new();
         let mut final_matching = MatchingResult {
@@ -66,22 +70,39 @@ impl Planner {
                 continue;
             }
             let candidates = index.candidates_for(&item.id).unwrap_or_default();
+            // `final_matching` is the minimum-host-RAM matching for the
+            // accepted set. Any feasible augmenting path can only keep or
+            // increase that set's cost, so adding the new work's cheapest idle
+            // edge is a sound lower bound. Keep host RAM first in `Cost`.
+            if minimum_immediate_host_ram(item, candidates, &device_map).is_some_and(
+                |minimum_host_ram| {
+                    final_matching
+                        .total_host_ram_bytes
+                        .checked_add(minimum_host_ram)
+                        .is_none_or(|minimum_total| {
+                            minimum_total > snapshot.host_memory.headroom_bytes
+                        })
+                },
+            ) {
+                blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
+                continue;
+            }
             let prepared_work =
                 prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config);
             if prepared_work.all_candidates.is_empty() {
-                blocked.push(BlockedWork {
-                    work_id: item.id.clone(),
-                    reason: classify_no_candidate(item, candidates, &device_map),
-                });
+                blocked.insert(
+                    item.id.clone(),
+                    classify_no_candidate(item, candidates, &device_map),
+                );
             } else if prepared_work.immediate_candidates.is_empty() {
-                blocked.push(BlockedWork {
-                    work_id: item.id.clone(),
-                    reason: if prepared_work.warm_wait.is_some() {
+                blocked.insert(
+                    item.id.clone(),
+                    if prepared_work.warm_wait.is_some() {
                         BlockedReason::WarmWait
                     } else {
                         BlockedReason::NoIdleDevice
                     },
-                });
+                );
             }
             prepared.insert(item.id.clone(), prepared_work);
             let Some(prepared_work) = prepared.get(&item.id) else {
@@ -96,22 +117,18 @@ impl Planner {
                 candidates: prepared_work.immediate_candidates.clone(),
             };
             let Some((trial_matcher, matching)) = matcher.try_with(trial_work) else {
-                push_blocked_once(&mut blocked, &item.id, BlockedReason::LowerPriorityOpening);
+                blocked.insert(item.id.clone(), BlockedReason::LowerPriorityOpening);
                 continue;
             };
             if matching.total_host_ram_bytes > snapshot.host_memory.headroom_bytes {
-                push_blocked_once(
-                    &mut blocked,
-                    &item.id,
-                    BlockedReason::AggregateHostRamReserved,
-                );
+                blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
                 continue;
             }
 
             matcher = trial_matcher;
             final_matching = matching;
             accepted_ids.insert(item.id.clone());
-            blocked.retain(|entry| entry.work_id != item.id);
+            blocked.remove(&item.id);
         }
 
         let ready_count = work.iter().filter(|item| item.ready).count();
@@ -131,32 +148,19 @@ impl Planner {
             }
         }
 
-        let mut blocked_ids = blocked
-            .iter()
-            .map(|entry| entry.work_id.clone())
-            .collect::<BTreeSet<_>>();
         for item in &work {
-            if !item.ready || accepted_ids.contains(&item.id) || blocked_ids.contains(&item.id) {
+            if !item.ready || accepted_ids.contains(&item.id) || blocked.contains_key(&item.id) {
                 continue;
             }
-            let reason = if idle_device_ids.is_empty() {
-                let candidates = index.candidates_for(&item.id).unwrap_or_default();
-                let prepared_work = prepared.entry(item.id.clone()).or_insert_with(|| {
-                    prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config)
-                });
-                if prepared_work.all_candidates.is_empty() {
-                    classify_no_candidate(item, candidates, &device_map)
-                } else {
-                    BlockedReason::NoIdleDevice
-                }
+            let candidates = index.candidates_for(&item.id).unwrap_or_default();
+            let reason = if !has_schedulable_candidate(item, candidates, &device_map) {
+                classify_no_candidate(item, candidates, &device_map)
+            } else if !has_idle_candidate(item, candidates, &device_map) {
+                BlockedReason::NoIdleDevice
             } else {
                 BlockedReason::LowerPriorityOpening
             };
-            blocked.push(BlockedWork {
-                work_id: item.id.clone(),
-                reason,
-            });
-            blocked_ids.insert(item.id.clone());
+            blocked.insert(item.id.clone(), reason);
         }
 
         let immediate_leases =
@@ -164,8 +168,8 @@ impl Planner {
         let reservation = build_reservation(snapshot, &immediate_leases);
         let warm_wait_ids = blocked
             .iter()
-            .filter(|entry| entry.reason == BlockedReason::WarmWait)
-            .map(|entry| entry.work_id.clone())
+            .filter(|(_, reason)| **reason == BlockedReason::WarmWait)
+            .map(|(work_id, _)| work_id.clone())
             .collect::<BTreeSet<_>>();
         let warm_waits = work
             .iter()
@@ -198,6 +202,10 @@ impl Planner {
             .enumerate()
             .map(|(position, item)| (item.id.clone(), position))
             .collect::<BTreeMap<_, _>>();
+        let mut blocked = blocked
+            .into_iter()
+            .map(|(work_id, reason)| BlockedWork { work_id, reason })
+            .collect::<Vec<_>>();
         blocked.sort_by(|left, right| {
             work_positions
                 .get(&left.work_id)
@@ -205,7 +213,7 @@ impl Planner {
                 .then_with(|| left.work_id.cmp(&right.work_id))
         });
 
-        Plan {
+        Ok(Plan {
             plan_version: snapshot.next_plan_version,
             state_version: snapshot.state_version,
             created_at_ms: snapshot.now_ms,
@@ -220,8 +228,67 @@ impl Planner {
             operation_budget: budget,
             operations_evaluated,
             optimizer_state,
+        })
+    }
+}
+
+fn validate_snapshot_ids(snapshot: &PlannerSnapshot) -> Result<(), PlannerError> {
+    let mut device_ids = BTreeSet::new();
+    for device in &snapshot.devices {
+        if !device_ids.insert(device.id.clone()) {
+            return Err(PlannerError::DuplicateDeviceId {
+                device_id: device.id.clone(),
+            });
         }
     }
+
+    let mut work_ids = BTreeSet::new();
+    for work in &snapshot.work {
+        if !work_ids.insert(work.id.clone()) {
+            return Err(PlannerError::DuplicateWorkId {
+                work_id: work.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_eligibility_index(
+    snapshot: &PlannerSnapshot,
+    index: &EligibilityIndex,
+) -> Result<(), PlannerError> {
+    if index.state_version() != snapshot.state_version {
+        return Err(PlannerError::StaleEligibilityIndex {
+            indexed_state_version: index.state_version(),
+            snapshot_state_version: snapshot.state_version,
+        });
+    }
+
+    let snapshot_ids = snapshot
+        .work
+        .iter()
+        .map(|work| work.id.clone())
+        .collect::<BTreeSet<_>>();
+    for work in &snapshot.work {
+        if index.candidates_for(&work.id).is_none() {
+            return Err(PlannerError::EligibilityIndexMissingWork {
+                work_id: work.id.clone(),
+            });
+        }
+        if !index.candidates_match(work) {
+            return Err(PlannerError::EligibilityIndexCandidatesChanged {
+                work_id: work.id.clone(),
+            });
+        }
+    }
+    for work_id in index.work_ids() {
+        if !snapshot_ids.contains(work_id) {
+            return Err(PlannerError::EligibilityIndexUnexpectedWork {
+                work_id: work_id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn optimization_horizon(ready_work_count: usize, schedulable_device_count: usize) -> usize {
@@ -254,16 +321,7 @@ fn prepare_work(
         .iter()
         .filter_map(|candidate| {
             let device = devices.get(&candidate.device_id)?;
-            if !device.is_schedulable()
-                || work
-                    .hard_device_id
-                    .as_ref()
-                    .is_some_and(|hard| hard != &candidate.device_id)
-                || work
-                    .backend_requirement
-                    .is_some_and(|backend| backend != device.backend)
-                || candidate.predicted_vram_bytes > device.available_vram_bytes
-            {
+            if !candidate_is_eligible(work, candidate, device, false) {
                 return None;
             }
             Some(MatchCandidate {
@@ -416,6 +474,63 @@ fn classify_no_candidate(
     }
 }
 
+fn has_schedulable_candidate(
+    work: &WorkSnapshot,
+    candidates: &[CandidatePlacement],
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+) -> bool {
+    candidates.iter().any(|candidate| {
+        devices
+            .get(&candidate.device_id)
+            .is_some_and(|device| candidate_is_eligible(work, candidate, device, false))
+    })
+}
+
+fn has_idle_candidate(
+    work: &WorkSnapshot,
+    candidates: &[CandidatePlacement],
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+) -> bool {
+    minimum_immediate_host_ram(work, candidates, devices).is_some()
+}
+
+/// Returns a lower bound for adding `work` to the current minimum-host-RAM
+/// matching. This is sound only while the matcher keeps host RAM as its first
+/// lexicographic cost component.
+fn minimum_immediate_host_ram(
+    work: &WorkSnapshot,
+    candidates: &[CandidatePlacement],
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+) -> Option<u64> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            devices
+                .get(&candidate.device_id)
+                .is_some_and(|device| candidate_is_eligible(work, candidate, device, true))
+        })
+        .map(|candidate| candidate.incremental_host_ram_bytes)
+        .min()
+}
+
+fn candidate_is_eligible(
+    work: &WorkSnapshot,
+    candidate: &CandidatePlacement,
+    device: &DeviceSnapshot,
+    require_idle: bool,
+) -> bool {
+    device.is_schedulable()
+        && (!require_idle || device.is_idle())
+        && work
+            .hard_device_id
+            .as_ref()
+            .is_none_or(|hard| hard == &candidate.device_id)
+        && work
+            .backend_requirement
+            .is_none_or(|backend| backend == device.backend)
+        && candidate.predicted_vram_bytes <= device.available_vram_bytes
+}
+
 fn build_immediate_leases(
     ordered_work: &[&WorkSnapshot],
     matching: &MatchingResult,
@@ -495,7 +610,7 @@ fn build_bypass_updates(
         let Some(prepared_work) = prepared.get(&wait.work_id) else {
             continue;
         };
-        let younger_start = leases.iter().find_map(|lease| {
+        let younger_starts = leases.iter().filter_map(|lease| {
             let younger_work = work_map.get(&lease.work_id)?;
             if work_order(younger_work) <= work_order(waiting_work) {
                 return None;
@@ -509,14 +624,17 @@ fn build_bypass_updates(
                 .saturating_add(declined.placement.incremental_host_ram_bytes);
             (replaced_total <= host_headroom).then_some(lease)
         });
-        if let Some(younger) = younger_start {
+        let mut bypass_count = waiting_work.bypass_count;
+        for younger in younger_starts {
+            let new_count = bypass_count.saturating_add(1).min(3);
             updates.push(BypassUpdate {
                 work_id: waiting_work.id.clone(),
-                previous_count: waiting_work.bypass_count,
-                new_count: waiting_work.bypass_count.saturating_add(1).min(3),
+                previous_count: bypass_count,
+                new_count,
                 younger_work_id: younger.work_id.clone(),
                 opening_device_id: younger.device_id.clone(),
             });
+            bypass_count = new_count;
         }
     }
     updates
@@ -591,23 +709,7 @@ fn build_lanes(
         return (seed_schedule.lanes, 0, optimizer_state);
     }
     if uniform_seed_is_optimal(snapshot, devices, &future_work, prepared, immediate_leases) {
-        let move_candidates = future_work
-            .iter()
-            .map(|work| {
-                prepared
-                    .get(&work.id)
-                    .map_or(0, |item| item.all_candidates.len().saturating_sub(1))
-            })
-            .sum::<usize>();
-        let swap_candidates = future_work
-            .len()
-            .saturating_mul(future_work.len().saturating_sub(1))
-            / 2;
-        return (
-            seed_schedule.lanes,
-            budget.min(move_candidates.saturating_add(swap_candidates)),
-            optimizer_state,
-        );
+        return (seed_schedule.lanes, 0, OptimizerState::SeedOnly);
     }
 
     let mut best_mapping = seed;
@@ -873,6 +975,12 @@ fn evaluate_schedule(
     let mut total_lateness_ms = 0_u128;
     let mut sum_completion_ms = 0_u128;
     let mut cold_loads = 0_usize;
+    let mut makespan_ms = context
+        .immediate_leases
+        .iter()
+        .map(|lease| lease.estimated_finish_ms)
+        .max()
+        .unwrap_or(snapshot.now_ms);
     for work in context.future_work {
         let Some(prepared_work) = context.prepared.get(&work.id) else {
             continue;
@@ -927,6 +1035,7 @@ fn evaluate_schedule(
         let deadline = work.ready_at_ms.saturating_add(soft_budget);
         total_lateness_ms += u128::from(start.saturating_sub(deadline));
         sum_completion_ms += u128::from(finish);
+        makespan_ms = makespan_ms.max(finish);
         if materialize {
             let assignment = PlannedAssignment {
                 work_id: work.id.clone(),
@@ -944,12 +1053,6 @@ fn evaluate_schedule(
         }
     }
 
-    let makespan_ms = lane_assignments
-        .values()
-        .flat_map(|lane| lane.iter())
-        .map(|assignment| assignment.estimated_finish_ms)
-        .max()
-        .unwrap_or(snapshot.now_ms);
     let lanes = lane_assignments
         .into_iter()
         .map(|(device_id, assignments)| DeviceLane {
@@ -1054,15 +1157,4 @@ fn work_order(work: &WorkSnapshot) -> (bool, u8, u64, &WorkId) {
         work.queue_rank,
         &work.id,
     )
-}
-
-fn push_blocked_once(blocked: &mut Vec<BlockedWork>, work_id: &WorkId, reason: BlockedReason) {
-    if let Some(existing) = blocked.iter_mut().find(|entry| &entry.work_id == work_id) {
-        existing.reason = reason;
-    } else {
-        blocked.push(BlockedWork {
-            work_id: work_id.clone(),
-            reason,
-        });
-    }
 }
