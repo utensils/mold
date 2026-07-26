@@ -103,7 +103,7 @@ nix run github:utensils/mold -- run "a cat"
 # Nix — NVIDIA Ampere / RTX 3090 or A40
 nix run github:utensils/mold#mold-sm86 -- run "a cat"
 
-# Nix — NVIDIA datacenter Blackwell / B200 or GB200
+# Nix — NVIDIA datacenter Blackwell / B200 or B300
 nix run github:utensils/mold#mold-sm100 -- run "a cat"
 
 # Nix — NVIDIA consumer Blackwell / RTX 50-series
@@ -121,8 +121,9 @@ cargo build --release -p mold-ai --features cuda
 cargo build --release -p mold-ai --features metal
 ```
 
-B200/GB200 sm_100 builds and synthetic multi-device coverage are simulated,
+B200/B300 sm_100 builds and synthetic multi-device coverage are simulated,
 not hardware-qualified. Real 8×B200 qualification remains deferred.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 The deferred RTX 3090 acceptance runner and evidence schema live in
 [`docs/qualification/`](docs/qualification/); no passing report is claimed.
 

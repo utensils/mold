@@ -64,7 +64,7 @@ works for SPA hot-iteration without recompiling Rust.
     # Package — must match your GPU architecture
     package = inputs.mold.packages.${system}.default;     # Ada (RTX 4090, sm_89)
     # package = inputs.mold.packages.${system}.mold-sm86;  # RTX 3090/A40, sm_86
-    # package = inputs.mold.packages.${system}.mold-sm100; # B200/GB200, sm_100
+    # package = inputs.mold.packages.${system}.mold-sm100; # B200/B300, sm_100
     # package = inputs.mold.packages.${system}.mold-sm120; # RTX 5090, sm_120
 
     # Advisory hint — emits a build warning if package doesn't match
@@ -165,7 +165,7 @@ matching flake output:
 
 - `"ampere"` → `packages.${system}.mold-sm86` (RTX 3090/A40, sm_86)
 - `"ada"` → `packages.${system}.mold` (RTX 40-series, sm_89)
-- `"blackwell-datacenter"` → `packages.${system}.mold-sm100` (B200/GB200, sm_100)
+- `"blackwell-datacenter"` → `packages.${system}.mold-sm100` (B200/B300, sm_100)
 - `"blackwell"` → `packages.${system}.mold-sm120` (RTX 50-series, sm_120)
 
 ### Monitoring
@@ -208,12 +208,12 @@ so Prometheus/Grafana Agent can scrape it without an API key.
 The module **cannot auto-select** the flake package — you must set `package` to
 match your GPU:
 
-| GPU                                 | Package                                     |
-| ----------------------------------- | ------------------------------------------- |
-| RTX 3090 / A40 (Ampere)             | `inputs.mold.packages.${system}.mold-sm86`  |
-| RTX 40-series (Ada)                 | `inputs.mold.packages.${system}.mold`       |
-| B200 / GB200 (datacenter Blackwell) | `inputs.mold.packages.${system}.mold-sm100` |
-| RTX 50-series (consumer Blackwell)  | `inputs.mold.packages.${system}.mold-sm120` |
+| GPU                                | Package                                     |
+| ---------------------------------- | ------------------------------------------- |
+| RTX 3090 / A40 (Ampere)            | `inputs.mold.packages.${system}.mold-sm86`  |
+| RTX 40-series (Ada)                | `inputs.mold.packages.${system}.mold`       |
+| B200 / B300 (datacenter Blackwell) | `inputs.mold.packages.${system}.mold-sm100` |
+| RTX 50-series (consumer Blackwell) | `inputs.mold.packages.${system}.mold-sm120` |
 
 Set `cudaArch` to the matching `ampere`, `ada`, `blackwell-datacenter`, or
 `blackwell` value. This is an advisory consistency check: it emits a build
@@ -233,7 +233,7 @@ nix build github:utensils/mold
 nix build github:utensils/mold#mold-sm86
 ```
 
-```bash [B200 / GB200]
+```bash [B200 / B300]
 nix build github:utensils/mold#mold-sm100
 ```
 
@@ -243,10 +243,13 @@ nix build github:utensils/mold#mold-sm120
 
 :::
 
-B200/GB200 support is simulated, not hardware-qualified. Hosted release CI
+B200/B300 support is simulated, not hardware-qualified. Hosted release CI
 builds the sm_100 server package alongside sm_86 and the sm_86 desktop output;
 real B200 qualification remains deferred. There is intentionally no sm_100
 desktop package.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+The current Linux flake outputs are x86_64 and must not be selected for Grace
+systems.
 
 ## Development Shell
 

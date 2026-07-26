@@ -332,7 +332,7 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
         .ok_or_else(|| anyhow!("--region is required in non-interactive deploy"))?;
     if gpu_uses_unsupported_linux_arm64(&instance_type) {
         bail!(
-            "{instance_type} is not supported by the published mold Docker images yet; GH200 Lambda hosts are linux/arm64, while the current images are linux/amd64. Choose an x86 GPU instance such as gpu_1x_a100_sxm4 or gpu_1x_a10."
+            "{instance_type} is not supported by the published mold Docker images yet; GH200, GB200, and GB300 Grace hosts are linux/arm64, while the current images are linux/amd64. Choose an x86 GPU instance such as gpu_1x_a100_sxm4 or gpu_1x_a10."
         );
     }
 

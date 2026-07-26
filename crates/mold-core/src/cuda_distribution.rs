@@ -76,20 +76,54 @@ fn has_rtx_50_series(words: &[String]) -> bool {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{gpu_name} uses an NVIDIA Grace linux/arm64 host, but published Mold containers are \
+     linux/amd64 only; GH200, GB200, and GB300 require future linux/arm64 artifacts and are \
+     unsupported"
+)]
+pub struct UnsupportedPublishedImagePlatform {
+    gpu_name: String,
+}
+
+impl UnsupportedPublishedImagePlatform {
+    pub fn gpu_name(&self) -> &str {
+        &self.gpu_name
+    }
+}
+
+pub fn gpu_name_uses_unsupported_grace_platform(name: &str) -> bool {
+    let words = words(name);
+    has_word(&words, "gh200")
+        || has_word(&words, "gb200")
+        || has_word(&words, "gb300")
+        || has_word(&words, "grace")
+}
+
+pub fn ensure_published_image_platform(
+    name: &str,
+) -> Result<(), UnsupportedPublishedImagePlatform> {
+    if gpu_name_uses_unsupported_grace_platform(name) {
+        Err(UnsupportedPublishedImagePlatform {
+            gpu_name: name.to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Select the published container target for a provider GPU display name.
-pub fn image_target_for_gpu_name(name: &str) -> CudaImageTarget {
+pub fn image_target_for_gpu_name(
+    name: &str,
+) -> Result<CudaImageTarget, UnsupportedPublishedImagePlatform> {
+    ensure_published_image_platform(name)?;
     let words = words(name);
 
-    if ["b200", "gb200", "b300", "gb300"]
-        .iter()
-        .any(|model| has_word(&words, model))
-    {
+    let target = if ["b200", "b300"].iter().any(|model| has_word(&words, model)) {
         CudaImageTarget::Sm100
     } else if has_adjacent(&words, "rtx", "pro") || has_rtx_50_series(&words) {
         CudaImageTarget::Sm120
-    } else if ["h100", "h200", "gh200"]
-        .iter()
-        .any(|model| has_word(&words, model))
+    } else if ["h100", "h200"].iter().any(|model| has_word(&words, model))
         || has_word(&words, "hopper")
     {
         CudaImageTarget::Sm90
@@ -110,16 +144,23 @@ pub fn image_target_for_gpu_name(name: &str) -> CudaImageTarget {
         // Ada names and unknown or ambiguous families retain the established
         // sm_89 image. In particular, never guess generic Blackwell as sm_120.
         CudaImageTarget::Sm89
-    }
+    };
+    Ok(target)
 }
 
 /// Build a rolling (`latest*`) or human-readable versioned image tag.
-pub fn image_tag_for_gpu_name(name: &str, version: &str) -> String {
+pub fn image_tag_for_gpu_name(
+    name: &str,
+    version: &str,
+) -> Result<String, UnsupportedPublishedImagePlatform> {
     let base = match version.trim().trim_start_matches('v') {
         "" | "latest" => "latest",
         version => version,
     };
-    format!("{base}{}", image_target_for_gpu_name(name).suffix())
+    Ok(format!(
+        "{base}{}",
+        image_target_for_gpu_name(name)?.suffix()
+    ))
 }
 
 /// Image tag base embedded by release CI.
@@ -209,11 +250,11 @@ fn image_reference_from_digest_manifest(
         manifest.repository == repository,
         "container digest manifest repository mismatch"
     );
-    let target = image_target_for_gpu_name(gpu_name);
+    let target = image_target_for_gpu_name(gpu_name)?;
     let entry = manifest.targets.get(target.manifest_key()).ok_or_else(|| {
         anyhow::anyhow!("container digest manifest omits {}", target.manifest_key())
     })?;
-    let expected_tag = image_tag_for_gpu_name(gpu_name, version);
+    let expected_tag = image_tag_for_gpu_name(gpu_name, version)?;
     anyhow::ensure!(
         entry.tag == expected_tag,
         "container digest manifest tag mismatch for {}",
@@ -266,6 +307,7 @@ pub async fn resolve_distribution_image_reference(
     gpu_name: &str,
     version: &str,
 ) -> anyhow::Result<String> {
+    ensure_published_image_platform(gpu_name)?;
     let version = version.trim();
     if is_exact_image_digest_reference(repository) {
         return Ok(repository.to_string());
@@ -273,7 +315,7 @@ pub async fn resolve_distribution_image_reference(
     if version.is_empty() || version == "latest" {
         return Ok(format!(
             "{repository}:{}",
-            image_tag_for_gpu_name(gpu_name, "latest")
+            image_tag_for_gpu_name(gpu_name, "latest")?
         ));
     }
     anyhow::ensure!(
@@ -587,9 +629,7 @@ mod tests {
             ("H100", CudaImageTarget::Sm90),
             ("H200", CudaImageTarget::Sm90),
             ("B200", CudaImageTarget::Sm100),
-            ("GB200", CudaImageTarget::Sm100),
             ("B300", CudaImageTarget::Sm100),
-            ("GB300", CudaImageTarget::Sm100),
             ("RTX PRO 6000 Blackwell", CudaImageTarget::Sm120),
             ("NVIDIA RTX PRO 1000 Blackwell", CudaImageTarget::Sm120),
             ("nvidia rtx-pro-2000 blackwell", CudaImageTarget::Sm120),
@@ -608,16 +648,74 @@ mod tests {
         ];
 
         for (name, expected) in cases {
-            assert_eq!(image_target_for_gpu_name(name), expected, "{name}");
+            assert_eq!(image_target_for_gpu_name(name), Ok(expected), "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn grace_hosts_are_rejected_before_any_published_image_is_resolved() {
+        for name in [
+            "NVIDIA GH200",
+            "NVIDIA GB200",
+            "NVIDIA GB300 NVL72",
+            "NVIDIA Grace Hopper Superchip",
+            "NVIDIA Grace Blackwell Superchip",
+        ] {
+            let target_error = image_target_for_gpu_name(name).unwrap_err();
+            assert_eq!(target_error.gpu_name(), name);
+            assert!(image_tag_for_gpu_name(name, "latest").is_err());
+
+            let error =
+                resolve_distribution_image_reference(OFFICIAL_IMAGE_REPOSITORY, name, "latest")
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("linux/arm64"),
+                "{name}: {error:#}"
+            );
+            assert!(
+                error
+                    .downcast_ref::<UnsupportedPublishedImagePlatform>()
+                    .is_some(),
+                "{name}: {error:#}"
+            );
+        }
+
+        let exact_digest = format!("{}@sha256:{}", OFFICIAL_IMAGE_REPOSITORY, "a".repeat(64));
+        let error = resolve_distribution_image_reference(&exact_digest, "NVIDIA GB200", "latest")
+            .await
+            .unwrap_err();
+        assert!(error
+            .downcast_ref::<UnsupportedPublishedImagePlatform>()
+            .is_some());
+
+        let error =
+            resolve_distribution_image_reference("registry.example/mold", "NVIDIA GB300", "0.20.2")
+                .await
+                .unwrap_err();
+        assert!(error
+            .downcast_ref::<UnsupportedPublishedImagePlatform>()
+            .is_some());
     }
 
     #[test]
     fn tags_are_versioned_or_rolling_with_the_same_suffix() {
-        assert_eq!(image_tag_for_gpu_name("A40", "latest"), "latest-sm86");
-        assert_eq!(image_tag_for_gpu_name("A40", "v0.20.2"), "0.20.2-sm86");
-        assert_eq!(image_tag_for_gpu_name("B300", "0.20.2"), "0.20.2-sm100");
-        assert_eq!(image_tag_for_gpu_name("Blackwell", "0.20.2"), "0.20.2");
+        assert_eq!(
+            image_tag_for_gpu_name("A40", "latest").unwrap(),
+            "latest-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu_name("A40", "v0.20.2").unwrap(),
+            "0.20.2-sm86"
+        );
+        assert_eq!(
+            image_tag_for_gpu_name("B300", "0.20.2").unwrap(),
+            "0.20.2-sm100"
+        );
+        assert_eq!(
+            image_tag_for_gpu_name("Blackwell", "0.20.2").unwrap(),
+            "0.20.2"
+        );
         assert!(!distribution_image_version().is_empty());
         assert!(is_exact_image_digest_reference(&format!(
             "registry.example/mold@sha256:{}",

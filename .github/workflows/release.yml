@@ -241,7 +241,7 @@ jobs:
           name: mold-x86_64-unknown-linux-gnu-cuda-sm89
           path: mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz
 
-  # Datacenter Blackwell (B200/GB200, sm_100). Built and statically validated;
+  # Datacenter Blackwell (B200/B300, sm_100). Built and statically validated;
   # hardware qualification remains deferred.
   build-linux-sm100:
     runs-on: ubuntu-latest
@@ -623,8 +623,11 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada Lovelace) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
-            | Linux x86_64 | CUDA — B200 / GB200 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+            | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
             | Linux x86_64 | CUDA — RTX 50-series (consumer Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+            Current Linux release archives and container images are linux/amd64 only.
 
             The install script auto-detects your GPU:
             ```bash
@@ -641,7 +644,7 @@ jobs:
             # Linux (requires NVIDIA driver + CUDA runtime)
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz   # RTX 3090 / A40
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz   # RTX 40-series
-            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz  # B200 / GB200 (simulated)
+            tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz  # B200 / B300 (simulated)
             tar xzf mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz  # RTX 50-series
             ./mold version
             ```
@@ -803,8 +806,11 @@ jobs:
             | macOS Apple Silicon | Metal | `mold-aarch64-apple-darwin.tar.gz` |
             | Linux x86_64 | CUDA — RTX 3090 / A40 (Ampere) | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz` |
             | Linux x86_64 | CUDA — RTX 40-series (Ada) | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz` |
-            | Linux x86_64 | CUDA — B200 / GB200 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+            | Linux x86_64 | CUDA — B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
             | Linux x86_64 | CUDA — RTX 50-series (consumer Blackwell) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+
+            GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+            Current Linux release archives and container images are linux/amd64 only.
 
             ## Desktop app (macOS)
 

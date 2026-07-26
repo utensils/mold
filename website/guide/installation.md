@@ -50,7 +50,7 @@ curl -fsSL ... | MOLD_VERSION=v0.10.0 sh
 # Force a GPU architecture (default: auto-detect on Linux)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm86  sh   # Ampere (RTX 3090 / A40)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm89  sh   # Ada (RTX 40-series)
-curl -fsSL ... | MOLD_CUDA_ARCH=sm100 sh   # Datacenter Blackwell (B200 / GB200)
+curl -fsSL ... | MOLD_CUDA_ARCH=sm100 sh   # Datacenter Blackwell (B200 / B300)
 curl -fsSL ... | MOLD_CUDA_ARCH=sm120 sh   # Consumer Blackwell (RTX 50-series)
 ```
 
@@ -124,7 +124,7 @@ source PKGBUILD with an explicit compute capability for other families:
 
 ```bash
 CUDA_COMPUTE_CAP=86 paru -S mold-ai   # RTX 3090 / A40
-CUDA_COMPUTE_CAP=100 paru -S mold-ai  # B200 / GB200
+CUDA_COMPUTE_CAP=100 paru -S mold-ai  # B200 / B300
 CUDA_COMPUTE_CAP=120 paru -S mold-ai  # RTX 50-series
 ```
 
@@ -151,7 +151,7 @@ nix run github:utensils/mold -- run "a cat"
 # RTX 3090 / A40
 nix run github:utensils/mold#mold-sm86 -- run "a cat"
 
-# B200 / GB200
+# B200 / B300
 nix run github:utensils/mold#mold-sm100 -- run "a cat"
 
 # RTX 50-series
@@ -213,17 +213,19 @@ The one-line installer always targets the latest tag from the
 [releases page](https://github.com/utensils/mold/releases). Each release ships
 the following assets:
 
-| Platform                                          | File                                              |
-| ------------------------------------------------- | ------------------------------------------------- |
-| macOS Apple Silicon                               | `mold-aarch64-apple-darwin.tar.gz`                |
-| Linux x86_64 (Ampere, RTX 3090 / A40)             | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz`  |
-| Linux x86_64 (Ada, RTX 4090 / 40-series)          | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
-| Linux x86_64 (datacenter Blackwell, B200 / GB200) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
-| Linux x86_64 (consumer Blackwell, RTX 50-series)  | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
+| Platform                                         | File                                              |
+| ------------------------------------------------ | ------------------------------------------------- |
+| macOS Apple Silicon                              | `mold-aarch64-apple-darwin.tar.gz`                |
+| Linux x86_64 (Ampere, RTX 3090 / A40)            | `mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz`  |
+| Linux x86_64 (Ada, RTX 4090 / 40-series)         | `mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz`  |
+| Linux x86_64 (datacenter Blackwell, B200 / B300) | `mold-x86_64-unknown-linux-gnu-cuda-sm100.tar.gz` |
+| Linux x86_64 (consumer Blackwell, RTX 50-series) | `mold-x86_64-unknown-linux-gnu-cuda-sm120.tar.gz` |
 
 B200 support is simulated, not hardware-qualified. The sm_100 artifact passes
 hosted build, CUDA-image, loader, NVML, archive, and synthetic scheduler checks;
 real 8×B200 and MIG qualification remain deferred.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+Current Linux release archives and containers are amd64-only.
 
 To install an older tag, put `MOLD_VERSION=<tag>` on the `sh` side of the
 pipe, e.g. `curl -fsSL ... | MOLD_VERSION=v0.8.0 sh`. Placing it on the

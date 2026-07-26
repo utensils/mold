@@ -252,18 +252,22 @@ pub async fn runpod_create(
     } else {
         None
     };
-    let image_name = mold_core::cuda_distribution::resolve_distribution_image_reference(
-        mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
-        &input.gpu_display_name,
-        mold_core::cuda_distribution::distribution_image_version(),
-    )
-    .await
-    .map_err(|error| format!("Could not resolve the Mold container: {error:#}"))?;
+    let image_name = resolve_published_image_for_gpu(&input.gpu_display_name).await?;
     let request = build_request(input, hf_token, image_name)?;
     client
         .create_pod(&request)
         .await
         .map_err(|e| format!("{e:#}"))
+}
+
+async fn resolve_published_image_for_gpu(gpu_display_name: &str) -> Result<String, String> {
+    mold_core::cuda_distribution::resolve_distribution_image_reference(
+        mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
+        gpu_display_name,
+        mold_core::cuda_distribution::distribution_image_version(),
+    )
+    .await
+    .map_err(|error| format!("Could not resolve the Mold container: {error:#}"))
 }
 
 #[tauri::command]
@@ -409,6 +413,20 @@ mod tests {
         assert!(build_request(invalid, None, "image".into())
             .unwrap_err()
             .contains("between 10 and 1000"));
+    }
+
+    #[tokio::test]
+    async fn published_image_routing_rejects_grace_and_retains_b200() {
+        for name in ["NVIDIA GH200", "NVIDIA GB200", "NVIDIA GB300"] {
+            let error = resolve_published_image_for_gpu(name).await.unwrap_err();
+            assert!(error.contains("linux/arm64"), "{name}: {error}");
+        }
+        assert_eq!(
+            resolve_published_image_for_gpu("NVIDIA B200")
+                .await
+                .unwrap(),
+            "ghcr.io/utensils/mold:latest-sm100"
+        );
     }
 
     #[test]

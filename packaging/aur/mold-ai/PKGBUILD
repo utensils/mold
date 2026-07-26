@@ -57,7 +57,7 @@ build() {
   cd "mold-${pkgver}"
   export CARGO_HOME="${srcdir}/cargo-home"
   # Default to Ada Lovelace (sm_89, RTX 40-series). Other users override with
-  # 86 for RTX 3090/A40, 100 for B200/GB200, or 120 for RTX 50-series.
+  # 86 for RTX 3090/A40, 100 for B200/B300, or 120 for RTX 50-series.
   # paru forwards env vars to makepkg; see the installation guide.
   export CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP:-89}"
   # makepkg runs in a minimal environment and does not source the user's

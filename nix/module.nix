@@ -39,7 +39,7 @@ in
         package's Mold CUDA capability metadata and warns only on mismatch.
         - "ampere" — RTX 3090/A40 (sm_86): use packages.''${system}.mold-sm86
         - "ada" — RTX 40-series (Ada Lovelace, sm_89): use packages.''${system}.mold
-        - "blackwell-datacenter" — B200/GB200 (sm_100): use packages.''${system}.mold-sm100
+        - "blackwell-datacenter" — B200/B300 (sm_100): use packages.''${system}.mold-sm100
         - "blackwell" — RTX 50-series (consumer Blackwell, sm_120): use packages.''${system}.mold-sm120
         The module cannot auto-select flake packages; you must set `package` to match.
       '';
@@ -315,7 +315,7 @@ in
           }. Set package to the matching Mold flake output.
         ''
         + lib.optionalString (cfg.cudaArch == "blackwell-datacenter") ''
-          B200/GB200 support is simulated, not hardware-qualified.
+          B200/B300 support is simulated, not hardware-qualified.
         ''
       )
     ];

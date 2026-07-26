@@ -145,7 +145,7 @@ When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
    - A2/A10/A16/A40, RTX A4000–A6000, RTX 3050–3090 → `:<version>-sm86`
    - Ada (4090, L40S) → `:<version>`
    - H100/H200 → `:<version>-sm90`
-   - B200/GB200/B300/GB300 → `:<version>-sm100`
+   - B200/B300 → `:<version>-sm100`
    - named RTX PRO/GeForce RTX 50-series → `:<version>-sm120`
    - ambiguous generic Blackwell → `:<version>` instead of guessing between
      incompatible datacenter and consumer targets
@@ -156,6 +156,9 @@ When `mold runpod create` (or `run`) is invoked without `--gpu`/`--dc`:
      repository must itself be supplied as `@sha256`.
      B200 support is simulated, not hardware-qualified; this routing does not
      represent a real B200 acceptance run.
+     GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+     RunPod CLI and desktop reject those Grace systems before constructing or
+     submitting an image reference.
 4. Datacenter is left unset; RunPod's scheduler picks any machine it can
    place. If that fails, `ensure_pod` retries across stock-ranked DCs with
    a 90-second schedule timeout per attempt, deleting stuck pods before

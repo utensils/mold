@@ -211,6 +211,12 @@ require_text "desktop/src-tauri/src/runpod.rs" \
   'resolve_distribution_image_reference'
 require_text "crates/mold-core/src/cuda_distribution.rs" \
   'refusing mutable tag fallback'
+require_text "crates/mold-core/src/cuda_distribution.rs" \
+  'pub struct UnsupportedPublishedImagePlatform'
+require_text "crates/mold-core/src/cuda_distribution.rs" \
+  'linux/arm64'
+require_text "crates/mold-cli/src/commands/runpod.rs" \
+  'ensure_published_image_platform(&gpu_display)'
 require_text "Dockerfile" 'ARG MOLD_DISTRIBUTION_IMAGE_VERSION=latest'
 require_text "Dockerfile" \
   'ENV MOLD_DISTRIBUTION_IMAGE_VERSION=${MOLD_DISTRIBUTION_IMAGE_VERSION}'
@@ -236,6 +242,29 @@ require_text "website/guide/installation.md" \
   'B200 support is simulated, not hardware-qualified'
 require_text "website/deployment/docker.md" \
   'B200 support is simulated, not hardware-qualified'
+for grace_doc in \
+  README.md \
+  website/deployment/docker.md \
+  website/deployment/lambda-cli.md \
+  website/deployment/nixos.md \
+  website/deployment/runpod-cli.md \
+  website/guide/installation.md; do
+  require_text "$grace_doc" \
+    'GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported'
+done
+require_text "$release" \
+  'GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.'
+grace_release_notice_count="$(
+  grep -Fc \
+    'GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.' \
+    "$repo_root/$release"
+)"
+[[ "$grace_release_notice_count" -eq 2 ]] \
+  || fail "both generated release descriptions must carry the Grace platform warning"
+if grep -Eq 'B200[[:space:]]*/[[:space:]]*GB200|B/GB200|B200/GB200' \
+  "$repo_root/.github/workflows/release.yml"; then
+  fail "generated release descriptions falsely route GB200 to an amd64 artifact"
+fi
 require_text "scripts/qualify-cuda-sm86.sh" 'sm86_attention_image_smoke'
 require_text "scripts/qualify-cuda-sm86.sh" 'sm86_ptx_image_smoke'
 require_text "scripts/qualify-cuda-sm86.sh" 'sm86_video_smoke'

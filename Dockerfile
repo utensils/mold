@@ -11,7 +11,7 @@
 # CUDA_COMPUTE_CAP targets:
 #   80 = Ampere (A100)          86 = Ampere (RTX 3090, A40)
 #   89 = Ada Lovelace (RTX 4090, L40S)   90 = Hopper (H100)
-#   100 = datacenter Blackwell (B200/GB200)
+#   100 = datacenter Blackwell (B200/B300)
 #   120 = consumer Blackwell (RTX 5090)
 
 # ── Stage 1a: Build web gallery SPA ─────────────────────────────────

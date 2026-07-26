@@ -50,7 +50,7 @@ docker pull ghcr.io/utensils/mold:latest-sm86
 # Hopper (H100/H200)
 docker pull ghcr.io/utensils/mold:latest-sm90
 
-# Datacenter Blackwell (B200 / GB200)
+# Datacenter Blackwell (B200 / B300)
 docker pull ghcr.io/utensils/mold:latest-sm100
 
 # Consumer Blackwell (RTX 5090)
@@ -78,14 +78,14 @@ docker run --gpus all -p 7680:7680 \
 The pre-built GHCR images are the fastest path. Pick the tag that matches your
 GPU's compute capability:
 
-| GPU family                         | Image tag                            |
-| ---------------------------------- | ------------------------------------ |
-| Ada (RTX 4090, L40S)               | `ghcr.io/utensils/mold:latest`       |
-| Ampere (A30, A100)                 | `ghcr.io/utensils/mold:latest-sm80`  |
-| Ampere (A2/A10/A16/A40, RTX 30/A)  | `ghcr.io/utensils/mold:latest-sm86`  |
-| Hopper (H100, H200, GH200)         | `ghcr.io/utensils/mold:latest-sm90`  |
-| Datacenter Blackwell (B/GB200/300) | `ghcr.io/utensils/mold:latest-sm100` |
-| Consumer Blackwell (RTX 50/PRO)    | `ghcr.io/utensils/mold:latest-sm120` |
+| GPU family                        | Image tag                            |
+| --------------------------------- | ------------------------------------ |
+| Ada (RTX 4090, L40S)              | `ghcr.io/utensils/mold:latest`       |
+| Ampere (A30, A100)                | `ghcr.io/utensils/mold:latest-sm80`  |
+| Ampere (A2/A10/A16/A40, RTX 30/A) | `ghcr.io/utensils/mold:latest-sm86`  |
+| Hopper (H100, H200)               | `ghcr.io/utensils/mold:latest-sm90`  |
+| Datacenter Blackwell (B200/B300)  | `ghcr.io/utensils/mold:latest-sm100` |
+| Consumer Blackwell (RTX 50/PRO)   | `ghcr.io/utensils/mold:latest-sm120` |
 
 The `latest*` aliases are mutable rolling main-branch channels. A release
 creates each `<version>*` tag once and rejects a release rerun if the existing
@@ -101,6 +101,7 @@ default sm_89 image rather than guessing sm_100 or sm_120.
 B200 support is simulated, not hardware-qualified. The sm_100 image is built
 and statically checked in hosted CI; real 8×B200 qualification is deferred and
 is never provisioned by CI.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
 
 ### Option 1 — Web Console
 

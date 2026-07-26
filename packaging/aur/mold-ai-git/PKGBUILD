@@ -60,7 +60,7 @@ prepare() {
 build() {
   cd "mold"
   export CARGO_HOME="${srcdir}/cargo-home"
-  # Override with 86 for RTX 3090/A40, 100 for B200/GB200, or 120 for
+  # Override with 86 for RTX 3090/A40, 100 for B200/B300, or 120 for
   # RTX 50-series. The default remains the established sm_89 build.
   export CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP:-89}"
   # makepkg runs in a minimal environment and does not source the user's

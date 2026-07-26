@@ -50,7 +50,7 @@ binaries use mutable `latest*` tags.
 | Ampere / A2/A10/A16/A40, RTX A4000–A6000, RTX 3050–3090     | `:<version>-sm86`   |
 | Ada / L40 / RTX 4090                                        | `:<version>`        |
 | Hopper / H100 / H200                                        | `:<version>-sm90`   |
-| Datacenter Blackwell / B200 / GB200 / B300 / GB300          | `:<version>-sm100`  |
+| Datacenter Blackwell / B200 / B300                          | `:<version>-sm100`  |
 | Consumer Blackwell / named RTX PRO or GeForce RTX 50-series | `:<version>-sm120`  |
 
 The shared name table includes RTX 3050, all named GeForce RTX 50-series, and
@@ -65,9 +65,9 @@ B200 support is simulated, not hardware-qualified. Mold does not launch
 Lambda qualification resources automatically; the real 8×B200 campaign is a
 separate deferred milestone.
 
-GH200 Lambda instances are not currently supported by the published mold
-container images: Lambda's GH200 hosts are `linux/arm64`, while the mold CUDA
-images are published for `linux/amd64`.
+GH200, GB200, and GB300 require future linux/arm64 artifacts and are unsupported.
+The published Mold CUDA images are Linux amd64 only, and both availability
+output and deploy fail closed before selecting an image for a Grace instance.
 
 ## Persistent Storage
 

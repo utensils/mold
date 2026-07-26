@@ -678,7 +678,7 @@
           }
           // lib.optionalAttrs isLinux {
             mold-sm86 = mkMold "86"; # Ampere (RTX 3090/A40)
-            mold-sm100 = mkMold "100"; # Datacenter Blackwell (B200/GB200)
+            mold-sm100 = mkMold "100"; # Datacenter Blackwell (B200/B300)
             mold-sm120 = mkMold "120"; # Consumer Blackwell (RTX 50-series)
             mold-desktop-sm86 = mkMoldDesktop "86";
             mold-desktop-sm120 = mkMoldDesktop "120";

@@ -890,6 +890,7 @@ pub async fn build_create_request(
 ) -> Result<CreatePodRequest> {
     // Resolve GPU — either user-supplied, config default, or cheapest available.
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
+    mold_core::cuda_distribution::ensure_published_image_platform(&gpu_display)?;
 
     // Resolve image tag.
     let image = if let Some(image_tag) = opts.image_tag.clone() {

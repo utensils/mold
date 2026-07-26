@@ -19,12 +19,12 @@ that CI force-publishes to on every release.
 ## Choosing a GPU variant
 
 The `mold-ai-bin` package ships the **sm_89 (Ada Lovelace)** tarball by
-default — that targets RTX 40-series cards. RTX 3090/A40, B200/GB200, and RTX
+default — that targets RTX 40-series cards. RTX 3090/A40, B200/B300, and RTX
 50-series users install the source PKGBUILD with an explicit compute
 capability:
 
 ```bash
-# B200 / GB200 (datacenter Blackwell; simulated, not hardware-qualified)
+# B200 / B300 (datacenter Blackwell; simulated, not hardware-qualified)
 CUDA_COMPUTE_CAP=100 paru -S mold-ai
 
 # RTX 50-series (consumer Blackwell)
