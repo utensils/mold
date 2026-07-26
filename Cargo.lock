@@ -3279,6 +3279,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mold-ai-scheduler"
+version = "0.20.2"
+
+[[package]]
 name = "mold-ai-server"
 version = "0.20.2"
 dependencies = [

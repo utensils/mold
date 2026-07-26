@@ -1,0 +1,1068 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::eligibility::EligibilityIndex;
+use crate::matching::{IncrementalMatcher, MatchCandidate, MatchWork, MatchingResult};
+use crate::{
+    AssignmentReason, BlockedReason, BlockedWork, BypassUpdate, CandidatePlacement, DeviceActivity,
+    DeviceId, DeviceLane, DeviceSnapshot, ImmediateLease, MatchingReservation, OptimizerState,
+    Plan, PlannedAssignment, PlannerConfig, PlannerSnapshot, PlanningMode, ReservationItem,
+    WarmWait, WorkId, WorkSnapshot,
+};
+
+#[derive(Clone, Debug)]
+pub struct Planner {
+    config: PlannerConfig,
+}
+
+impl Default for Planner {
+    fn default() -> Self {
+        Self::new(PlannerConfig::default())
+    }
+}
+
+impl Planner {
+    pub fn new(config: PlannerConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn plan(&self, snapshot: &PlannerSnapshot) -> Plan {
+        let index = EligibilityIndex::from_work(&snapshot.work);
+        self.plan_with_index(snapshot, &index)
+    }
+
+    pub fn plan_with_index(&self, snapshot: &PlannerSnapshot, index: &EligibilityIndex) -> Plan {
+        let devices = canonical_devices(&snapshot.devices);
+        let device_map = devices
+            .iter()
+            .map(|device| (device.id.clone(), device))
+            .collect::<BTreeMap<_, _>>();
+        let idle_device_ids = devices
+            .iter()
+            .filter(|device| device.is_idle())
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+
+        let mut work = snapshot.work.iter().collect::<Vec<_>>();
+        work.sort_by(|left, right| work_order(left).cmp(&work_order(right)));
+
+        let mut prepared = BTreeMap::<WorkId, PreparedWork>::new();
+        let mut blocked = work
+            .iter()
+            .filter(|item| !item.ready)
+            .map(|item| BlockedWork {
+                work_id: item.id.clone(),
+                reason: BlockedReason::NotReady,
+            })
+            .collect::<Vec<_>>();
+        let mut matcher = IncrementalMatcher::new(&idle_device_ids);
+        let mut accepted_ids = BTreeSet::<WorkId>::new();
+        let mut final_matching = MatchingResult {
+            assignments: BTreeMap::new(),
+            total_host_ram_bytes: 0,
+        };
+
+        for item in &work {
+            if !item.ready || accepted_ids.len() == idle_device_ids.len() {
+                continue;
+            }
+            let candidates = index.candidates_for(&item.id).unwrap_or_default();
+            let prepared_work =
+                prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config);
+            if prepared_work.all_candidates.is_empty() {
+                blocked.push(BlockedWork {
+                    work_id: item.id.clone(),
+                    reason: classify_no_candidate(item, candidates, &device_map),
+                });
+            } else if prepared_work.immediate_candidates.is_empty() {
+                blocked.push(BlockedWork {
+                    work_id: item.id.clone(),
+                    reason: if prepared_work.warm_wait.is_some() {
+                        BlockedReason::WarmWait
+                    } else {
+                        BlockedReason::NoIdleDevice
+                    },
+                });
+            }
+            prepared.insert(item.id.clone(), prepared_work);
+            let Some(prepared_work) = prepared.get(&item.id) else {
+                continue;
+            };
+            if prepared_work.immediate_candidates.is_empty() {
+                continue;
+            }
+
+            let trial_work = MatchWork {
+                work_id: item.id.clone(),
+                candidates: prepared_work.immediate_candidates.clone(),
+            };
+            let Some((trial_matcher, matching)) = matcher.try_with(trial_work) else {
+                push_blocked_once(&mut blocked, &item.id, BlockedReason::LowerPriorityOpening);
+                continue;
+            };
+            if matching.total_host_ram_bytes > snapshot.host_memory.headroom_bytes {
+                push_blocked_once(
+                    &mut blocked,
+                    &item.id,
+                    BlockedReason::AggregateHostRamReserved,
+                );
+                continue;
+            }
+
+            matcher = trial_matcher;
+            final_matching = matching;
+            accepted_ids.insert(item.id.clone());
+            blocked.retain(|entry| entry.work_id != item.id);
+        }
+
+        let ready_count = work.iter().filter(|item| item.ready).count();
+        let schedulable_count = devices
+            .iter()
+            .filter(|device| device.is_schedulable())
+            .count();
+        let base_horizon = optimization_horizon(ready_count, schedulable_count);
+        let horizon_work = select_horizon(&work, base_horizon);
+        for item in &horizon_work {
+            if !prepared.contains_key(&item.id) {
+                let candidates = index.candidates_for(&item.id).unwrap_or_default();
+                prepared.insert(
+                    item.id.clone(),
+                    prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config),
+                );
+            }
+        }
+
+        let mut blocked_ids = blocked
+            .iter()
+            .map(|entry| entry.work_id.clone())
+            .collect::<BTreeSet<_>>();
+        for item in &work {
+            if !item.ready || accepted_ids.contains(&item.id) || blocked_ids.contains(&item.id) {
+                continue;
+            }
+            let reason = if idle_device_ids.is_empty() {
+                let candidates = index.candidates_for(&item.id).unwrap_or_default();
+                let prepared_work = prepared.entry(item.id.clone()).or_insert_with(|| {
+                    prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config)
+                });
+                if prepared_work.all_candidates.is_empty() {
+                    classify_no_candidate(item, candidates, &device_map)
+                } else {
+                    BlockedReason::NoIdleDevice
+                }
+            } else {
+                BlockedReason::LowerPriorityOpening
+            };
+            blocked.push(BlockedWork {
+                work_id: item.id.clone(),
+                reason,
+            });
+            blocked_ids.insert(item.id.clone());
+        }
+
+        let immediate_leases =
+            build_immediate_leases(&work, &final_matching, &device_map, snapshot.now_ms);
+        let reservation = build_reservation(snapshot, &immediate_leases);
+        let warm_wait_ids = blocked
+            .iter()
+            .filter(|entry| entry.reason == BlockedReason::WarmWait)
+            .map(|entry| entry.work_id.clone())
+            .collect::<BTreeSet<_>>();
+        let warm_waits = work
+            .iter()
+            .filter(|item| !accepted_ids.contains(&item.id))
+            .filter(|item| warm_wait_ids.contains(&item.id))
+            .filter_map(|item| prepared.get(&item.id)?.warm_wait.clone())
+            .collect::<Vec<_>>();
+        let bypass_updates = build_bypass_updates(
+            &work,
+            &immediate_leases,
+            &warm_waits,
+            &prepared,
+            snapshot.host_memory.headroom_bytes,
+            reservation.total_host_ram_bytes,
+        );
+
+        let budget = operation_budget(schedulable_count, horizon_work.len());
+        let (lanes, operations_evaluated, optimizer_state) = build_lanes(
+            snapshot,
+            &devices,
+            &horizon_work,
+            &prepared,
+            &immediate_leases,
+            budget,
+            self.config.mode,
+        );
+
+        let work_positions = work
+            .iter()
+            .enumerate()
+            .map(|(position, item)| (item.id.clone(), position))
+            .collect::<BTreeMap<_, _>>();
+        blocked.sort_by(|left, right| {
+            work_positions
+                .get(&left.work_id)
+                .cmp(&work_positions.get(&right.work_id))
+                .then_with(|| left.work_id.cmp(&right.work_id))
+        });
+
+        Plan {
+            plan_version: snapshot.next_plan_version,
+            state_version: snapshot.state_version,
+            created_at_ms: snapshot.now_ms,
+            next_replan_at_ms: snapshot.next_replan_at_ms,
+            immediate_leases,
+            lanes,
+            blocked,
+            warm_waits,
+            bypass_updates,
+            reservation,
+            optimization_horizon_length: horizon_work.len(),
+            operation_budget: budget,
+            operations_evaluated,
+            optimizer_state,
+        }
+    }
+}
+
+pub fn optimization_horizon(ready_work_count: usize, schedulable_device_count: usize) -> usize {
+    ready_work_count.min(schedulable_device_count.saturating_mul(8).clamp(64, 200))
+}
+
+pub fn operation_budget(
+    schedulable_device_count: usize,
+    optimization_horizon_length: usize,
+) -> usize {
+    (64 * schedulable_device_count + 4 * optimization_horizon_length).clamp(512, 8_192)
+}
+
+#[derive(Clone, Debug)]
+struct PreparedWork {
+    all_candidates: Vec<MatchCandidate>,
+    immediate_candidates: Vec<MatchCandidate>,
+    declined_candidates: Vec<MatchCandidate>,
+    warm_wait: Option<WarmWait>,
+}
+
+fn prepare_work(
+    work: &WorkSnapshot,
+    candidates: &[CandidatePlacement],
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+    now_ms: u64,
+    config: &PlannerConfig,
+) -> PreparedWork {
+    let mut all_candidates = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let device = devices.get(&candidate.device_id)?;
+            if !device.is_schedulable()
+                || work
+                    .hard_device_id
+                    .as_ref()
+                    .is_some_and(|hard| hard != &candidate.device_id)
+                || work
+                    .backend_requirement
+                    .is_some_and(|backend| backend != device.backend)
+                || candidate.predicted_vram_bytes > device.available_vram_bytes
+            {
+                return None;
+            }
+            Some(MatchCandidate {
+                setup_ms: setup_ms(candidate, device),
+                placement: candidate.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    sort_match_candidates(&mut all_candidates);
+
+    let mut immediate_candidates = all_candidates
+        .iter()
+        .filter(|candidate| {
+            devices
+                .get(&candidate.placement.device_id)
+                .is_some_and(|device| device.is_idle())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut declined_candidates = Vec::new();
+    let mut warm_wait = None;
+
+    if work.bypass_count < 3 && config.warm_wait_max_ms > 0 {
+        let warm_options = all_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let device = devices.get(&candidate.placement.device_id)?;
+                if !device
+                    .warm_execution_fingerprints
+                    .contains(&candidate.placement.execution_fingerprint)
+                {
+                    return None;
+                }
+                let ready_at = match device.activity {
+                    DeviceActivity::Idle => now_ms,
+                    DeviceActivity::Busy => device.available_at_ms?,
+                };
+                let finish = ready_at
+                    .saturating_add(candidate.placement.warm_setup_ms)
+                    .saturating_add(candidate.placement.predicted_run_ms);
+                Some((finish, ready_at, candidate))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some((warm_finish, warm_ready_at, warm_candidate)) =
+            warm_options.into_iter().min_by(|left, right| {
+                (left.0, &left.2.placement.device_id).cmp(&(right.0, &right.2.placement.device_id))
+            })
+        {
+            let started_at = work.warm_wait_started_at_ms.unwrap_or(now_ms);
+            let deadline = started_at
+                .saturating_add(config.warm_wait_max_ms)
+                .min(warm_ready_at);
+            let best_cold_finish = immediate_candidates
+                .iter()
+                .filter(|candidate| {
+                    !devices
+                        .get(&candidate.placement.device_id)
+                        .is_some_and(|device| {
+                            device
+                                .warm_execution_fingerprints
+                                .contains(&candidate.placement.execution_fingerprint)
+                        })
+                })
+                .map(|candidate| {
+                    now_ms
+                        .saturating_add(candidate.placement.cold_setup_ms)
+                        .saturating_add(candidate.placement.predicted_run_ms)
+                })
+                .min();
+
+            if let Some(best_cold_finish) = best_cold_finish {
+                if now_ms < deadline && warm_finish < best_cold_finish {
+                    let mut retained = Vec::new();
+                    for candidate in immediate_candidates {
+                        let is_warm =
+                            devices
+                                .get(&candidate.placement.device_id)
+                                .is_some_and(|device| {
+                                    device
+                                        .warm_execution_fingerprints
+                                        .contains(&candidate.placement.execution_fingerprint)
+                                });
+                        if !is_warm {
+                            declined_candidates.push(candidate);
+                        } else {
+                            retained.push(candidate);
+                        }
+                    }
+                    immediate_candidates = retained;
+                    if !declined_candidates.is_empty() {
+                        warm_wait = Some(WarmWait {
+                            work_id: work.id.clone(),
+                            warm_device_id: warm_candidate.placement.device_id.clone(),
+                            started_at_ms: started_at,
+                            deadline_ms: deadline,
+                            predicted_warm_finish_ms: warm_finish,
+                            best_cold_finish_ms: best_cold_finish,
+                            declined_device_ids: declined_candidates
+                                .iter()
+                                .map(|candidate| candidate.placement.device_id.clone())
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    sort_match_candidates(&mut immediate_candidates);
+    sort_match_candidates(&mut declined_candidates);
+    PreparedWork {
+        all_candidates,
+        immediate_candidates,
+        declined_candidates,
+        warm_wait,
+    }
+}
+
+fn classify_no_candidate(
+    work: &WorkSnapshot,
+    candidates: &[CandidatePlacement],
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+) -> BlockedReason {
+    if let Some(hard_device_id) = &work.hard_device_id {
+        if !devices
+            .get(hard_device_id)
+            .is_some_and(|device| device.is_schedulable())
+        {
+            return BlockedReason::HardPinUnavailable;
+        }
+    }
+    if let Some(backend) = work.backend_requirement {
+        if !devices
+            .values()
+            .any(|device| device.is_schedulable() && device.backend == backend)
+        {
+            return BlockedReason::BackendUnsupported;
+        }
+    }
+    let vram_blocked = candidates.iter().any(|candidate| {
+        devices.get(&candidate.device_id).is_some_and(|device| {
+            device.is_schedulable() && candidate.predicted_vram_bytes > device.available_vram_bytes
+        })
+    });
+    if vram_blocked {
+        BlockedReason::InsufficientVram
+    } else {
+        BlockedReason::NoSchedulableDevice
+    }
+}
+
+fn build_immediate_leases(
+    ordered_work: &[&WorkSnapshot],
+    matching: &MatchingResult,
+    devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
+    now_ms: u64,
+) -> Vec<ImmediateLease> {
+    ordered_work
+        .iter()
+        .filter_map(|work| {
+            let candidate = matching.assignments.get(&work.id)?;
+            let device = devices.get(&candidate.placement.device_id)?;
+            let warm = device
+                .warm_execution_fingerprints
+                .contains(&candidate.placement.execution_fingerprint);
+            let finish = now_ms
+                .saturating_add(candidate.setup_ms)
+                .saturating_add(candidate.placement.predicted_run_ms);
+            Some(ImmediateLease {
+                work_id: work.id.clone(),
+                device_id: candidate.placement.device_id.clone(),
+                worker_generation: device.worker_generation,
+                placement: candidate.placement.clone(),
+                reason: if work.starvation_forced() {
+                    AssignmentReason::StarvationForced
+                } else if warm {
+                    AssignmentReason::WarmResident
+                } else {
+                    AssignmentReason::Priority
+                },
+                estimated_start_ms: now_ms,
+                estimated_finish_ms: finish,
+            })
+        })
+        .collect()
+}
+
+fn build_reservation(
+    snapshot: &PlannerSnapshot,
+    immediate_leases: &[ImmediateLease],
+) -> MatchingReservation {
+    let items = immediate_leases
+        .iter()
+        .map(|lease| ReservationItem {
+            work_id: lease.work_id.clone(),
+            device_id: lease.device_id.clone(),
+            host_ram_bytes: lease.placement.incremental_host_ram_bytes,
+        })
+        .collect::<Vec<_>>();
+    MatchingReservation {
+        sample_generation: snapshot.host_memory.sample_generation,
+        ledger_sequence: snapshot.host_memory.ledger_sequence,
+        total_host_ram_bytes: items
+            .iter()
+            .map(|item| item.host_ram_bytes)
+            .fold(0_u64, u64::saturating_add),
+        items,
+    }
+}
+
+fn build_bypass_updates(
+    ordered_work: &[&WorkSnapshot],
+    leases: &[ImmediateLease],
+    warm_waits: &[WarmWait],
+    prepared: &BTreeMap<WorkId, PreparedWork>,
+    host_headroom: u64,
+    reserved_host_ram: u64,
+) -> Vec<BypassUpdate> {
+    let work_map = ordered_work
+        .iter()
+        .map(|work| (work.id.clone(), *work))
+        .collect::<BTreeMap<_, _>>();
+    let mut updates = Vec::new();
+    for wait in warm_waits {
+        let Some(waiting_work) = work_map.get(&wait.work_id) else {
+            continue;
+        };
+        let Some(prepared_work) = prepared.get(&wait.work_id) else {
+            continue;
+        };
+        let younger_start = leases.iter().find_map(|lease| {
+            let younger_work = work_map.get(&lease.work_id)?;
+            if work_order(younger_work) <= work_order(waiting_work) {
+                return None;
+            }
+            let declined = prepared_work
+                .declined_candidates
+                .iter()
+                .find(|candidate| candidate.placement.device_id == lease.device_id)?;
+            let replaced_total = reserved_host_ram
+                .saturating_sub(lease.placement.incremental_host_ram_bytes)
+                .saturating_add(declined.placement.incremental_host_ram_bytes);
+            (replaced_total <= host_headroom).then_some(lease)
+        });
+        if let Some(younger) = younger_start {
+            updates.push(BypassUpdate {
+                work_id: waiting_work.id.clone(),
+                previous_count: waiting_work.bypass_count,
+                new_count: waiting_work.bypass_count.saturating_add(1).min(3),
+                younger_work_id: younger.work_id.clone(),
+                opening_device_id: younger.device_id.clone(),
+            });
+        }
+    }
+    updates
+}
+
+fn select_horizon<'a>(
+    ordered_work: &[&'a WorkSnapshot],
+    base_horizon: usize,
+) -> Vec<&'a WorkSnapshot> {
+    let mut selected = ordered_work
+        .iter()
+        .filter(|work| work.ready)
+        .take(base_horizon)
+        .copied()
+        .collect::<Vec<_>>();
+    let selected_ids = selected
+        .iter()
+        .map(|work| work.id.clone())
+        .collect::<BTreeSet<_>>();
+    selected.extend(
+        ordered_work
+            .iter()
+            .filter(|work| {
+                work.ready && work.starvation_forced() && !selected_ids.contains(&work.id)
+            })
+            .copied(),
+    );
+    selected.sort_by(|left, right| work_order(left).cmp(&work_order(right)));
+    selected
+}
+
+fn build_lanes(
+    snapshot: &PlannerSnapshot,
+    devices: &[DeviceSnapshot],
+    horizon_work: &[&WorkSnapshot],
+    prepared: &BTreeMap<WorkId, PreparedWork>,
+    immediate_leases: &[ImmediateLease],
+    budget: usize,
+    mode: PlanningMode,
+) -> (Vec<DeviceLane>, usize, OptimizerState) {
+    let immediate_ids = immediate_leases
+        .iter()
+        .map(|lease| lease.work_id.clone())
+        .collect::<BTreeSet<_>>();
+    let future_work = horizon_work
+        .iter()
+        .filter(|work| !immediate_ids.contains(&work.id))
+        .copied()
+        .collect::<Vec<_>>();
+    let schedule_context = ScheduleContext {
+        snapshot,
+        devices,
+        future_work: &future_work,
+        prepared,
+        immediate_leases,
+    };
+
+    let mut seed = BTreeMap::<WorkId, CandidatePlacement>::new();
+    let seed_schedule = evaluate_schedule(&schedule_context, &seed, true, true);
+    seed = seed_schedule
+        .future_assignments
+        .iter()
+        .map(|assignment| (assignment.work_id.clone(), assignment.placement.clone()))
+        .collect();
+
+    let optimizer_state = match mode {
+        PlanningMode::Optimize => OptimizerState::Optimized,
+        PlanningMode::WatchdogFallback => OptimizerState::WatchdogFallback,
+        PlanningMode::InternalErrorFallback => OptimizerState::InternalErrorFallback,
+    };
+    if mode != PlanningMode::Optimize {
+        return (seed_schedule.lanes, 0, optimizer_state);
+    }
+    if uniform_seed_is_optimal(snapshot, devices, &future_work, prepared, immediate_leases) {
+        let move_candidates = future_work
+            .iter()
+            .map(|work| {
+                prepared
+                    .get(&work.id)
+                    .map_or(0, |item| item.all_candidates.len().saturating_sub(1))
+            })
+            .sum::<usize>();
+        let swap_candidates = future_work
+            .len()
+            .saturating_mul(future_work.len().saturating_sub(1))
+            / 2;
+        return (
+            seed_schedule.lanes,
+            budget.min(move_candidates.saturating_add(swap_candidates)),
+            optimizer_state,
+        );
+    }
+
+    let mut best_mapping = seed;
+    let mut best_schedule = seed_schedule;
+    let mut operations = 0_usize;
+
+    'moves: for work in &future_work {
+        let Some(prepared_work) = prepared.get(&work.id) else {
+            continue;
+        };
+        for candidate in &prepared_work.all_candidates {
+            if operations == budget {
+                break 'moves;
+            }
+            let previous = best_mapping.get(&work.id).cloned();
+            if previous.as_ref() == Some(&candidate.placement) {
+                continue;
+            }
+            operations += 1;
+            best_mapping.insert(work.id.clone(), candidate.placement.clone());
+            let schedule = evaluate_schedule(&schedule_context, &best_mapping, false, false);
+            if schedule_is_better(&schedule.score, &best_schedule.score) {
+                best_schedule = schedule;
+            } else if let Some(previous) = previous {
+                best_mapping.insert(work.id.clone(), previous);
+            } else {
+                best_mapping.remove(&work.id);
+            }
+        }
+    }
+
+    if operations < budget {
+        'swaps: for left_index in 0..future_work.len() {
+            for right_index in left_index + 1..future_work.len() {
+                if operations == budget {
+                    break 'swaps;
+                }
+                let left = future_work[left_index];
+                let right = future_work[right_index];
+                let (Some(left_current), Some(right_current)) = (
+                    best_mapping.get(&left.id).cloned(),
+                    best_mapping.get(&right.id).cloned(),
+                ) else {
+                    continue;
+                };
+                let Some(left_replacement) =
+                    candidate_for_device(prepared.get(&left.id), &right_current.device_id)
+                else {
+                    continue;
+                };
+                let Some(right_replacement) =
+                    candidate_for_device(prepared.get(&right.id), &left_current.device_id)
+                else {
+                    continue;
+                };
+                operations += 1;
+                best_mapping.insert(left.id.clone(), left_replacement);
+                best_mapping.insert(right.id.clone(), right_replacement);
+                let schedule = evaluate_schedule(&schedule_context, &best_mapping, false, false);
+                if schedule_is_better(&schedule.score, &best_schedule.score) {
+                    best_schedule = schedule;
+                } else {
+                    best_mapping.insert(left.id.clone(), left_current);
+                    best_mapping.insert(right.id.clone(), right_current);
+                }
+            }
+        }
+    }
+
+    let final_schedule = evaluate_schedule(&schedule_context, &best_mapping, false, true);
+    (final_schedule.lanes, operations, optimizer_state)
+}
+
+fn uniform_seed_is_optimal(
+    snapshot: &PlannerSnapshot,
+    devices: &[DeviceSnapshot],
+    future_work: &[&WorkSnapshot],
+    prepared: &BTreeMap<WorkId, PreparedWork>,
+    immediate_leases: &[ImmediateLease],
+) -> bool {
+    if future_work.is_empty() {
+        return true;
+    }
+    let schedulable_ids = devices
+        .iter()
+        .filter(|device| device.is_schedulable())
+        .map(|device| device.id.clone())
+        .collect::<BTreeSet<_>>();
+    if schedulable_ids.is_empty() {
+        return true;
+    }
+
+    let mut base = devices
+        .iter()
+        .filter(|device| device.is_schedulable())
+        .map(|device| {
+            (
+                device.id.clone(),
+                (
+                    match device.activity {
+                        DeviceActivity::Idle => snapshot.now_ms,
+                        DeviceActivity::Busy => device.available_at_ms.unwrap_or(u64::MAX / 4),
+                    },
+                    device.warm_execution_fingerprints.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for lease in immediate_leases {
+        let entry = base.entry(lease.device_id.clone()).or_default();
+        entry.0 = lease.estimated_finish_ms;
+        entry
+            .1
+            .insert(lease.placement.execution_fingerprint.clone());
+    }
+    let mut base_values = base.values();
+    let Some(first_base) = base_values.next() else {
+        return true;
+    };
+    if base_values.any(|value| value != first_base) {
+        return false;
+    }
+
+    let mut common_signature = None::<(crate::ExecutionFingerprint, u64, u64, u64, u64, u64)>;
+    let common_ready_at = future_work[0].ready_at_ms;
+    for work in future_work {
+        if work.ready_at_ms != common_ready_at {
+            return false;
+        }
+        let Some(item) = prepared.get(&work.id) else {
+            return false;
+        };
+        let candidate_devices = item
+            .all_candidates
+            .iter()
+            .map(|candidate| candidate.placement.device_id.clone())
+            .collect::<BTreeSet<_>>();
+        if candidate_devices != schedulable_ids {
+            return false;
+        }
+        let mut signatures = item.all_candidates.iter().map(|candidate| {
+            (
+                candidate.placement.execution_fingerprint.clone(),
+                candidate.placement.predicted_vram_bytes,
+                candidate.placement.incremental_host_ram_bytes,
+                candidate.placement.cold_setup_ms,
+                candidate.placement.warm_setup_ms,
+                candidate.placement.predicted_run_ms,
+            )
+        });
+        let Some(first) = signatures.next() else {
+            return false;
+        };
+        if signatures.any(|signature| signature != first) {
+            return false;
+        }
+        if common_signature
+            .as_ref()
+            .is_some_and(|common| common != &first)
+        {
+            return false;
+        }
+        common_signature = Some(first);
+    }
+    true
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ScheduleScore {
+    total_lateness_ms: u128,
+    makespan_ms: u64,
+    sum_completion_ms: u128,
+    cold_loads: usize,
+}
+
+#[derive(Clone, Debug)]
+struct EvaluatedSchedule {
+    lanes: Vec<DeviceLane>,
+    future_assignments: Vec<PlannedAssignment>,
+    score: ScheduleScore,
+}
+
+struct ScheduleContext<'a> {
+    snapshot: &'a PlannerSnapshot,
+    devices: &'a [DeviceSnapshot],
+    future_work: &'a [&'a WorkSnapshot],
+    prepared: &'a BTreeMap<WorkId, PreparedWork>,
+    immediate_leases: &'a [ImmediateLease],
+}
+
+fn schedule_is_better(candidate: &ScheduleScore, current: &ScheduleScore) -> bool {
+    (
+        candidate.total_lateness_ms,
+        candidate.makespan_ms,
+        candidate.sum_completion_ms,
+        candidate.cold_loads,
+    ) < (
+        current.total_lateness_ms,
+        current.makespan_ms,
+        current.sum_completion_ms,
+        current.cold_loads,
+    )
+}
+
+fn evaluate_schedule(
+    context: &ScheduleContext<'_>,
+    mapping: &BTreeMap<WorkId, CandidatePlacement>,
+    choose_missing: bool,
+    materialize: bool,
+) -> EvaluatedSchedule {
+    let snapshot = context.snapshot;
+    let mut availability = context
+        .devices
+        .iter()
+        .filter(|device| device.is_schedulable())
+        .map(|device| {
+            (
+                device.id.clone(),
+                match device.activity {
+                    DeviceActivity::Idle => snapshot.now_ms,
+                    DeviceActivity::Busy => device.available_at_ms.unwrap_or(u64::MAX / 4),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut warm = context
+        .devices
+        .iter()
+        .filter(|device| device.is_schedulable())
+        .map(|device| {
+            (
+                device.id.clone(),
+                device.warm_execution_fingerprints.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut lane_assignments = context
+        .devices
+        .iter()
+        .filter(|device| device.is_schedulable())
+        .map(|device| (device.id.clone(), Vec::<PlannedAssignment>::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for lease in context.immediate_leases {
+        availability.insert(lease.device_id.clone(), lease.estimated_finish_ms);
+        warm.entry(lease.device_id.clone())
+            .or_default()
+            .insert(lease.placement.execution_fingerprint.clone());
+        lane_assignments
+            .entry(lease.device_id.clone())
+            .or_default()
+            .push(PlannedAssignment {
+                work_id: lease.work_id.clone(),
+                device_id: lease.device_id.clone(),
+                placement: lease.placement.clone(),
+                estimated_start_ms: lease.estimated_start_ms,
+                estimated_finish_ms: lease.estimated_finish_ms,
+                immediate: true,
+            });
+    }
+
+    let mut future_assignments = Vec::new();
+    let mut total_lateness_ms = 0_u128;
+    let mut sum_completion_ms = 0_u128;
+    let mut cold_loads = 0_usize;
+    for work in context.future_work {
+        let Some(prepared_work) = context.prepared.get(&work.id) else {
+            continue;
+        };
+        let selected = if let Some(candidate) = mapping.get(&work.id) {
+            prepared_work
+                .all_candidates
+                .iter()
+                .find(|item| &item.placement == candidate)
+                .map(|item| &item.placement)
+        } else if choose_missing {
+            prepared_work
+                .all_candidates
+                .iter()
+                .min_by(|left, right| {
+                    projected_finish(left, &availability, &warm)
+                        .cmp(&projected_finish(right, &availability, &warm))
+                        .then_with(|| {
+                            left.placement
+                                .incremental_host_ram_bytes
+                                .cmp(&right.placement.incremental_host_ram_bytes)
+                        })
+                        .then_with(|| left.placement.device_id.cmp(&right.placement.device_id))
+                })
+                .map(|item| &item.placement)
+        } else {
+            None
+        };
+        let Some(placement) = selected else {
+            continue;
+        };
+        let start = *availability
+            .get(&placement.device_id)
+            .unwrap_or(&(u64::MAX / 4));
+        let is_warm = warm
+            .get(&placement.device_id)
+            .is_some_and(|fingerprints| fingerprints.contains(&placement.execution_fingerprint));
+        let setup = if is_warm {
+            placement.warm_setup_ms
+        } else {
+            cold_loads += 1;
+            placement.cold_setup_ms
+        };
+        let finish = start
+            .saturating_add(setup)
+            .saturating_add(placement.predicted_run_ms);
+        availability.insert(placement.device_id.clone(), finish);
+        warm.entry(placement.device_id.clone())
+            .or_default()
+            .insert(placement.execution_fingerprint.clone());
+        let soft_budget = (placement.predicted_run_ms / 4).clamp(5_000, 60_000);
+        let deadline = work.ready_at_ms.saturating_add(soft_budget);
+        total_lateness_ms += u128::from(start.saturating_sub(deadline));
+        sum_completion_ms += u128::from(finish);
+        if materialize {
+            let assignment = PlannedAssignment {
+                work_id: work.id.clone(),
+                device_id: placement.device_id.clone(),
+                placement: placement.clone(),
+                estimated_start_ms: start,
+                estimated_finish_ms: finish,
+                immediate: false,
+            };
+            lane_assignments
+                .entry(assignment.device_id.clone())
+                .or_default()
+                .push(assignment.clone());
+            future_assignments.push(assignment);
+        }
+    }
+
+    let makespan_ms = lane_assignments
+        .values()
+        .flat_map(|lane| lane.iter())
+        .map(|assignment| assignment.estimated_finish_ms)
+        .max()
+        .unwrap_or(snapshot.now_ms);
+    let lanes = lane_assignments
+        .into_iter()
+        .map(|(device_id, assignments)| DeviceLane {
+            device_id,
+            assignments,
+        })
+        .collect();
+    EvaluatedSchedule {
+        lanes,
+        future_assignments,
+        score: ScheduleScore {
+            total_lateness_ms,
+            makespan_ms,
+            sum_completion_ms,
+            cold_loads,
+        },
+    }
+}
+
+fn projected_finish(
+    candidate: &MatchCandidate,
+    availability: &BTreeMap<DeviceId, u64>,
+    warm: &BTreeMap<DeviceId, BTreeSet<crate::ExecutionFingerprint>>,
+) -> (u64, u64) {
+    let start = *availability
+        .get(&candidate.placement.device_id)
+        .unwrap_or(&(u64::MAX / 4));
+    let setup = if warm
+        .get(&candidate.placement.device_id)
+        .is_some_and(|fingerprints| {
+            fingerprints.contains(&candidate.placement.execution_fingerprint)
+        }) {
+        candidate.placement.warm_setup_ms
+    } else {
+        candidate.placement.cold_setup_ms
+    };
+    (
+        start
+            .saturating_add(setup)
+            .saturating_add(candidate.placement.predicted_run_ms),
+        setup,
+    )
+}
+
+fn candidate_for_device(
+    prepared: Option<&PreparedWork>,
+    device_id: &DeviceId,
+) -> Option<CandidatePlacement> {
+    prepared?
+        .all_candidates
+        .iter()
+        .filter(|candidate| &candidate.placement.device_id == device_id)
+        .min_by(|left, right| {
+            left.placement
+                .incremental_host_ram_bytes
+                .cmp(&right.placement.incremental_host_ram_bytes)
+                .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+        })
+        .map(|candidate| candidate.placement.clone())
+}
+
+fn canonical_devices(devices: &[DeviceSnapshot]) -> Vec<DeviceSnapshot> {
+    let mut devices = devices.to_vec();
+    devices.sort_by(|left, right| left.id.cmp(&right.id));
+    devices
+}
+
+fn setup_ms(candidate: &CandidatePlacement, device: &DeviceSnapshot) -> u64 {
+    if device
+        .warm_execution_fingerprints
+        .contains(&candidate.execution_fingerprint)
+    {
+        candidate.warm_setup_ms
+    } else {
+        candidate.cold_setup_ms
+    }
+}
+
+fn sort_match_candidates(candidates: &mut [MatchCandidate]) {
+    candidates.sort_by(|left, right| {
+        left.placement
+            .device_id
+            .cmp(&right.placement.device_id)
+            .then_with(|| {
+                left.placement
+                    .incremental_host_ram_bytes
+                    .cmp(&right.placement.incremental_host_ram_bytes)
+            })
+            .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+            .then_with(|| {
+                left.placement
+                    .execution_fingerprint
+                    .cmp(&right.placement.execution_fingerprint)
+            })
+    });
+}
+
+fn work_order(work: &WorkSnapshot) -> (bool, u8, u64, &WorkId) {
+    (
+        !work.starvation_forced(),
+        work.priority_class.sort_key(),
+        work.queue_rank,
+        &work.id,
+    )
+}
+
+fn push_blocked_once(blocked: &mut Vec<BlockedWork>, work_id: &WorkId, reason: BlockedReason) {
+    if let Some(existing) = blocked.iter_mut().find(|entry| &entry.work_id == work_id) {
+        existing.reason = reason;
+    } else {
+        blocked.push(BlockedWork {
+            work_id: work_id.clone(),
+            reason,
+        });
+    }
+}

@@ -1,0 +1,527 @@
+use std::collections::BTreeSet;
+use std::fmt;
+
+macro_rules! string_id {
+    ($name:ident) => {
+        #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_owned())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+string_id!(DeviceId);
+string_id!(WorkId);
+string_id!(ParentId);
+string_id!(ExecutionFingerprint);
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Backend {
+    #[default]
+    Cuda,
+    Metal,
+    Cpu,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeviceAdminState {
+    #[default]
+    Enabled,
+    Draining,
+    Disabled,
+    StartupExcluded,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeviceHealth {
+    #[default]
+    Healthy,
+    Degraded,
+    Unavailable,
+    Poisoned,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeviceActivity {
+    #[default]
+    Idle,
+    Busy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceSnapshot {
+    pub id: DeviceId,
+    pub backend: Backend,
+    pub admin_state: DeviceAdminState,
+    pub health: DeviceHealth,
+    pub activity: DeviceActivity,
+    /// Credible monotonic availability estimate for a busy device.
+    pub available_at_ms: Option<u64>,
+    pub worker_generation: u64,
+    pub available_vram_bytes: u64,
+    pub warm_execution_fingerprints: BTreeSet<ExecutionFingerprint>,
+}
+
+impl DeviceSnapshot {
+    pub fn idle(id: impl Into<DeviceId>, available_vram_bytes: u64) -> Self {
+        Self {
+            id: id.into(),
+            backend: Backend::Cuda,
+            admin_state: DeviceAdminState::Enabled,
+            health: DeviceHealth::Healthy,
+            activity: DeviceActivity::Idle,
+            available_at_ms: None,
+            worker_generation: 0,
+            available_vram_bytes,
+            warm_execution_fingerprints: BTreeSet::new(),
+        }
+    }
+
+    pub fn busy(id: impl Into<DeviceId>, available_vram_bytes: u64, available_at_ms: u64) -> Self {
+        Self {
+            activity: DeviceActivity::Busy,
+            available_at_ms: Some(available_at_ms),
+            ..Self::idle(id, available_vram_bytes)
+        }
+    }
+
+    pub fn with_warm(mut self, fingerprint: impl Into<ExecutionFingerprint>) -> Self {
+        self.warm_execution_fingerprints.insert(fingerprint.into());
+        self
+    }
+
+    pub fn with_backend(mut self, backend: Backend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    pub fn with_admin_state(mut self, state: DeviceAdminState) -> Self {
+        self.admin_state = state;
+        self
+    }
+
+    pub fn with_health(mut self, health: DeviceHealth) -> Self {
+        self.health = health;
+        self
+    }
+
+    pub fn is_schedulable(&self) -> bool {
+        self.admin_state == DeviceAdminState::Enabled && self.health == DeviceHealth::Healthy
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.is_schedulable() && self.activity == DeviceActivity::Idle
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidatePlacement {
+    pub device_id: DeviceId,
+    pub execution_fingerprint: ExecutionFingerprint,
+    pub predicted_vram_bytes: u64,
+    pub incremental_host_ram_bytes: u64,
+    pub cold_setup_ms: u64,
+    pub warm_setup_ms: u64,
+    pub predicted_run_ms: u64,
+}
+
+impl CandidatePlacement {
+    pub fn new(
+        device_id: impl Into<DeviceId>,
+        execution_fingerprint: impl Into<ExecutionFingerprint>,
+        incremental_host_ram_bytes: u64,
+    ) -> Self {
+        Self {
+            device_id: device_id.into(),
+            execution_fingerprint: execution_fingerprint.into(),
+            predicted_vram_bytes: 0,
+            incremental_host_ram_bytes,
+            cold_setup_ms: 0,
+            warm_setup_ms: 0,
+            predicted_run_ms: 0,
+        }
+    }
+
+    pub fn with_vram(mut self, predicted_vram_bytes: u64) -> Self {
+        self.predicted_vram_bytes = predicted_vram_bytes;
+        self
+    }
+
+    pub fn with_timing(
+        mut self,
+        cold_setup_ms: u64,
+        warm_setup_ms: u64,
+        predicted_run_ms: u64,
+    ) -> Self {
+        self.cold_setup_ms = cold_setup_ms;
+        self.warm_setup_ms = warm_setup_ms;
+        self.predicted_run_ms = predicted_run_ms;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkKind {
+    #[default]
+    Generation,
+    PreparedSibling,
+    ChainStage,
+    PostUpscale,
+    StandaloneUpscale,
+    PromptExpansion,
+    AdminModelLoad,
+    BatchChild,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PriorityClass {
+    Critical,
+    #[default]
+    User,
+    Admin,
+}
+
+impl PriorityClass {
+    pub(crate) fn sort_key(self) -> u8 {
+        match self {
+            Self::Critical => 0,
+            Self::User => 1,
+            Self::Admin => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkSnapshot {
+    pub id: WorkId,
+    pub parent_id: ParentId,
+    pub kind: WorkKind,
+    pub ready: bool,
+    pub ready_at_ms: u64,
+    pub queue_rank: u64,
+    pub priority_class: PriorityClass,
+    pub bypass_count: u8,
+    pub hard_device_id: Option<DeviceId>,
+    pub backend_requirement: Option<Backend>,
+    pub warm_wait_started_at_ms: Option<u64>,
+    pub candidate_placements: Vec<CandidatePlacement>,
+}
+
+impl WorkSnapshot {
+    pub fn new(
+        id: impl Into<WorkId>,
+        queue_rank: u64,
+        candidate_placements: Vec<CandidatePlacement>,
+    ) -> Self {
+        let id = id.into();
+        Self {
+            parent_id: ParentId::new(id.as_str()),
+            id,
+            kind: WorkKind::Generation,
+            ready: true,
+            ready_at_ms: 0,
+            queue_rank,
+            priority_class: PriorityClass::User,
+            bypass_count: 0,
+            hard_device_id: None,
+            backend_requirement: None,
+            warm_wait_started_at_ms: None,
+            candidate_placements,
+        }
+    }
+
+    pub fn with_priority(mut self, priority_class: PriorityClass) -> Self {
+        self.priority_class = priority_class;
+        self
+    }
+
+    pub fn with_bypass_count(mut self, bypass_count: u8) -> Self {
+        self.bypass_count = bypass_count;
+        self
+    }
+
+    pub fn with_hard_device(mut self, device_id: impl Into<DeviceId>) -> Self {
+        self.hard_device_id = Some(device_id.into());
+        self
+    }
+
+    pub fn with_backend_requirement(mut self, backend: Backend) -> Self {
+        self.backend_requirement = Some(backend);
+        self
+    }
+
+    pub fn with_warm_wait_started_at(mut self, started_at_ms: u64) -> Self {
+        self.warm_wait_started_at_ms = Some(started_at_ms);
+        self
+    }
+
+    pub fn with_ready_at(mut self, ready_at_ms: u64) -> Self {
+        self.ready_at_ms = ready_at_ms;
+        self
+    }
+
+    pub fn with_ready(mut self, ready: bool) -> Self {
+        self.ready = ready;
+        self
+    }
+
+    pub(crate) fn starvation_forced(&self) -> bool {
+        self.bypass_count >= 3
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanningMode {
+    Optimize,
+    WatchdogFallback,
+    InternalErrorFallback,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannerConfig {
+    pub warm_wait_max_ms: u64,
+    pub mode: PlanningMode,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            warm_wait_max_ms: 2_000,
+            mode: PlanningMode::Optimize,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostMemorySnapshot {
+    pub headroom_bytes: u64,
+    pub sample_generation: u64,
+    pub ledger_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannerSnapshot {
+    pub state_version: u64,
+    pub next_plan_version: u64,
+    pub now_ms: u64,
+    pub next_replan_at_ms: Option<u64>,
+    pub host_memory: HostMemorySnapshot,
+    pub devices: Vec<DeviceSnapshot>,
+    pub work: Vec<WorkSnapshot>,
+}
+
+impl PlannerSnapshot {
+    pub fn new(
+        state_version: u64,
+        next_plan_version: u64,
+        now_ms: u64,
+        host_headroom_bytes: u64,
+        devices: Vec<DeviceSnapshot>,
+        work: Vec<WorkSnapshot>,
+    ) -> Self {
+        Self {
+            state_version,
+            next_plan_version,
+            now_ms,
+            next_replan_at_ms: None,
+            host_memory: HostMemorySnapshot {
+                headroom_bytes: host_headroom_bytes,
+                sample_generation: 0,
+                ledger_sequence: 0,
+            },
+            devices,
+            work,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssignmentReason {
+    Priority,
+    StarvationForced,
+    WarmResident,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImmediateLease {
+    pub work_id: WorkId,
+    pub device_id: DeviceId,
+    pub worker_generation: u64,
+    pub placement: CandidatePlacement,
+    pub reason: AssignmentReason,
+    pub estimated_start_ms: u64,
+    pub estimated_finish_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedAssignment {
+    pub work_id: WorkId,
+    pub device_id: DeviceId,
+    pub placement: CandidatePlacement,
+    pub estimated_start_ms: u64,
+    pub estimated_finish_ms: u64,
+    pub immediate: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceLane {
+    pub device_id: DeviceId,
+    pub assignments: Vec<PlannedAssignment>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockedReason {
+    NotReady,
+    NoSchedulableDevice,
+    NoIdleDevice,
+    HardPinUnavailable,
+    BackendUnsupported,
+    InsufficientVram,
+    AggregateHostRamReserved,
+    WarmWait,
+    LowerPriorityOpening,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockedWork {
+    pub work_id: WorkId,
+    pub reason: BlockedReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarmWait {
+    pub work_id: WorkId,
+    pub warm_device_id: DeviceId,
+    pub started_at_ms: u64,
+    pub deadline_ms: u64,
+    pub predicted_warm_finish_ms: u64,
+    pub best_cold_finish_ms: u64,
+    pub declined_device_ids: Vec<DeviceId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BypassUpdate {
+    pub work_id: WorkId,
+    pub previous_count: u8,
+    pub new_count: u8,
+    pub younger_work_id: WorkId,
+    pub opening_device_id: DeviceId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReservationItem {
+    pub work_id: WorkId,
+    pub device_id: DeviceId,
+    pub host_ram_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchingReservation {
+    pub sample_generation: u64,
+    pub ledger_sequence: u64,
+    pub total_host_ram_bytes: u64,
+    pub items: Vec<ReservationItem>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptimizerState {
+    Optimized,
+    SeedOnly,
+    WatchdogFallback,
+    InternalErrorFallback,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Plan {
+    pub plan_version: u64,
+    pub state_version: u64,
+    pub created_at_ms: u64,
+    pub next_replan_at_ms: Option<u64>,
+    pub immediate_leases: Vec<ImmediateLease>,
+    pub lanes: Vec<DeviceLane>,
+    pub blocked: Vec<BlockedWork>,
+    pub warm_waits: Vec<WarmWait>,
+    pub bypass_updates: Vec<BypassUpdate>,
+    pub reservation: MatchingReservation,
+    pub optimization_horizon_length: usize,
+    pub operation_budget: usize,
+    pub operations_evaluated: usize,
+    pub optimizer_state: OptimizerState,
+}
+
+impl Plan {
+    pub fn blocked_reason(&self, work_id: &WorkId) -> Option<&BlockedReason> {
+        self.blocked
+            .iter()
+            .find(|blocked| &blocked.work_id == work_id)
+            .map(|blocked| &blocked.reason)
+    }
+
+    pub fn validate_for_grant(
+        &self,
+        state_version: u64,
+        plan_version: u64,
+        sample_generation: u64,
+        ledger_sequence: u64,
+    ) -> Result<(), PlanValidationError> {
+        if state_version != self.state_version {
+            return Err(PlanValidationError::StaleState {
+                planned: self.state_version,
+                current: state_version,
+            });
+        }
+        if plan_version != self.plan_version {
+            return Err(PlanValidationError::StalePlan {
+                planned: self.plan_version,
+                current: plan_version,
+            });
+        }
+        if sample_generation != self.reservation.sample_generation {
+            return Err(PlanValidationError::StaleMemorySample {
+                planned: self.reservation.sample_generation,
+                current: sample_generation,
+            });
+        }
+        if ledger_sequence != self.reservation.ledger_sequence {
+            return Err(PlanValidationError::StaleMemoryLedger {
+                planned: self.reservation.ledger_sequence,
+                current: ledger_sequence,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlanValidationError {
+    StaleState { planned: u64, current: u64 },
+    StalePlan { planned: u64, current: u64 },
+    StaleMemorySample { planned: u64, current: u64 },
+    StaleMemoryLedger { planned: u64, current: u64 },
+}

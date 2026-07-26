@@ -8,6 +8,7 @@ members = [
     "crates/mold-discord",
     "crates/mold-tui",
     "crates/mold-catalog",
+    "crates/mold-scheduler",
 ]
 # The Tauri desktop and iOS apps are standalone cargo roots: their platform UI
 # dependencies must stay out of this workspace's lockfile and `--workspace` CI.
