@@ -207,6 +207,7 @@ pub(crate) fn rejection_suggestion(hint: Option<ActivationHint>) -> &'static str
 /// `None` the inner peak retains the existing 2 GB
 /// `MEMORY_BUDGET_HEADROOM` constant from `estimate_peak_memory` and no
 /// extra is added — equivalent to the pre-Tier-2.3 behavior.
+#[cfg(test)]
 pub(crate) fn preflight_memory_guard_with_available(
     model_name: &str,
     paths: &ModelPaths,
@@ -214,11 +215,29 @@ pub(crate) fn preflight_memory_guard_with_available(
     available_bytes: u64,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
+    preflight_memory_guard_with_available_on_gpu(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        0,
+        hint,
+    )
+}
+
+pub(crate) fn preflight_memory_guard_with_available_on_gpu(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    gpu_ordinal: usize,
+    hint: Option<ActivationHint>,
+) -> Result<(), ApiError> {
     let forced_offload = matches!(
         mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     );
-    let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+    let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal);
     preflight_memory_guard_with_available_and_policy(
         model_name,
         paths,
@@ -449,8 +468,24 @@ fn qwen_image_quantized_sequential_peak(paths: &ModelPaths, hint: Option<Activat
 /// transformer's GPU budget. Auto placement can recover from CUDA OOM by
 /// retrying the prompt path on CPU; explicit same-GPU placement cannot.
 pub(crate) fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
+    ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
+        mold_inference::runtime_env::value("MOLD_LTX2_GEMMA_DEVICE").as_deref(),
+        mold_inference::runtime_env::value("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").as_deref(),
+        gpu_ordinal,
+    )
+}
+
+fn ltx2_encoder_phase_competes_with_transformer_gpu_from_values(
+    primary: Option<&str>,
+    legacy_force_cpu: Option<&str>,
+    gpu_ordinal: usize,
+) -> bool {
     matches!(
-        mold_inference::device::resolve_ltx2_gemma_device_override(gpu_ordinal),
+        mold_inference::device::resolve_ltx2_gemma_device_override_from_values(
+            primary,
+            legacy_force_cpu,
+            gpu_ordinal,
+        ),
         Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal)) if ordinal == gpu_ordinal
     )
 }
@@ -483,11 +518,12 @@ pub(crate) fn preflight_memory_guard(
         let effective_free = authoritative_cuda_available(
             mold_inference::device::usable_free_vram_bytes_result(gpu_ordinal),
         )?;
-        preflight_memory_guard_with_available(
+        preflight_memory_guard_with_available_on_gpu(
             model_name,
             paths,
             active_vram_bytes,
             effective_free,
+            gpu_ordinal,
             hint,
         )
     }
@@ -497,11 +533,12 @@ pub(crate) fn preflight_memory_guard(
         // macOS unified memory: query system memory and add reclaimable footprint.
         if let Some(available) = mold_inference::device::available_system_memory_bytes() {
             if available > 0 {
-                return preflight_memory_guard_with_available(
+                return preflight_memory_guard_with_available_on_gpu(
                     model_name,
                     paths,
                     active_vram_bytes,
                     available,
+                    gpu_ordinal,
                     hint,
                 );
             }
@@ -530,7 +567,14 @@ pub(crate) fn preflight_memory_guard_after_drop(
         let available = authoritative_cuda_available(
             mold_inference::device::post_drop_free_vram_bytes(gpu_ordinal),
         )?;
-        preflight_memory_guard_with_available(model_name, paths, 0, available, hint)
+        preflight_memory_guard_with_available_on_gpu(
+            model_name,
+            paths,
+            0,
+            available,
+            gpu_ordinal,
+            hint,
+        )
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -893,6 +937,15 @@ fn request_sensitive_activation_memory(
 #[cfg(test)]
 mod fail_closed_tests {
     use super::*;
+
+    #[test]
+    fn explicit_gemma_gpu_policy_tracks_the_assigned_worker_ordinal() {
+        assert!(ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("gpu"), None, 1));
+        assert!(ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("gpu"), None, 7));
+        assert!(
+            !ltx2_encoder_phase_competes_with_transformer_gpu_from_values(Some("cpu"), None, 1)
+        );
+    }
 
     #[test]
     fn unavailable_cuda_sample_blocks_admission_with_typed_api_error() {

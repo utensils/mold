@@ -1,8 +1,8 @@
 //! Shared local-engine preamble for `mold run` (single clip) and
 //! `mold run --frames N` chains in `--local` mode: resolve-or-pull the
 //! model, apply encoder-variant env overrides, resolve eager/offload,
-//! pick a GPU, and construct the engine. One home so the generate and
-//! chain paths can't drift.
+//! freeze a scheduler-selected execution plan, and construct the engine on
+//! its device owner thread. One home so generate and chain paths cannot drift.
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use anyhow::Result;
@@ -102,28 +102,6 @@ pub(crate) async fn resolve_or_pull_model(
     }
 }
 
-/// Apply env overrides, resolve eager/offload, select the best GPU from
-/// the allowed set (most free VRAM), and construct the engine.
-#[cfg(any(feature = "cuda", feature = "metal"))]
-pub(crate) fn build_local_engine(
-    model: &str,
-    paths: ModelPaths,
-    config: &Config,
-    ov: &EngineOverrides,
-) -> Result<Box<dyn mold_inference::InferenceEngine>> {
-    let discovered = mold_inference::device::discover_gpus();
-    let gpu_ordinal = selected_local_gpu_ordinals(config, ov)?
-        .into_iter()
-        .max_by_key(|ordinal| {
-            discovered
-                .iter()
-                .find(|gpu| gpu.ordinal == *ordinal)
-                .map_or(0, |gpu| gpu.free_vram_bytes)
-        })
-        .unwrap_or(0);
-    build_local_engine_on_gpu(model, paths, config, ov, gpu_ordinal)
-}
-
 /// Resolve every selected runtime device. This is shared by single-item local
 /// inference and the scheduler-backed local batch adapter; it has no 2-GPU
 /// special case.
@@ -151,50 +129,6 @@ pub(crate) fn selected_local_gpu_ordinals(
     Ok(available.into_iter().map(|gpu| gpu.ordinal).collect())
 }
 
-/// Construct an engine pinned to one scheduler-selected local device.
-#[cfg(any(feature = "cuda", feature = "metal"))]
-pub(crate) fn build_local_engine_on_gpu(
-    model: &str,
-    paths: ModelPaths,
-    config: &Config,
-    ov: &EngineOverrides,
-    gpu_ordinal: usize,
-) -> Result<Box<dyn mold_inference::InferenceEngine>> {
-    use mold_inference::LoadStrategy;
-
-    apply_local_engine_env_overrides(
-        ov.t5_variant.as_deref(),
-        ov.qwen3_variant.as_deref(),
-        ov.qwen2_variant.as_deref(),
-        ov.qwen2_text_encoder_mode.as_deref(),
-    );
-
-    if ov.eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    if ov.offload {
-        std::env::set_var("MOLD_OFFLOAD", "1");
-    }
-    let is_eager =
-        ov.eager || mold_inference::runtime_env::value("MOLD_EAGER").is_some_and(|v| v == "1");
-    let load_strategy = if is_eager {
-        LoadStrategy::Eager
-    } else {
-        LoadStrategy::Sequential
-    };
-    let is_offload =
-        ov.offload || mold_inference::runtime_env::value("MOLD_OFFLOAD").is_some_and(|v| v == "1");
-
-    mold_inference::create_engine(
-        model.to_string(),
-        paths,
-        config,
-        load_strategy,
-        gpu_ordinal,
-        is_offload,
-    )
-}
-
 /// Resolve the same concrete execution plans used by the server coordinator,
 /// then run the pure scheduler against real discovered free VRAM and OS
 /// available-RAM headroom. Each ordinal maps to exactly the immutable plan
@@ -207,6 +141,12 @@ pub(crate) async fn plan_local_batch(
 ) -> Result<LocalBatchPlan> {
     use sysinfo::System;
 
+    apply_local_engine_env_overrides(
+        ov.t5_variant.as_deref(),
+        ov.qwen3_variant.as_deref(),
+        ov.qwen2_variant.as_deref(),
+        ov.qwen2_text_encoder_mode.as_deref(),
+    );
     if ov.eager {
         std::env::set_var("MOLD_EAGER", "1");
     }

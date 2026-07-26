@@ -25,6 +25,7 @@ pub(crate) struct MatchingResult {
 struct Cost {
     host_ram: i128,
     setup: i128,
+    free_vram: i128,
     stable_tie: i128,
 }
 
@@ -35,6 +36,7 @@ impl Add for Cost {
         Self {
             host_ram: self.host_ram + right.host_ram,
             setup: self.setup + right.setup,
+            free_vram: self.free_vram + right.free_vram,
             stable_tie: self.stable_tie + right.stable_tie,
         }
     }
@@ -47,6 +49,7 @@ impl Neg for Cost {
         Self {
             host_ram: -self.host_ram,
             setup: -self.setup,
+            free_vram: -self.free_vram,
             stable_tie: -self.stable_tie,
         }
     }
@@ -156,14 +159,16 @@ impl IncrementalMatcher {
         let mut candidates = work.candidates.iter().enumerate().collect::<Vec<_>>();
         candidates.sort_by(|(left_index, left), (right_index, right)| {
             left.placement
-                .device_id
-                .cmp(&right.placement.device_id)
-                .then_with(|| {
-                    left.placement
-                        .incremental_host_ram_bytes
-                        .cmp(&right.placement.incremental_host_ram_bytes)
-                })
+                .incremental_host_ram_bytes
+                .cmp(&right.placement.incremental_host_ram_bytes)
                 .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+                .then_with(|| {
+                    right
+                        .placement
+                        .device_available_vram_bytes
+                        .cmp(&left.placement.device_available_vram_bytes)
+                })
+                .then_with(|| left.placement.device_id.cmp(&right.placement.device_id))
                 .then_with(|| left_index.cmp(right_index))
         });
         for (candidate_index, candidate) in candidates {
@@ -176,6 +181,7 @@ impl IncrementalMatcher {
                 Cost {
                     host_ram: i128::from(candidate.placement.incremental_host_ram_bytes),
                     setup: i128::from(candidate.setup_ms),
+                    free_vram: -i128::from(candidate.placement.device_available_vram_bytes),
                     stable_tie,
                 },
                 Some(candidate_index),

@@ -716,9 +716,30 @@ async fn prepare_inputs_for_devices(
         (variant.tag, variant.size_bytes)
     })
     .map(|variant| variant.tag.to_string());
+    let capacity_sensitive = match family.as_str() {
+        "flux"
+        | "sd3"
+        | "sd3.5"
+        | "stable-diffusion-3"
+        | "stable-diffusion-3.5"
+        | "ltx-video"
+        | "ltx_video" => base
+            .t5_variant
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value == "auto"),
+        "z-image" | "flux2" | "flux.2" | "flux2-klein" => base
+            .qwen3_variant
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value == "auto"),
+        "qwen-image" | "qwen_image" | "qwen-image-edit" => base
+            .qwen2_variant
+            .as_deref()
+            .is_none_or(|value| value.is_empty() || value == "auto"),
+        _ => false,
+    };
 
     let mut by_device = BTreeMap::new();
-    let mut failures = Vec::new();
+    let mut failures = BTreeMap::new();
     let dependency_context = DependencyContext {
         state,
         work_id,
@@ -784,7 +805,7 @@ async fn prepare_inputs_for_devices(
             _ => Ok(()),
         };
         if let Err(error) = materialized {
-            failures.push(format!("{}: {error}", device.id));
+            failures.insert(device.id, error);
             continue;
         }
         by_device.insert(
@@ -792,18 +813,25 @@ async fn prepare_inputs_for_devices(
             PreparedDeviceExecutionInputs {
                 engine_paths: selected_paths,
                 engine_config: frozen,
+                prepared_available_vram_bytes: device.available_vram_bytes,
+                capacity_sensitive,
             },
         );
     }
     if by_device.is_empty() {
         return Err(format!(
             "no request-eligible device could materialize encoder dependencies: {}",
-            failures.join("; ")
+            failures
+                .iter()
+                .map(|(device, error)| format!("{device}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ")
         ));
     }
     Ok(PreparedExecutionInputs {
         authority_fingerprint,
         by_device,
+        retryable_device_failures: failures,
     })
 }
 

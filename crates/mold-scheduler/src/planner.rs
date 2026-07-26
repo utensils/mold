@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::eligibility::EligibilityIndex;
@@ -1014,6 +1015,10 @@ fn evaluate_schedule(
                                 .incremental_host_ram_bytes
                                 .cmp(&right.placement.incremental_host_ram_bytes)
                         })
+                        .then_with(|| {
+                            Reverse(left.placement.device_available_vram_bytes)
+                                .cmp(&Reverse(right.placement.device_available_vram_bytes))
+                        })
                         .then_with(|| left.placement.device_id.cmp(&right.placement.device_id))
                 })
                 .map(|item| &item.placement)
@@ -1145,14 +1150,14 @@ fn setup_ms(candidate: &CandidatePlacement, device: &DeviceSnapshot) -> u64 {
 fn sort_match_candidates(candidates: &mut [MatchCandidate]) {
     candidates.sort_by(|left, right| {
         left.placement
-            .device_id
-            .cmp(&right.placement.device_id)
-            .then_with(|| {
-                left.placement
-                    .incremental_host_ram_bytes
-                    .cmp(&right.placement.incremental_host_ram_bytes)
-            })
+            .incremental_host_ram_bytes
+            .cmp(&right.placement.incremental_host_ram_bytes)
             .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+            .then_with(|| {
+                Reverse(left.placement.device_available_vram_bytes)
+                    .cmp(&Reverse(right.placement.device_available_vram_bytes))
+            })
+            .then_with(|| left.placement.device_id.cmp(&right.placement.device_id))
             .then_with(|| {
                 left.placement
                     .execution_fingerprint

@@ -162,6 +162,51 @@ fn rematching_selects_the_minimum_aggregate_host_ram_full_matching() {
 }
 
 #[test]
+fn equivalent_feasible_devices_prefer_the_most_free_vram() {
+    let low = DeviceSnapshot::idle("gpu-a", 12 * GIB);
+    let high = DeviceSnapshot::idle("gpu-z", 22 * GIB);
+    let low_candidate = candidate("gpu-a", 1).with_device_available_vram(12 * GIB);
+    let high_candidate = candidate("gpu-z", 1).with_device_available_vram(22 * GIB);
+
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![low, high],
+            vec![work("single", 0, vec![low_candidate, high_candidate])],
+            8,
+        ))
+        .expect("both candidates are feasible");
+
+    assert_eq!(assignments(&plan)["single"], "gpu-z");
+}
+
+#[test]
+fn equivalent_free_vram_ties_use_stable_device_id_deterministically() {
+    let candidates = vec![
+        candidate("gpu-z", 1).with_device_available_vram(20 * GIB),
+        candidate("gpu-a", 1).with_device_available_vram(20 * GIB),
+    ];
+    for devices in [
+        vec![
+            DeviceSnapshot::idle("gpu-z", 20 * GIB),
+            DeviceSnapshot::idle("gpu-a", 20 * GIB),
+        ],
+        vec![
+            DeviceSnapshot::idle("gpu-a", 20 * GIB),
+            DeviceSnapshot::idle("gpu-z", 20 * GIB),
+        ],
+    ] {
+        let plan = Planner::default()
+            .plan(&snapshot(
+                devices,
+                vec![work("single", 0, candidates.clone())],
+                8,
+            ))
+            .expect("tie plan");
+        assert_eq!(assignments(&plan)["single"], "gpu-a");
+    }
+}
+
+#[test]
 fn aggregate_host_ram_rechecks_the_actual_rematched_total() {
     let plan = Planner::default()
         .plan(&snapshot(

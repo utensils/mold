@@ -1144,6 +1144,74 @@ async fn generate_local(
     .await
 }
 
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+struct LocalOwnerPool {
+    command_txs: std::collections::BTreeMap<
+        usize,
+        std::sync::mpsc::SyncSender<Option<(u32, GenerateRequest)>>,
+    >,
+    workers: tokio::task::JoinSet<()>,
+    progress_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+impl LocalOwnerPool {
+    async fn shutdown_and_join(&mut self) -> Option<anyhow::Error> {
+        // Closing every sender is the shutdown signal. A blocking owner
+        // finishes its current request, observes Disconnected, clears the
+        // progress callback, and drops the engine on that same thread.
+        self.command_txs.clear();
+        let mut first_error = None;
+        while let Some(result) = self.workers.join_next().await {
+            if let Err(error) = result {
+                first_error.get_or_insert_with(|| error.into());
+            }
+        }
+        for render in self.progress_tasks.drain(..) {
+            if let Err(error) = render.await {
+                first_error.get_or_insert_with(|| error.into());
+            }
+        }
+        first_error
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+impl Drop for LocalOwnerPool {
+    fn drop(&mut self) {
+        // This is the panic/cancellation safety net. Normal and recoverable
+        // error paths call `shutdown_and_join`; Drop still closes the owner
+        // channels before aborting async wrappers. Tokio cannot synchronously
+        // join from Drop, but spawn_blocking owners retain no sender and
+        // therefore exit after their current request.
+        self.command_txs.clear();
+        self.workers.abort_all();
+        for task in &self.progress_tasks {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+fn local_batch_requests(
+    base: &GenerateRequest,
+    batch: u32,
+    base_seed: u64,
+    prompts: Option<&[String]>,
+) -> Vec<GenerateRequest> {
+    (0..batch)
+        .map(|index| {
+            let mut request = base.clone();
+            request.seed = Some(base_seed.wrapping_add(index as u64));
+            request.batch_size = 1;
+            if let Some(prompt) = prompts.and_then(|values| values.get(index as usize)) {
+                request.prompt = prompt.clone();
+            }
+            request
+        })
+        .collect()
+}
+
 #[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
 async fn generate_local_batch(
@@ -1200,16 +1268,12 @@ async fn generate_local_batch(
         batch as usize,
         local_plan.host_headroom_bytes,
     )?;
-    let mut planned_items = (0..batch)
-        .map(|index| {
-            let mut iter_req = base_req.clone();
-            iter_req.seed = Some(base_seed.wrapping_add(index as u64));
-            iter_req.batch_size = 1;
-            if let Some(prompt) = batch_prompts.and_then(|prompts| prompts.get(index as usize)) {
-                iter_req.prompt = prompt.clone();
-            }
-            Some((index, iter_req))
-        })
+    let batch_requests = local_batch_requests(&base_req, batch, base_seed, batch_prompts);
+    let mut planned_items = batch_requests
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, request)| Some((index as u32, request)))
         .collect::<Vec<_>>();
 
     enum LocalOwnerEvent {
@@ -1284,12 +1348,17 @@ async fn generate_local_batch(
         progress_tasks.push(render);
     }
     drop(event_tx);
+    let mut owners = LocalOwnerPool {
+        command_txs,
+        workers,
+        progress_tasks,
+    };
 
     let mut completed = Vec::with_capacity(batch as usize);
     let mut first_error = None;
     let mut terminal_items = 0_usize;
     let mut initial_ready = std::collections::BTreeSet::new();
-    while terminal_items < batch as usize {
+    'events: while terminal_items < batch as usize {
         let Some(event) = event_rx.recv().await else {
             if first_error.is_none() {
                 first_error = Some(anyhow::anyhow!(
@@ -1300,11 +1369,22 @@ async fn generate_local_batch(
         };
         match event {
             LocalOwnerEvent::Ready(ordinal) => {
-                admission.owner_ready(ordinal)?;
+                if let Err(error) = admission.owner_ready(ordinal) {
+                    first_error = Some(error.context(format!(
+                        "local owner {ordinal} published an invalid ready transition"
+                    )));
+                    break 'events;
+                }
                 initial_ready.insert(ordinal);
             }
             LocalOwnerEvent::Completed(ordinal, index, response) => {
-                admission.owner_completed(ordinal)?;
+                if let Err(error) = admission.owner_completed(ordinal) {
+                    first_error = Some(error.context(format!(
+                        "local owner {ordinal} completed item {} outside its lease",
+                        index + 1
+                    )));
+                    break 'events;
+                }
                 completed.push((index, response));
                 terminal_items += 1;
             }
@@ -1334,11 +1414,17 @@ async fn generate_local_batch(
 
         // Wait for every owner to publish its initial Ready before the first
         // admission so batch=1 is selected from the complete device set.
-        if initial_ready.len() < command_txs.len() {
+        if initial_ready.len() < owners.command_txs.len() {
             continue;
         }
         loop {
-            let leases = admission.lease_ready()?;
+            let leases = match admission.lease_ready() {
+                Ok(leases) => leases,
+                Err(error) => {
+                    first_error = Some(error.context("local batch admission invariant failed"));
+                    break 'events;
+                }
+            };
             if leases.is_empty() {
                 break;
             }
@@ -1367,7 +1453,7 @@ async fn generate_local_batch(
                         request.seed.unwrap(),
                     );
                 }
-                let returned = match command_txs.get(&lease.ordinal) {
+                let returned = match owners.command_txs.get(&lease.ordinal) {
                     Some(tx) => match tx.send(Some((index, request))) {
                         Ok(()) => None,
                         Err(error) => error.0,
@@ -1396,23 +1482,14 @@ async fn generate_local_batch(
             break;
         }
     }
-    for tx in command_txs.values() {
-        let _ = tx.send(None);
-    }
-    while let Some(result) = workers.join_next().await {
-        if let Err(error) = result {
-            if first_error.is_none() {
-                first_error = Some(error.into());
-            }
-        }
-    }
-    for render in progress_tasks {
-        let _ = render.await;
-    }
-    if let Some(error) = first_error {
-        return Err(error);
+    if let Some(error) = owners.shutdown_and_join().await {
+        first_error.get_or_insert(error);
     }
     completed.sort_by_key(|(index, _)| *index);
+    let successful_items = completed
+        .iter()
+        .map(|(index, _)| (index + 1).to_string())
+        .collect::<Vec<_>>();
 
     let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
     let mut last_video: Option<mold_core::VideoData> = None;
@@ -1443,7 +1520,7 @@ async fn generate_local_batch(
                     output_format,
                     preview,
                     Some(PersistArgs {
-                        request: req,
+                        request: &batch_requests[i as usize],
                         seed_used: response.seed_used,
                         generation_time_ms: response.generation_time_ms,
                     }),
@@ -1451,6 +1528,18 @@ async fn generate_local_batch(
             }
             all_images.push(img);
         }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error.context(format!(
+            "local batch preserved {} successful output item(s) ({}) with exact per-item prompt/seed provenance",
+            successful_items.len(),
+            if successful_items.is_empty() {
+                "none".to_string()
+            } else {
+                successful_items.join(", ")
+            }
+        )));
     }
 
     Ok(GenerateResponse {
@@ -1889,6 +1978,47 @@ mod tests {
     fn filename_single_batch_no_index() {
         let name = default_filename("flux-dev:q4", 100, "png", 1, 0);
         assert!(!name.contains("-0."));
+    }
+
+    #[test]
+    fn local_batch_requests_freeze_per_item_prompt_and_seed_provenance() {
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"source","model":"flux-dev:q4","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let prompts = vec!["first".to_string(), "second".to_string()];
+        let requests = local_batch_requests(&request, 2, 41, Some(&prompts));
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].prompt, "first");
+        assert_eq!(requests[0].seed, Some(41));
+        assert_eq!(requests[1].prompt, "second");
+        assert_eq!(requests[1].seed, Some(42));
+        assert_eq!(requests[0].batch_size, 1);
+        assert_eq!(requests[1].batch_size, 1);
+    }
+
+    #[tokio::test]
+    async fn local_owner_pool_shutdown_closes_and_joins_owner_threads() {
+        let (command_tx, command_rx) =
+            std::sync::mpsc::sync_channel::<Option<(u32, GenerateRequest)>>(1);
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner_exited = exited.clone();
+        let mut workers = tokio::task::JoinSet::new();
+        workers.spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                while command_rx.recv().is_ok() {}
+                owner_exited.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        });
+        let mut owners = LocalOwnerPool {
+            command_txs: std::collections::BTreeMap::from([(0, command_tx)]),
+            workers,
+            progress_tasks: vec![tokio::spawn(async {})],
+        };
+        assert!(owners.shutdown_and_join().await.is_none());
+        assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

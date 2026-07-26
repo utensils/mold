@@ -27,6 +27,13 @@ const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_TRANSIENT_HOST_RAM: u64 = 64 * 1024 * 1024;
 const MAX_PLAN_INVALIDATIONS: u8 = 3;
 const PLAN_INVALIDATION_BACKOFF_MS: u64 = 25;
+const PREPARATION_REFRESH_STABILITY_MS: u64 = 1_000;
+const PREPARATION_RETRY_BASE_MS: u64 = 250;
+const PREPARATION_RETRY_MAX_MS: u64 = 5_000;
+const PREPARATION_CAPACITY_DELTA_BYTES: u64 = 2 << 30;
+const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
+const DISPATCH_RETRY_BASE_MS: u64 = 25;
+const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseFence {
@@ -237,6 +244,59 @@ struct PendingGeneration {
     preparation: PreparationState,
     prepared_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
     retry_not_before_ms: Option<u64>,
+    preparation_retry_attempts: u8,
+    preparation_refresh_observation: Option<PreparationRefreshObservation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparationRefreshObservation {
+    signature: Vec<(String, i8)>,
+    first_observed_ms: u64,
+}
+
+fn capacity_refresh_direction(
+    prepared_available: u64,
+    current_available: u64,
+    capacity_sensitive: bool,
+) -> Option<i8> {
+    if !capacity_sensitive
+        || current_available.abs_diff(prepared_available) < PREPARATION_CAPACITY_DELTA_BYTES
+    {
+        return None;
+    }
+    if u128::from(current_available) * 5 <= u128::from(prepared_available) * 4 {
+        Some(-1)
+    } else if u128::from(current_available) * 4 >= u128::from(prepared_available) * 5 {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+fn observe_preparation_refresh(
+    observation: &mut Option<PreparationRefreshObservation>,
+    signature: Vec<(String, i8)>,
+    now_ms: u64,
+    delay_ms: u64,
+) -> bool {
+    match observation {
+        Some(current) if current.signature == signature => {
+            now_ms.saturating_sub(current.first_observed_ms) >= delay_ms
+        }
+        slot => {
+            *slot = Some(PreparationRefreshObservation {
+                signature,
+                first_observed_ms: now_ms,
+            });
+            false
+        }
+    }
+}
+
+fn dispatch_retry_delay_ms(round: u8) -> u64 {
+    DISPATCH_RETRY_BASE_MS
+        .saturating_mul(1_u64 << u32::from(round.saturating_sub(1).min(6)))
+        .min(DISPATCH_RETRY_MAX_MS)
 }
 
 #[derive(Debug)]
@@ -681,6 +741,8 @@ struct Coordinator {
     last_paused: bool,
     last_worker_claims: BTreeMap<String, usize>,
     plan_invalidations: BTreeMap<String, u8>,
+    dispatch_retry_round: u8,
+    dispatch_retry_not_before_ms: Option<u64>,
     #[cfg(test)]
     before_grant_hook: Option<BeforeGrantHook>,
 }
@@ -727,6 +789,8 @@ impl Coordinator {
             last_paused: false,
             last_worker_claims: BTreeMap::new(),
             plan_invalidations: BTreeMap::new(),
+            dispatch_retry_round: 0,
+            dispatch_retry_not_before_ms: None,
             #[cfg(test)]
             before_grant_hook: None,
         }
@@ -736,6 +800,18 @@ impl Coordinator {
         self.state_version = self.state_version.saturating_add(1);
         self.dirty.mark_dirty(Instant::now(), self.state_version);
         *immediate = true;
+    }
+
+    fn defer_dispatch_retry(&mut self) {
+        self.dispatch_retry_round = self.dispatch_retry_round.saturating_add(1);
+        let backoff_ms = dispatch_retry_delay_ms(self.dispatch_retry_round);
+        self.dispatch_retry_not_before_ms = Some(monotonic_ms().saturating_add(backoff_ms));
+        self.dirty.mark_dirty(Instant::now(), self.state_version);
+    }
+
+    fn clear_dispatch_retry(&mut self) {
+        self.dispatch_retry_round = 0;
+        self.dispatch_retry_not_before_ms = None;
     }
 
     fn enqueue(&mut self, mut job: GenerationJob, immediate: &mut bool) {
@@ -774,6 +850,8 @@ impl Coordinator {
                 preparation: PreparationState::Needed,
                 prepared_inputs: None,
                 retry_not_before_ms: None,
+                preparation_retry_attempts: 0,
+                preparation_refresh_observation: None,
             },
         );
         self.mutate(immediate);
@@ -868,6 +946,14 @@ impl Coordinator {
                 }
                 pending.prepared_inputs = prepared.execution_inputs;
                 pending.preparation = PreparationState::Ready;
+                pending.preparation_refresh_observation = None;
+                if pending
+                    .prepared_inputs
+                    .as_ref()
+                    .is_none_or(|inputs| inputs.retryable_device_failures.is_empty())
+                {
+                    pending.preparation_retry_attempts = 0;
+                }
                 self.mutate(immediate);
             }
             PreparationEvent::Failed { work_id, error } => {
@@ -1078,6 +1164,8 @@ impl Coordinator {
                                         retry_not_before_ms: Some(
                                             monotonic_ms().saturating_add(backoff_ms),
                                         ),
+                                        preparation_retry_attempts: 0,
+                                        preparation_refresh_observation: None,
                                     },
                                 );
                             }
@@ -1095,6 +1183,8 @@ impl Coordinator {
                                     preparation: PreparationState::Ready,
                                     prepared_inputs,
                                     retry_not_before_ms: None,
+                                    preparation_retry_attempts: 0,
+                                    preparation_refresh_observation: None,
                                 },
                             );
                         }
@@ -1472,6 +1562,37 @@ impl Coordinator {
         })
     }
 
+    fn preparation_refresh_signature(
+        prepared: &crate::execution_plan::PreparedExecutionInputs,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) -> Vec<(String, i8)> {
+        let current = device_facts
+            .iter()
+            .map(|device| (device.id.as_str(), device.available_vram_bytes))
+            .collect::<BTreeMap<_, _>>();
+        let mut signature = prepared
+            .retryable_device_failures
+            .keys()
+            .filter(|device| current.contains_key(device.as_str()))
+            .map(|device| (device.clone(), 0))
+            .collect::<Vec<_>>();
+        for (device_id, inputs) in &prepared.by_device {
+            if !inputs.capacity_sensitive {
+                continue;
+            }
+            let Some(&available) = current.get(device_id.as_str()) else {
+                continue;
+            };
+            let prepared_available = inputs.prepared_available_vram_bytes;
+            if let Some(direction) = capacity_refresh_direction(prepared_available, available, true)
+            {
+                signature.push((device_id.clone(), direction));
+            }
+        }
+        signature.sort();
+        signature
+    }
+
     fn reset_stale_preparations(&mut self) -> bool {
         let stale = self
             .pending
@@ -1484,14 +1605,49 @@ impl Coordinator {
                 )
             })
             .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        if stale.is_empty() {
+            .collect::<BTreeSet<_>>();
+        let device_facts = self.device_facts_from_snapshots(&self.device_snapshots());
+        let now_ms = monotonic_ms();
+        let mut refresh = BTreeSet::new();
+        for (id, pending) in &mut self.pending {
+            if stale.contains(id) || pending.preparation != PreparationState::Ready {
+                continue;
+            }
+            let Some(prepared) = pending.prepared_inputs.as_ref() else {
+                pending.preparation_refresh_observation = None;
+                continue;
+            };
+            let signature = Self::preparation_refresh_signature(prepared, &device_facts);
+            if signature.is_empty() {
+                pending.preparation_refresh_observation = None;
+                continue;
+            }
+            let delay = PREPARATION_RETRY_BASE_MS
+                .saturating_mul(1_u64 << u32::from(pending.preparation_retry_attempts.min(4)))
+                .clamp(PREPARATION_REFRESH_STABILITY_MS, PREPARATION_RETRY_MAX_MS);
+            if observe_preparation_refresh(
+                &mut pending.preparation_refresh_observation,
+                signature,
+                now_ms,
+                delay,
+            ) {
+                refresh.insert(id.clone());
+            }
+        }
+        if stale.is_empty() && refresh.is_empty() {
             return false;
         }
-        for id in stale {
-            if let Some(pending) = self.pending.get_mut(&id) {
+        for id in stale.iter().chain(refresh.iter()) {
+            if let Some(pending) = self.pending.get_mut(id) {
                 pending.preparation = PreparationState::Needed;
                 pending.prepared_inputs = None;
+                pending.preparation_refresh_observation = None;
+                if refresh.contains(id) {
+                    pending.preparation_retry_attempts =
+                        pending.preparation_retry_attempts.saturating_add(1);
+                } else {
+                    pending.preparation_retry_attempts = 0;
+                }
             }
         }
         self.state_version = self.state_version.saturating_add(1);
@@ -1695,6 +1851,13 @@ impl Coordinator {
     }
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
+        if self
+            .dispatch_retry_not_before_ms
+            .is_some_and(|deadline| deadline > monotonic_ms())
+        {
+            return None;
+        }
+        self.dispatch_retry_not_before_ms = None;
         if self.reset_stale_preparations() {
             return None;
         }
@@ -1713,6 +1876,7 @@ impl Coordinator {
         {
             return None;
         }
+        let mut replans_this_turn = 0_u8;
         loop {
             if self.reject_terminal_generation_plan_errors()
                 && self.pending.is_empty()
@@ -1734,6 +1898,7 @@ impl Coordinator {
             };
             self.plan_version = plan.plan_version;
             if plan.immediate_leases.is_empty() {
+                self.clear_dispatch_retry();
                 log_typed_blocks(&plan);
                 return Some(plan.state_version);
             }
@@ -1759,6 +1924,11 @@ impl Coordinator {
                 return None;
             }
             if mutation_detected {
+                replans_this_turn = replans_this_turn.saturating_add(1);
+                if replans_this_turn >= MAX_DISPATCH_REPLANS_PER_TURN {
+                    self.defer_dispatch_retry();
+                    return None;
+                }
                 continue;
             }
 
@@ -1864,8 +2034,14 @@ impl Coordinator {
                     .is_err()
             {
                 self.state_version = self.state_version.saturating_add(1);
+                replans_this_turn = replans_this_turn.saturating_add(1);
+                if replans_this_turn >= MAX_DISPATCH_REPLANS_PER_TURN {
+                    self.defer_dispatch_retry();
+                    return None;
+                }
                 continue;
             }
+            self.clear_dispatch_retry();
 
             let mut granted = Vec::new();
             let mut grant_failed = false;
@@ -2008,6 +2184,8 @@ impl Coordinator {
                                     preparation: PreparationState::Ready,
                                     prepared_inputs,
                                     retry_not_before_ms,
+                                    preparation_retry_attempts: 0,
+                                    preparation_refresh_observation: None,
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -4284,5 +4462,76 @@ mod tests {
             "failed grant reservation must settle before same-turn replan"
         );
         drop(results);
+    }
+
+    #[test]
+    fn partial_materialization_failure_remains_a_refresh_candidate() {
+        let mut prepared = crate::execution_plan::PreparedExecutionInputs::default();
+        prepared.retryable_device_failures.insert(
+            "cuda:1".to_string(),
+            "temporary dependency download failure".to_string(),
+        );
+        let signature = Coordinator::preparation_refresh_signature(
+            &prepared,
+            &[crate::execution_plan::DeviceFact {
+                id: "cuda:1".to_string(),
+                ordinal: 1,
+                available_vram_bytes: 24 << 30,
+            }],
+        );
+        assert_eq!(signature, vec![("cuda:1".to_string(), 0)]);
+    }
+
+    #[test]
+    fn auto_capacity_refresh_requires_a_material_sustained_change() {
+        assert_eq!(capacity_refresh_direction(24 << 30, 23 << 30, true), None);
+        assert_eq!(
+            capacity_refresh_direction(24 << 30, 16 << 30, false),
+            None,
+            "an explicit variant must not churn with telemetry"
+        );
+        assert_eq!(
+            capacity_refresh_direction(24 << 30, 16 << 30, true),
+            Some(-1)
+        );
+
+        let signature = vec![("cuda:0".to_string(), -1)];
+        let mut observation = None;
+        assert!(!observe_preparation_refresh(
+            &mut observation,
+            signature.clone(),
+            10_000,
+            1_000
+        ));
+        assert!(!observe_preparation_refresh(
+            &mut observation,
+            signature.clone(),
+            10_999,
+            1_000
+        ));
+        assert!(observe_preparation_refresh(
+            &mut observation,
+            signature,
+            11_000,
+            1_000
+        ));
+        assert!(
+            !observe_preparation_refresh(
+                &mut observation,
+                vec![("cuda:0".to_string(), 1)],
+                11_001,
+                1_000
+            ),
+            "direction changes restart the stability window"
+        );
+    }
+
+    #[test]
+    fn exact_sample_churn_retry_is_bounded_and_backed_off() {
+        assert_eq!(MAX_DISPATCH_REPLANS_PER_TURN, 3);
+        assert_eq!(dispatch_retry_delay_ms(1), 25);
+        assert_eq!(dispatch_retry_delay_ms(2), 50);
+        assert_eq!(dispatch_retry_delay_ms(3), 100);
+        assert_eq!(dispatch_retry_delay_ms(u8::MAX), DISPATCH_RETRY_MAX_MS);
     }
 }

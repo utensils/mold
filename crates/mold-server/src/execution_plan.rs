@@ -211,12 +211,21 @@ pub struct PreparedExecutionInputs {
     /// tests that do not exercise production dependency preparation.
     pub authority_fingerprint: String,
     pub by_device: BTreeMap<String, PreparedDeviceExecutionInputs>,
+    /// Request-eligible devices whose dependency materialization failed while
+    /// at least one sibling succeeded. These omissions are retryable; they
+    /// must not silently become the device set for the lifetime of the job.
+    pub retryable_device_failures: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedDeviceExecutionInputs {
     pub engine_paths: ModelPaths,
     pub engine_config: mold_inference::FrozenEngineConfig,
+    /// Free VRAM used to resolve an `auto` dependency choice.
+    pub prepared_available_vram_bytes: u64,
+    /// False for explicit variants, whose choice must not churn with
+    /// telemetry.
+    pub capacity_sensitive: bool,
 }
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
@@ -1933,8 +1942,11 @@ mod tests {
                 PreparedDeviceExecutionInputs {
                     engine_paths: selected_paths,
                     engine_config: selected_config,
+                    prepared_available_vram_bytes: 24 * GIB,
+                    capacity_sensitive: false,
                 },
             )]),
+            retryable_device_failures: BTreeMap::new(),
         };
 
         let plans = resolve_execution_plans_with_prepared(
@@ -1990,8 +2002,11 @@ mod tests {
                 PreparedDeviceExecutionInputs {
                     engine_paths: paths.clone(),
                     engine_config,
+                    prepared_available_vram_bytes: 24 * GIB,
+                    capacity_sensitive: false,
                 },
             )]),
+            retryable_device_failures: BTreeMap::new(),
         };
 
         let mut changed_config = config.clone();

@@ -656,13 +656,14 @@ pub(crate) async fn estimate_generation_memory(
     // latest resource-sampler facts and report the roomiest current
     // candidate for an Auto request; never perform a device-0 live query or
     // substitute total VRAM when no free-memory sample exists.
-    let available = state.resources.latest().and_then(|snapshot| {
+    let roomiest = state.resources.latest().and_then(|snapshot| {
         snapshot
             .gpus
             .iter()
-            .map(|gpu| gpu.vram_total.saturating_sub(gpu.vram_used))
-            .max()
+            .map(|gpu| (gpu.vram_total.saturating_sub(gpu.vram_used), gpu.ordinal))
+            .max_by_key(|(available, ordinal)| (*available, std::cmp::Reverse(*ordinal)))
     });
+    let available = roomiest.map(|(available, _)| available);
     let forced_offload = matches!(
         mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
@@ -674,7 +675,9 @@ pub(crate) async fn estimate_generation_memory(
         available,
         forced_offload,
         request_has_effective_lora(req),
-        crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(0),
+        roomiest.is_some_and(|(_, ordinal)| {
+            crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(ordinal)
+        }),
     );
 
     Ok(GenerationMemoryEstimate {

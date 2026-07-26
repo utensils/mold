@@ -10,9 +10,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "1"
 
-# Note: CUDA builds are not run in CI — they require a GPU host with NixOS + CUDA.
-# CI only checks non-CUDA compilation, lints, and tests.
-#
 # Cache strategy: jobs that compile the same features share a cache key.
 # Only main-branch pushes save caches; PRs read from main's cache.
 #
@@ -192,6 +189,54 @@ jobs:
         run: cargo test --workspace
       - name: Check with all optional features
         run: cargo check -p mold-ai --features preview,discord,expand,tui,webp,mp4,mdns
+
+  cuda-check:
+    name: CUDA forced-local typecheck
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      CUDA_COMPUTE_CAP: "89"
+      LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          sudo apt-get clean
+      - name: Install Rust build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld nasm libwebp-dev
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.8.1"
+          method: local
+          log-file-suffix: root-ci-sm89
+          linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-cuda-sm89
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check CUDA forced-local and server paths
+        run: cargo check -p mold-ai --features cuda,preview,expand,tui,webp,mp4,mdns
+
+  metal-check:
+    name: Metal forced-local typecheck
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace-metal
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check Metal forced-local and server paths
+        run: cargo check -p mold-ai --features metal,preview,expand,tui,webp,mp4,mdns
 
   coverage:
     needs: changes
