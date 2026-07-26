@@ -2837,8 +2837,23 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             available: true,
             lifecycle: false,
         },
+        dispatch: dispatch_capabilities(state.scheduled_work.dispatch_mode()),
         expand: Some(expand),
     })
+}
+
+fn dispatch_capabilities(
+    mode: crate::dispatch_mode::DispatchMode,
+) -> mold_core::DispatchCapabilities {
+    mold_core::DispatchCapabilities {
+        modes: ["legacy", "observe", "v2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        active_mode: Some(mode.as_str().to_string()),
+        v2_authoritative: mode.owns_v2_workers(),
+        observes_v2_decisions: mode.records_v2_observations(),
+    }
 }
 
 /// Derive the wire capability without constructing an expander or probing an
@@ -4230,6 +4245,25 @@ mod tests {
         assert_eq!(capability.backend, mold_core::ExpandBackend::Api);
         assert!(!capability.configured);
         assert_eq!(capability.model_present, None);
+    }
+
+    #[test]
+    fn dispatch_capability_reports_authority_without_implying_live_cutover() {
+        let legacy = dispatch_capabilities(crate::dispatch_mode::DispatchMode::Legacy);
+        assert_eq!(legacy.active_mode.as_deref(), Some("legacy"));
+        assert!(!legacy.v2_authoritative);
+        assert!(!legacy.observes_v2_decisions);
+
+        let observe = dispatch_capabilities(crate::dispatch_mode::DispatchMode::Observe);
+        assert_eq!(observe.active_mode.as_deref(), Some("observe"));
+        assert!(!observe.v2_authoritative);
+        assert!(observe.observes_v2_decisions);
+
+        let v2 = dispatch_capabilities(crate::dispatch_mode::DispatchMode::V2);
+        assert_eq!(v2.active_mode.as_deref(), Some("v2"));
+        assert!(v2.v2_authoritative);
+        assert!(!v2.observes_v2_decisions);
+        assert_eq!(v2.modes, ["legacy", "observe", "v2"]);
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

@@ -67,6 +67,12 @@ cross-GPU component pins fail instead of falling back. `mold run --local
 selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
 selection.
 
+`MOLD_DISPATCH_MODE=v2` is the default server dispatch owner. During the
+rollout window, restart with `legacy` for rollback or `observe` to keep legacy
+dispatch authoritative while recording the read-only V2 decision at each
+legacy dispatch point. The mode is restart-only; Mold never switches CUDA
+owners or contexts live.
+
 ## Install
 
 ```bash

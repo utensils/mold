@@ -79,6 +79,9 @@ struct StartupPlan {
     start_generation_runner: bool,
     start_chain_runner: bool,
     start_legacy_cache_evictor: bool,
+    start_legacy_dispatcher: bool,
+    start_v2_coordinator: bool,
+    observe_v2_decisions: bool,
 }
 
 /// Owns every dedicated GPU OS thread from the instant it is spawned.
@@ -188,6 +191,7 @@ fn startup_plan(
     discovered_count: usize,
     selected_count: usize,
     gpu_runtime_build: bool,
+    dispatch_mode: crate::dispatch_mode::DispatchMode,
 ) -> StartupPlan {
     let mode = classify_startup_mode(
         selection,
@@ -204,6 +208,11 @@ fn startup_plan(
         // GPU workers own their cache eviction on their CUDA owner threads.
         // Maintenance has no engine cache to sweep.
         start_legacy_cache_evictor: mode == StartupMode::CpuFallback,
+        start_legacy_dispatcher: mode == StartupMode::GpuWorkers
+            && !dispatch_mode.owns_v2_workers(),
+        start_v2_coordinator: mode == StartupMode::GpuWorkers && dispatch_mode.owns_v2_workers(),
+        observe_v2_decisions: mode == StartupMode::GpuWorkers
+            && dispatch_mode.records_v2_observations(),
     }
 }
 
@@ -220,6 +229,9 @@ pub async fn run_server(
     // process (issue #342). With SIG_IGN, such writes surface as EPIPE and are
     // handled per-request by hyper/axum.
     signals::ignore_sigpipe();
+
+    let dispatch_mode = dispatch_mode::DispatchMode::from_env().map_err(anyhow::Error::msg)?;
+    info!(mode = %dispatch_mode, "selected restart-time GPU dispatch mode");
 
     Config::install_runtime_models_dir_override(models_dir.clone());
 
@@ -244,23 +256,34 @@ pub async fn run_server(
         discovered.len(),
         selected.len(),
         cfg!(any(feature = "cuda", feature = "metal")),
+        dispatch_mode,
     );
+    if startup.start_v2_coordinator {
+        info!("scheduler V2 owns GPU dispatch and worker leases");
+    } else if startup.observe_v2_decisions {
+        info!(
+            "legacy dispatcher owns GPU work; V2 decisions are observed without leases or transport"
+        );
+    } else if startup.start_legacy_dispatcher {
+        info!("legacy dispatcher owns GPU work");
+    }
 
     let mut workers = Vec::new();
     let mut gpu_owner_threads = GpuOwnerThreads::default();
     let (scheduler_worker_tx, scheduler_worker_rx) =
         tokio::sync::mpsc::unbounded_channel::<scheduler::WorkerEvent>();
+    let (legacy_owner_event_tx, legacy_owner_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<gpu_worker::LegacyOwnerEvent>();
 
-    // Capacity one transports one acknowledged grant. It is not a worker
-    // queue: the coordinator may send only after consuming the worker's
-    // matching Ready generation.
-    const PER_WORKER_CHANNEL_SIZE: usize = 1;
+    // V2's capacity-one channel is a rendezvous transport after Ready.
+    // Rollback mode retains the prior depth-two device-local buffer.
+    let per_worker_channel_size = if startup.start_v2_coordinator { 1 } else { 2 };
 
     let max_cached = state::resolve_max_cached_models();
     let cache_idle_ttl = std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs());
     if startup.start_gpu_workers {
         for gpu in &selected {
-            let (job_tx, job_rx) = std::sync::mpsc::sync_channel(PER_WORKER_CHANNEL_SIZE);
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel(per_worker_channel_size);
             let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
                 gpu: gpu.clone(),
                 model_cache: std::sync::Arc::new(std::sync::Mutex::new(
@@ -282,12 +305,21 @@ pub async fn run_server(
                 job_tx,
             });
 
-            let handle = gpu_worker::spawn_gpu_thread(
-                worker.clone(),
-                job_rx,
-                scheduler_worker_tx.clone(),
-                cache_idle_ttl,
-            );
+            let handle = if startup.start_v2_coordinator {
+                gpu_worker::spawn_gpu_thread(
+                    worker.clone(),
+                    job_rx,
+                    scheduler_worker_tx.clone(),
+                    cache_idle_ttl,
+                )
+            } else {
+                gpu_worker::spawn_legacy_gpu_thread(
+                    worker.clone(),
+                    job_rx,
+                    legacy_owner_event_tx.clone(),
+                    cache_idle_ttl,
+                )
+            };
             gpu_owner_threads.track(worker.clone(), handle);
             workers.push(worker);
         }
@@ -448,7 +480,8 @@ pub async fn run_server(
         state.set_generation_unavailable(reason);
         state
     };
-    state.scheduled_work = scheduler::ScheduledWorkHandle::new(scheduled_work_tx);
+    state.scheduled_work =
+        scheduler::ScheduledWorkHandle::for_mode(scheduled_work_tx, dispatch_mode);
 
     // Open the gallery metadata DB (best-effort — server still runs without it).
     match mold_db::open_default() {
@@ -577,25 +610,46 @@ pub async fn run_server(
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
     let scheduler_shutdown = tokio_util::sync::CancellationToken::new();
-    let uses_gpu_scheduler = startup.mode == StartupMode::GpuWorkers;
-    let generation_worker_handle = match startup.mode {
-        StartupMode::GpuWorkers => Some(tokio::spawn(scheduler::run_scheduler_coordinator(
+    let uses_gpu_scheduler = startup.start_v2_coordinator;
+    let generation_worker_handle = if startup.start_v2_coordinator {
+        drop(legacy_owner_event_rx);
+        Some(tokio::spawn(scheduler::run_scheduler_coordinator(
             job_rx,
             scheduled_work_rx,
             scheduler_worker_rx,
             worker_state,
             scheduler_shutdown.clone(),
-        ))),
-        StartupMode::CpuFallback => {
-            drop(scheduled_work_rx);
-            drop(scheduler_worker_rx);
-            Some(tokio::spawn(queue::run_queue_worker(job_rx, worker_state)))
-        }
-        StartupMode::Maintenance => {
-            drop(job_rx);
-            drop(scheduled_work_rx);
-            drop(scheduler_worker_rx);
-            None
+        )))
+    } else if startup.start_legacy_dispatcher {
+        drop(scheduler_worker_rx);
+        Some(tokio::spawn(async move {
+            tokio::join!(
+                queue::run_queue_dispatcher(job_rx, worker_state.clone()),
+                queue::run_legacy_scheduled_work_dispatcher(
+                    scheduled_work_rx,
+                    legacy_owner_event_rx,
+                    worker_state,
+                ),
+            );
+        }))
+    } else {
+        match startup.mode {
+            StartupMode::CpuFallback => {
+                drop(legacy_owner_event_rx);
+                drop(scheduled_work_rx);
+                drop(scheduler_worker_rx);
+                Some(tokio::spawn(queue::run_queue_worker(job_rx, worker_state)))
+            }
+            StartupMode::Maintenance => {
+                drop(legacy_owner_event_rx);
+                drop(job_rx);
+                drop(scheduled_work_rx);
+                drop(scheduler_worker_rx);
+                None
+            }
+            StartupMode::GpuWorkers => {
+                unreachable!("GPU startup must select one dispatch owner")
+            }
         }
     };
 
@@ -687,6 +741,8 @@ pub async fn run_server(
     // Must happen before any middleware or handler that records metrics.
     #[cfg(feature = "metrics")]
     let prometheus_handle = metrics::install_recorder();
+    #[cfg(feature = "metrics")]
+    metrics::record_dispatch_mode(dispatch_mode);
 
     // Build the router with middleware layers.
     // Order (outermost → innermost): CORS → Trace → RequestID → Metrics → Auth → RateLimit → routes
@@ -1026,7 +1082,13 @@ mod tests {
     fn explicit_none_constructs_no_gpu_execution_components() {
         // Fail closed even if a future resolver regression accidentally hands
         // startup a selected device for the explicit maintenance selector.
-        let plan = startup_plan(&GpuSelection::None, 2, 1, true);
+        let plan = startup_plan(
+            &GpuSelection::None,
+            2,
+            1,
+            true,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
 
         assert_eq!(plan.mode, StartupMode::Maintenance);
         assert!(!plan.start_gpu_workers);
@@ -1046,7 +1108,13 @@ mod tests {
 
     #[test]
     fn unusable_gpu_identity_constructs_no_gpu_execution_components() {
-        let plan = startup_plan(&GpuSelection::All, 2, 0, true);
+        let plan = startup_plan(
+            &GpuSelection::All,
+            2,
+            0,
+            true,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
 
         assert_eq!(plan.mode, StartupMode::Maintenance);
         assert!(!plan.start_gpu_workers);
@@ -1066,6 +1134,46 @@ mod tests {
             classify_startup_mode(&GpuSelection::All, 0, 0, true),
             StartupMode::Maintenance
         );
+    }
+
+    #[test]
+    fn rollout_mode_selects_exactly_one_gpu_dispatch_owner() {
+        use crate::dispatch_mode::DispatchMode;
+
+        let legacy = startup_plan(&GpuSelection::All, 2, 2, true, DispatchMode::Legacy);
+        assert!(legacy.start_gpu_workers);
+        assert!(legacy.start_legacy_dispatcher);
+        assert!(!legacy.start_v2_coordinator);
+        assert!(!legacy.observe_v2_decisions);
+
+        let observe = startup_plan(&GpuSelection::All, 2, 2, true, DispatchMode::Observe);
+        assert!(observe.start_gpu_workers);
+        assert!(observe.start_legacy_dispatcher);
+        assert!(!observe.start_v2_coordinator);
+        assert!(observe.observe_v2_decisions);
+
+        let v2 = startup_plan(&GpuSelection::All, 2, 2, true, DispatchMode::V2);
+        assert!(v2.start_gpu_workers);
+        assert!(!v2.start_legacy_dispatcher);
+        assert!(v2.start_v2_coordinator);
+        assert!(!v2.observe_v2_decisions);
+    }
+
+    #[test]
+    fn maintenance_mode_never_starts_either_dispatch_owner() {
+        use crate::dispatch_mode::DispatchMode;
+
+        for dispatch_mode in [
+            DispatchMode::Legacy,
+            DispatchMode::Observe,
+            DispatchMode::V2,
+        ] {
+            let plan = startup_plan(&GpuSelection::None, 2, 0, true, dispatch_mode);
+            assert!(!plan.start_gpu_workers);
+            assert!(!plan.start_legacy_dispatcher);
+            assert!(!plan.start_v2_coordinator);
+            assert!(!plan.observe_v2_decisions);
+        }
     }
 
     fn owner_test_worker() -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {

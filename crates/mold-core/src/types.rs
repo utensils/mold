@@ -3899,6 +3899,20 @@ pub struct DeviceCapabilities {
     pub lifecycle: bool,
 }
 
+/// Restart-time GPU dispatch rollout state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchCapabilities {
+    /// Modes accepted by `MOLD_DISPATCH_MODE`.
+    pub modes: Vec<String>,
+    /// Active mode for this process. Missing on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_mode: Option<String>,
+    /// V2 is the authoritative dispatcher and lease owner.
+    pub v2_authoritative: bool,
+    /// Legacy owns dispatch while read-only V2 decisions are recorded.
+    pub observes_v2_decisions: bool,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -3921,6 +3935,9 @@ pub struct ServerCapabilities {
     /// and lifecycle controls are unavailable.
     #[serde(default)]
     pub devices: DeviceCapabilities,
+    /// Absent on older servers. Dispatch mode changes require a restart.
+    #[serde(default)]
+    pub dispatch: DispatchCapabilities,
     /// Absent on older servers. Unlike default-false capability groups,
     /// absence here means unknown so newer clients may still try expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4001,6 +4018,10 @@ mod device_types_tests {
         .unwrap();
         assert!(!caps.devices.available);
         assert!(!caps.devices.lifecycle);
+        assert!(caps.dispatch.modes.is_empty());
+        assert!(caps.dispatch.active_mode.is_none());
+        assert!(!caps.dispatch.v2_authoritative);
+        assert!(!caps.dispatch.observes_v2_decisions);
     }
 }
 

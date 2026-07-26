@@ -146,7 +146,7 @@ Environment variables take precedence over config file values.
 | `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory                                                                                                                    |
 | `MOLD_PORT`          | `7680`                             | Server port                                                                                                                                |
 | `MOLD_MDNS`          | `1` (on)                           | Set `0`/`false` to disable `mold serve` LAN advertising and server-assisted DNS-SD browsing (requires the `mdns` build feature)            |
-| `MOLD_DISPATCH_MODE` | `v2`                               | Reserved rollout contract (`legacy`, `observe`, or `v2`). Startup does not consume this switch yet, so setting it currently has no effect. |
+| `MOLD_DISPATCH_MODE` | `v2`                               | Restart-time GPU dispatch owner: `legacy` retains the prior dispatcher, `observe` retains legacy ownership and records read-only V2 decisions at its dispatch points, and `v2` enables authoritative V2 leases. Invalid values fail startup. |
 | `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`                                                                                                                 |
 | `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                                                  |
 

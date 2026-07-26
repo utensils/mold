@@ -30,6 +30,8 @@ pub const UPTIME: &str = "mold_uptime_seconds";
 pub const GENERATION_ERRORS_TOTAL: &str = "mold_generation_errors_total";
 pub const CACHE_EVICTIONS_TOTAL: &str = "mold_cache_evictions_total";
 pub const CACHE_SIZE: &str = "mold_cache_size";
+pub const DISPATCH_MODE_INFO: &str = "mold_dispatch_mode_info";
+pub const DISPATCH_OBSERVATIONS_TOTAL: &str = "mold_dispatch_observations_total";
 
 // ── Recorder installation ──────────────────────────────────────────────────
 
@@ -196,6 +198,37 @@ pub fn set_cache_size(size: usize) {
 /// Increment the queue-reorder counter (lookahead picked a non-head job).
 pub fn record_queue_reorder() {
     counter!(QUEUE_REORDERS_TOTAL).increment(1);
+}
+
+/// Publish the one active restart-time dispatch mode as a labelled info gauge.
+pub fn record_dispatch_mode(mode: crate::dispatch_mode::DispatchMode) {
+    for candidate in ["legacy", "observe", "v2"] {
+        gauge!(DISPATCH_MODE_INFO, "mode" => candidate).set(if candidate == mode.as_str() {
+            1.0
+        } else {
+            0.0
+        });
+    }
+}
+
+/// Record one read-only V2 comparison made at a real legacy dispatch point.
+pub fn record_dispatch_observation(
+    outcome: &'static str,
+    legacy_setup_warm: bool,
+    v2_setup_warm: Option<bool>,
+) {
+    let v2_setup = match v2_setup_warm {
+        Some(true) => "warm",
+        Some(false) => "cold",
+        None => "blocked",
+    };
+    counter!(
+        DISPATCH_OBSERVATIONS_TOTAL,
+        "outcome" => outcome,
+        "legacy_setup" => if legacy_setup_warm { "warm" } else { "cold" },
+        "v2_setup" => v2_setup
+    )
+    .increment(1);
 }
 
 #[cfg(test)]

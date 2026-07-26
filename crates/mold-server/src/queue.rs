@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
 
-#[cfg(test)]
 use crate::gpu_pool::GpuJob;
 use crate::model_manager;
 use crate::state::{
@@ -830,7 +829,6 @@ async fn single_gpu_loaded_models(state: &AppState) -> std::collections::HashSet
 /// either it's in the worker's cache as Gpu-resident OR it's the worker's
 /// `active_generation` (covering the take-and-restore window where the
 /// cache entry briefly disappears).
-#[cfg(test)]
 fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     for worker in &state.gpu_pool.workers {
@@ -1387,7 +1385,6 @@ async fn process_job(state: &AppState, job: GenerationJob) {
 /// right one warm.
 ///
 /// Exits when the sender half of the channel is dropped (server shutdown).
-#[cfg(test)]
 pub async fn run_queue_dispatcher(
     job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
@@ -1398,7 +1395,167 @@ pub async fn run_queue_dispatcher(
     run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
 }
 
-#[cfg(test)]
+pub async fn run_legacy_scheduled_work_dispatcher(
+    mut scheduled_work_rx: tokio::sync::mpsc::Receiver<crate::scheduler::ScheduledOwnerWork>,
+    mut owner_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::gpu_worker::LegacyOwnerEvent>,
+    state: AppState,
+) {
+    let mut scheduled_closed = false;
+    let mut followups_closed = false;
+    loop {
+        if scheduled_closed && followups_closed {
+            break;
+        }
+        let work = tokio::select! {
+            work = scheduled_work_rx.recv(), if !scheduled_closed => {
+                match work {
+                    Some(work) => Some(work),
+                    None => {
+                        scheduled_closed = true;
+                        None
+                    }
+                }
+            }
+            event = owner_event_rx.recv(), if !followups_closed => {
+                match event {
+                    Some(crate::gpu_worker::LegacyOwnerEvent::FollowupReady(work)) => Some(*work),
+                    None => {
+                        followups_closed = true;
+                        None
+                    }
+                }
+            }
+        };
+        let Some(work) = work else {
+            continue;
+        };
+        dispatch_legacy_scheduled_work(&state, work).await;
+    }
+    tracing::info!("legacy GPU utility dispatcher shutting down");
+}
+
+async fn dispatch_legacy_scheduled_work(
+    state: &AppState,
+    work: crate::scheduler::ScheduledOwnerWork,
+) {
+    let mut pending = Some(work);
+    let mut skip = Vec::new();
+    loop {
+        let Some(current) = pending.as_ref() else {
+            return;
+        };
+        if current.work.is_cancelled() {
+            return;
+        }
+        if state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+        {
+            pending
+                .take()
+                .expect("legacy scheduled work remains pending")
+                .work
+                .reject("fatal CUDA error requires server restart".to_string());
+            return;
+        }
+        let worker = if let Some(ordinal) = current.hard_ordinal {
+            state.gpu_pool.worker_by_ordinal(ordinal)
+        } else {
+            state.gpu_pool.select_worker_excluding(
+                &current.model_fingerprint,
+                current.estimated_vram_bytes,
+                &skip,
+            )
+        };
+        let Some(worker) = worker else {
+            if current.hard_ordinal.is_some() || state.gpu_pool.worker_count() == 0 {
+                pending
+                    .take()
+                    .expect("legacy scheduled work remains pending")
+                    .work
+                    .reject("requested GPU is unavailable".to_string());
+                return;
+            }
+            skip.clear();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
+        };
+
+        let observation = build_observed_dispatch(
+            state,
+            &current.id,
+            current.work.kind(),
+            &current.model_fingerprint,
+            current.estimated_vram_bytes,
+            current.hard_ordinal,
+            &worker,
+        );
+        let current = pending.take().expect("legacy scheduled work is present");
+        let retry = crate::gpu_pool::OwnerWorkRetry {
+            model_fingerprint: current.model_fingerprint,
+            estimated_vram_bytes: current.estimated_vram_bytes,
+            estimated_host_ram_bytes: current.estimated_host_ram_bytes,
+            hard_ordinal: current.hard_ordinal,
+            priority: current.priority,
+            queue_rank: 0,
+        };
+        let fence = crate::scheduler::LeaseFence {
+            work_id: current.id,
+            device_id: crate::scheduler::worker_device_id(&worker),
+            state_version: 0,
+            plan_version: 0,
+            worker_generation: 0,
+            memory_sample_generation: 0,
+            memory_ledger_sequence: 0,
+        };
+        worker.in_flight.fetch_add(1, Ordering::SeqCst);
+        let grant = Box::new(crate::gpu_pool::LeaseGrant {
+            fence,
+            work: current.work,
+            retry: Some(retry),
+        });
+        match worker.try_send_job(grant) {
+            Ok(()) => {
+                if let Some(observation) = observation {
+                    state.scheduled_work.observations().record(observation);
+                }
+                return;
+            }
+            Err(error) => {
+                worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                let grant = match error {
+                    std::sync::mpsc::TrySendError::Full(grant)
+                    | std::sync::mpsc::TrySendError::Disconnected(grant) => *grant,
+                };
+                let retry = grant
+                    .retry
+                    .expect("legacy scheduled work always carries retry metadata");
+                pending = Some(crate::scheduler::ScheduledOwnerWork {
+                    id: grant.fence.work_id,
+                    model_fingerprint: retry.model_fingerprint,
+                    estimated_vram_bytes: retry.estimated_vram_bytes,
+                    estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
+                    hard_ordinal: retry.hard_ordinal,
+                    priority: retry.priority,
+                    work: grant.work,
+                });
+                if pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.hard_ordinal.is_none())
+                {
+                    skip.push(worker.gpu.ordinal);
+                    if skip.len() >= state.gpu_pool.worker_count().max(1) {
+                        skip.clear();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
+
 async fn run_queue_dispatcher_with_tuning(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
@@ -1599,6 +1756,16 @@ async fn run_queue_dispatcher_with_tuning(
                 break;
             };
 
+            let observed_dispatch = build_observed_dispatch(
+                &state,
+                &job_id,
+                mold_scheduler::WorkKind::Generation,
+                &model_name,
+                estimated_vram,
+                preferred_gpu,
+                &worker,
+            );
+
             // Increment in-flight BEFORE sending to reserve the slot.
             worker.in_flight.fetch_add(1, Ordering::SeqCst);
             let pending = gpu_job.take().expect("gpu_job present in retry loop");
@@ -1623,6 +1790,9 @@ async fn run_queue_dispatcher_with_tuning(
             };
             match worker.try_send_job(Box::new(grant)) {
                 Ok(()) => {
+                    if let Some(observation) = observed_dispatch {
+                        state.scheduled_work.observations().record(observation);
+                    }
                     dispatched = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(j)) => {
@@ -1630,7 +1800,7 @@ async fn run_queue_dispatcher_with_tuning(
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
-                    gpu_job = Some(generation_from_test_grant(*j));
+                    gpu_job = Some(generation_from_legacy_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                         if skip.len() >= state.gpu_pool.worker_count().max(1) {
@@ -1650,7 +1820,7 @@ async fn run_queue_dispatcher_with_tuning(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
                     );
-                    gpu_job = Some(generation_from_test_grant(*j));
+                    gpu_job = Some(generation_from_legacy_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
@@ -1678,12 +1848,196 @@ async fn run_queue_dispatcher_with_tuning(
     tracing::info!("multi-GPU queue dispatcher shutting down");
 }
 
-#[cfg(test)]
-fn generation_from_test_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
+fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
     match grant.work {
         crate::gpu_pool::OwnerWork::Generation(job) => *job,
-        work => panic!("legacy test dispatcher received {:?}", work.kind()),
+        work => panic!("legacy dispatcher received {:?}", work.kind()),
     }
+}
+
+pub(crate) fn build_observed_dispatch(
+    state: &AppState,
+    work_id: &str,
+    work_kind: mold_scheduler::WorkKind,
+    model_fingerprint: &str,
+    estimated_vram_bytes: u64,
+    hard_ordinal: Option<usize>,
+    legacy_worker: &crate::gpu_pool::GpuWorker,
+) -> Option<crate::dispatch_mode::DispatchObservation> {
+    if !state
+        .scheduled_work
+        .dispatch_mode()
+        .records_v2_observations()
+    {
+        return None;
+    }
+
+    let sampled_free = state
+        .resources
+        .latest()
+        .map(|snapshot| {
+            snapshot
+                .gpus
+                .into_iter()
+                .map(|gpu| {
+                    (
+                        (gpu.backend, gpu.ordinal),
+                        gpu.vram_total.saturating_sub(gpu.vram_used),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut eligible_idle_device_ids = Vec::new();
+    let devices = state
+        .gpu_pool
+        .workers
+        .iter()
+        .map(|worker| {
+            let device_id = crate::scheduler::worker_device_id(worker);
+            let health = if worker.poisoned.load(Ordering::SeqCst)
+                || worker.fatal_cuda_error.load(Ordering::SeqCst)
+            {
+                mold_scheduler::DeviceHealth::Poisoned
+            } else if worker.consecutive_failures.load(Ordering::SeqCst) >= 3
+                && worker
+                    .degraded_until
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some_and(|until| Instant::now() < until)
+            {
+                mold_scheduler::DeviceHealth::Degraded
+            } else {
+                mold_scheduler::DeviceHealth::Healthy
+            };
+            let activity = if worker.in_flight.load(Ordering::SeqCst) == 0 {
+                mold_scheduler::DeviceActivity::Idle
+            } else {
+                mold_scheduler::DeviceActivity::Busy
+            };
+            let available_vram_bytes = sampled_free
+                .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                .copied()
+                .unwrap_or(worker.gpu.free_vram_bytes);
+            if health == mold_scheduler::DeviceHealth::Healthy
+                && activity == mold_scheduler::DeviceActivity::Idle
+                && available_vram_bytes >= estimated_vram_bytes
+                && hard_ordinal.is_none_or(|ordinal| ordinal == worker.gpu.ordinal)
+            {
+                eligible_idle_device_ids.push(device_id.clone());
+            }
+            let warm = worker
+                .resident_model
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .into_iter()
+                .map(mold_scheduler::ExecutionFingerprint::new)
+                .collect::<BTreeSet<_>>();
+            mold_scheduler::DeviceSnapshot {
+                id: mold_scheduler::DeviceId::new(device_id),
+                backend: match worker.gpu.backend {
+                    mold_core::GpuBackend::Metal => mold_scheduler::Backend::Metal,
+                    _ => mold_scheduler::Backend::Cuda,
+                },
+                admin_state: mold_scheduler::DeviceAdminState::Enabled,
+                health,
+                activity,
+                // Legacy has no lease-backed completion estimate. Supplying
+                // one would manufacture an impossible end-to-end comparison.
+                available_at_ms: None,
+                worker_generation: 0,
+                available_vram_bytes,
+                warm_execution_fingerprints: warm,
+            }
+        })
+        .collect::<Vec<_>>();
+    eligible_idle_device_ids.sort();
+
+    let candidates = state
+        .gpu_pool
+        .workers
+        .iter()
+        .map(|worker| {
+            mold_scheduler::CandidatePlacement::new(
+                crate::scheduler::worker_device_id(worker),
+                model_fingerprint,
+                0,
+            )
+            .with_vram(estimated_vram_bytes)
+            .with_timing(1_000, 0, 1_000)
+        })
+        .collect::<Vec<_>>();
+    let mut work = mold_scheduler::WorkSnapshot::new(work_id, 0, candidates);
+    work.kind = work_kind;
+    if let Some(ordinal) = hard_ordinal {
+        let hard_device_id = state
+            .gpu_pool
+            .worker_by_ordinal(ordinal)
+            .map(|worker| crate::scheduler::worker_device_id(&worker))
+            .unwrap_or_else(|| format!("unavailable:gpu:{ordinal}"));
+        work = work.with_hard_device(hard_device_id);
+    }
+    let work_id = mold_scheduler::WorkId::new(work_id);
+    let plan = match mold_scheduler::Planner::default().plan(&mold_scheduler::PlannerSnapshot::new(
+        1,
+        1,
+        0,
+        u64::MAX,
+        devices,
+        vec![work],
+    )) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // Observation must never become dispatch authority. An invalid
+            // comparison snapshot is telemetry loss, not permission to delay
+            // or reject the legacy decision.
+            tracing::warn!(
+                work_id = %work_id,
+                error = %error,
+                "could not compute read-only V2 dispatch observation"
+            );
+            return None;
+        }
+    };
+    let v2_device_id = plan
+        .immediate_leases
+        .iter()
+        .find(|lease| lease.work_id == work_id)
+        .map(|lease| lease.device_id.to_string());
+    let blocked_reason = plan.blocked_reason(&work_id).copied();
+    let legacy_device_id = crate::scheduler::worker_device_id(legacy_worker);
+    let legacy_setup_warm = legacy_worker
+        .resident_model
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_deref()
+        == Some(model_fingerprint);
+    let v2_setup_warm = v2_device_id.as_deref().and_then(|device_id| {
+        state
+            .gpu_pool
+            .workers
+            .iter()
+            .find(|worker| crate::scheduler::worker_device_id(worker) == device_id)
+            .map(|worker| {
+                worker
+                    .resident_model
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_deref()
+                    == Some(model_fingerprint)
+            })
+    });
+    Some(crate::dispatch_mode::DispatchObservation {
+        work_id: work_id.to_string(),
+        work_kind,
+        legacy_device_id,
+        v2_device_id,
+        blocked_reason,
+        eligible_idle_device_ids,
+        legacy_setup_warm,
+        v2_setup_warm,
+    })
 }
 
 /// Rough VRAM estimate for a model (used for placement decisions).
@@ -1862,13 +2216,164 @@ mod tests {
         (worker, job_rx)
     }
 
+    #[test]
+    fn observe_planning_is_read_only_until_legacy_transport_accepts_work() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+
+        let observation = build_observed_dispatch(
+            &state,
+            "observe-read-only",
+            mold_scheduler::WorkKind::Generation,
+            "flux-dev:q4",
+            6_000_000_000,
+            None,
+            &worker,
+        )
+        .expect("observe mode should compute a comparison");
+
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(state.scheduled_work.observations().snapshot().total, 0);
+        assert_eq!(
+            observation.v2_device_id.as_deref(),
+            worker.gpu.stable_id.as_deref()
+        );
+
+        state.scheduled_work.observations().record(observation);
+        let snapshot = state.scheduled_work.observations().snapshot();
+        assert_eq!(snapshot.total, 1);
+        assert_eq!(snapshot.matched, 1);
+    }
+
+    #[test]
+    fn legacy_and_v2_modes_never_run_the_observe_hook() {
+        for mode in [
+            crate::dispatch_mode::DispatchMode::Legacy,
+            crate::dispatch_mode::DispatchMode::V2,
+        ] {
+            let (worker, worker_rx) = test_worker(0, 1);
+            let mut state = empty_test_state(mold_core::Config::default());
+            state.gpu_pool = Arc::new(GpuPool {
+                workers: vec![worker.clone()],
+            });
+            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work =
+                crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+
+            assert!(build_observed_dispatch(
+                &state,
+                "disabled-observer",
+                mold_scheduler::WorkKind::Generation,
+                "flux-dev:q4",
+                6_000_000_000,
+                None,
+                &worker,
+            )
+            .is_none());
+            assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                worker_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_records_only_after_legacy_transport_accepts_work() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+
+        worker.in_flight.store(1, Ordering::SeqCst);
+        worker
+            .try_send_job(Box::new(crate::gpu_pool::LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "filler".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    state_version: 0,
+                    plan_version: 0,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                },
+                work: crate::gpu_pool::OwnerWork::Probe {
+                    id: "filler".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(|| {}),
+                },
+                retry: None,
+            }))
+            .unwrap();
+
+        let work = crate::scheduler::ScheduledOwnerWork::new(
+            "observed-accepted",
+            "flux-dev:q4",
+            6_000_000_000,
+            crate::gpu_pool::OwnerWork::Probe {
+                id: "observed-accepted".to_string(),
+                kind: mold_scheduler::WorkKind::AdminModelLoad,
+                run: Box::new(|| {}),
+            },
+        );
+        let dispatch_state = state.clone();
+        let dispatch =
+            tokio::spawn(
+                async move { dispatch_legacy_scheduled_work(&dispatch_state, work).await },
+            );
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(
+            state.scheduled_work.observations().snapshot().total,
+            0,
+            "a full legacy transport must not create a fake observation"
+        );
+
+        let filler = worker_rx.recv().expect("remove full-channel filler");
+        drop(filler);
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        let accepted = tokio::task::spawn_blocking(move || {
+            worker_rx.recv_timeout(std::time::Duration::from_secs(1))
+        })
+        .await
+        .unwrap()
+        .expect("legacy transport should accept after capacity opens");
+        let accepted_id = match accepted {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.id().to_string(),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        assert_eq!(accepted_id, "observed-accepted");
+        dispatch.await.unwrap();
+        let snapshot = state.scheduled_work.observations().snapshot();
+        assert_eq!(snapshot.total, 1);
+        assert_eq!(snapshot.matched, 1);
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+
     fn recv_worker_job(
         rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
         timeout: std::time::Duration,
     ) -> Result<crate::gpu_pool::GpuJob, std::sync::mpsc::RecvTimeoutError> {
         match rx.recv_timeout(timeout)? {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
-                Ok(generation_from_test_grant(*grant))
+                Ok(generation_from_legacy_grant(*grant))
             }
             crate::gpu_pool::GpuWorkerCommand::Shutdown => {
                 panic!("unexpected worker shutdown command")

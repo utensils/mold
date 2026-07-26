@@ -17,6 +17,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub enum LegacyOwnerEvent {
+    FollowupReady(Box<crate::scheduler::ScheduledOwnerWork>),
+}
+
 /// Spawn the dedicated OS thread for a GPU worker.
 /// Returns the JoinHandle (caller should keep it alive).
 pub fn spawn_gpu_thread(
@@ -37,6 +41,31 @@ pub fn spawn_gpu_thread(
             );
         })
         .expect("failed to spawn GPU worker thread")
+}
+
+/// Spawn a rollback-window worker that retains the pre-V2 dispatcher as the
+/// sole dispatch authority. It never publishes Ready generations or validates
+/// V2 lease fences; all CUDA ownership still stays on this one OS thread.
+pub fn spawn_legacy_gpu_thread(
+    worker: Arc<GpuWorker>,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    owner_event_tx: tokio::sync::mpsc::UnboundedSender<LegacyOwnerEvent>,
+    cache_idle_ttl: Duration,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("gpu-legacy-worker-{}", worker.gpu.ordinal))
+        .spawn(move || {
+            run_gpu_owner_entrypoint(&worker, || {
+                run_legacy_gpu_owner_loop(
+                    &worker,
+                    job_rx,
+                    owner_event_tx,
+                    cache_idle_ttl,
+                    Duration::from_secs(60),
+                );
+            });
+        })
+        .expect("failed to spawn legacy GPU worker thread")
 }
 
 fn run_gpu_owner(
@@ -228,6 +257,103 @@ fn run_gpu_owner_loop(
     tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
 }
 
+fn run_legacy_gpu_owner_loop(
+    worker: &GpuWorker,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    owner_event_tx: tokio::sync::mpsc::UnboundedSender<LegacyOwnerEvent>,
+    cache_idle_ttl: Duration,
+    idle_poll: Duration,
+) {
+    if worker
+        .owner_thread_id
+        .set(std::thread::current().id())
+        .is_err()
+    {
+        quarantine_poisoned_worker(worker);
+        tracing::error!(
+            gpu = worker.gpu.ordinal,
+            "legacy GPU worker owner thread was initialized more than once"
+        );
+        return;
+    }
+    mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
+    tracing::info!(
+        gpu = worker.gpu.ordinal,
+        name = %worker.gpu.name,
+        "legacy GPU worker thread started"
+    );
+    loop {
+        if worker.shutdown_requested.load(Ordering::SeqCst)
+            || worker.poisoned.load(Ordering::SeqCst)
+            || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            break;
+        }
+        let command = match job_rx.recv_timeout(idle_poll) {
+            Ok(command) => command,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if worker.shutdown_requested.load(Ordering::SeqCst)
+                    || worker.poisoned.load(Ordering::SeqCst)
+                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
+                {
+                    break;
+                }
+                evict_idle_on_worker(worker, cache_idle_ttl);
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let grant = match command {
+            GpuWorkerCommand::Grant(grant) => grant,
+            GpuWorkerCommand::Shutdown => break,
+        };
+        if worker.poisoned.load(Ordering::SeqCst)
+            || worker.fatal_cuda_error.load(Ordering::SeqCst)
+            || worker.shutdown_requested.load(Ordering::SeqCst)
+        {
+            grant
+                .work
+                .reject(fatal_cuda_user_message("queued GPU work"));
+            settle_legacy_in_flight(worker);
+            break;
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_legacy_owner_work(worker, *grant, &owner_event_tx);
+        }));
+        settle_legacy_in_flight(worker);
+        if outcome.is_err() {
+            quarantine_poisoned_worker(worker);
+            break;
+        }
+    }
+    if !worker.poisoned.load(Ordering::SeqCst) && !worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        let cached = worker
+            .model_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        if let Err(error) =
+            teardown_inference_engines_safely(worker, cached, "legacy GPU owner shutdown")
+        {
+            tracing::error!(
+                gpu = worker.gpu.ordinal,
+                %error,
+                "legacy GPU owner shutdown teardown failed; retaining remaining resources for process exit"
+            );
+        }
+    }
+    tracing::info!(gpu = worker.gpu.ordinal, "legacy GPU worker thread exiting");
+}
+
+fn settle_legacy_in_flight(worker: &GpuWorker) {
+    worker
+        .in_flight
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_sub(1)
+        })
+        .expect("legacy owner completed work without a dispatch claim");
+}
+
 fn process_owner_work(
     worker: &GpuWorker,
     grant: LeaseGrant,
@@ -268,6 +394,32 @@ fn process_owner_work(
             commit_utility_allocation(scheduler_tx, &grant.fence);
             run();
         }
+    }
+}
+
+fn process_legacy_owner_work(
+    worker: &GpuWorker,
+    grant: LeaseGrant,
+    owner_event_tx: &tokio::sync::mpsc::UnboundedSender<LegacyOwnerEvent>,
+) {
+    if let Err(error) = ensure_owner_thread(worker) {
+        grant.work.reject(error.to_string());
+        return;
+    }
+    match grant.work {
+        OwnerWork::Generation(job) => {
+            process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
+        }
+        OwnerWork::PromptExpansion(job) => process_prompt_expansion(worker, *job),
+        OwnerWork::PostUpscale(job) => process_post_generation_upscale(worker, *job),
+        OwnerWork::StandaloneUpscale(job) => process_standalone_upscale(worker, *job),
+        OwnerWork::AdminModelLoad(job) => {
+            let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
+            let _ = job.result_tx.send(result);
+        }
+        OwnerWork::AdminModelUnload(job) => process_admin_unload(worker, *job),
+        #[cfg(test)]
+        OwnerWork::Probe { run, .. } => run(),
     }
 }
 
@@ -983,6 +1135,48 @@ fn process_job(
     job: GpuJob,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
 ) {
+    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx));
+}
+
+enum GenerationEventSink<'a> {
+    V2(&'a tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>),
+    Legacy(&'a tokio::sync::mpsc::UnboundedSender<LegacyOwnerEvent>),
+}
+
+impl GenerationEventSink<'_> {
+    fn allocation_committed(&self, lease: &crate::scheduler::LeaseFence) {
+        if let Self::V2(scheduler_tx) = self {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
+                device_id: lease.device_id.clone(),
+                work_id: lease.work_id.clone(),
+                worker_generation: lease.worker_generation,
+            });
+        }
+    }
+
+    fn followup_ready(
+        &self,
+        work: crate::scheduler::ScheduledOwnerWork,
+    ) -> Result<(), Box<crate::scheduler::ScheduledOwnerWork>> {
+        match self {
+            Self::V2(scheduler_tx) => scheduler_tx
+                .send(crate::scheduler::WorkerEvent::FollowupReady {
+                    work: Box::new(work),
+                })
+                .map_err(|error| match error.0 {
+                    crate::scheduler::WorkerEvent::FollowupReady { work } => work,
+                    _ => unreachable!("followup_ready only transports FollowupReady"),
+                }),
+            Self::Legacy(owner_event_tx) => owner_event_tx
+                .send(LegacyOwnerEvent::FollowupReady(Box::new(work)))
+                .map_err(|error| match error.0 {
+                    LegacyOwnerEvent::FollowupReady(work) => work,
+                }),
+        }
+    }
+}
+
+fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: GenerationEventSink<'_>) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
     let job_id = job.id.clone();
@@ -1120,11 +1314,7 @@ fn process_job(
     // coordinator keeps the reservation charged until a memory sample whose
     // collection began after this commit can reflect it.
     if let Some(lease) = job.lease.as_ref() {
-        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
-            device_id: lease.device_id.clone(),
-            work_id: lease.work_id.clone(),
-            worker_generation: lease.worker_generation,
-        });
+        event_sink.allocation_committed(lease);
     }
 
     if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
@@ -1362,19 +1552,16 @@ fn process_job(
                             image: img,
                         })),
                     );
-                    match scheduler_tx.send(crate::scheduler::WorkerEvent::FollowupReady {
-                        work: Box::new(work),
-                    }) {
+                    match event_sink.followup_ready(work) {
                         Ok(()) => {
                             std::mem::forget(cleanup);
                         }
-                        Err(error) => {
-                            if let crate::scheduler::WorkerEvent::FollowupReady { work } = error.0 {
-                                work.work.reject(
-                                    "scheduler stopped before post-generation upscale".to_string(),
-                                );
-                                std::mem::forget(cleanup);
-                            }
+                        Err(work) => {
+                            work.work.reject(
+                                "GPU dispatch owner stopped before post-generation upscale"
+                                    .to_string(),
+                            );
+                            std::mem::forget(cleanup);
                         }
                     }
                     return;
@@ -2871,6 +3058,103 @@ mod tests {
         handle
             .join()
             .expect("owner shutdown catches teardown panic");
+
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn legacy_owner_executes_without_publishing_v2_ready_or_acceptance_events() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (owner_event_tx, mut owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_legacy_gpu_thread(
+            worker.clone(),
+            job_rx,
+            owner_event_tx,
+            Duration::from_secs(60),
+        );
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        worker.in_flight.store(1, Ordering::SeqCst);
+        worker
+            .try_send_job(Box::new(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "legacy-probe".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    state_version: 0,
+                    plan_version: 0,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                },
+                work: OwnerWork::Probe {
+                    id: "legacy-probe".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(move || ran_tx.send(()).unwrap()),
+                },
+                retry: None,
+            }))
+            .unwrap();
+
+        ran_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("legacy owner should execute transported work");
+        for _ in 0..100 {
+            if worker.in_flight.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            owner_event_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        worker.request_shutdown();
+        handle.join().expect("legacy owner should join cleanly");
+        assert!(matches!(
+            owner_event_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn legacy_owner_shutdown_uses_poison_safe_cache_teardown() {
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(PanickingDropEngine {
+                name: "legacy-shutdown-engine".to_string(),
+                unload_calls: unload_calls.clone(),
+                drop_calls: drop_calls.clone(),
+            }),
+            0,
+        );
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_legacy_gpu_thread(
+            worker.clone(),
+            job_rx,
+            owner_event_tx,
+            Duration::from_secs(60),
+        );
+
+        let started_deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < started_deadline {
+            if worker.owner_thread_id.get().is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            worker.owner_thread_id.get().is_some(),
+            "legacy owner must start before shutdown is requested"
+        );
+        worker.request_shutdown();
+        handle
+            .join()
+            .expect("legacy owner catches teardown panic on shutdown");
 
         assert_eq!(unload_calls.load(Ordering::SeqCst), 1);
         assert_eq!(drop_calls.load(Ordering::SeqCst), 0);

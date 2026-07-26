@@ -117,14 +117,45 @@ impl ScheduledOwnerWork {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ScheduledWorkHandle {
     tx: Option<tokio::sync::mpsc::Sender<ScheduledOwnerWork>>,
+    dispatch_mode: crate::dispatch_mode::DispatchMode,
+    observations: Arc<crate::dispatch_mode::DispatchObservationRecorder>,
+}
+
+impl Default for ScheduledWorkHandle {
+    fn default() -> Self {
+        Self {
+            tx: None,
+            dispatch_mode: crate::dispatch_mode::DispatchMode::V2,
+            observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
+        }
+    }
 }
 
 impl ScheduledWorkHandle {
     pub fn new(tx: tokio::sync::mpsc::Sender<ScheduledOwnerWork>) -> Self {
-        Self { tx: Some(tx) }
+        Self::for_mode(tx, crate::dispatch_mode::DispatchMode::V2)
+    }
+
+    pub fn for_mode(
+        tx: tokio::sync::mpsc::Sender<ScheduledOwnerWork>,
+        dispatch_mode: crate::dispatch_mode::DispatchMode,
+    ) -> Self {
+        Self {
+            tx: Some(tx),
+            dispatch_mode,
+            observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
+        }
+    }
+
+    pub const fn dispatch_mode(&self) -> crate::dispatch_mode::DispatchMode {
+        self.dispatch_mode
+    }
+
+    pub fn observations(&self) -> &crate::dispatch_mode::DispatchObservationRecorder {
+        &self.observations
     }
 
     pub async fn submit(&self, work: ScheduledOwnerWork) -> Result<(), String> {
