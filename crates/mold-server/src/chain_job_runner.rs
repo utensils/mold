@@ -1729,9 +1729,10 @@ impl StageExecutor for ProductionStageExecutor {
         motion_tail_frames: u32,
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome> {
-        let worker = select_worker_for_stage(&self.gpu_pool, model)
+        let in_flight = claim_worker_for_stage(&self.gpu_pool, model)
             .ok_or_else(|| anyhow!("no GPU worker available for chain stage model '{model}'"))?;
-        let _in_flight = WorkerInFlightGuard::new(worker.clone());
+        let worker = in_flight.worker().clone();
+        let _in_flight = in_flight;
         let _active = WorkerActiveGenerationGuard::new(worker.clone(), model, &stage_req.prompt)?;
         let hint = model_manager::family_for_model_sync(model, &self.config).map(|family| {
             model_manager::ActivationHint {
@@ -2341,9 +2342,30 @@ fn read_audio_sidecar(path: &Path) -> anyhow::Result<NativeAudioTrack> {
     })
 }
 
-fn select_worker_for_stage(gpu_pool: &GpuPool, model: &str) -> Option<Arc<GpuWorker>> {
+fn claim_worker_for_stage(gpu_pool: &GpuPool, model: &str) -> Option<WorkerInFlightGuard> {
     let est = crate::queue::estimate_model_vram(model);
-    gpu_pool.select_worker(model, est)
+    loop {
+        let mut skipped = Vec::new();
+        let mut found_eligible = false;
+        while skipped.len() < gpu_pool.worker_count() {
+            let Some(worker) = gpu_pool.select_worker_excluding(model, est, &skipped) else {
+                break;
+            };
+            found_eligible = true;
+            if let Some(claim) = WorkerInFlightGuard::try_claim(worker.clone()) {
+                return Some(claim);
+            }
+            skipped.push(worker.gpu.ordinal);
+        }
+        if !found_eligible {
+            return None;
+        }
+        // This temporary compatibility path is removed when ChainStage becomes
+        // a first-class scheduler work unit. Until then, wait exactly as the
+        // old per-worker model lock did while preserving atomic exclusion from
+        // owner-scheduled work.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 struct WorkerInFlightGuard {
@@ -2351,15 +2373,18 @@ struct WorkerInFlightGuard {
 }
 
 impl WorkerInFlightGuard {
-    fn new(worker: Arc<GpuWorker>) -> Self {
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
-        Self { worker }
+    fn try_claim(worker: Arc<GpuWorker>) -> Option<Self> {
+        worker.try_claim_in_flight().then_some(Self { worker })
+    }
+
+    fn worker(&self) -> &Arc<GpuWorker> {
+        &self.worker
     }
 }
 
 impl Drop for WorkerInFlightGuard {
     fn drop(&mut self) {
-        self.worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.worker.release_in_flight();
     }
 }
 

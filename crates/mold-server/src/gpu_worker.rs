@@ -186,7 +186,7 @@ fn run_gpu_owner_loop(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_owner_work(worker, *grant, &scheduler_tx);
         }));
-        worker.in_flight.store(0, Ordering::SeqCst);
+        worker.release_in_flight();
         if outcome.is_err() {
             // A panic may have crossed arbitrary Candle/cudarc state.
             // Treat the owner context as fatal and let supervision

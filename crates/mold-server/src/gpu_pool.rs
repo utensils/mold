@@ -338,6 +338,22 @@ pub enum GpuWorkerCommand {
 }
 
 impl GpuWorker {
+    /// Atomically claim this device for one owner-scheduled or legacy-isolated
+    /// GPU operation.
+    ///
+    /// `in_flight` is a binary exclusion fence in V2. Legacy chain stages use
+    /// the same claim until they are migrated to first-class scheduler leases,
+    /// preventing a stale Ready advertisement from overlapping owner work.
+    pub(crate) fn try_claim_in_flight(&self) -> bool {
+        self.in_flight
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub(crate) fn release_in_flight(&self) {
+        self.in_flight.store(0, Ordering::SeqCst);
+    }
+
     pub(crate) fn try_send_job(
         &self,
         grant: Box<LeaseGrant>,
@@ -796,6 +812,20 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn in_flight_claim_is_binary_and_reusable_after_release() {
+        let (worker, _job_rx) = test_worker(0, 24_000_000_000);
+
+        assert!(worker.try_claim_in_flight());
+        assert!(!worker.try_claim_in_flight());
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 1);
+
+        worker.release_in_flight();
+        assert!(worker.try_claim_in_flight());
+        worker.release_in_flight();
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[test]

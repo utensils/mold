@@ -567,6 +567,7 @@ struct Coordinator {
     last_queue_shape: Vec<(String, Option<usize>)>,
     last_registry_sequence: u64,
     last_paused: bool,
+    last_worker_claims: BTreeMap<String, usize>,
     #[cfg(test)]
     before_grant_hook: Option<BeforeGrantHook>,
 }
@@ -611,6 +612,7 @@ impl Coordinator {
             last_queue_shape: Vec::new(),
             last_registry_sequence: 0,
             last_paused: false,
+            last_worker_claims: BTreeMap::new(),
             #[cfg(test)]
             before_grant_hook: None,
         }
@@ -870,7 +872,7 @@ impl Coordinator {
                 self.memory.release(&work_id);
                 self.memory.collect_now();
                 if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
-                    worker.in_flight.store(0, Ordering::SeqCst);
+                    worker.release_in_flight();
                 }
                 let LeaseGrant { work, retry, .. } = *grant;
                 match work {
@@ -958,6 +960,23 @@ impl Coordinator {
     }
 
     fn reconcile_external_mutations(&mut self, immediate: &mut bool) {
+        let worker_claims = self
+            .state
+            .gpu_pool
+            .workers
+            .iter()
+            .map(|worker| {
+                (
+                    worker_device_id(worker),
+                    worker.in_flight.load(Ordering::SeqCst),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if worker_claims != self.last_worker_claims {
+            self.last_worker_claims = worker_claims;
+            self.mutate(immediate);
+        }
+
         let listing = self.state.job_registry.snapshot();
         let queue_shape = listing
             .entries
@@ -1048,6 +1067,7 @@ impl Coordinator {
                     health,
                     activity: if ready.is_some()
                         && !self.leases.contains_key(&worker_device_id(worker))
+                        && worker.in_flight.load(Ordering::SeqCst) == 0
                     {
                         DeviceActivity::Idle
                     } else {
@@ -1335,7 +1355,10 @@ impl Coordinator {
                     memory_sample_generation: plan.reservation.sample_generation,
                     memory_ledger_sequence: plan.reservation.ledger_sequence,
                 };
-                worker.in_flight.store(1, Ordering::SeqCst);
+                if !worker.try_claim_in_flight() {
+                    grant_failed = true;
+                    break;
+                }
                 if let Some(pending) = self.pending.remove(&id) {
                     let bypass_count = pending.bypass_count;
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
@@ -1372,7 +1395,7 @@ impl Coordinator {
                             granted.push(id);
                         }
                         Err(crate::job_registry::DispatchAttemptError::Claim(error, returned)) => {
-                            worker.in_flight.store(0, Ordering::SeqCst);
+                            worker.release_in_flight();
                             let generation = generation_from_owner_grant(*returned);
                             reject_generation(
                                 &self.state,
@@ -1385,7 +1408,7 @@ impl Coordinator {
                             break;
                         }
                         Err(crate::job_registry::DispatchAttemptError::Transport(returned)) => {
-                            worker.in_flight.store(0, Ordering::SeqCst);
+                            worker.release_in_flight();
                             let generation = generation_from_owner_grant(*returned);
                             self.pending.insert(
                                 generation.id.clone(),
@@ -1438,7 +1461,7 @@ impl Coordinator {
                             granted.push(id);
                         }
                         Err(error) => {
-                            worker.in_flight.store(0, Ordering::SeqCst);
+                            worker.release_in_flight();
                             let returned = match error {
                                 std::sync::mpsc::TrySendError::Full(grant)
                                 | std::sync::mpsc::TrySendError::Disconnected(grant) => grant,
@@ -1461,7 +1484,7 @@ impl Coordinator {
                         }
                     }
                 } else {
-                    worker.in_flight.store(0, Ordering::SeqCst);
+                    worker.release_in_flight();
                     grant_failed = true;
                     break;
                 }
@@ -2293,6 +2316,167 @@ mod tests {
         assert!(kinds.contains(&mold_scheduler::WorkKind::Generation));
         assert!(kinds.contains(&mold_scheduler::WorkKind::StandaloneUpscale));
         assert_eq!(coordinator.leases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_chain_in_flight_blocks_owner_utility_grant() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+
+        worker.in_flight.store(1, Ordering::SeqCst);
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "utility-during-chain",
+                "real-esrgan-x4plus:fp16",
+                2 << 30,
+                OwnerWork::Probe {
+                    id: "utility-during-chain".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+
+        coordinator.dispatch_ready().await;
+
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "a legacy chain stage owns this CUDA device; owner work must not overlap it"
+        );
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("utility-during-chain"));
+    }
+
+    #[tokio::test]
+    async fn legacy_chain_claim_after_plan_fences_owner_transport() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "utility-racing-chain",
+                "real-esrgan-x4plus:fp16",
+                2 << 30,
+                OwnerWork::Probe {
+                    id: "utility-racing-chain".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        let plan_built = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        coordinator.before_grant_hook = Some(BeforeGrantHook {
+            plan_built: plan_built.clone(),
+            resume: resume.clone(),
+        });
+        let dispatch = tokio::spawn(async move {
+            let _ = coordinator.dispatch_ready().await;
+            coordinator
+        });
+
+        plan_built.notified().await;
+        assert!(
+            worker.try_claim_in_flight(),
+            "legacy chain wins the atomic device claim"
+        );
+        resume.notify_one();
+        let coordinator = dispatch.await.unwrap();
+
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "a stale plan must not transport owner work after a chain claim"
+        );
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("utility-racing-chain"));
+        worker.release_in_flight();
+    }
+
+    #[test]
+    fn legacy_chain_claim_and_release_trigger_coordinator_replans() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.reconcile_external_mutations(&mut immediate);
+        immediate = false;
+
+        assert!(worker.try_claim_in_flight());
+        coordinator.reconcile_external_mutations(&mut immediate);
+        assert!(immediate, "a legacy chain claim must invalidate idle plans");
+
+        immediate = false;
+        worker.release_in_flight();
+        coordinator.reconcile_external_mutations(&mut immediate);
+        assert!(
+            immediate,
+            "a legacy chain release must promptly reopen scheduler capacity"
+        );
     }
 
     #[tokio::test]
