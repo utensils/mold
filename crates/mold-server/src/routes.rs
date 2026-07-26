@@ -667,17 +667,24 @@ fn validate_multi_gpu_placement(
         .map_err(ApiError::validation)
 }
 
-fn clear_global_upscaler_cache(state: &AppState) {
+async fn clear_global_upscaler_cache(state: &AppState) {
     if state.gpu_pool.worker_count() > 0 {
         // GPU-worker mode never populates the legacy global cache. All
         // upscaler engines are created and dropped inside an owner command.
         return;
     }
-    if let Ok(mut cache) = state.upscaler_cache.try_lock() {
-        if let Some(mut engine) = cache.take() {
-            engine.unload();
-            tracing::info!("upscaler cache cleared");
+    let cache = state.upscaler_cache.clone();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        if let Ok(mut cache) = cache.try_lock() {
+            if let Some(mut engine) = cache.take() {
+                engine.unload();
+                tracing::info!("upscaler cache cleared");
+            }
         }
+    })
+    .await
+    {
+        tracing::warn!(%error, "upscaler cache teardown task panicked");
     }
 }
 
@@ -2076,7 +2083,7 @@ async fn unload_model(
     }
 
     // Legacy single-GPU path.
-    clear_global_upscaler_cache(&state);
+    clear_global_upscaler_cache(&state).await;
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -4098,7 +4105,7 @@ mod tests {
             unloaded_on: unloaded_on.clone(),
         }));
 
-        clear_global_upscaler_cache(&state);
+        clear_global_upscaler_cache(&state).await;
 
         assert!(unloaded.load(Ordering::SeqCst));
         assert_ne!(
