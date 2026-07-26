@@ -44,10 +44,10 @@ describe("StageCard source image affordance", () => {
     const card = mount(StageCard, {
       props: props({ prompt: "one", frames: 97 }),
     });
-    await card.find('[aria-label="Move stage up"]').trigger("click");
-    await card.find('[aria-label="Move stage down"]').trigger("click");
-    await card.find('[aria-label="Duplicate stage"]').trigger("click");
-    await card.find('[aria-label="Delete stage"]').trigger("click");
+    await card.find('[aria-label="Move clip up"]').trigger("click");
+    await card.find('[aria-label="Move clip down"]').trigger("click");
+    await card.find('[aria-label="Duplicate clip"]').trigger("click");
+    await card.find('[aria-label="Delete clip"]').trigger("click");
     expect(card.emitted("move-up")).toHaveLength(1);
     expect(card.emitted("move-down")).toHaveLength(1);
     expect(card.emitted("duplicate")).toHaveLength(1);

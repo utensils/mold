@@ -2,6 +2,12 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import Icon from "@ui/components/Icon.vue";
+import {
+  defaultSequenceStages,
+  sequenceDuration,
+  sequenceValidation,
+  type SequenceStage,
+} from "@studio/lib/sequence";
 import StageCard from "./StageCard.vue";
 import { toast } from "../lib/toasts";
 import ImagePickerModal from "./ImagePickerModal.vue";
@@ -46,7 +52,11 @@ function newScript(): ChainScriptToml {
       motion_tail_frames: 25,
       output_format: "mp4",
     },
-    stage: [blankStage()],
+    stage: defaultSequenceStages().map((stage) => ({
+      prompt: stage.prompt,
+      frames: stage.frames,
+      transition: stage.transition,
+    })),
   };
 }
 
@@ -70,6 +80,9 @@ onMounted(async () => {
     } catch {
       /* ignore corrupt draft */
     }
+  }
+  if (script.value.stage.length < 2) {
+    script.value.stage.push(blankStage("smooth"));
   }
   limits.value = await fetchChainLimits(props.model).catch(() => null);
   limitsLoaded.value = true;
@@ -182,29 +195,22 @@ function clearImage(i: number) {
   script.value.stage[i] = next;
 }
 
-const totalFrames = computed(() => {
-  const s = script.value;
-  const mt = s.chain.motion_tail_frames;
-  let total = 0;
-  s.stage.forEach((stage, i) => {
-    if (i === 0) {
-      total += stage.frames;
-      return;
-    }
-    switch (stage.transition ?? "smooth") {
-      case "smooth":
-        total += Math.max(0, stage.frames - mt);
-        break;
-      case "cut":
-        total += stage.frames;
-        break;
-      case "fade":
-        total += Math.max(0, stage.frames - (stage.fade_frames ?? 8));
-        break;
-    }
-  });
-  return total;
-});
+const authoringStages = computed<SequenceStage[]>(() =>
+  script.value.stage.map((stage) => ({
+    prompt: stage.prompt,
+    frames: stage.frames,
+    transition: stage.transition ?? "smooth",
+    ...(stage.fade_frames == null ? {} : { fade_frames: stage.fade_frames }),
+  })),
+);
+const duration = computed(() =>
+  sequenceDuration(
+    authoringStages.value,
+    script.value.chain.fps,
+    script.value.chain.motion_tail_frames,
+  ),
+);
+const totalFrames = computed(() => duration.value.frames);
 
 function exportToml(): string {
   return writeChainScript(script.value);
@@ -265,18 +271,25 @@ const chainUnavailable = computed(
 const sequenceUnsupported = computed(
   () => limits.value?.supports_sequence === false,
 );
+const validationErrors = computed(() =>
+  sequenceValidation(authoringStages.value, {
+    maxStages: maxStages.value,
+    maxTotalFrames: maxTotalFrames.value,
+    motionTailFrames: script.value.chain.motion_tail_frames,
+  }),
+);
 
 const canGenerate = computed(
   () =>
     limits.value !== null &&
     !sequenceUnsupported.value &&
     !overCap.value &&
-    script.value.stage.some((s) => s.prompt.trim()),
+    validationErrors.value.length === 0,
 );
 
 const stageCountLabel = computed(() => {
   const n = script.value.stage.length;
-  return `${n} ${n === 1 ? "stage" : "stages"}`;
+  return `${n} ${n === 1 ? "clip" : "clips"}`;
 });
 
 const summaryLine = computed(
@@ -315,30 +328,45 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
 <template>
   <div class="flex flex-col gap-3">
     <div class="flex items-center gap-2">
-      <span class="font-display text-sm font-semibold text-rebate"
-        >Script mode</span
-      >
-      <div class="ml-auto flex gap-2">
-        <button type="button" class="sc-tool" @click="importFileInput?.click()">
-          <Icon name="upload" :size="13" />
-          Import
-        </button>
-        <input
-          ref="importFileInput"
-          type="file"
-          accept=".toml"
-          class="hidden"
-          @change="handleImportChange"
-        />
-        <button type="button" class="sc-tool" @click="downloadToml()">
-          <Icon name="download" :size="13" />
-          Export
-        </button>
-        <button type="button" class="sc-tool" @click="copyToml()">
-          <Icon name="copy" :size="13" />
-          Copy TOML
-        </button>
+      <div>
+        <span class="font-display text-sm font-semibold text-rebate"
+          >Sequence</span
+        >
+        <p class="mt-0.5 text-xs text-ink-3">
+          Tell the story one clip at a time.
+        </p>
       </div>
+      <details class="ml-auto">
+        <summary class="sc-tool cursor-pointer list-none">
+          <Icon name="settings" :size="13" />
+          Sequence tools
+        </summary>
+        <div class="mt-2 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            class="sc-tool"
+            @click="importFileInput?.click()"
+          >
+            <Icon name="upload" :size="13" />
+            Import
+          </button>
+          <input
+            ref="importFileInput"
+            type="file"
+            accept=".toml"
+            class="hidden"
+            @change="handleImportChange"
+          />
+          <button type="button" class="sc-tool" @click="downloadToml()">
+            <Icon name="download" :size="13" />
+            Export
+          </button>
+          <button type="button" class="sc-tool" @click="copyToml()">
+            <Icon name="copy" :size="13" />
+            Copy TOML
+          </button>
+        </div>
+      </details>
     </div>
 
     <VueDraggable v-model="script.stage" handle=".drag-handle">
@@ -384,6 +412,15 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       </button>
       <span v-else class="font-mono text-ink-3">max stages reached</span>
     </div>
+
+    <p
+      v-if="validationErrors.length"
+      data-test="sequence-validation"
+      class="rounded-control border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
+      role="alert"
+    >
+      {{ validationErrors[0] }}
+    </p>
 
     <label
       v-if="limits?.supports_audio"
@@ -441,7 +478,7 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       data-test="script-generate"
       @click="submit"
     >
-      Generate
+      Generate sequence
     </button>
 
     <ImagePickerModal

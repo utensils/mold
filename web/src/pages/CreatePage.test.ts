@@ -590,6 +590,7 @@ describe("CreatePage layout and behavior", () => {
         output_format: "mp4",
         stages: [expect.objectContaining({ prompt: "stage zero", frames: 9 })],
       }),
+      expect.objectContaining({ baseUrl: expect.any(String) }),
     );
     expect(submitMock).not.toHaveBeenCalled();
   });
@@ -1359,7 +1360,7 @@ describe("CreatePage host routing", () => {
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
-  it("says sequences stay on this server when the route points elsewhere", async () => {
+  it("does not show the obsolete origin-only sequence warning", async () => {
     const studio = addHost({ url: "http://studio:7680", name: "Studio" });
     localStorage.setItem("mold.web.generateTarget.v1", studio.id);
     localStorage.setItem("mold.composer.mode", "script");
@@ -1372,7 +1373,7 @@ describe("CreatePage host routing", () => {
     await nextTick();
 
     expect(wrapper.find("[data-test='sequence-origin-note']").exists()).toBe(
-      true,
+      false,
     );
   });
 
@@ -1446,7 +1447,7 @@ function pageStubs() {
     },
     ChainJobCard: {
       name: "ChainJobCard",
-      props: ["job"],
+      props: ["job", "target"],
       emits: ["dismiss"],
       template: '<div data-test="chain-job-card">{{ job.id }}</div>',
     },

@@ -333,10 +333,14 @@ async function requireJson<T>(res: Response, label: string): Promise<T> {
 
 export async function createChainJob(
   req: ChainRequestWire,
+  target?: StreamTarget,
 ): Promise<CreateChainJobResponse> {
-  const res = await fetch(`${base}/api/chain-jobs`, {
+  const res = await fetch(`${targetBase(target)}/api/chain-jobs`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...targetHeaders(target),
+    },
     body: JSON.stringify(req),
   });
   return requireJson<CreateChainJobResponse>(res, "POST /api/chain-jobs");
@@ -347,15 +351,24 @@ export async function listChainJobs(): Promise<ChainJobListing> {
   return requireJson<ChainJobListing>(res, "GET /api/chain-jobs");
 }
 
-export async function getChainJob(id: string): Promise<ChainJobDetail> {
-  const res = await fetch(`${base}/api/chain-jobs/${encodeURIComponent(id)}`);
+export async function getChainJob(
+  id: string,
+  target?: StreamTarget,
+): Promise<ChainJobDetail> {
+  const res = await fetch(
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}`,
+    { headers: targetHeaders(target) },
+  );
   return requireJson<ChainJobDetail>(res, `GET /api/chain-jobs/${id}`);
 }
 
-export async function resumeChainJob(id: string): Promise<ChainJobSummary> {
+export async function resumeChainJob(
+  id: string,
+  target?: StreamTarget,
+): Promise<ChainJobSummary> {
   const res = await fetch(
-    `${base}/api/chain-jobs/${encodeURIComponent(id)}/resume`,
-    { method: "POST" },
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/resume`,
+    { method: "POST", headers: targetHeaders(target) },
   );
   return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/resume`);
 }
@@ -363,22 +376,29 @@ export async function resumeChainJob(id: string): Promise<ChainJobSummary> {
 export async function retakeChainJob(
   id: string,
   req: RetakeRequest,
+  target?: StreamTarget,
 ): Promise<ChainJobSummary> {
   const res = await fetch(
-    `${base}/api/chain-jobs/${encodeURIComponent(id)}/retake`,
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/retake`,
     {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...targetHeaders(target),
+      },
       body: JSON.stringify(req),
     },
   );
   return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/retake`);
 }
 
-export async function cancelChainJob(id: string): Promise<ChainJobSummary> {
+export async function cancelChainJob(
+  id: string,
+  target?: StreamTarget,
+): Promise<ChainJobSummary> {
   const res = await fetch(
-    `${base}/api/chain-jobs/${encodeURIComponent(id)}/cancel`,
-    { method: "POST" },
+    `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/cancel`,
+    { method: "POST", headers: targetHeaders(target) },
   );
   return requireJson<ChainJobSummary>(res, `POST /api/chain-jobs/${id}/cancel`);
 }
@@ -403,12 +423,16 @@ export async function gcChainJobs(): Promise<{
   return requireJson(res, "POST /api/chain-jobs/gc");
 }
 
-export function chainJobEventsUrl(id: string): string {
-  return `${base}/api/chain-jobs/${encodeURIComponent(id)}/events`;
+export function chainJobEventsUrl(id: string, target?: StreamTarget): string {
+  return `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/events`;
 }
 
-export function chainJobStagePreviewUrl(id: string, idx: number): string {
-  return `${base}/api/chain-jobs/${encodeURIComponent(id)}/stages/${encodeURIComponent(
+export function chainJobStagePreviewUrl(
+  id: string,
+  idx: number,
+  target?: StreamTarget,
+): string {
+  return `${targetBase(target)}/api/chain-jobs/${encodeURIComponent(id)}/stages/${encodeURIComponent(
     String(idx),
   )}/preview`;
 }
