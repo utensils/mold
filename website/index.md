@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: mold
-  text: AI Image Generation on Your GPU
+  text: Local AI Image & Video Generation on Your GPU
   tagline:
     'CLI-native and built for people, scripts, and agents. CUDA on Linux, Metal
     on macOS, and the same local engine behind desktop, web, TUI, iPhone, REST,
@@ -35,7 +35,7 @@ features:
       terminals, shell pipelines, CI, and agents.'
   - icon:
       src: /icons/grid.svg
-    title: 11 Model Families
+    title: Broad Model Support
     details: FLUX.1, SDXL, SD 1.5, SD 3.5, Z-Image, Flux.2 Klein, Qwen-Image,
       Qwen-Image-Edit, Wuerstchen v2, LTX Video, and LTX-2 / LTX-2.3. Images,
       native joint audio-video, and quantized variants that fit a wide range of
