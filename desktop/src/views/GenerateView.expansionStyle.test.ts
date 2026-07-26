@@ -78,6 +78,7 @@ function mountView() {
         ExpandControl: false,
         PreparedExpansionBatch: false,
         ExpansionPullStatus: false,
+        GenerateErrorNotice: false,
         ComposerCard: false,
         InspectorPanel: false,
       },

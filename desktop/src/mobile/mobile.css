@@ -1417,6 +1417,36 @@ textarea.control {
   border: 1px solid color-mix(in srgb, var(--stop) 55%, var(--edge));
   background: color-mix(in srgb, var(--stop) 8%, transparent);
   color: var(--stop);
+  font-size: var(--text-body);
+}
+
+.mobile-generate-validation-copy,
+.mobile-generate-validation-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.mobile-generate-validation-copy p {
+  flex: 1;
+  margin: 0;
+}
+
+.mobile-error-copy {
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--stop) 45%, var(--edge));
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--stop);
+}
+
+.mobile-generate-validation-actions {
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 
 .mobile-generate-callout {

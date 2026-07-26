@@ -17,6 +17,7 @@ import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { ChainJobDetail, GalleryImage } from "../types";
+import type { Job } from "../composables/useGenerateStream";
 
 vi.mock("vue-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-router")>()),
@@ -68,6 +69,7 @@ const chainJobDetailRef = vi.hoisted(
     },
 );
 const chainJobIdRef = vi.hoisted(() => ({ value: null as string | null }));
+const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
 
 vi.mock("../api", () => ({
   createChainJob: createChainJobMock,
@@ -89,7 +91,7 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
     typeof import("../composables/useGenerateStream")
   >()),
   useGenerateStream: () => ({
-    jobs: { value: [] },
+    jobs: streamJobsRef,
     submit: submitMock,
     cancel: vi.fn(),
     remove: vi.fn(),
@@ -151,6 +153,7 @@ describe("CreatePage layout and behavior", () => {
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    streamJobsRef.value = [];
     upscaleStreamMock.mockReset();
     upscaleStreamMock.mockResolvedValue(undefined);
     createChainJobMock.mockClear();
@@ -180,6 +183,82 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.get("[data-test='generate-workspace']").classes()).toContain(
       "md:grid-cols-[minmax(0,1fr)_340px]",
     );
+  });
+
+  it("uses a human-readable catalog model in the completed generation caption", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "cv:1759168",
+        family: "sdxl",
+        display_name: "Juggernaut XL - Ragnarok",
+        description: "Juggernaut XL - Ragnarok by RunDiffusion",
+        size_gb: 6.9,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 25,
+        default_guidance: 7,
+        is_loaded: true,
+        hf_repo: "",
+        downloaded: true,
+      },
+    ]);
+    streamJobsRef.value = [
+      {
+        id: "done-1",
+        request: {
+          model: "cv:1759168",
+          prompt: "a camera",
+          width: 1024,
+          height: 1024,
+          steps: 25,
+          guidance: 7,
+          batch_size: 1,
+          output_format: "png",
+        },
+        startedAt: 1,
+        controller: new AbortController(),
+        progress: {
+          stage: "complete",
+          step: 25,
+          totalSteps: 25,
+          weightBytesLoaded: null,
+          weightBytesTotal: null,
+          queuePosition: null,
+          gpu: null,
+          elapsedMs: 11_800,
+        },
+        result: {
+          type: "complete",
+          image: "image-bytes",
+          format: "png",
+          seed_used: 42,
+          model: "cv:1759168",
+          width: 1024,
+          height: 1024,
+          generation_time_ms: 11_800,
+        },
+        error: null,
+        state: "done",
+        chain: null,
+        lastProgressAt: Date.now(),
+        workStarted: true,
+        hostId: null,
+        hostLabel: null,
+        target: null,
+        serverId: "server-1",
+        previewUrl: null,
+        seedVisual: "42",
+      } as Job,
+    ];
+
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const caption = String(
+      wrapper.getComponent({ name: "ResultCanvas" }).props("resultCaption"),
+    );
+    expect(caption).toContain("Juggernaut XL - Ragnarok");
+    expect(caption).not.toContain("cv:1759168");
   });
 
   it("orders phone Create as prompt, controls, actions, canvas, then recent", async () => {
@@ -675,6 +754,59 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.negativePrompt).toBe("text");
   });
 
+  it("offers a readable explicit override for a stale quick expansion", async () => {
+    const fluxModel = {
+      name: "flux-dev:q4",
+      family: "flux",
+      description: "Inverse Mix",
+      size_gb: 4,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 20,
+      default_guidance: 3.5,
+      is_loaded: false,
+      hf_repo: "",
+      downloaded: true,
+      last_used: null,
+    };
+    const catalogModel = {
+      ...fluxModel,
+      name: "cv:1759168",
+      family: "sdxl",
+      display_name: "Juggernaut XL - Ragnarok",
+    };
+    hostModelsMock.mockResolvedValue([fluxModel, catalogModel]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = fluxModel.name;
+    form.state.value.modelFamily = fluxModel.family;
+    form.state.value.prompt = "a lighthouse";
+    await nextTick();
+    await wrapper.get("[data-test='composer-expand']").trigger("click");
+    wrapper
+      .getComponent({ name: "ExpandModal" })
+      .vm.$emit("apply-prompt", "storm light over the harbor");
+    await nextTick();
+    form.applyModelDefaults(catalogModel);
+    await nextTick();
+
+    const notice = wrapper.get("[data-test='web-quick-expansion-stale']");
+    expect(notice.text()).toContain("Juggernaut XL - Ragnarok");
+    expect(notice.text()).not.toContain("cv:1759168");
+    await notice
+      .get("[data-test='web-generate-expanded-anyway']")
+      .trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(1);
+    expect(submitMock.mock.calls[0]?.[0]).toMatchObject({
+      model: catalogModel.name,
+      prompt: "storm light over the harbor",
+      original_prompt: "a lighthouse",
+    });
+  });
+
   it("freezes a quick expansion to its host and sends original-prompt provenance", async () => {
     const studio = addHost({
       url: "http://studio:7680",
@@ -1140,9 +1272,9 @@ function pageStubs() {
     },
     ResultCanvas: {
       name: "ResultCanvas",
-      props: ["mode", "variations"],
+      props: ["mode", "variations", "resultCaption"],
       template:
-        '<div data-test="result-canvas" :data-count="(variations||[]).length"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
+        '<div data-test="result-canvas" :data-count="(variations||[]).length" :data-caption="resultCaption"><button data-test="queue-variations" @click="$emit(\'queue\')">queue</button></div>',
     },
     CreateModelPicker: {
       name: "CreateModelPicker",

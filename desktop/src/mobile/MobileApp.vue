@@ -376,6 +376,7 @@ const preparedStaleReasons = computed(() => {
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
+    modelLabels: new Map(models.value.map((model) => [model.name, modelLabel(model.name)])),
     hostTargets: new Map(
       hosts.value.map((host) => [
         host.id,
@@ -398,6 +399,7 @@ const quickStaleReasons = computed(() => {
     selectedHostPolicy: selectedHostId.value || null,
     readyHostIds: new Set(hosts.value.filter((host) => host.online).map((host) => host.id)),
     hostLabels: new Map(hosts.value.map((host) => [host.id, host.name])),
+    modelLabels: new Map(models.value.map((model) => [model.name, modelLabel(model.name)])),
     hostTargets: new Map(
       hosts.value.map((host) => [
         host.id,
@@ -1216,6 +1218,36 @@ function restoreQuickExpansion(): void {
   preparedSubmitting.value = false;
   preparingGeneration.value = false;
   submissionUiId += 1;
+}
+
+async function developExpandedAnyway(): Promise<void> {
+  if (!quickExpansionSnapshot.value) return;
+  submissionGuard.invalidate();
+  quickExpansionSnapshot.value = null;
+  expansionError.value = "";
+  await generate();
+}
+
+async function reexpandAndDevelop(): Promise<void> {
+  if (!quickExpansionSnapshot.value || quickExpansionOriginal.value === null) return;
+  restoreQuickExpansion();
+  await nextTick();
+  await expandForCurrentBatch();
+  if (quickExpansionSnapshot.value && quickStaleReasons.value.length === 0) {
+    await generate();
+  }
+}
+
+async function copyQuickExpansionError(): Promise<void> {
+  await copyMobileError(`${quickStaleReasons.value.join(" ")} Choose how to continue.`);
+}
+
+async function copyMobileError(message: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(message);
+  } catch {
+    setGenerationStatus("Could not copy the error message.", true);
+  }
 }
 
 function editPreparedPrompt(payload: { id: string; text: string }): void {
@@ -2462,22 +2494,97 @@ onBeforeUnmount(() => {
             @expand="expandForCurrentBatch()"
             @undo="restoreQuickExpansion"
           />
-          <p
+          <div
             v-if="quickStaleReasons.length"
             class="mobile-generate-validation"
             role="alert"
             data-test="mobile-quick-expansion-stale"
           >
-            {{ quickStaleReasons.join(" ") }} Undo or expand again before developing.
-          </p>
-          <p
+            <div class="mobile-generate-validation-copy">
+              <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
+              <button
+                class="mobile-error-copy"
+                type="button"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyQuickExpansionError"
+              >
+                <svg
+                  width="17"
+                  height="17"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="8" y="8" width="11" height="11" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                </svg>
+              </button>
+            </div>
+            <div class="mobile-generate-validation-actions">
+              <button
+                class="primary-button mobile-touch-action"
+                type="button"
+                data-test="mobile-reexpand-and-develop"
+                :disabled="expansionRunning || preparedSubmitting"
+                @click="reexpandAndDevelop"
+              >
+                Re-expand and Develop
+              </button>
+              <button
+                class="secondary-button mobile-touch-action"
+                type="button"
+                data-test="mobile-develop-expanded-anyway"
+                :disabled="expansionRunning || preparedSubmitting"
+                @click="developExpandedAnyway"
+              >
+                Develop anyway
+              </button>
+              <button
+                class="secondary-button mobile-touch-action"
+                type="button"
+                @click="restoreQuickExpansion"
+              >
+                Restore original
+              </button>
+            </div>
+          </div>
+          <div
             v-if="expansionError && !expansionMissingModel && !preparedBatch"
             class="mobile-generate-validation"
             role="alert"
             data-test="mobile-expansion-error"
           >
-            {{ expansionError }}
-          </p>
+            <div class="mobile-generate-validation-copy">
+              <p>{{ expansionError }}</p>
+              <button
+                class="mobile-error-copy"
+                type="button"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyMobileError(expansionError)"
+              >
+                <svg
+                  width="17"
+                  height="17"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="8" y="8" width="11" height="11" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                </svg>
+              </button>
+            </div>
+          </div>
           <MobileExpansionPullStatus
             v-if="expansionMissingModel && expansionPullStatus"
             :model="expansionMissingModel.model"

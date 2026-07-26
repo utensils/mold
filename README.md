@@ -144,8 +144,11 @@ Desktop prompt expansion follows the visible Batch count. Batch 1 is a quick
 rewrite with undo; larger batches prepare exactly N editable variations for
 review before any work is queued. Expansion and every generated sibling stay
 on one resolved host (including Batch 1's next generation), and changes to the
-source prompt, model, host, or count preserve the prepared work while requiring
-an explicit refresh or discard. Library records the prepared batch identity and
+source prompt, model, host, or count preserve the prepared work. A stale Batch 1
+rewrite offers explicit re-expand-and-generate, generate-anyway, and
+restore-original actions; reviewed Batch N work requires refresh or discard.
+Generation status uses catalog display names while retaining stable `cv:` /
+`hf:` identities on the wire. Library records the prepared batch identity and
 each sibling's position. If that host lacks the expansion model, Create keeps
 the recovery in place and shows its exact-host pull from connection through
 queue, byte/file progress, readiness, or retry without hiding reviewed prompts.

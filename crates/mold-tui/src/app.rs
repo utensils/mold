@@ -7443,12 +7443,18 @@ mod tests {
     async fn activity_line_states() {
         use crate::ui::chrome::{activity_line, ActivityKind};
         let mut app = make_settings_test_app();
+        app.generate.params.model = "cv:1759168".into();
+        let mut catalog_model =
+            make_test_catalog_entry("cv:1759168", 25, 7.0, 1024, 1024, "legacy title");
+        catalog_model.display_name = Some("Juggernaut XL - Ragnarok".into());
+        app.models.catalog = vec![catalog_model];
 
         // Idle: names the model and host; never fakes a queue depth.
         let (kind, text) = activity_line(&app);
         assert_eq!(kind, ActivityKind::Idle);
-        let expected = format!("idle · {}", app.generate.params.model);
-        assert!(text.starts_with(&expected), "{text}");
+        let expected = "idle · Juggernaut XL - Ragnarok";
+        assert!(text.starts_with(expected), "{text}");
+        assert!(!text.contains("cv:1759168"), "{text}");
         assert!(
             !text.contains("queue"),
             "queue must be omitted when unknown"
@@ -7461,7 +7467,10 @@ mod tests {
         app.generate.progress.denoise_elapsed_ms = 6000;
         let (kind, text) = activity_line(&app);
         assert_eq!(kind, ActivityKind::Generating);
-        assert!(text.contains("developing"), "{text}");
+        assert!(
+            text.contains("developing · Juggernaut XL - Ragnarok"),
+            "{text}"
+        );
         assert!(text.contains("12/28"), "{text}");
         assert!(text.contains("2.0 it/s"), "{text}");
 

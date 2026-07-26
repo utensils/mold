@@ -7,7 +7,7 @@ import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatc
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import { useConnectionStore } from "../stores/connection";
 import { useGenerateFormStore } from "../stores/generateForm";
-import { useGenerationStore } from "../stores/generation";
+import { newJob, useGenerationStore } from "../stores/generation";
 import { useHostsStore } from "../stores/hosts";
 import { useModelStore } from "../stores/models";
 import { useToastStore } from "../stores/toasts";
@@ -62,6 +62,14 @@ const model: ModelEntry = {
   default_guidance: 4.5,
 } as ModelEntry;
 
+const catalogModel: ModelEntry = {
+  ...model,
+  name: "cv:1759168",
+  family: "sdxl",
+  display_name: "Juggernaut XL - Ragnarok",
+  description: "Juggernaut XL - Ragnarok by RunDiffusion",
+} as ModelEntry;
+
 function mountView() {
   return mount(GenerateView, {
     shallow: true,
@@ -74,6 +82,7 @@ function mountView() {
         ExpandControl: false,
         PreparedExpansionBatch: false,
         ExpansionPullStatus: false,
+        GenerateErrorNotice: false,
         ComposerCard: false,
         InspectorPanel: false,
       },
@@ -240,6 +249,135 @@ describe("GenerateView prepared expansion batches", () => {
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]![2]).toEqual(localRoute);
+  });
+
+  it("offers immediate human-readable recovery when a quick expansion changes models", async () => {
+    useGenerateFormStore().form.batchSize = 1;
+    apiJson.mockResolvedValue([model, catalogModel]);
+    apiJsonTo.mockResolvedValue([model, catalogModel]);
+    useModelStore().all = [model, catalogModel];
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    useGenerateFormStore().applyModel(catalogModel);
+    await flushPromises();
+
+    const notice = wrapper.get("[data-test='quick-expansion-stale']");
+    expect(notice.text()).toContain("Juggernaut XL - Ragnarok");
+    expect(notice.text()).not.toContain("cv:1759168");
+    expect(notice.find("[data-test='reexpand-and-generate']").exists()).toBe(true);
+    expect(notice.find("[data-test='generate-expanded-anyway']").exists()).toBe(true);
+    expect(notice.find("[data-test='restore-expanded-original']").exists()).toBe(true);
+  });
+
+  it("explicitly generates the visible expanded prompt with the current model and route", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    apiJson.mockResolvedValue([model, catalogModel]);
+    apiJsonTo.mockResolvedValue([model, catalogModel]);
+    useModelStore().all = [model, catalogModel];
+    vi.mocked(expandPrompt).mockResolvedValue({
+      original: "a lighthouse at dusk",
+      expanded: ["storm light"],
+    });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    useGenerateFormStore().applyModel(catalogModel);
+    await flushPromises();
+
+    await wrapper.get("[data-test='generate-expanded-anyway']").trigger("click");
+    await flushPromises();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]![0]).toMatchObject({
+      model: "cv:1759168",
+      prompt: "storm light",
+      original_prompt: "a lighthouse at dusk",
+    });
+    expect(submit.mock.calls[0]![2]).toBeNull();
+  });
+
+  it("re-expands the original prompt for the current model before generating", async () => {
+    const form = useGenerateFormStore().form;
+    form.batchSize = 1;
+    apiJson.mockResolvedValue([model, catalogModel]);
+    apiJsonTo.mockResolvedValue([model, catalogModel]);
+    useModelStore().all = [model, catalogModel];
+    vi.mocked(expandPrompt)
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["storm light"],
+      })
+      .mockResolvedValueOnce({
+        original: "a lighthouse at dusk",
+        expanded: ["cinematic lighthouse for SDXL"],
+      });
+    const submit = vi.spyOn(useGenerationStore(), "submitBatch").mockReturnValue({
+      jobs: [],
+      settled: Promise.resolve([]),
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent(ExpandControl).vm.$emit("expand");
+    await flushPromises();
+    useGenerateFormStore().applyModel(catalogModel);
+    await flushPromises();
+
+    await wrapper.get("[data-test='reexpand-and-generate']").trigger("click");
+    await flushPromises();
+
+    expect(expandPrompt).toHaveBeenNthCalledWith(
+      2,
+      "a lighthouse at dusk",
+      { variations: 1, modelFamily: "sdxl" },
+      { baseUrl: "http://127.0.0.1:7680", apiKey: "local-key" },
+    );
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]![0]).toMatchObject({
+      model: "cv:1759168",
+      prompt: "cinematic lighthouse for SDXL",
+      original_prompt: "a lighthouse at dusk",
+    });
+  });
+
+  it("shows a human-readable catalog model in generation chrome", async () => {
+    apiJson.mockResolvedValue([catalogModel]);
+    apiJsonTo.mockResolvedValue([catalogModel]);
+    useModelStore().all = [catalogModel];
+    const job = newJob({
+      model: catalogModel.name,
+      prompt: "a camera",
+      width: 1024,
+      height: 1024,
+      steps: 25,
+      guidance: 7,
+      batch_size: 1,
+      output_format: "png",
+    });
+    job.status = "denoising";
+    job.step = 20;
+    job.total = 25;
+    useGenerationStore().jobs = [job];
+
+    const wrapper = mountView();
+    await flushPromises();
+
+    const chrome = wrapper.get("[data-test='generation-edge-code']");
+    expect(chrome.text()).toContain("Juggernaut XL - Ragnarok");
+    expect(chrome.text()).not.toContain("CV·1759168");
+    expect(chrome.text()).not.toContain("cv:1759168");
   });
 
   it("cancels a deferred Batch 1 submission when the expansion is restored", async () => {

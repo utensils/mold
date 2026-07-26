@@ -60,8 +60,13 @@ surface powers it, so anything the app does maps to a documented endpoint.
   Prompt expansion follows Batch: Batch 1 is a quick rewrite with undo, while
   Batch N greater than 1 prepares exactly N editable variations for review
   before generation. Mold shows and freezes the resolved host for expansion
-  and every sibling. Source, model, host, or count changes keep the reviewed
-  work visible but require refresh or discard before it can run. Library shows
+  and every sibling. When a Batch 1 rewrite becomes stale, Create immediately
+  offers to re-expand the original for the current model and generate, generate
+  the visible rewrite anyway, or restore the original; generation errors use
+  larger copy with a copy-to-clipboard control. Source, model, host, or count
+  changes keep Batch N reviewed work visible but require refresh or discard
+  before it can run. Generation chrome uses human-readable catalog names while
+  retaining stable IDs internally. Library shows
   each prepared print's durable batch identity and sibling position. When the
   expansion model is missing, the same inline area follows its pull on that
   frozen host through connection, queue, byte/file/ETA progress, readiness, or
