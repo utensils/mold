@@ -1677,6 +1677,7 @@ impl Flux2Engine {
 
 impl InferenceEngine for Flux2Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_flux2_loras(req);
         let result = self.generate_inner(req);
@@ -1715,6 +1716,18 @@ impl InferenceEngine for Flux2Engine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

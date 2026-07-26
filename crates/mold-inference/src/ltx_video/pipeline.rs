@@ -835,6 +835,7 @@ impl LtxVideoEngine {
 
 impl crate::engine::InferenceEngine for LtxVideoEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -864,6 +865,18 @@ impl crate::engine::InferenceEngine for LtxVideoEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&ModelPaths> {
@@ -1165,6 +1178,7 @@ impl LtxVideoEngine {
         let denoise_start = Instant::now();
 
         for (step, sigma) in run_sigmas.iter().copied().enumerate() {
+            progress.checkpoint()?;
             let step_start = Instant::now();
             let resolved = &step_schedule[step];
             let batch = latents.dim(0)?;
@@ -1283,6 +1297,7 @@ impl LtxVideoEngine {
             });
         }
 
+        progress.checkpoint()?;
         progress.stage_done(stage_name, denoise_start.elapsed());
         unpack_latents(
             &latents,

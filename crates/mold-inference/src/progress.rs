@@ -1,4 +1,54 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
+
+/// Attempt-scoped cooperative cancellation shared between a caller and one
+/// inference invocation.
+///
+/// Cancellation never interrupts a CUDA kernel. Engines poll the token only at
+/// explicit safe points, so Candle and CUDA objects remain owned and dropped by
+/// the same worker thread that started the invocation.
+#[derive(Clone, Debug, Default)]
+pub struct InferenceCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl InferenceCancellationToken {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn checkpoint(&self) -> Result<(), InferenceCancelled> {
+        if self.is_cancelled() {
+            Err(InferenceCancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Typed non-fatal result returned when an inference attempt observes its
+/// cooperative cancellation token at a safe point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InferenceCancelled;
+
+impl std::fmt::Display for InferenceCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("inference cancelled")
+    }
+}
+
+impl std::error::Error for InferenceCancelled {}
+
+pub fn is_inference_cancelled(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<InferenceCancelled>())
+}
 
 /// Progress events emitted during model loading and inference.
 #[derive(Debug, Clone)]
@@ -42,6 +92,7 @@ pub type ProgressCallback = Box<dyn Fn(ProgressEvent) + Send + Sync>;
 #[derive(Default)]
 pub struct ProgressReporter {
     callback: Option<ProgressCallback>,
+    cancellation: Option<InferenceCancellationToken>,
 }
 
 impl ProgressReporter {
@@ -90,6 +141,22 @@ impl ProgressReporter {
 
     pub fn clear_callback(&mut self) {
         self.callback = None;
+    }
+
+    pub fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.cancellation = Some(token);
+    }
+
+    pub fn clear_cancellation_token(&mut self) {
+        self.cancellation = None;
+    }
+
+    /// Return a typed cancellation result only at a caller-selected safe point.
+    pub fn checkpoint(&self) -> Result<(), InferenceCancelled> {
+        match &self.cancellation {
+            Some(token) => token.checkpoint(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -168,6 +235,34 @@ mod tests {
             elapsed: Duration::from_millis(5),
         });
         // Reaching this point without panic is the assertion.
+    }
+
+    #[test]
+    fn cancellation_token_is_shared_and_attempt_scoped() {
+        let first_attempt = InferenceCancellationToken::default();
+        let first_attempt_worker = first_attempt.clone();
+        let second_attempt = InferenceCancellationToken::default();
+
+        assert!(first_attempt_worker.checkpoint().is_ok());
+        first_attempt.cancel();
+
+        assert_eq!(first_attempt_worker.checkpoint(), Err(InferenceCancelled));
+        assert!(second_attempt.checkpoint().is_ok());
+    }
+
+    #[test]
+    fn reporter_observes_and_clears_cooperative_cancellation() {
+        let token = InferenceCancellationToken::default();
+        let mut reporter = ProgressReporter::default();
+        reporter.set_cancellation_token(token.clone());
+
+        assert!(reporter.checkpoint().is_ok());
+        token.cancel();
+        let error = anyhow::Error::from(reporter.checkpoint().unwrap_err());
+        assert!(is_inference_cancelled(&error));
+
+        reporter.clear_cancellation_token();
+        assert!(reporter.checkpoint().is_ok());
     }
 
     #[test]

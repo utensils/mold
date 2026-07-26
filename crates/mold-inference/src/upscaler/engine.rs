@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::device::create_device;
-use crate::engine::LoadStrategy;
-use crate::progress::{ProgressCallback, ProgressReporter};
+use crate::engine::{BatchExecutionCapability, LoadStrategy};
+use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressReporter};
 use crate::weight_loader::load_safetensors_with_progress;
 
 use super::arch::{detect_architecture, UpscalerArch};
@@ -43,6 +43,18 @@ pub trait UpscaleEngine: Send + Sync {
 
     /// Clear any previously installed progress callback.
     fn clear_on_progress(&mut self);
+
+    /// Install the current attempt's cooperative cancellation token.
+    fn set_cancellation_token(&mut self, _token: InferenceCancellationToken) {}
+
+    /// Clear the token before this engine is reused by another attempt.
+    fn clear_cancellation_token(&mut self) {}
+
+    /// Declare tested native batch sizes for standalone and post-generation
+    /// upscale work. Test doubles inherit singleton behavior.
+    fn batch_execution_capability(&self) -> BatchExecutionCapability {
+        BatchExecutionCapability::SINGLETON_COOPERATIVE
+    }
 }
 
 /// Loaded model state (architecture-polymorphic).
@@ -108,6 +120,7 @@ impl UpscalerEngine {
 
 impl UpscaleEngine for UpscalerEngine {
     fn upscale(&mut self, req: &mold_core::UpscaleRequest) -> Result<mold_core::UpscaleResponse> {
+        self.progress.checkpoint()?;
         self.ensure_loaded()?;
 
         let start = Instant::now();
@@ -342,6 +355,18 @@ impl UpscaleEngine for UpscalerEngine {
 
     fn clear_on_progress(&mut self) {
         self.progress.clear_callback();
+    }
+
+    fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.progress.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.progress.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> BatchExecutionCapability {
+        BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 }
 

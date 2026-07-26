@@ -1491,6 +1491,7 @@ impl SD3Engine {
 
 impl InferenceEngine for SD3Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -1527,6 +1528,18 @@ impl InferenceEngine for SD3Engine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

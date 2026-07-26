@@ -1363,6 +1363,7 @@ impl ZImageEngine {
         let previewer = crate::latent_preview::LatentPreviewer::zimage();
 
         for step in 0..num_steps {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
             let t = model_timestep(&scheduler);
             let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &device)?.to_dtype(dtype)?;
@@ -1432,6 +1433,7 @@ impl ZImageEngine {
             }
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -1766,6 +1768,7 @@ impl ZImageEngine {
                 .expect("transformer must be loaded for denoising");
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = model_timestep(&scheduler);
                 let t_tensor = Tensor::from_vec(vec![t as f32], (1,), &loaded.device)?
@@ -1843,6 +1846,7 @@ impl ZImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
         tracing::info!("denoising complete");
 
@@ -1941,6 +1945,7 @@ impl ZImageEngine {
 
 impl InferenceEngine for ZImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_zimage_loras(req);
         let result = self.generate_inner(req);
@@ -1980,6 +1985,18 @@ impl InferenceEngine for ZImageEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

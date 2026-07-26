@@ -697,6 +697,7 @@ impl WuerstchenEngine {
             if step_idx + 1 >= timesteps.len() {
                 break; // last timestep is 0.0, not used for denoising
             }
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
@@ -722,6 +723,7 @@ impl WuerstchenEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
@@ -761,6 +763,7 @@ impl WuerstchenEngine {
         let start = Instant::now();
 
         for (step_idx, &t) in active_timesteps.iter().enumerate() {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
 
             let noise_pred = if use_cfg {
@@ -795,6 +798,7 @@ impl WuerstchenEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base.progress.stage_done(&label, start.elapsed());
         Ok(())
     }
@@ -1509,6 +1513,7 @@ impl WuerstchenEngine {
 
 impl InferenceEngine for WuerstchenEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         let result = self.generate_inner(req);
         self.pending_placement = None;
@@ -1545,6 +1550,18 @@ impl InferenceEngine for WuerstchenEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

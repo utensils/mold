@@ -3,7 +3,7 @@ use mold_core::GenerateRequest;
 use mold_core::GenerateResponse;
 use std::ops::{Deref, DerefMut};
 
-use crate::progress::ProgressCallback;
+use crate::progress::{InferenceCancellationToken, ProgressCallback};
 
 /// Controls how model components are loaded during inference.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -13,6 +13,42 @@ pub enum LoadStrategy {
     Eager,
     /// Load-use-drop per component, minimizing peak memory (CLI one-shot mode).
     Sequential,
+}
+
+/// Engine-family batching contract consumed by the server-owned adaptive
+/// batch planner.
+///
+/// A family that reports only `[1]` supports parallel singleton children but
+/// does not claim native tensor batching. Sizes must be strictly increasing
+/// and non-zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchExecutionCapability {
+    pub native_batch_sizes: &'static [usize],
+    pub cooperative_cancellation: bool,
+}
+
+impl BatchExecutionCapability {
+    pub const SINGLETON_COOPERATIVE: Self = Self {
+        native_batch_sizes: &[1],
+        cooperative_cancellation: true,
+    };
+
+    pub fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.native_batch_sizes.is_empty(),
+            "native batch sizes must not be empty"
+        );
+        let mut previous = 0;
+        for &size in self.native_batch_sizes {
+            anyhow::ensure!(size > 0, "native batch sizes must be non-zero");
+            anyhow::ensure!(
+                size > previous,
+                "native batch sizes must be strictly increasing"
+            );
+            previous = size;
+        }
+        Ok(())
+    }
 }
 
 /// Trait for inference backends.
@@ -37,6 +73,19 @@ pub trait InferenceEngine: Send + Sync {
     fn set_on_progress(&mut self, _callback: ProgressCallback) {}
     /// Clear any previously installed progress callback.
     fn clear_on_progress(&mut self) {}
+    /// Install an attempt-scoped cooperative cancellation token. The caller
+    /// may signal it from another thread; the engine observes it only at safe
+    /// checkpoints on its owning worker thread.
+    fn set_cancellation_token(&mut self, _token: InferenceCancellationToken) {}
+    /// Remove the current attempt's cancellation token before the engine is
+    /// reused for another job.
+    fn clear_cancellation_token(&mut self) {}
+    /// Declare this engine family's tested batch and cancellation contract.
+    /// The default exists for lightweight test doubles; every production
+    /// family overrides it explicitly.
+    fn batch_execution_capability(&self) -> BatchExecutionCapability {
+        BatchExecutionCapability::SINGLETON_COOPERATIVE
+    }
     /// Return the model's resolved file paths, if available.
     /// Used by the server for pre-load memory checks on unified-memory systems.
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
@@ -200,6 +249,24 @@ pub(crate) fn seeded_randn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_execution_capability_rejects_invalid_native_sizes() {
+        for native_batch_sizes in [&[][..], &[0][..], &[1, 1][..], &[2, 1][..]] {
+            assert!(
+                BatchExecutionCapability {
+                    native_batch_sizes,
+                    cooperative_cancellation: true,
+                }
+                .validate()
+                .is_err(),
+                "{native_batch_sizes:?}"
+            );
+        }
+        BatchExecutionCapability::SINGLETON_COOPERATIVE
+            .validate()
+            .unwrap();
+    }
 
     #[test]
     fn seeded_randn_produces_correct_shape() {

@@ -2364,6 +2364,7 @@ impl QwenImageEngine {
         };
 
         for step in 0..num_steps {
+            self.base.progress.checkpoint()?;
             let step_start = Instant::now();
             let t = scheduler.current_timestep();
             let noise_pred = if use_cfg {
@@ -2459,6 +2460,7 @@ impl QwenImageEngine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -2781,6 +2783,7 @@ impl QwenImageEngine {
             };
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let timestep = if use_batched_cfg {
@@ -2867,6 +2870,7 @@ impl QwenImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
         let latents = Self::unpack_latents_packed(&latents, height / 8, width / 8)?;
@@ -3253,6 +3257,7 @@ impl QwenImageEngine {
             };
 
             for step in 0..num_steps {
+                progress.checkpoint()?;
                 let step_start = Instant::now();
                 let t = scheduler.current_timestep();
                 let noise_pred = if use_cfg {
@@ -3332,6 +3337,7 @@ impl QwenImageEngine {
             }
         }
 
+        progress.checkpoint()?;
         progress.stage_done(&denoise_label, denoise_start.elapsed());
 
         // Free text embeddings
@@ -3458,6 +3464,7 @@ impl QwenImageEngine {
 
 impl InferenceEngine for QwenImageEngine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = effective_loras(req);
         let result = self.generate_inner(req);
@@ -3498,6 +3505,18 @@ impl InferenceEngine for QwenImageEngine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

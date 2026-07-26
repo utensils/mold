@@ -23,7 +23,7 @@ use super::text::prompt_encoder::NativePromptEncoder;
 use crate::chain::{ChainStageRenderer, ChainTail, StageOutcome, StageProgressEvent};
 use crate::engine::{gpu_dtype, rand_seed, InferenceEngine, LoadStrategy};
 use crate::ltx_video::video_enc;
-use crate::progress::ProgressCallback;
+use crate::progress::{InferenceCancellationToken, ProgressCallback};
 
 /// Soft-conditioning strength for the cross-stage identity anchor on chain
 /// continuations. The denoise mask at the anchor token becomes
@@ -39,6 +39,7 @@ pub struct Ltx2Engine {
     loaded: bool,
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
+    cancellation: Option<InferenceCancellationToken>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
     load_strategy: LoadStrategy,
     /// GPU ordinal this engine is pinned to. Every CUDA device operation must
@@ -119,6 +120,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: None,
             on_progress: None,
+            cancellation: None,
             pending_placement: None,
             load_strategy,
             gpu_ordinal,
@@ -261,6 +263,7 @@ impl Ltx2Engine {
             loaded: false,
             native_runtime: Some(runtime),
             on_progress: None,
+            cancellation: None,
             pending_placement: None,
             load_strategy: LoadStrategy::Sequential,
             gpu_ordinal: 0,
@@ -284,6 +287,13 @@ impl Ltx2Engine {
                 message: message.to_string(),
             });
         }
+    }
+
+    fn checkpoint(&self) -> Result<()> {
+        if let Some(token) = &self.cancellation {
+            token.checkpoint()?;
+        }
+        Ok(())
     }
 
     fn is_oom_error(err: &impl std::fmt::Display) -> bool {
@@ -681,9 +691,11 @@ fn configure_native_ltx2_cuda_device(device: &Device) -> Result<()> {
 
 impl Ltx2Engine {
     fn generate_inner(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.checkpoint()?;
         if !self.loaded {
             self.load()?;
         }
+        self.checkpoint()?;
         let start = Instant::now();
         self.emit("Preparing native LTX-2 request");
 
@@ -691,6 +703,7 @@ impl Ltx2Engine {
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let materialize_start = Instant::now();
         let plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.materialize_request", materialize_start);
         let planned_stage_count = plan.execution_graph.denoise_passes.len();
         self.emit(&format!(
@@ -718,10 +731,17 @@ impl Ltx2Engine {
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
         let prepare_start = Instant::now();
         let prepared = runtime.prepare(&plan)?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
         let render_start = Instant::now();
-        let rendered = runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref())?;
+        let rendered = runtime.render_native_video(
+            &plan,
+            &prepared,
+            self.on_progress.as_ref(),
+            self.cancellation.as_ref(),
+        )?;
+        self.checkpoint()?;
         Self::log_timing("pipeline.render_runtime", render_start);
         let encode_start = Instant::now();
         let (output_bytes, thumbnail_bytes, gif_preview, probe) =
@@ -907,8 +927,12 @@ impl Ltx2Engine {
                 return Err(err);
             }
         };
-        let render_result =
-            runtime.render_native_video(&plan, &prepared, self.on_progress.as_ref());
+        let render_result = runtime.render_native_video(
+            &plan,
+            &prepared,
+            self.on_progress.as_ref(),
+            self.cancellation.as_ref(),
+        );
         self.native_runtime = Some(runtime);
         let rendered = render_result?;
 
@@ -1012,6 +1036,18 @@ impl InferenceEngine for Ltx2Engine {
 
     fn clear_on_progress(&mut self) {
         self.on_progress = None;
+    }
+
+    fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.cancellation = Some(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.cancellation = None;
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&ModelPaths> {

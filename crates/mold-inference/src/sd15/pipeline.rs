@@ -837,6 +837,7 @@ impl SD15Engine {
         let denoise_start = Instant::now();
 
         for (step_idx, &t) in active_timesteps.iter().enumerate() {
+            self.base.progress.checkpoint()?;
             let step_start = std::time::Instant::now();
             let latent_input = if use_cfg {
                 Tensor::cat(&[&*latents, &*latents], 0)?
@@ -899,6 +900,7 @@ impl SD15Engine {
             });
         }
 
+        self.base.progress.checkpoint()?;
         self.base
             .progress
             .stage_done(&denoise_label, denoise_start.elapsed());
@@ -1683,6 +1685,7 @@ impl SD15Engine {
 
 impl InferenceEngine for SD15Engine {
     fn generate(&mut self, req: &GenerateRequest) -> Result<GenerateResponse> {
+        self.base.progress.checkpoint()?;
         self.pending_placement = req.placement.clone();
         self.pending_loras = super::lora::effective_sd15_loras(req);
         let result = self.generate_inner(req);
@@ -1725,6 +1728,18 @@ impl InferenceEngine for SD15Engine {
 
     fn clear_on_progress(&mut self) {
         self.base.clear_on_progress();
+    }
+
+    fn set_cancellation_token(&mut self, token: crate::progress::InferenceCancellationToken) {
+        self.base.set_cancellation_token(token);
+    }
+
+    fn clear_cancellation_token(&mut self) {
+        self.base.clear_cancellation_token();
+    }
+
+    fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
+        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
