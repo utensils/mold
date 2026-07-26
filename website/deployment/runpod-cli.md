@@ -202,7 +202,7 @@ services.mold = {
 
 The key is read via `ExecStartPre` and injected into the service
 environment — never written into the Nix store. Same pattern as
-`hfTokenFile` and `apiKeyFile`.
+`hfTokenFile`, `civitaiTokenFile`, and `apiKeyFile`.
 
 ## REST vs GraphQL
 

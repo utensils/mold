@@ -2,7 +2,7 @@
 //!
 //! The web UI must not make a browser profile the authority for a remote
 //! server's downloads. Credentials are persisted beside the server config,
-//! returned only as masked status, and resolved behind environment variables.
+//! returned only as masked status, and resolved ahead of environment defaults.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use axum::extract::Path as AxumPath;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -82,13 +81,6 @@ impl Provider {
         }
     }
 
-    fn env_name(self) -> &'static str {
-        match self {
-            Self::Hf => "HF_TOKEN",
-            Self::Civitai => "CIVITAI_TOKEN",
-        }
-    }
-
     fn get_mut(self, credentials: &mut CatalogCredentials) -> &mut Option<String> {
         match self {
             Self::Hf => &mut credentials.hf_token,
@@ -102,6 +94,13 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn resolved_token(stored: Option<String>, environment: Option<String>) -> Option<String> {
+    stored
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or(environment)
 }
 
 fn credentials_path() -> Result<PathBuf, ApiError> {
@@ -186,10 +185,12 @@ fn mask_token(token: &str) -> String {
 }
 
 fn state(stored: Option<&str>, environment: Option<&str>) -> CatalogCredentialState {
-    let (token, source) = if let Some(token) = environment {
-        (Some(token), Some("environment"))
-    } else if let Some(token) = stored {
+    let stored = stored.map(str::trim).filter(|value| !value.is_empty());
+    let environment = environment.map(str::trim).filter(|value| !value.is_empty());
+    let (token, source) = if let Some(token) = stored {
         (Some(token), Some("server"))
+    } else if let Some(token) = environment {
+        (Some(token), Some("environment"))
     } else {
         (None, None)
     };
@@ -259,11 +260,14 @@ fn update_server_credentials_cache(path: PathBuf, credentials: &CatalogCredentia
 }
 
 pub(crate) fn resolved_hf_token() -> Option<String> {
-    nonempty_env("HF_TOKEN").or_else(|| load_server_credentials().hf_token)
+    resolved_token(load_server_credentials().hf_token, nonempty_env("HF_TOKEN"))
 }
 
 pub(crate) fn resolved_civitai_token() -> Option<String> {
-    nonempty_env("CIVITAI_TOKEN").or_else(|| load_server_credentials().civitai_token)
+    resolved_token(
+        load_server_credentials().civitai_token,
+        nonempty_env("CIVITAI_TOKEN"),
+    )
 }
 
 pub async fn get_catalog_credentials() -> Result<Json<CatalogCredentialStatus>, ApiError> {
@@ -280,16 +284,6 @@ pub async fn put_catalog_credential(
     Json(body): Json<SetCatalogCredential>,
 ) -> Result<Json<CatalogCredentialStatus>, ApiError> {
     let provider = Provider::parse(&provider)?;
-    if nonempty_env(provider.env_name()).is_some() {
-        return Err(ApiError::with_code(
-            format!(
-                "{} is set in the server environment and must be changed there",
-                provider.env_name()
-            ),
-            "CATALOG_CREDENTIAL_ENVIRONMENT_MANAGED",
-            StatusCode::CONFLICT,
-        ));
-    }
     let token = body.token.trim();
     if token.is_empty() {
         return Err(ApiError::validation("token must not be empty"));
@@ -315,17 +309,6 @@ pub async fn delete_catalog_credential(
     AxumPath(provider): AxumPath<String>,
 ) -> Result<Json<CatalogCredentialStatus>, ApiError> {
     let provider = Provider::parse(&provider)?;
-    if nonempty_env(provider.env_name()).is_some() {
-        return Err(ApiError::with_code(
-            format!(
-                "{} is set in the server environment and must be removed there",
-                provider.env_name()
-            ),
-            "CATALOG_CREDENTIAL_ENVIRONMENT_MANAGED",
-            StatusCode::CONFLICT,
-        ));
-    }
-
     let path = credentials_path()?;
     let _guard = CREDENTIALS_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -375,15 +358,52 @@ mod tests {
     }
 
     #[test]
-    fn environment_credentials_override_saved_server_values() {
+    fn saved_server_credentials_override_environment_defaults() {
         let credentials = CatalogCredentials {
             hf_token: Some("stored-hf".into()),
             civitai_token: Some("stored-cv".into()),
         };
         let status = credential_status(&credentials, Some("env-hf"), None);
+        assert_eq!(status.hf.source, Some("server"));
+        assert_eq!(status.hf.masked.as_deref(), Some("••••d-hf"));
+        assert_eq!(status.civitai.source, Some("server"));
+    }
+
+    #[test]
+    fn environment_credentials_are_fallbacks_when_no_saved_override_exists() {
+        let credentials = CatalogCredentials::default();
+        let status = credential_status(&credentials, Some("env-hf"), Some("env-cv"));
         assert_eq!(status.hf.source, Some("environment"));
         assert_eq!(status.hf.masked.as_deref(), Some("••••v-hf"));
-        assert_eq!(status.civitai.source, Some("server"));
+        assert_eq!(status.civitai.source, Some("environment"));
+        assert_eq!(status.civitai.masked.as_deref(), Some("••••v-cv"));
+    }
+
+    #[test]
+    fn whitespace_only_saved_value_reports_the_environment_fallback() {
+        let credentials = CatalogCredentials {
+            hf_token: Some("  ".into()),
+            civitai_token: None,
+        };
+        let status = credential_status(&credentials, Some("env-hf"), None);
+        assert_eq!(status.hf.source, Some("environment"));
+        assert_eq!(status.hf.masked.as_deref(), Some("••••v-hf"));
+    }
+
+    #[test]
+    fn runtime_resolution_uses_saved_override_then_environment_fallback() {
+        assert_eq!(
+            resolved_token(Some(" saved ".into()), Some("environment".into())),
+            Some("saved".into())
+        );
+        assert_eq!(
+            resolved_token(None, Some("environment".into())),
+            Some("environment".into())
+        );
+        assert_eq!(
+            resolved_token(Some("  ".into()), Some("environment".into())),
+            Some("environment".into())
+        );
     }
 
     #[test]

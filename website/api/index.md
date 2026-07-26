@@ -44,7 +44,7 @@ When running `mold serve`, you get a REST API for remote image generation.
 | `GET`    | `/api/catalog/installed`                  | List installed catalog entries and LoRAs                                                                          |
 | `GET`    | `/api/catalog/credentials`                | Return masked status for server-owned HF/Civitai credentials                                                      |
 | `PUT`    | `/api/catalog/credentials/:provider`      | Save an `hf` or `civitai` credential on the serving host                                                          |
-| `DELETE` | `/api/catalog/credentials/:provider`      | Remove a server-owned credential (environment-managed credentials are read-only)                                  |
+| `DELETE` | `/api/catalog/credentials/:provider`      | Remove a saved host credential and fall back to its environment-provided default                                  |
 | `GET`    | `/api/catalog/:id`                        | Resolve one `hf:` or `cv:` catalog entry                                                                          |
 | `POST`   | `/api/catalog/:id/download`               | Queue a catalog entry plus missing companions                                                                     |
 | `POST`   | `/api/upscale`                            | Upscale image with Real-ESRGAN                                                                                    |

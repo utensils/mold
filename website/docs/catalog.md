@@ -110,8 +110,10 @@ Set tokens in the server environment before `mold serve`, or save them in the
 web Settings panel. Web saves them in the owner-only
 `$MOLD_HOME/catalog-credentials.json` file on the serving host and receives
 only masked status in response; raw values are not retained in browser storage.
-`HF_TOKEN` and `CIVITAI_TOKEN` take precedence over saved values and are
-read-only in web Settings.
+Saved values take precedence over `HF_TOKEN` and `CIVITAI_TOKEN`. Environment
+variables remain the server defaults: web Settings labels them as Environment,
+allows a user to save an override, and returns to the environment value when
+that override is cleared.
 
 The desktop app can forward its locally stored Hugging Face or Civitai token as
 a request-scoped fallback to a remote host; the host's own credential remains

@@ -85,9 +85,10 @@ works for SPA hot-iteration without recompiling Rust.
     # CORS — restrict to specific origin (null = permissive)
     # corsOrigin = "https://mysite.example.com";
 
-    # HuggingFace auth — for gated model repos
-    # Points to a file containing the token (e.g. agenix secret)
+    # Catalog auth defaults — users can override these in web Settings
+    # Points to files containing tokens (e.g. agenix secrets)
     hfTokenFile = config.age.secrets.hf-token.path;
+    civitaiTokenFile = config.age.secrets.civitai-token.path;
 
     # API key authentication — file with one key per line (e.g. agenix secret)
     # When set, all API requests require an X-Api-Key header
@@ -140,7 +141,8 @@ works for SPA hot-iteration without recompiling Rust.
 | `gpus`             | null/string | `null`              | Which GPUs to use: `"0,1"` or `"all"` (null = every visible GPU)     |
 | `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
 | `outputDir`        | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
-| `hfTokenFile`      | null/path   | `null`              | Path to file with HuggingFace token                                  |
+| `hfTokenFile`      | null/path   | `null`              | Path to overridable default HuggingFace token                        |
+| `civitaiTokenFile` | null/path   | `null`              | Path to overridable default Civitai token                            |
 | `apiKeyFile`       | null/path   | `null`              | Path to file with API key(s) for authentication (e.g. agenix secret) |
 | `rateLimit`        | null/string | `null`              | Per-IP rate limit (e.g. `"10/min"`)                                  |
 | `rateLimitBurst`   | null/int    | `null`              | Override burst allowance (defaults to 2x rate)                       |

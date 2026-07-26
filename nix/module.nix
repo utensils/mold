@@ -128,7 +128,13 @@ in
     hfTokenFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Path to a file containing the HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile.";
+      description = "Path to a file containing the default HuggingFace API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile and can be overridden from web Settings.";
+    };
+
+    civitaiTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Path to a file containing the default Civitai API token (e.g. an agenix secret). The token is loaded at service start via EnvironmentFile and can be overridden from web Settings.";
     };
 
     runpodApiKeyFile = lib.mkOption {
@@ -362,12 +368,21 @@ in
         Group = "mold";
         UMask = "0002";
         ExecStartPre =
-          lib.optionals (cfg.hfTokenFile != null || cfg.apiKeyFile != null || cfg.runpodApiKeyFile != null)
+          lib.optionals
+            (
+              cfg.hfTokenFile != null
+              || cfg.civitaiTokenFile != null
+              || cfg.apiKeyFile != null
+              || cfg.runpodApiKeyFile != null
+            )
             [
               "+${pkgs.writeShellScript "mold-env" ''
                 : > /run/mold/env
                 ${lib.optionalString (cfg.hfTokenFile != null) ''
                   echo "HF_TOKEN=$(cat ${cfg.hfTokenFile})" >> /run/mold/env
+                ''}
+                ${lib.optionalString (cfg.civitaiTokenFile != null) ''
+                  echo "CIVITAI_TOKEN=$(cat ${cfg.civitaiTokenFile})" >> /run/mold/env
                 ''}
                 ${lib.optionalString (cfg.apiKeyFile != null) ''
                   echo "MOLD_API_KEY=@${cfg.apiKeyFile}" >> /run/mold/env
@@ -389,7 +404,12 @@ in
       }
       //
         lib.optionalAttrs
-          (cfg.hfTokenFile != null || cfg.apiKeyFile != null || cfg.runpodApiKeyFile != null)
+          (
+            cfg.hfTokenFile != null
+            || cfg.civitaiTokenFile != null
+            || cfg.apiKeyFile != null
+            || cfg.runpodApiKeyFile != null
+          )
           {
             EnvironmentFile = "-/run/mold/env";
           }
