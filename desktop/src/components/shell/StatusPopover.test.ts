@@ -5,6 +5,7 @@ import StatusPopover from "./StatusPopover.vue";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 
 const apiJson = vi.fn();
 vi.mock("../../lib/api/client", () => ({
@@ -89,6 +90,53 @@ describe("StatusPopover host-aware display", () => {
     await openPopover(wrapper);
     expect(wrapper.text()).toContain("local");
     expect(wrapper.text()).toContain("queue 0/200");
+  });
+
+  it("shows the host selected in the Create header while idle", async () => {
+    const wrapper = mountPopover();
+    addRemoteHost();
+    useAppPrefsStore().settings = { generateTargetHost: "hal9000-7680" } as never;
+    await flushPromises();
+    await openPopover(wrapper);
+    expect(wrapper.text()).toContain("hal9000");
+    expect(wrapper.text()).toContain("queue 2/200");
+    expect(wrapper.text()).toContain("flux2-klein:q4");
+    expect(streamCalls.at(-1)?.target?.baseUrl).toBe("http://hal9000:7680");
+  });
+
+  it("keeps showing a concrete Create host selection while another host has a live job", async () => {
+    const wrapper = mountPopover();
+    addRemoteHost();
+    const hosts = useHostsStore();
+    hosts.extras.push({
+      id: "plato-7680",
+      label: "plato",
+      url: "http://plato:7680",
+      apiKey: null,
+      status: "ready",
+      error: null,
+      instanceId: null,
+    });
+    hosts.telemetry["plato-7680"] = {
+      queueDepth: 1,
+      queueCapacity: 200,
+      version: "0.16.0",
+      modelsLoaded: ["qwen-image:bf16"],
+      gpuInfo: { name: "NVIDIA L40S", vram_total_mb: 46068, vram_used_mb: 12288 },
+    };
+    useAppPrefsStore().settings = { generateTargetHost: "plato-7680" } as never;
+    useGenerationStore().jobs.push({
+      clientId: 1,
+      status: "denoising",
+      hostId: "hal9000-7680",
+      hostLabel: "hal9000",
+    } as never);
+    await flushPromises();
+    await openPopover(wrapper);
+    expect(wrapper.text()).toContain("plato");
+    expect(wrapper.text()).toContain("queue 1/200");
+    expect(wrapper.text()).toContain("qwen-image:bf16");
+    expect(wrapper.text()).not.toContain("hal9000");
   });
 
   it("follows a live remote job: chip, queue, and models come from that host", async () => {

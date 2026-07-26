@@ -247,8 +247,10 @@ export function modelAvailabilityTag(
 
 /**
  * Which host the status bar should mirror: the host of the most recently
- * submitted still-live job (the bar follows the action), else the primary.
- * Jobs without a routed host (single-host submissions) run on the primary.
+ * submitted still-live job with a routed host id when Create is using Auto or
+ * Most capable, else the primary. A concrete sticky selection is resolved by
+ * the status component before this fallback. Jobs without a routed host run on
+ * the primary.
  */
 export function pickDisplayHost(
   liveJobHostIds: ReadonlyArray<string | null>,

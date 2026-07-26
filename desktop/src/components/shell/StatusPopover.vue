@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
+import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
@@ -8,13 +9,14 @@ import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { sseStream } from "../../lib/api/sse";
 import { formatGB, percent, vramLevel } from "../../lib/format";
-import { pickDisplayHost } from "../../lib/hosts";
+import { normalizeTargetHost, pickDisplayHost } from "../../lib/hosts";
 import { shouldRestartEmbeddedEngine } from "../../lib/connectionRecovery";
 import type { ResourceSnapshot, ServerStatus } from "../../lib/api/types";
 
 defineProps<{ collapsed?: boolean }>();
 
 const conn = useConnectionStore();
+const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
 const snapshot = ref<ResourceSnapshot | null>(null);
@@ -26,12 +28,17 @@ let resourceAbort: AbortController | null = null;
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * The status follows the action: while a routed job is live, it mirrors THAT
- * host (chip, VRAM, queue, models) and reverts to the primary once the last
- * remote job settles. The embedded-engine recovery poll below stays bound to
- * the primary connection no matter what is displayed.
+ * The status mirrors the concrete host selected in the Create header. Auto
+ * and Most capable have no concrete host until routing happens, so those modes
+ * follow the most recently submitted live job with a routed host id and
+ * otherwise show the primary. The embedded-engine recovery poll below stays
+ * bound to the primary connection no matter what is displayed.
  */
 const displayHost = computed(() => {
+  const selected = normalizeTargetHost(appPrefs.settings?.generateTargetHost, hosts.all);
+  if (selected && selected !== "capable") {
+    return hosts.all.find((host) => host.id === selected) ?? hosts.primaryHost;
+  }
   const liveIds = generation.jobs
     .filter((j) => j.status !== "complete" && j.status !== "error")
     .map((j) => j.hostId);
