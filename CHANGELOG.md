@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The iPhone Models family filter no longer stays stuck on "All families".** The family taxonomy was fetched once when the Models tab first mounted, so a host that was unreachable — or whose API key was still coming out of the Keychain — left the picker with its single placeholder option for the rest of the session, and a failed catalog search was never retried either. Mold now re-drives the taxonomy and a failed search whenever the browsed host's address, key, or reachability changes, keeps the last taxonomy that did load instead of blanking it on a failed reload, and falls back to a session-sticky set of the families seen in catalog results and installed host inventories when the taxonomy endpoint cannot be read at all — accumulated rather than derived from the rows on screen, which would collapse the picker to the family already filtered on.
 - **Desktop Library now uses native save language for gallery media.** The print-details action says **Save image** or **Save video** instead of the browser-oriented **Download**, while preserving the existing user-chosen file-save behavior.
 - **New video sequences now start at a GPU-safe clip duration.** Web,
   desktop, and iPhone use the Plato-verified 25-frame default instead of
