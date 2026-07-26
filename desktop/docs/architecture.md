@@ -237,7 +237,13 @@ The shared devshell exposes cross-platform desktop helpers:
 
 The devshell includes `cargo-tauri`, Bun tooling, `lsof`, and ImageMagick. Linux adds WebKitGTK, GTK, Soup, GStreamer, CUDA, and the runtime library paths required by the launched binary. macOS uses system WKWebView and scopes the system C compiler linker variables to desktop commands so the existing Apple build and signing flow is unchanged.
 
-The flake exports `mold-desktop` for the platform default GPU target. Linux also exports `mold-desktop-sm120` for Blackwell and an AppImage through `desktop-build`; macOS keeps the existing application bundle, signing, and bundle-verification path. Frontend dependencies are pinned through bun2nix on both platforms.
+The flake exports `mold-desktop` for the platform default GPU target. Linux also exports `mold-desktop-sm86` for RTX 3090/A40 and `mold-desktop-sm120` for RTX 50-series, plus an AppImage through `desktop-build`. There is intentionally no B200/sm100 desktop package; desktop clients manage those servers remotely. macOS keeps the existing application bundle, signing, and bundle-verification path. Frontend dependencies are pinned through bun2nix on both platforms.
+
+Desktop-created RunPod machines use the same centralized GPU-family table as
+the CLI. Stable desktop releases fetch the exact release/source container
+manifest and submit `ghcr.io/utensils/mold@sha256:…`; a missing or inconsistent
+manifest fails provisioning without mutable fallback. Main-branch desktop
+nightlies use the corresponding rolling `latest*` map.
 
 **Rust toolchain:** the devshell's existing `rust-bin.stable.latest`. If a toolchain/Tauri transitive-dep breakage appears (Aethon had to pin 1.92 because 1.95 broke icu_provider/objc2), pin **only** in the desktop package derivation, never the shared devshell toolchain.
 

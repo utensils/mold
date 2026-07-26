@@ -137,9 +137,24 @@ correct `CUDA_COMPUTE_CAP` or choose the matching package variant.
 Examples:
 
 ```bash
-docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-b200 .
+docker build --build-arg CUDA_COMPUTE_CAP=86 -t mold-server-rtx3090 .
+nix build .#mold-sm86
+
+docker build --build-arg CUDA_COMPUTE_CAP=100 -t mold-server-b200 .
+nix build .#mold-sm100
+
+docker build --build-arg CUDA_COMPUTE_CAP=120 -t mold-server-rtx5090 .
 nix build .#mold-sm120
 ```
+
+B200/sm_100 support is simulated, not hardware-qualified. The B200 commands
+above select the correct artifact; they are not evidence of a real hardware
+acceptance run.
+
+For provider GPU names, explicit families win: generic Ampere maps to sm_80,
+while a bare `Blackwell` label is too ambiguous to choose between sm_100 and
+sm_120 and therefore retains the default sm_89 compatibility image. Specify an
+exact image tag when a provider omits the model name.
 
 For local debugging, `MOLD_DEVICE=cpu` forces CPU execution. That is mostly
 useful for diagnosis, not for real image generation performance.

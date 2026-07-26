@@ -86,8 +86,12 @@ cutover.
 curl -fsSL https://raw.githubusercontent.com/utensils/mold/main/install.sh | sh
 ```
 
-The installer downloads the latest release to `~/.local/bin/mold`, selects the
-right NVIDIA build on Linux, and installs the Metal build on macOS.
+The installer downloads the latest release to `~/.local/bin/mold`, verifies
+its SHA-256 checksum, inspects every Linux GPU visible through
+`CUDA_VISIBLE_DEVICES`, and selects one compatible NVIDIA build independent of
+device order. Unsupported mixed architecture groups fail with an actionable
+override/source-build error instead of silently targeting GPU 0. macOS installs
+the Metal build.
 
 <details>
 <summary>Other install options</summary>
@@ -96,7 +100,13 @@ right NVIDIA build on Linux, and installs the Metal build on macOS.
 # Nix — NVIDIA Ada / RTX 40-series
 nix run github:utensils/mold -- run "a cat"
 
-# Nix — NVIDIA Blackwell / RTX 50-series
+# Nix — NVIDIA Ampere / RTX 3090 or A40
+nix run github:utensils/mold#mold-sm86 -- run "a cat"
+
+# Nix — NVIDIA datacenter Blackwell / B200 or GB200
+nix run github:utensils/mold#mold-sm100 -- run "a cat"
+
+# Nix — NVIDIA consumer Blackwell / RTX 50-series
 nix run github:utensils/mold#mold-sm120 -- run "a cat"
 
 # Arch Linux
@@ -110,6 +120,11 @@ cargo build --release -p mold-ai --features cuda
 ./scripts/ensure-web-dist.sh
 cargo build --release -p mold-ai --features metal
 ```
+
+B200/GB200 sm_100 builds and synthetic multi-device coverage are simulated,
+not hardware-qualified. Real 8×B200 qualification remains deferred.
+The deferred RTX 3090 acceptance runner and evidence schema live in
+[`docs/qualification/`](docs/qualification/); no passing report is claimed.
 
 Prebuilt binaries and checksums are available on the
 [releases page](https://github.com/utensils/mold/releases/latest). See the

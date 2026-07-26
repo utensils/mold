@@ -11,7 +11,8 @@
 # CUDA_COMPUTE_CAP targets:
 #   80 = Ampere (A100)          86 = Ampere (RTX 3090, A40)
 #   89 = Ada Lovelace (RTX 4090, L40S)   90 = Hopper (H100)
-#   120 = Blackwell (RTX 5090, B200)
+#   100 = datacenter Blackwell (B200/GB200)
+#   120 = consumer Blackwell (RTX 5090)
 
 # ── Stage 1a: Build web gallery SPA ─────────────────────────────────
 # The gallery is served by `mold serve` as a SPA fallback. Building it

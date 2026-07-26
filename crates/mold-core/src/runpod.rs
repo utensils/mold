@@ -812,24 +812,8 @@ fn truncate_for_error(s: &str) -> String {
 
 /// Map a RunPod GPU `displayName` (e.g. `"RTX 4090"`) to the matching
 /// `ghcr.io/utensils/mold` image tag.
-pub fn image_tag_for_gpu(display_name: &str) -> &'static str {
-    let d = display_name.to_lowercase();
-    if d.contains("5090") || d.contains("rtx pro") || d.contains("blackwell") || d.contains("b200")
-    {
-        "latest-sm120"
-    } else if d.contains("h100")
-        || d.contains("h200")
-        || d.contains("gh200")
-        || d.contains("hopper")
-    {
-        "latest-sm90"
-    } else if d.contains("a100") || d.contains("3090") || d.contains("a40") || d.contains("ampere")
-    {
-        "latest-sm80"
-    } else {
-        // Ada (4090, L40, L40S) and fallback
-        "latest"
-    }
+pub fn image_tag_for_gpu(display_name: &str, version: &str) -> String {
+    crate::cuda_distribution::image_tag_for_gpu_name(display_name, version)
 }
 
 /// Ranked preference when auto-picking GPUs. Higher index = more preferred.
@@ -848,17 +832,41 @@ mod tests {
 
     #[test]
     fn image_tag_mapping() {
-        assert_eq!(image_tag_for_gpu("RTX 4090"), "latest");
-        assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 4090"), "latest");
-        assert_eq!(image_tag_for_gpu("L40S"), "latest");
-        assert_eq!(image_tag_for_gpu("RTX 5090"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("NVIDIA GeForce RTX 5090"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("RTX PRO 4500"), "latest-sm120");
-        assert_eq!(image_tag_for_gpu("A100 80GB"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("A100 PCIe"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("RTX 3090"), "latest-sm80");
-        assert_eq!(image_tag_for_gpu("H100 SXM"), "latest-sm90");
-        assert_eq!(image_tag_for_gpu("H200 SXM"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("RTX 4090", "latest"), "latest");
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA GeForce RTX 4090", "0.10.0"),
+            "0.10.0"
+        );
+        assert_eq!(image_tag_for_gpu("L40S", "latest"), "latest");
+        assert_eq!(image_tag_for_gpu("RTX 5090", "latest"), "latest-sm120");
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA GeForce RTX 5090", "0.10.0"),
+            "0.10.0-sm120"
+        );
+        assert_eq!(image_tag_for_gpu("RTX PRO 4500", "latest"), "latest-sm120");
+        assert_eq!(image_tag_for_gpu("NVIDIA B200", "latest"), "latest-sm100");
+        assert_eq!(image_tag_for_gpu("NVIDIA GB200", "0.10.0"), "0.10.0-sm100");
+        assert_eq!(image_tag_for_gpu("A100 80GB", "latest"), "latest-sm80");
+        assert_eq!(image_tag_for_gpu("A100 PCIe", "latest"), "latest-sm80");
+        assert_eq!(image_tag_for_gpu("RTX 3090", "latest"), "latest-sm86");
+        assert_eq!(image_tag_for_gpu("NVIDIA A40", "latest"), "latest-sm86");
+        assert_eq!(image_tag_for_gpu("H100 SXM", "latest"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("H200 SXM", "latest"), "latest-sm90");
+        assert_eq!(image_tag_for_gpu("NVIDIA A10", "latest"), "latest-sm86");
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA RTX A6000", "latest"),
+            "latest-sm86"
+        );
+        assert_eq!(image_tag_for_gpu("NVIDIA A16", "latest"), "latest-sm86");
+        assert_eq!(image_tag_for_gpu("NVIDIA A2", "latest"), "latest-sm86");
+        assert_eq!(image_tag_for_gpu("NVIDIA A30", "latest"), "latest-sm80");
+        assert_eq!(image_tag_for_gpu("NVIDIA B300", "latest"), "latest-sm100");
+        assert_eq!(image_tag_for_gpu("NVIDIA GB300", "latest"), "latest-sm100");
+        assert_eq!(
+            image_tag_for_gpu("NVIDIA Blackwell", "latest"),
+            "latest",
+            "generic Blackwell must not guess between incompatible targets"
+        );
     }
 
     #[test]

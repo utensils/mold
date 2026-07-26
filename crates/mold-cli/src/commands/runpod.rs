@@ -12,9 +12,9 @@ use colored::Colorize;
 use mold_core::config::Config;
 use mold_core::error::MoldError;
 use mold_core::runpod::{
-    image_tag_for_gpu, valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest,
-    GpuType, NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV,
-    DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
+    valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest, GpuType,
+    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, API_KEY_ENV, DEFAULT_ENDPOINT,
+    NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 
 use crate::theme;
@@ -892,11 +892,24 @@ pub async fn build_create_request(
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
 
     // Resolve image tag.
-    let image_tag = opts
-        .image_tag
-        .clone()
-        .unwrap_or_else(|| image_tag_for_gpu(&gpu_display).to_string());
-    let image = format!("ghcr.io/utensils/mold:{image_tag}");
+    let image = if let Some(image_tag) = opts.image_tag.clone() {
+        if image_tag.starts_with("sha256:") {
+            let reference = format!("ghcr.io/utensils/mold@{image_tag}");
+            if !mold_core::cuda_distribution::is_exact_image_digest_reference(&reference) {
+                bail!("--image-tag sha256 digest must contain exactly 64 hexadecimal characters");
+            }
+            reference
+        } else {
+            format!("ghcr.io/utensils/mold:{image_tag}")
+        }
+    } else {
+        mold_core::cuda_distribution::resolve_distribution_image_reference(
+            mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
+            &gpu_display,
+            mold_core::cuda_distribution::distribution_image_version(),
+        )
+        .await?
+    };
 
     // Resolve volume + network volume.
     let volume_id = opts

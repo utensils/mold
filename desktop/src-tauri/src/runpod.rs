@@ -1,7 +1,7 @@
 use mold_core::runpod::{
-    image_tag_for_gpu, valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest,
-    Datacenter, GpuType, NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest,
-    DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
+    valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest, Datacenter, GpuType,
+    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, DEFAULT_ENDPOINT,
+    NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
@@ -131,6 +131,7 @@ fn default_pod_name() -> String {
 fn build_request(
     input: RunPodCreateInput,
     hf_token: Option<String>,
+    image_name: String,
 ) -> Result<CreatePodRequest, String> {
     if input.gpu_type_id.trim().is_empty() {
         return Err("Choose a GPU before launching.".into());
@@ -162,10 +163,7 @@ fn build_request(
             .name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(default_pod_name),
-        image_name: format!(
-            "ghcr.io/utensils/mold:{}",
-            image_tag_for_gpu(&input.gpu_display_name)
-        ),
+        image_name,
         gpu_type_ids: vec![input.gpu_type_id],
         cloud_type,
         data_center_ids: input.datacenter_id.map(|id| vec![id]),
@@ -254,7 +252,14 @@ pub async fn runpod_create(
     } else {
         None
     };
-    let request = build_request(input, hf_token)?;
+    let image_name = mold_core::cuda_distribution::resolve_distribution_image_reference(
+        mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
+        &input.gpu_display_name,
+        mold_core::cuda_distribution::distribution_image_version(),
+    )
+    .await
+    .map_err(|error| format!("Could not resolve the Mold container: {error:#}"))?;
+    let request = build_request(input, hf_token, image_name)?;
     client
         .create_pod(&request)
         .await
@@ -383,7 +388,12 @@ mod tests {
 
     #[test]
     fn create_request_selects_image_ports_model_and_token() {
-        let request = build_request(input(), Some("hf_secret".into())).unwrap();
+        let request = build_request(
+            input(),
+            Some("hf_secret".into()),
+            "ghcr.io/utensils/mold:latest-sm120".into(),
+        )
+        .unwrap();
         assert_eq!(request.image_name, "ghcr.io/utensils/mold:latest-sm120");
         assert_eq!(request.ports, ["7680/http", "22/tcp"]);
         assert_eq!(request.cloud_type, "SECURE");
@@ -396,7 +406,7 @@ mod tests {
     fn create_request_rejects_invalid_resource_values() {
         let mut invalid = input();
         invalid.container_disk_gb = 2;
-        assert!(build_request(invalid, None)
+        assert!(build_request(invalid, None, "image".into())
             .unwrap_err()
             .contains("between 10 and 1000"));
     }
@@ -416,7 +426,7 @@ mod tests {
                 size: 100,
             },
         );
-        let request = build_request(input, None).unwrap();
+        let request = build_request(input, None, "image".into()).unwrap();
         assert_eq!(request.cloud_type, "SECURE");
         assert_eq!(request.data_center_ids, Some(vec!["US-KS-2".into()]));
         assert_eq!(request.network_volume_id.as_deref(), Some("nv-1"));

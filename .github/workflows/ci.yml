@@ -69,9 +69,24 @@ jobs:
               - '.github/workflows/ci.yml'
             release:
               - 'Dockerfile'
+              - 'flake.nix'
+              - 'install.sh'
+              - 'nix/**'
+              - 'packaging/**'
+              - 'crates/mold-cli/Cargo.toml'
+              - 'desktop/src-tauri/Cargo.toml'
               - 'release-plz.toml'
+              - 'website/deployment/docker.md'
+              - 'website/guide/installation.md'
+              - '.github/workflows/release.yml'
               - 'scripts/release/**'
+              - 'scripts/verify-cuda-release-binary.sh'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
+              - 'scripts/tests/cuda-distribution-contract.sh'
+              - 'scripts/tests/install-cuda-arch.sh'
+              - 'scripts/tests/cuda-qualification-contract.sh'
+              - 'scripts/qualify-cuda-sm86.sh'
+              - 'docs/qualification/**'
               - 'scripts/tests/docker-web-context.sh'
               - 'scripts/tests/release-sync-pr.sh'
               - '.github/workflows/release-plz.yml'
@@ -89,6 +104,12 @@ jobs:
         run: bash scripts/tests/ci-coverage-disk-guard.sh
       - name: Test Docker web build context
         run: bash scripts/tests/docker-web-context.sh
+      - name: Test CUDA distribution contract
+        run: bash scripts/tests/cuda-distribution-contract.sh
+      - name: Test installer CUDA architecture selection
+        run: bash scripts/tests/install-cuda-arch.sh
+      - name: Test deferred CUDA qualification contract
+        run: bash scripts/tests/cuda-qualification-contract.sh
 
   docs:
     needs: changes

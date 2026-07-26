@@ -3,9 +3,9 @@
 use anyhow::{anyhow, bail, Result};
 use mold_core::config::Config;
 use mold_core::lambda::{
-    build_launch_request, filesystem_name, gpu_uses_unsupported_linux_arm64, image_tag_for_gpu,
-    render_cloud_init, AvailabilityRow, CloudInitOptions, CreateFilesystemRequest,
-    CreateSshKeyRequest, Filesystem, Instance, LambdaClient, LambdaSettings, LaunchRequestInput,
+    build_launch_request, filesystem_name, gpu_uses_unsupported_linux_arm64, render_cloud_init,
+    AvailabilityRow, CloudInitOptions, CreateFilesystemRequest, CreateSshKeyRequest, Filesystem,
+    Instance, LambdaClient, LambdaSettings, LaunchRequestInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -348,9 +348,12 @@ pub async fn run_deploy(opts: DeployOptions) -> Result<()> {
         Some(ensure_filesystem(&client, &fs_name, &region).await?.id)
     };
 
-    let gpu_desc = instance_type.as_str();
-    let image_tag = image_tag_for_gpu(gpu_desc, env!("CARGO_PKG_VERSION"));
-    let image = format!("{}:{image_tag}", config.lambda.image_repository());
+    let image = mold_core::cuda_distribution::resolve_distribution_image_reference(
+        config.lambda.image_repository(),
+        instance_type.as_str(),
+        mold_core::cuda_distribution::distribution_image_version(),
+    )
+    .await?;
     let user_data = render_cloud_init(&CloudInitOptions {
         image,
         mount_path: config.lambda.filesystem_mount_path.clone(),

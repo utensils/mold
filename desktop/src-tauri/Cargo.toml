@@ -94,7 +94,8 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 default = []
 # CPU-only by default so CI runs without a GPU; desktop-dev/desktop-build
 # turn on the native GPU backend for real generation.
-cuda = ["mold-server/cuda"]
+cuda = ["mold-server/cuda", "nvml"]
+nvml = ["mold-server/nvml"]
 metal = ["mold-server/metal"]
 
 [profile.release]
