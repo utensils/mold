@@ -268,6 +268,7 @@ pub async fn run_status() -> Result<()> {
             let client = mold_core::MoldClient::new(&srv.base_url());
             match client.server_status().await {
                 Ok(status) => {
+                    let devices = client.devices().await.ok();
                     eprintln!("Server running (PID {})", srv.pid);
                     eprintln!("  Version: {}", status.version);
                     eprintln!("  Port:    {}", srv.port);
@@ -280,7 +281,27 @@ pub async fn run_status() -> Result<()> {
                             status.models_loaded.join(", ")
                         }
                     );
-                    if let Some(gpu) = &status.gpu_info {
+                    if let Some(devices) =
+                        devices.as_ref().filter(|state| !state.devices.is_empty())
+                    {
+                        for device in &devices.devices {
+                            let ordinal = device
+                                .ordinal
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "—".into());
+                            let used = device.memory.used_bytes.unwrap_or(0) / 1024_u64.pow(2);
+                            let total = device.memory.total_bytes.unwrap_or(0) / 1024_u64.pow(2);
+                            let utilization = device
+                                .telemetry
+                                .utilization_percent
+                                .map(|value| format!("{value}%"))
+                                .unwrap_or_else(|| "—".into());
+                            eprintln!(
+                                "  GPU {ordinal}: {} [{}] {:?}/{:?}, VRAM {used}/{total}MB, util {utilization}",
+                                device.name, device.id, device.admin_state, device.health
+                            );
+                        }
+                    } else if let Some(gpu) = &status.gpu_info {
                         eprintln!("  GPU:     {}", gpu.name);
                         eprintln!("  VRAM:    {}/{}MB", gpu.vram_used_mb, gpu.vram_total_mb);
                     }

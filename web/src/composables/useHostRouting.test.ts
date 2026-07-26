@@ -34,6 +34,7 @@ vi.mock("../components/machines/hostClient", () => ({
       ? Promise.resolve(canned)
       : Promise.reject(new Error("legacy server"));
   },
+  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
 }));
 
 function model(

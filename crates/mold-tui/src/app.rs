@@ -110,6 +110,11 @@ pub enum BackgroundEvent {
         host_id: String,
         queue: Option<mold_core::QueueListingWire>,
     },
+    /// Per-host stable-ID device inventory for the selected Machines row.
+    HostDevicesUpdate {
+        host_id: String,
+        devices: Option<mold_core::DeviceState>,
+    },
     /// Result of the connect-a-machine test fetch.
     MachineConnectTested {
         url: String,
@@ -3564,6 +3569,18 @@ impl App {
             Action::MachinesNextDevice if self.active_view == View::Machines => {
                 self.machines.select_next_device();
             }
+            Action::MachinesDevicePrev
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_prev_device();
+            }
+            Action::MachinesDeviceNext
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_next_device();
+            }
             Action::MachinesToggleDevice
                 if self.active_view == View::Machines
                     && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
@@ -6106,6 +6123,9 @@ impl App {
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);
+                }
+                BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
+                    self.machines.apply_devices(host_id, devices);
                 }
                 BackgroundEvent::MachineConnectTested {
                     url,
@@ -12237,6 +12257,7 @@ mod tests {
                         metadata: None,
                     },
                 ],
+                plan: None,
             }),
         );
 

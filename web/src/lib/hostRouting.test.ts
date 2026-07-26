@@ -64,6 +64,14 @@ describe("pickAutoHost", () => {
     expect(picked?.id).toBe("b");
   });
 
+  it("prefers the earliest predicted completion over raw queue depth", () => {
+    const picked = pickAutoHost([
+      host({ id: "slow", queueDepth: 1, predictedCompletionMs: 20_000 }),
+      host({ id: "fast", queueDepth: 4, predictedCompletionMs: 10_000 }),
+    ]);
+    expect(picked?.id).toBe("fast");
+  });
+
   it("treats an unknown queue depth as busiest", () => {
     const picked = pickAutoHost([
       host({ id: "a", queueDepth: null }),

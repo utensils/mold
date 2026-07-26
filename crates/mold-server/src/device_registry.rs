@@ -7,6 +7,7 @@
 //! jobs or querying CUDA on an HTTP request.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use mold_core::{
@@ -113,6 +114,7 @@ pub struct DeviceRegistry {
     explicit_preferences: RwLock<BTreeMap<String, bool>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     transient_ids: Mutex<HashMap<String, String>>,
+    mutation_sequence: AtomicU64,
 }
 
 impl DeviceRegistry {
@@ -144,6 +146,7 @@ impl DeviceRegistry {
             explicit_preferences: RwLock::new(explicit_preferences),
             metadata_db,
             transient_ids: Mutex::new(HashMap::new()),
+            mutation_sequence: AtomicU64::new(0),
         }
     }
 
@@ -171,6 +174,7 @@ impl DeviceRegistry {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(device_id.to_string(), enabled);
+        self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -192,6 +196,10 @@ impl DeviceRegistry {
 
     pub fn has_devices(&self) -> bool {
         !self.discovery.devices().is_empty()
+    }
+
+    pub fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence.load(Ordering::SeqCst)
     }
 
     pub fn snapshot(
@@ -296,6 +304,12 @@ impl DeviceRegistry {
                     device.visible_ordinal == Some(worker.gpu.ordinal)
                         && device.backend == worker.gpu.backend
                 });
+                let active = worker.is_some_and(|status| {
+                    !matches!(
+                        status.state,
+                        GpuWorkerState::Idle | GpuWorkerState::Degraded
+                    )
+                });
                 let admin_state = if !device.startup_allowed {
                     DeviceAdminState::StartupExcluded
                 } else if pool.workers.is_starting(&id)
@@ -310,6 +324,8 @@ impl DeviceRegistry {
                     DeviceAdminState::Draining
                 } else if desired_enabled {
                     DeviceAdminState::Enabled
+                } else if active {
+                    DeviceAdminState::Draining
                 } else {
                     DeviceAdminState::Disabled
                 };

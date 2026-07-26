@@ -65,6 +65,22 @@ Router assembled in `crates/mold-server/src/routes.rs::create_router` (state rou
 | GET        | `/metrics`                                | —                                                                                | Prometheus text                                                                                                                                                                                                                                               | Only with `metrics` feature; mounted **outside** auth/rate-limit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | GET/HEAD   | `/*` (fallback)                           | —                                                                                | Embedded Vue SPA (rust-embed) or inline placeholder                                                                                                                                                                                                           | `web_ui.rs`; ETag/304, immutable cache for `assets/*`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
+Current multi-GPU servers additionally expose `GET /api/devices` and
+`PATCH /api/devices/:stable-id {enabled}`. The inventory includes every
+visible full GPU or MIG instance, stable identity, nullable telemetry,
+lifecycle/health/activity, active work, and planned work. Disabling an active
+device returns its draining state and prevents new assignments; current work
+finishes. Device mutation is authenticated and rate-limited like generation.
+
+`GET /api/queue` retains the legacy `entries` projection and adds an optional
+versioned `plan` with stable device lanes, blocked/assignment reasons,
+estimated start/finish plus confidence, and the sliding replan deadline.
+`PATCH /api/queue/:id` accepts additive `hard_pinned_device_id`; legacy
+`target_gpu` remains supported, and supplying both is valid only when they
+resolve to the same device. `/api/events` adds `queue_plan_changed` and
+`device_state_changed` deltas; clients bootstrap from the two snapshot
+endpoints and apply only newer plan versions.
+
 ### Streaming / progress mechanism
 
 **SSE only — there are no WebSockets anywhere.** All progress is `axum::response::sse::Sse` with a 15 s keepalive `ping` comment. Two channel patterns:

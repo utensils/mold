@@ -38,6 +38,8 @@ export interface RoutableHost {
   status: HostRoutingStatus;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
+  /** Predicted end of this host's current plan. Null on legacy hosts. */
+  predictedCompletionMs?: number | null;
   gpu: RoutableGpu | null;
 }
 
@@ -61,6 +63,10 @@ function depth(host: RoutableHost): number {
   return host.queueDepth ?? Number.MAX_SAFE_INTEGER;
 }
 
+function completion(host: RoutableHost): number {
+  return host.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
+}
+
 /**
  * Auto routing: the ready host with the shallowest queue wins; unknown depth
  * counts as busiest; this server wins ties. Null when nothing is ready.
@@ -71,8 +77,11 @@ export function pickAutoHost<T extends RoutableHost>(
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
+    if (completion(h) < completion(best)) return h;
+    if (completion(h) > completion(best)) return best;
     if (depth(h) < depth(best)) return h;
     if (depth(h) === depth(best) && isOrigin(h) && !isOrigin(best)) return h;
+    if (depth(h) === depth(best) && h.id < best.id) return h;
     return best;
   });
 }

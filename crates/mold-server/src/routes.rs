@@ -2430,13 +2430,28 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     )
 )]
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
+    Json(current_device_state(&state))
+}
+
+fn current_device_state(state: &AppState) -> DeviceState {
     let resources = state.resources.latest();
     let mut snapshot =
         state
             .device_registry
             .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
     annotate_restart_required(&state, &mut snapshot);
-    Json(snapshot)
+    if let Some(plan) = state.scheduled_work.latest_plan() {
+        snapshot.plan_version = plan.plan_version;
+        for device in &mut snapshot.devices {
+            device.planned_work_ids = plan
+                .work_items
+                .iter()
+                .filter(|work| work.planned_device_id.as_deref() == Some(device.id.as_str()))
+                .map(|work| work.work_id.clone())
+                .collect();
+        }
+    }
+    snapshot
 }
 
 fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
@@ -2689,7 +2704,9 @@ async fn health() -> impl IntoResponse {
     )
 )]
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
-    Json(state.job_registry.snapshot())
+    let mut listing = state.job_registry.snapshot();
+    listing.plan = state.scheduled_work.latest_plan();
+    Json(listing)
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -2712,6 +2729,12 @@ struct QueuePatchRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<usize>)]
     target_gpu: Option<Option<usize>>,
+    /// Preferred stable device ID. Absent leaves the pin unchanged; `null`
+    /// means Auto. Stable IDs are the durable API and take the place of
+    /// ordinal pins for new clients.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    hard_pinned_device_id: Option<Option<String>>,
     /// New 0-based index for the job among the queued jobs. Clamped into range
     /// (a large value sends it to the back). Absent means no reorder.
     #[serde(default)]
@@ -2747,6 +2770,31 @@ async fn patch_queue_job(
             )));
         }
     }
+    let stable_target_gpu = match req.hard_pinned_device_id.as_ref() {
+        Some(Some(id)) => {
+            let state_now = current_device_state(&state);
+            let device = state_now
+                .devices
+                .iter()
+                .find(|device| device.id == *id)
+                .ok_or_else(|| {
+                    ApiError::validation(format!("device {id} is not visible on this server"))
+                })?;
+            Some(Some(device.ordinal.ok_or_else(|| {
+                ApiError::validation(format!("device {id} has no schedulable worker ordinal"))
+            })?))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    if let (Some(legacy), Some(stable)) = (req.target_gpu, stable_target_gpu) {
+        if legacy != stable {
+            return Err(ApiError::validation(
+                "target_gpu and hard_pinned_device_id resolve to different devices",
+            ));
+        }
+    }
+    let resolved_target_gpu = stable_target_gpu.or(req.target_gpu);
 
     // A mutation response is also the scheduler acknowledgement: the final
     // lease claim takes this same fence, so no plan built from the old lane or
@@ -2756,7 +2804,7 @@ async fn patch_queue_job(
     // Both edits are independent and additive — apply whichever the request
     // supplied. `target_gpu` only when the field was present (absent leaves the
     // lane untouched); `position` only when a reorder was requested.
-    if let Some(target_gpu) = req.target_gpu {
+    if let Some(target_gpu) = resolved_target_gpu {
         state
             .job_registry
             .set_target_gpu(&id, target_gpu)
@@ -3071,11 +3119,17 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_pause: true,
             can_cancel_all: true,
             can_reorder: true,
+            stable_device_pins: true,
+            cooperative_cancellation: false,
+            server_batch: false,
         },
         devices: mold_core::DeviceCapabilities {
             available: true,
             lifecycle: state.scheduled_work.v2_authoritative(),
             restart_enable: !state.scheduled_work.v2_authoritative(),
+            stable_pins: true,
+            planned_lanes: state.scheduled_work.v2_authoritative(),
+            learned_eta: true,
         },
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),

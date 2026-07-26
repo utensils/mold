@@ -26,9 +26,11 @@ import {
 import {
   hostDevices,
   hostModels,
+  hostQueue,
   hostStatus,
 } from "../components/machines/hostClient";
 import type { DeviceInfo } from "@studio/api/devices";
+import { predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
@@ -56,6 +58,7 @@ interface HostTelemetry {
   status: HostRoutingStatus;
   queueDepth: number | null;
   gpu: RoutableGpu | null;
+  predictedCompletionMs: number | null;
 }
 
 export interface HostRouting {
@@ -104,6 +107,7 @@ const hosts = computed<RoutableHost[]>(() =>
       status: live?.status ?? "connecting",
       queueDepth: live?.queueDepth ?? null,
       gpu: live?.gpu ?? null,
+      predictedCompletionMs: live?.predictedCompletionMs ?? null,
     };
     if (entry.apiKey) host.apiKey = entry.apiKey;
     return host;
@@ -192,10 +196,11 @@ function gpuFromStatus(
 }
 
 async function pollHost(entry: HostEntry): Promise<void> {
-  const [status, models, devices] = await Promise.allSettled([
+  const [status, models, devices, queue] = await Promise.allSettled([
     hostStatus(entry),
     hostModels(entry),
     hostDevices(entry),
+    hostQueue(entry),
   ]);
   if (status.status === "fulfilled") {
     const inventory =
@@ -211,12 +216,21 @@ async function pollHost(entry: HostEntry): Promise<void> {
         status: generationReady ? "ready" : "error",
         queueDepth: status.value.queue_depth ?? null,
         gpu: gpuFromStatus(status.value, inventory),
+        predictedCompletionMs:
+          queue.status === "fulfilled" && queue.value.plan
+            ? predictedCompletionUnixMs(queue.value.plan)
+            : null,
       },
     };
   } else {
     telemetry.value = {
       ...telemetry.value,
-      [entry.id]: { status: "error", queueDepth: null, gpu: null },
+      [entry.id]: {
+        status: "error",
+        queueDepth: null,
+        gpu: null,
+        predictedCompletionMs: null,
+      },
     };
   }
   if (models.status === "fulfilled") {

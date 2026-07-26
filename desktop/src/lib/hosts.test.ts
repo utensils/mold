@@ -60,6 +60,20 @@ describe("pickAutoHost", () => {
     expect(pickAutoHost([local, busy, idle])?.id).toBe("idle");
   });
 
+  it("prefers the earlier predicted completion before queue depth", () => {
+    const deepButFast = host({
+      id: "fast",
+      queueDepth: 4,
+      predictedCompletionMs: 10_000,
+    });
+    const shallowButSlow = host({
+      id: "slow",
+      queueDepth: 1,
+      predictedCompletionMs: 20_000,
+    });
+    expect(pickAutoHost([shallowButSlow, deepButFast])?.id).toBe("fast");
+  });
+
   it("prefers the local host on a queue-depth tie", () => {
     const local = host({ id: "local", kind: "local", queueDepth: 1 });
     const remote = host({ id: "remote", queueDepth: 1 });

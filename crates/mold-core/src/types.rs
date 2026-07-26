@@ -1145,6 +1145,70 @@ pub struct QueueJobEntryWire {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
+/// Confidence attached to a learned scheduler ETA.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueEstimateConfidence {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+/// One internal scheduler unit in the additive queue-plan projection.
+///
+/// Strings are used for extensible scheduler states/reasons so an older
+/// client can continue rendering a plan after a server adds a work kind.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueWorkItem {
+    pub work_id: String,
+    pub parent_id: String,
+    pub work_kind: String,
+    pub priority_class: String,
+    pub queue_rank: u64,
+    pub bypass_count: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_pinned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_order: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_start_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_finish_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub estimate_confidence: QueueEstimateConfidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_stage: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_partitions: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_phase: Option<String>,
+}
+
+/// Versioned scheduler plan appended to `GET /api/queue`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePlan {
+    pub plan_version: u64,
+    pub state_version: u64,
+    pub optimizer_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_since_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_replan_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub work_items: Vec<QueueWorkItem>,
+}
+
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
 /// mold-server's `job_registry::QueueListing`. The server wraps the rows in
 /// an object (not a bare array) so the response can grow extra fields without
@@ -1153,6 +1217,10 @@ pub struct QueueJobEntryWire {
 pub struct QueueListingWire {
     #[serde(default)]
     pub entries: Vec<QueueJobEntryWire>,
+    /// Absent on legacy servers and before the V2 coordinator has produced
+    /// its first plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<QueuePlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -3812,6 +3880,15 @@ pub struct QueueCapabilities {
     pub can_cancel_all: bool,
     #[serde(default)]
     pub can_reorder: bool,
+    /// Queue pins may use opaque stable device IDs.
+    #[serde(default)]
+    pub stable_device_pins: bool,
+    /// Server can cooperatively cancel already-running work.
+    #[serde(default)]
+    pub cooperative_cancellation: bool,
+    /// Server accepts one atomic batch request instead of client siblings.
+    #[serde(default)]
+    pub server_batch: bool,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
@@ -3968,6 +4045,15 @@ pub struct DeviceCapabilities {
     /// even though live lifecycle mutation is not authoritative.
     #[serde(default)]
     pub restart_enable: bool,
+    /// Queue pins may use stable device IDs.
+    #[serde(default)]
+    pub stable_pins: bool,
+    /// Queue snapshots include versioned per-device lanes.
+    #[serde(default)]
+    pub planned_lanes: bool,
+    /// ETAs may be backed by persisted runtime observations.
+    #[serde(default)]
+    pub learned_eta: bool,
 }
 
 /// Restart-time GPU dispatch rollout state.
@@ -4384,6 +4470,11 @@ pub enum ServerEvent {
     /// New-job dispatch resumed via `POST /api/queue/resume`. Emitted only on
     /// the paused→resumed transition.
     QueueResumed,
+    /// The V2 scheduler published a newer versioned plan. Clients replace
+    /// their tentative lanes only when `plan_version` advances.
+    QueuePlanChanged {
+        plan: Box<QueuePlan>,
+    },
     /// A machine-wide device lifecycle preference or runtime state changed.
     DeviceStateChanged {
         device_id: String,
@@ -4463,6 +4554,21 @@ mod server_event_tests {
         assert!(serde_json::to_string(&multi)
             .unwrap()
             .contains(r#""gpu":1"#));
+    }
+
+    #[test]
+    fn plan_and_device_events_are_additive_snake_case_contracts() {
+        let event = ServerEvent::QueuePlanChanged {
+            plan: Box::new(QueuePlan {
+                plan_version: 4,
+                state_version: 7,
+                optimizer_state: "optimized".into(),
+                ..QueuePlan::default()
+            }),
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "queue_plan_changed");
+        assert_eq!(json["plan"]["plan_version"], 4);
     }
 
     #[test]

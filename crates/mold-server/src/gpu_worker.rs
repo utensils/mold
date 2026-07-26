@@ -408,7 +408,7 @@ fn run_gpu_owner_loop(
         #[cfg(test)]
         pause_after_acceptance_for_test(&fence.work_id);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_owner_work(worker, *grant, &scheduler_tx);
+            process_owner_work(worker, *grant, &scheduler_tx)
         }));
         worker.release_in_flight();
         if outcome.is_err() {
@@ -422,6 +422,9 @@ fn run_gpu_owner_loop(
             ordinal: worker.gpu.ordinal,
             owner_epoch: worker.owner_epoch,
             worker_generation: generation,
+            successful: matches!(&outcome, Ok(true))
+                && !worker.poisoned.load(Ordering::SeqCst)
+                && !worker.fatal_cuda_error.load(Ordering::SeqCst),
         });
         if outcome.is_err()
             || worker.shutdown_requested.load(Ordering::SeqCst)
@@ -608,41 +611,45 @@ fn process_owner_work(
     worker: &GpuWorker,
     grant: LeaseGrant,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
-) {
+) -> bool {
     if let Err(error) = ensure_owner_thread(worker) {
         grant.work.reject(error.to_string());
-        return;
+        return false;
     }
     match grant.work {
         OwnerWork::Generation(mut job) => {
             job.lease = Some(grant.fence);
-            process_job(worker, *job, scheduler_tx);
+            process_job(worker, *job, scheduler_tx)
         }
         OwnerWork::PromptExpansion(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_prompt_expansion(worker, *job);
+            process_prompt_expansion(worker, *job)
         }
         OwnerWork::PostUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
             process_post_generation_upscale(worker, *job);
+            true
         }
         OwnerWork::StandaloneUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_standalone_upscale(worker, *job);
+            process_standalone_upscale(worker, *job)
         }
         OwnerWork::AdminModelLoad(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
             let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
+            let successful = result.is_ok();
             let _ = job.result_tx.send(result);
+            successful
         }
         OwnerWork::AdminModelUnload(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_admin_unload(worker, *job);
+            process_admin_unload(worker, *job)
         }
         #[cfg(test)]
         OwnerWork::Probe { run, .. } => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
             run();
+            true
         }
     }
 }
@@ -658,16 +665,23 @@ fn process_legacy_owner_work(
     }
     match grant.work {
         OwnerWork::Generation(job) => {
-            process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
+            let _ =
+                process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
         }
-        OwnerWork::PromptExpansion(job) => process_prompt_expansion(worker, *job),
+        OwnerWork::PromptExpansion(job) => {
+            let _ = process_prompt_expansion(worker, *job);
+        }
         OwnerWork::PostUpscale(job) => process_post_generation_upscale(worker, *job),
-        OwnerWork::StandaloneUpscale(job) => process_standalone_upscale(worker, *job),
+        OwnerWork::StandaloneUpscale(job) => {
+            let _ = process_standalone_upscale(worker, *job);
+        }
         OwnerWork::AdminModelLoad(job) => {
             let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
             let _ = job.result_tx.send(result);
         }
-        OwnerWork::AdminModelUnload(job) => process_admin_unload(worker, *job),
+        OwnerWork::AdminModelUnload(job) => {
+            let _ = process_admin_unload(worker, *job);
+        }
         #[cfg(test)]
         OwnerWork::Probe { run, .. } => run(),
     }
@@ -685,7 +699,7 @@ fn commit_utility_allocation(
     });
 }
 
-fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
+fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::ExpandResult> {
         ensure_worker_not_poisoned(worker, &job.settings.model)?;
         #[cfg(feature = "expand")]
@@ -721,10 +735,12 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
             "prompt expansion fatally poisoned its owner context"
         );
     }
+    let successful = result.is_ok();
     let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+    successful
 }
 
-fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
+fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::UpscaleResponse> {
         ensure_worker_not_poisoned(worker, &job.model)?;
         let mut engine = mold_inference::create_upscale_engine(
@@ -750,7 +766,9 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
             "standalone upscale fatally poisoned its owner context"
         );
     }
+    let successful = result.is_ok();
     let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+    successful
 }
 
 fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) {
@@ -791,24 +809,24 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     drop(cleanup);
 }
 
-fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) {
+fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
     if let Err(error) =
         ensure_worker_not_poisoned(worker, job.model.as_deref().unwrap_or("active model"))
     {
         let _ = job.result_tx.send(Err(error.to_string()));
-        return;
+        return false;
     }
     if job.evict_cached {
         let Some(model) = job.model.as_deref() else {
             let _ = job
                 .result_tx
                 .send(Err("cached eviction requires a model name".to_string()));
-            return;
+            return false;
         };
-        let _ = job
-            .result_tx
-            .send(evict_cached_model_blocking(worker, model).map_err(|error| error.to_string()));
-        return;
+        let result = evict_cached_model_blocking(worker, model).map_err(|error| error.to_string());
+        let successful = result.is_ok();
+        let _ = job.result_tx.send(result);
+        return successful;
     }
     if let Some(expected) = job.model.as_deref() {
         let resident = worker
@@ -818,12 +836,13 @@ fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) {
             .clone();
         if resident.as_deref() != Some(expected) {
             let _ = job.result_tx.send(Ok(None));
-            return;
+            return true;
         }
     }
-    let _ = job
-        .result_tx
-        .send(unload_blocking(worker).map_err(|error| error.to_string()));
+    let result = unload_blocking(worker).map_err(|error| error.to_string());
+    let successful = result.is_ok();
+    let _ = job.result_tx.send(result);
+    successful
 }
 
 /// Evict parked engines on the worker thread that owns their device context.
@@ -1394,8 +1413,8 @@ fn process_job(
     worker: &GpuWorker,
     job: GpuJob,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
-) {
-    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx));
+) -> bool {
+    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx))
 }
 
 enum GenerationEventSink<'a> {
@@ -1437,7 +1456,11 @@ impl GenerationEventSink<'_> {
     }
 }
 
-fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: GenerationEventSink<'_>) {
+fn process_job_with_sink(
+    worker: &GpuWorker,
+    job: GpuJob,
+    event_sink: GenerationEventSink<'_>,
+) -> bool {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
     let job_id = job.id.clone();
@@ -1463,12 +1486,12 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
-        return;
+        return false;
     }
 
     // Mark the registry entry as running on this specific GPU. The /api/queue
@@ -1495,7 +1518,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     // Ensure model is loaded on this GPU.
@@ -1554,7 +1577,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
         if count_worker_failure {
             record_failure(worker);
         }
-        return;
+        return false;
     }
     worker.set_resident_execution_fingerprint(
         job.execution_plan
@@ -1578,7 +1601,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     // Set active generation state.
@@ -1602,7 +1625,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             "skipping generation after model readiness — client disconnected"
         );
         clear_active_generation(worker);
-        return;
+        return false;
     }
 
     // Take-and-restore: remove engine from cache, release lock during inference.
@@ -1620,7 +1643,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
         }
         let _ = job.result_tx.send(Err(err_msg));
         clear_active_generation(worker);
-        return;
+        return false;
     };
 
     // Set progress callback if SSE streaming.
@@ -1757,7 +1780,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                     }));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
-                return;
+                return false;
             }
 
             // Extract the primary image (or video thumbnail).
@@ -1805,9 +1828,10 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                             image: img,
                         })),
                     );
-                    match event_sink.followup_ready(work) {
+                    let followup_started = match event_sink.followup_ready(work) {
                         Ok(()) => {
                             std::mem::forget(cleanup);
+                            true
                         }
                         Err(work) => {
                             work.work.reject(
@@ -1815,14 +1839,16 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                                     .to_string(),
                             );
                             std::mem::forget(cleanup);
+                            false
                         }
-                    }
-                    return;
+                    };
+                    return followup_started;
                 }
             }
 
             finish_generation_success(job, response, img, None);
             drop(cleanup);
+            true
         }
         Ok(Err(e)) => {
             tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
@@ -1858,6 +1884,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                 }));
             }
             let _ = job.result_tx.send(Err(err_msg));
+            false
         }
         Err(panic_payload) => {
             tracing::error!(gpu = ordinal, model = %model_name, "Inference panicked");
@@ -1875,6 +1902,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                 }));
             }
             let _ = job.result_tx.send(Err(err_msg));
+            false
         }
     }
 }
@@ -4999,6 +5027,7 @@ mod tests {
                         ordinal: 0,
                         owner_epoch: 0,
                         worker_generation: 0,
+                        successful: false,
                     })
             ),
             None => panic!("owner event channel closed"),

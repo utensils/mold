@@ -124,6 +124,13 @@ export interface ServerCapabilities {
     can_cancel_all?: boolean;
     can_reorder?: boolean;
   };
+  devices?: {
+    available?: boolean;
+    lifecycle?: boolean;
+    stable_pins?: boolean;
+    planned_lanes?: boolean;
+    learned_eta?: boolean;
+  };
 }
 
 export function inferFormatFromName(filename: string): OutputFormat | null {
@@ -315,6 +322,7 @@ export interface QueueEntry {
 
 export interface QueueListing {
   entries: QueueEntry[];
+  plan?: import("@studio/api/queuePlan").QueuePlan | null;
 }
 
 export type SseProgressEvent =

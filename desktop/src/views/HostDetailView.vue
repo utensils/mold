@@ -5,6 +5,9 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { setDeviceEnabled } from "@studio/api/devices";
+import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
@@ -247,7 +250,40 @@ const installedModels = computed(() => hostModels.installedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
+const mutatingDeviceId = ref<string | null>(null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
+
+async function toggleDevice(deviceId: string, enabled: boolean) {
+  const target = hostTarget();
+  if (!target) return;
+  mutatingDeviceId.value = deviceId;
+  try {
+    await setDeviceEnabled(target, deviceId, enabled);
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Couldn't ${enabled ? "enable" : "disable"} device: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  } finally {
+    mutatingDeviceId.value = null;
+  }
+}
+
+async function unpinWork(workId: string) {
+  const target = hostTarget();
+  if (!target) return;
+  try {
+    await setQueueDevicePin(target, workId, null);
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Queue pin was not changed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  }
+}
 
 // ── Loaded-model chips: per-host unload ───────────────────────────────────
 
@@ -685,6 +721,17 @@ async function forget() {
                 </RouterLink>
               </div>
               <DownloadsTray :host-id="hostId" data-test="host-downloads" class="mt-2" />
+            </CardSurface>
+
+            <CardSurface large>
+              <DevicePanel
+                :devices="queueSnapshot?.devices ?? []"
+                :plan="queueSnapshot?.plan ?? null"
+                :mutable="queueSnapshot?.devices !== null"
+                :busy-device-id="mutatingDeviceId"
+                @unpin="unpinWork"
+                @toggle="toggleDevice"
+              />
             </CardSurface>
 
             <!-- Queue — the whole server queue (other clients' jobs included),

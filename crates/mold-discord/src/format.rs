@@ -169,6 +169,9 @@ pub fn format_generation_result(resp: &GenerateResponse, prompt: &str) -> EmbedD
 
     // Preserve insertion order so tests/UI stay stable.
     fields.retain(|(_, v, _)| !v.is_empty());
+    if let Some(gpu) = resp.gpu {
+        fields.push(("Device".to_string(), format!("GPU {gpu}"), true));
+    }
 
     EmbedData {
         title,
@@ -255,6 +258,14 @@ pub fn format_model_list(models: &[ModelInfoExtended]) -> EmbedData {
 
 /// Format server status into embed data.
 pub fn format_server_status(status: &ServerStatus) -> EmbedData {
+    format_server_status_with_devices(status, None, None)
+}
+
+pub fn format_server_status_with_devices(
+    status: &ServerStatus,
+    devices: Option<&mold_core::DeviceState>,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> EmbedData {
     let uptime = format_duration_secs(status.uptime_secs);
     let version = match (&status.git_sha, &status.build_date) {
         (Some(sha), Some(date)) => format!("{} ({sha}, {date})", status.version),
@@ -277,7 +288,32 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
         ("Models Loaded".to_string(), loaded, false),
     ];
 
-    if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
+    if let Some(devices) = devices.filter(|state| !state.devices.is_empty()) {
+        let summary = devices
+            .devices
+            .iter()
+            .map(|device| {
+                let ordinal = device
+                    .ordinal
+                    .map_or_else(|| "—".into(), |value| value.to_string());
+                let used = device.memory.used_bytes.unwrap_or(0) / 1024_u64.pow(2);
+                let total = device.memory.total_bytes.unwrap_or(0) / 1024_u64.pow(2);
+                let state = if device.admin_state == mold_core::DeviceAdminState::Draining {
+                    "finishing current work".to_string()
+                } else if device.health != mold_core::DeviceHealth::Healthy {
+                    format!("{:?}", device.health).to_lowercase()
+                } else {
+                    format!("{:?}", device.admin_state).to_lowercase()
+                };
+                format!(
+                    "GPU {ordinal} · {} · `{}` · {state} · {used}/{total}MB",
+                    device.name, device.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fields.push(("Devices".to_string(), summary, false));
+    } else if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
         let mut groups: Vec<(&str, usize, u64, u64)> = Vec::new();
         for gpu in gpus {
             if let Some((_, count, used, total)) =
@@ -313,6 +349,27 @@ pub fn format_server_status(status: &ServerStatus) -> EmbedData {
             format!(
                 "{} ({}MB / {}MB VRAM)",
                 gpu.name, gpu.vram_used_mb, gpu.vram_total_mb
+            ),
+            false,
+        ));
+    }
+    if let Some(queue) = queue {
+        let blocked = queue
+            .plan
+            .as_ref()
+            .map(|plan| {
+                plan.work_items
+                    .iter()
+                    .filter(|work| work.reason.is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        let planned = queue.plan.as_ref().map_or(0, |plan| plan.work_items.len());
+        fields.push((
+            "Queue".to_string(),
+            format!(
+                "{} active/queued · {planned} planned · {blocked} blocked",
+                queue.entries.len()
             ),
             false,
         ));

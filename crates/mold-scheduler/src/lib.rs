@@ -7,11 +7,16 @@
 //! state immediately before dispatch.
 
 mod eligibility;
+mod estimates;
 mod matching;
 mod planner;
 mod types;
 
 pub use eligibility::EligibilityIndex;
+pub use estimates::{
+    EstimateBucket, EstimateConfidence, EstimateKey, EstimateObservation, EstimateStore,
+    ResolvedEstimate, StaticEstimate,
+};
 pub use planner::{operation_budget, optimization_horizon, Planner};
 pub use types::{
     static_timing_for, AssignmentReason, Backend, BlockedReason, BlockedWork, BypassUpdate,

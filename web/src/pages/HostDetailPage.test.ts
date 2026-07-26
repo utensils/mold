@@ -13,12 +13,13 @@ import type {
 } from "../types";
 import { addHost, getHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
-import type { DeviceInfo } from "@studio/api/devices";
+import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 // Mutable fixtures the hostClient mock reads at call time.
 let poll: {
   status: ReturnType<typeof ref<HostStatus | null>>;
   devices: ReturnType<typeof ref<DeviceInfo[] | null>>;
+  deviceState: ReturnType<typeof ref<DeviceListResponse | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
@@ -77,6 +78,8 @@ vi.mock("../components/machines/hostClient", () => ({
   useHostPoll: () => poll,
   hostCapabilities: () => Promise.resolve(caps),
   hostQueue: () => Promise.resolve({ entries: queueEntries }),
+  setHostDeviceEnabled: () =>
+    Promise.resolve({ devices: poll.devices.value ?? [], plan_version: 0 }),
   hostModels: () => Promise.resolve(models),
   hostDownloads: () => Promise.resolve(downloadsListing),
   // Wrappers defer reading the vi.fns until call time (the factory is hoisted
@@ -229,6 +232,7 @@ beforeEach(() => {
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     devices: ref<DeviceInfo[] | null>(null),
+    deviceState: ref<DeviceListResponse | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
     lastSeen: ref<number | null>(Date.now()),

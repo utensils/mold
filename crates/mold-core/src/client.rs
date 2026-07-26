@@ -802,13 +802,13 @@ impl MoldClient {
         device_id: &str,
         enabled: bool,
     ) -> Result<crate::DeviceInfo> {
-        let mut url = reqwest::Url::parse(&self.base_url)?;
-        url.path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("Mold server URL cannot be a base URL"))?
-            .extend(["api", "devices", device_id]);
         let response = self
             .client
-            .patch(url)
+            .patch(format!(
+                "{}/api/devices/{}",
+                self.base_url,
+                encode_path_segment(device_id)
+            ))
             .json(&crate::DeviceMutationRequest { enabled })
             .send()
             .await?;
@@ -1500,7 +1500,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("PATCH"))
-            .and(path("/api/devices/cuda:device-1"))
+            .and(path("/api/devices/cuda%3Adevice-1"))
             .and(body_json(serde_json::json!({ "enabled": true })))
             .respond_with(
                 ResponseTemplate::new(409)

@@ -23,9 +23,11 @@ import type { HostEntry } from "../../lib/hostRegistry";
 import { parseCurrentServerStatus } from "@studio/api/client";
 import {
   listDevices,
+  setDeviceEnabled,
   type DeviceInfo,
   type DeviceListResponse,
 } from "@studio/api/devices";
+import { parseQueueListing } from "@studio/api/queuePlan";
 
 export type HostStatus = ServerStatus;
 export type HostCapabilities = ServerCapabilities;
@@ -91,6 +93,18 @@ export function hostDevices(host: HostEntry): Promise<DeviceListResponse> {
   return listDevices({ baseUrl: host.url, apiKey: host.apiKey ?? null });
 }
 
+export function setHostDeviceEnabled(
+  host: HostEntry,
+  deviceId: string,
+  enabled: boolean,
+): Promise<DeviceListResponse> {
+  return setDeviceEnabled(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    deviceId,
+    enabled,
+  );
+}
+
 export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
   return getJson<DiscoveryPeer[]>(host, "/api/discovery/peers", signal);
 }
@@ -122,7 +136,9 @@ export function hostResources(host: HostEntry, signal?: AbortSignal) {
 }
 
 export function hostQueue(host: HostEntry, signal?: AbortSignal) {
-  return getJson<QueueListing>(host, "/api/queue", signal);
+  return getJson<unknown>(host, "/api/queue", signal).then(
+    (value) => parseQueueListing(value) as QueueListing,
+  );
 }
 
 export function hostModels(host: HostEntry, signal?: AbortSignal) {
@@ -203,6 +219,7 @@ export interface HostPoll {
   status: Ref<HostStatus | null>;
   /** Full current-server inventory, or null when the endpoint is unsupported. */
   devices: Ref<DeviceInfo[] | null>;
+  deviceState: Ref<DeviceListResponse | null>;
   resources: Ref<ResourceSnapshot | null>;
   online: Ref<boolean>;
   /** Epoch ms of the last successful status read, or null before the first. */
@@ -232,6 +249,7 @@ export function useHostPoll(
   const intervalMs = options.intervalMs ?? 5000;
   const status = ref<HostStatus | null>(null);
   const devices = ref<DeviceInfo[] | null>(null);
+  const deviceState = ref<DeviceListResponse | null>(null);
   const resources = ref<ResourceSnapshot | null>(null);
   const online = ref(false);
   const lastSeen = ref<number | null>(null);
@@ -252,13 +270,11 @@ export function useHostPoll(
         options.withResources
           ? hostResources(host, signal).catch(() => null)
           : Promise.resolve(null),
-        hostDevices(host).then(
-          (snapshot) => snapshot.devices,
-          () => null,
-        ),
+        hostDevices(host).catch(() => null),
       ]);
       status.value = nextStatus;
-      devices.value = nextDevices;
+      deviceState.value = nextDevices;
+      devices.value = nextDevices?.devices ?? null;
       if (options.withResources && nextResources)
         resources.value = nextResources;
       online.value = true;
@@ -293,6 +309,7 @@ export function useHostPoll(
   return {
     status,
     devices,
+    deviceState,
     resources,
     online,
     lastSeen,

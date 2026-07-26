@@ -377,6 +377,21 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         theme.dim().add_modifier(Modifier::BOLD),
     )));
     let listing = st.queue.as_ref().filter(|(id, _)| id == host_id);
+    if let Some(plan) = listing.and_then(|(_, listing)| listing.plan.as_ref()) {
+        if let Some(deadline) = plan.next_replan_at_unix_ms {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Tentative plan · replans in {}s",
+                    deadline.saturating_sub(now).div_ceil(1000)
+                ),
+                theme.dim(),
+            )));
+        }
+    }
     match listing {
         Some((_, listing)) if !listing.entries.is_empty() => {
             let now_ms = std::time::SystemTime::now()
@@ -403,6 +418,12 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                         job.position,
                     )
                 };
+                let plan_detail = listing.plan.as_ref().and_then(|plan| {
+                    plan.work_items
+                        .iter()
+                        .find(|work| work.parent_id == job.id)
+                        .map(queue_plan_detail)
+                });
                 let style = if selected {
                     theme.list_selected()
                 } else if job.state == "running" {
@@ -411,6 +432,9 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                     theme.dim()
                 };
                 lines.push(Line::from(Span::styled(text, style)));
+                if let Some(detail) = plan_detail.filter(|detail| !detail.is_empty()) {
+                    lines.push(Line::from(Span::styled(format!("  {detail}"), theme.dim())));
+                }
             }
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
@@ -554,6 +578,25 @@ fn short_device_id(id: &str) -> String {
     } else {
         format!("{}…{}", &id[..11], &id[id.len() - 6..])
     }
+}
+
+fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
+    if let Some(reason) = &work.reason {
+        return reason.replace('_', " ");
+    }
+    let mut parts = Vec::new();
+    if let Some(device) = &work.planned_device_id {
+        parts.push(short_device_id(device));
+    }
+    if let Some(finish) = work.estimated_finish_unix_ms {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        parts.push(format!("~{}s", finish.saturating_sub(now).div_ceil(1000)));
+    }
+    parts.push(format!("{:?} confidence", work.estimate_confidence).to_lowercase());
+    parts.join(" · ")
 }
 
 // ── Pure formatting helpers (contract-tested) ───────────────────────

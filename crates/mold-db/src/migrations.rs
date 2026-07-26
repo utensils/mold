@@ -332,6 +332,26 @@ CREATE TABLE device_preferences (
 );
 "#;
 
+/// v13 → learned scheduler timing and memory observations.
+const V13_SCHEDULER_ESTIMATES: &str = r#"
+CREATE TABLE scheduler_estimates (
+    estimate_key                 TEXT PRIMARY KEY,
+    device_class                TEXT NOT NULL,
+    model_fingerprint           TEXT NOT NULL,
+    work_kind                   TEXT NOT NULL,
+    shape_bucket                TEXT NOT NULL,
+    execution_fingerprint       TEXT NOT NULL,
+    sample_count                INTEGER NOT NULL,
+    ewma_total_ms               REAL NOT NULL,
+    ewma_load_ms                REAL,
+    vram_high_water_bytes       INTEGER,
+    host_high_water_bytes       INTEGER,
+    last_observed_at            INTEGER NOT NULL
+);
+CREATE INDEX idx_scheduler_estimates_last_observed
+ON scheduler_estimates(last_observed_at);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -383,11 +403,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 12,
         kind: MigrationKind::Sql(V12_DEVICE_PREFERENCES),
     },
+    Migration {
+        version: 13,
+        kind: MigrationKind::Sql(V13_SCHEDULER_ESTIMATES),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -763,7 +787,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 12);
+        assert_eq!(SCHEMA_VERSION, 13);
         assert!(table_exists(&conn, "device_preferences"));
         assert_eq!(
             column_names(&conn, "device_preferences"),
@@ -850,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn v11_to_v12_adds_empty_machine_wide_device_preferences() {
+    fn v11_upgrade_adds_empty_machine_wide_device_preferences() {
         let mut conn = Connection::open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         for migration in MIGRATIONS
@@ -867,7 +891,7 @@ mod tests {
 
         apply_pending(&mut conn).unwrap();
 
-        assert_eq!(current_version(&conn).unwrap(), 12);
+        assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
         assert!(table_exists(&conn, "device_preferences"));
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM device_preferences", [], |row| {
@@ -1054,8 +1078,8 @@ mod v9_tests {
     use rusqlite::Connection;
 
     #[test]
-    fn schema_version_is_twelve() {
-        assert_eq!(SCHEMA_VERSION, 12);
+    fn schema_version_is_thirteen() {
+        assert_eq!(SCHEMA_VERSION, 13);
     }
 
     #[test]

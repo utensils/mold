@@ -1638,6 +1638,7 @@ mod tests {
         let app = app_with_state(state);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
@@ -1829,6 +1830,70 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["id"], "aaaa");
         assert!(body.get("target_gpu").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_queue_accepts_matching_pin_shapes_and_rejects_a_mismatch() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine_and_queue(MockEngine::ready()).0;
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()],
+        });
+        install_worker_registry(&mut state);
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "hard_pinned_device_id": id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": null,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": id,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
     }
 
     #[tokio::test]
@@ -2494,6 +2559,9 @@ mod tests {
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
+        assert_eq!(body["devices"]["stable_pins"], true);
+        assert_eq!(body["devices"]["planned_lanes"], true);
+        assert_eq!(body["devices"]["learned_eta"], true);
     }
 
     #[tokio::test]
@@ -2547,6 +2615,9 @@ mod tests {
             let body = json_body(response).await;
             assert_eq!(body["devices"]["lifecycle"], false, "{label}");
             assert_eq!(body["devices"]["restart_enable"], true, "{label}");
+            assert_eq!(body["devices"]["stable_pins"], true, "{label}");
+            assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
+            assert_eq!(body["devices"]["learned_eta"], true, "{label}");
         }
     }
 
@@ -4201,6 +4272,10 @@ mod tests {
             spec["paths"]["/api/devices"]["get"].is_object(),
             "spec should document GET /api/devices"
         );
+        assert!(
+            spec["paths"]["/api/devices/{id}"]["patch"].is_object(),
+            "spec should document PATCH /api/devices/{{id}}"
+        );
     }
 
     // ── /api/docs ────────────────────────────────────────────────────────────
@@ -5817,6 +5892,10 @@ mod tests {
         );
         assert_eq!(
             crate::rate_limit::classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/devices/cuda:0123456789abcdef", &Method::PATCH,),
             Some(RouteTier::Generation)
         );
 

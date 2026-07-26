@@ -76,6 +76,8 @@ pub struct JobEntry {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct QueueListing {
     pub entries: Vec<JobEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<mold_core::QueuePlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -561,7 +563,10 @@ impl JobRegistry {
                 metadata: e.metadata.clone(),
             })
             .collect();
-        QueueListing { entries: out }
+        QueueListing {
+            entries: out,
+            plan: None,
+        }
     }
 
     /// Currently-tracked job count. Exposed for tests and metrics.

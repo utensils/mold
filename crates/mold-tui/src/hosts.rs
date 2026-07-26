@@ -359,8 +359,12 @@ pub(crate) struct MachinesState {
     pub device_selected: usize,
     /// Queue snapshot for the selected remote host.
     pub queue: Option<(String, mold_core::QueueListingWire)>,
+    /// Stable-ID device inventory for the selected remote host.
+    pub devices: Option<(String, mold_core::DeviceState)>,
     /// Job selection inside the detail pane's queue lanes.
     pub queue_selected: usize,
+    /// Stable device selection inside the detail pane.
+    pub device_selected: usize,
     /// Last host-poll instant (None = poll immediately).
     pub last_poll: Option<std::time::Instant>,
 }
@@ -430,6 +434,7 @@ impl MachinesState {
 
     fn on_selection_changed(&mut self) {
         self.queue = None;
+        self.devices = None;
         self.queue_selected = 0;
         self.device_selected = 0;
     }
@@ -659,6 +664,45 @@ impl MachinesState {
         }
     }
 
+    pub fn apply_devices(&mut self, host_id: String, devices: Option<mold_core::DeviceState>) {
+        let selected_id = match self.selected_row() {
+            MachineRowId::Host(id) => id,
+            MachineRowId::Local => return,
+        };
+        if selected_id == host_id {
+            if let Some(state) = &devices {
+                if self.device_selected >= state.devices.len() {
+                    self.device_selected = state.devices.len().saturating_sub(1);
+                }
+            }
+            self.devices = devices.map(|state| (host_id, state));
+        }
+    }
+
+    pub fn selected_device(&self) -> Option<&mold_core::DeviceInfo> {
+        let MachineRowId::Host(selected_id) = self.selected_row() else {
+            return None;
+        };
+        let (host_id, state) = self.devices.as_ref()?;
+        (host_id == &selected_id)
+            .then(|| state.devices.get(self.device_selected))
+            .flatten()
+    }
+
+    pub fn device_select_prev(&mut self) {
+        self.device_selected = self.device_selected.saturating_sub(1);
+    }
+
+    pub fn device_select_next(&mut self) {
+        let count = self
+            .devices
+            .as_ref()
+            .map_or(0, |(_, state)| state.devices.len());
+        if self.device_selected + 1 < count {
+            self.device_selected += 1;
+        }
+    }
+
     /// Forget a host: registry row, API key, cached status/queue, and
     /// selection clamp. The caller resets the generation target if it
     /// pointed at this host.
@@ -672,6 +716,13 @@ impl MachinesState {
                 self.queue = None;
                 self.queue_selected = 0;
             }
+        }
+        if self
+            .devices
+            .as_ref()
+            .is_some_and(|(host_id, _)| host_id == id)
+        {
+            self.devices = None;
         }
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
@@ -922,10 +973,13 @@ pub(crate) async fn set_local_device_enabled(
 pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender<BackgroundEvent>) {
     let client = client_for_host(&entry);
     let queue = client.list_queue().await.ok();
+    let devices = client.devices().await.ok();
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
+        host_id: host_id.clone(),
         queue,
     });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
 }
 
 /// Run the connect-flow test fetch and report back.
@@ -960,10 +1014,36 @@ pub(crate) async fn cancel_host_job(
         let _ = tx.send(BackgroundEvent::Error(format!("Cancel failed: {e:#}")));
     }
     let queue = client.list_queue().await.ok();
+    let devices = client.devices().await.ok();
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
+        host_id: host_id.clone(),
         queue,
     });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
+}
+
+/// Update one stable device and publish the server's authoritative state.
+pub(crate) async fn set_host_device_enabled(
+    entry: HostEntry,
+    device_id: String,
+    enabled: bool,
+    tx: mpsc::UnboundedSender<BackgroundEvent>,
+) {
+    let client = client_for_host(&entry);
+    match client.set_device_enabled(&device_id, enabled).await {
+        Ok(devices) => {
+            let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+                host_id: entry.id,
+                devices: Some(devices),
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "Device update failed for {device_id}: {error:#}"
+            )));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1170,6 +1250,64 @@ mod tests {
         assert!(st.select_next());
         assert_eq!(st.selected_row(), MachineRowId::Host("h0".into()));
         assert!(!st.select_next(), "selection clamps at the last row");
+    }
+
+    fn test_device(id: &str, ordinal: usize) -> mold_core::DeviceInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": "cuda",
+            "ordinal": ordinal,
+            "device_kind": "full_gpu",
+            "nvml_uuid": null,
+            "physical_uuid": null,
+            "mig_uuid": null,
+            "mig_parent_uuid": null,
+            "mig_profile": null,
+            "name": format!("GPU {ordinal}"),
+            "pci_bus_id": null,
+            "compute_capability": null,
+            "memory": {
+                "total_bytes": null,
+                "used_bytes": null,
+                "mold_used_bytes": null,
+                "other_used_bytes": null
+            },
+            "telemetry": {
+                "utilization_percent": null,
+                "temperature_c": null,
+                "power_w": null
+            },
+            "desired_enabled": true,
+            "admin_state": "enabled",
+            "health": "healthy",
+            "activity": "idle",
+            "schedulable": true,
+            "unschedulable_reason": null,
+            "loaded_models": [],
+            "active_work_id": null,
+            "planned_work_ids": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stable_device_selection_is_independent_and_clamped() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0), test_device("cuda:second", 1)],
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
+        st.device_select_next();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:second");
+        st.device_select_next();
+        assert_eq!(st.device_selected, 1);
+        st.device_select_prev();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
     }
 
     #[test]

@@ -12,6 +12,8 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import ProgressBar from "@ui/components/ProgressBar.vue";
 import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import StatusDot from "../components/machines/StatusDot.vue";
 import QueueCard from "../components/machines/QueueCard.vue";
@@ -26,6 +28,7 @@ import {
   pauseHostQueue,
   resumeHostQueue,
   setQueueJobLane,
+  setHostDeviceEnabled,
   useHostPoll,
   type HostCapabilities,
 } from "../components/machines/hostClient";
@@ -58,6 +61,8 @@ const hostName = ref(host?.name ?? "");
 
 const caps = ref<HostCapabilities | null>(null);
 const queue = ref<QueueEntry[]>([]);
+const queuePlan = ref<QueuePlan | null>(null);
+const mutatingDeviceId = ref<string | null>(null);
 const models = ref<ModelInfoExtended[]>([]);
 const downloads = ref<DownloadJobWire[]>([]);
 const targetId = ref(getGenerateTargetId());
@@ -114,9 +119,45 @@ const modelLabel = (name: string) => modelDisplayNameForId(name, models.value);
 async function reloadQueue() {
   if (!host) return;
   try {
-    queue.value = (await hostQueue(host)).entries;
+    const listing = await hostQueue(host);
+    queue.value = listing.entries;
+    queuePlan.value = listing.plan ?? null;
   } catch {
     // Keep the last-good queue; the offline banner covers the failure.
+  }
+}
+
+async function onToggleDevice(deviceId: string, enabled: boolean) {
+  if (!host) return;
+  mutatingDeviceId.value = deviceId;
+  try {
+    const state = await setHostDeviceEnabled(host, deviceId, enabled);
+    if (poll) {
+      poll.deviceState.value = state;
+      poll.devices.value = state.devices;
+    }
+    await reloadQueue();
+  } catch (e) {
+    toast(
+      "error",
+      `Couldn't ${enabled ? "enable" : "disable"} device: ${errMsg(e)}`,
+    );
+  } finally {
+    mutatingDeviceId.value = null;
+  }
+}
+
+async function onUnpinWork(workId: string) {
+  if (!host) return;
+  try {
+    await setQueueDevicePin(
+      { baseUrl: host.url, apiKey: host.apiKey ?? null },
+      workId,
+      null,
+    );
+    await reloadQueue();
+  } catch (error) {
+    toast("error", `Couldn't use Auto for queued work: ${errMsg(error)}`);
   }
 }
 
@@ -503,6 +544,16 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="md-queue" :data-dimmed="offline ? 'true' : undefined">
+        <CardSurface class="mb-4">
+          <DevicePanel
+            :devices="poll?.devices.value ?? []"
+            :plan="queuePlan"
+            :mutable="caps?.devices?.lifecycle === true"
+            :busy-device-id="mutatingDeviceId"
+            @unpin="onUnpinWork"
+            @toggle="onToggleDevice"
+          />
+        </CardSurface>
         <QueueCard
           :entries="queue"
           :models="models"

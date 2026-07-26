@@ -133,6 +133,7 @@ const hostModelsMock = vi.hoisted(() =>
 vi.mock("../components/machines/hostClient", () => ({
   hostStatus: hostStatusMock,
   hostModels: hostModelsMock,
+  hostQueue: () => Promise.resolve({ entries: [], plan: null }),
   hostDevices: () => Promise.reject(new Error("legacy server in tests")),
 }));
 

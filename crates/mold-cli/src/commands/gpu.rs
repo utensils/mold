@@ -1,50 +1,6 @@
-use anyhow::{bail, Result};
-use mold_core::{DeviceAdminState, DeviceInfo, MoldClient, ServerCapabilities};
-
-pub async fn list(json: bool) -> Result<()> {
-    let devices = MoldClient::from_env().devices().await?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&devices)?);
-        return Ok(());
-    }
-    if devices.devices.is_empty() {
-        println!("No runtime-visible GPU devices.");
-        return Ok(());
-    }
-    for device in devices.devices {
-        let ordinal = device
-            .ordinal
-            .map(|ordinal| format!("GPU {ordinal}"))
-            .unwrap_or_else(|| "GPU —".to_string());
-        let memory = device
-            .memory
-            .total_bytes
-            .map(|bytes| format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0))
-            .unwrap_or_else(|| "VRAM unknown".to_string());
-        println!(
-            "{ordinal:<7} {:<28} {:<18} {:<16} {memory}",
-            device.name,
-            short_id(&device.id),
-            admin_label(device.admin_state),
-        );
-    }
-    Ok(())
-}
-
-pub async fn set(selector: &str, enabled: bool) -> Result<()> {
-    let client = MoldClient::from_env();
-    let capabilities = client.server_capabilities().await?;
-    let state = client.devices().await?;
-    let device = resolve_device(&state.devices, selector)?;
-    ensure_supported(&capabilities, device, enabled)?;
-    let updated = client.set_device_enabled(&device.id, enabled).await?;
-    if updated.restart_required {
-        println!("{}: enabled after server restart", updated.name);
-    } else {
-        println!("{}: {}", updated.name, admin_label(updated.admin_state));
-    }
-    Ok(())
-}
+use anyhow::{bail, Context, Result};
+use colored::Colorize;
+use mold_core::{DeviceAdminState, DeviceHealth, DeviceInfo, MoldClient, ServerCapabilities};
 
 fn ensure_supported(
     capabilities: &ServerCapabilities,
@@ -63,47 +19,100 @@ fn ensure_supported(
 }
 
 fn resolve_device<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a DeviceInfo> {
+    if let Some(device) = devices.iter().find(|device| device.id == selector) {
+        return Ok(device);
+    }
     if let Ok(ordinal) = selector.parse::<usize>() {
-        return devices
+        if let Some(device) = devices
             .iter()
             .find(|device| device.ordinal == Some(ordinal))
-            .ok_or_else(|| anyhow::anyhow!("no runtime-visible GPU has ordinal {ordinal}"));
+        {
+            return Ok(device);
+        }
     }
-    let matches = devices
-        .iter()
-        .filter(|device| device.id == selector)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [device] => Ok(*device),
-        [] => bail!("unknown stable device ID '{selector}'"),
-        _ => bail!("ambiguous device selector '{selector}'"),
+    bail!("unknown GPU {selector:?}; run `mold gpu list` for stable IDs")
+}
+
+fn human_state(device: &DeviceInfo) -> String {
+    match (device.admin_state, device.health) {
+        (DeviceAdminState::Draining, _) => "finishing current work".yellow().to_string(),
+        (_, DeviceHealth::Unavailable | DeviceHealth::Poisoned) => format!("{:?}", device.health)
+            .to_lowercase()
+            .red()
+            .to_string(),
+        (DeviceAdminState::Enabled, DeviceHealth::Healthy) => "enabled".green().to_string(),
+        _ => format!("{:?}", device.admin_state).to_lowercase(),
     }
 }
 
-fn short_id(id: &str) -> String {
-    if id.len() <= 18 {
-        id.to_string()
+pub async fn list(json: bool) -> Result<()> {
+    let state = MoldClient::from_env()
+        .devices()
+        .await
+        .context("failed to read server devices")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&state)?);
+        return Ok(());
+    }
+    if state.devices.is_empty() {
+        println!("No compute devices visible.");
+        return Ok(());
+    }
+    for device in &state.devices {
+        let ordinal = device
+            .ordinal
+            .map(|value| format!("GPU {value}"))
+            .unwrap_or_else(|| "GPU —".into());
+        let used = device.memory.used_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
+        let total = device.memory.total_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
+        let utilization = device
+            .telemetry
+            .utilization_percent
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "{}  {}  {}  {}  VRAM {:.1}/{:.1} GiB  util {}",
+            device.id,
+            ordinal,
+            device.name,
+            human_state(device),
+            used,
+            total,
+            utilization
+        );
+    }
+    Ok(())
+}
+
+pub async fn set(selector: &str, enabled: bool) -> Result<()> {
+    let client = MoldClient::from_env();
+    let capabilities = client
+        .server_capabilities()
+        .await
+        .context("failed to read server capabilities")?;
+    let state = client
+        .devices()
+        .await
+        .context("failed to read server devices")?;
+    let device = resolve_device(&state.devices, selector)?;
+    ensure_supported(&capabilities, device, enabled)?;
+    let id = device.id.clone();
+    let device = client
+        .set_device_enabled(&id, enabled)
+        .await
+        .with_context(|| format!("failed to update device {id}"))?;
+    if device.restart_required {
+        println!("{}: enabled after server restart", device.name);
     } else {
-        format!("{}…{}", &id[..11], &id[id.len() - 6..])
+        println!("{}: {}", device.id, human_state(&device));
     }
-}
-
-fn admin_label(state: DeviceAdminState) -> &'static str {
-    match state {
-        DeviceAdminState::StartupExcluded => "startup excluded",
-        DeviceAdminState::Starting => "starting",
-        DeviceAdminState::Enabled => "enabled",
-        DeviceAdminState::Draining => "draining",
-        DeviceAdminState::Disabled => "disabled",
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mold_core::{
-        DeviceActivity, DeviceHealth, DeviceKind, DeviceMemoryInfo, DeviceTelemetry, GpuBackend,
-    };
+    use mold_core::{DeviceActivity, DeviceKind, DeviceMemoryInfo, DeviceTelemetry, GpuBackend};
 
     fn device(id: &str, ordinal: usize) -> DeviceInfo {
         DeviceInfo {
@@ -116,17 +125,17 @@ mod tests {
             mig_uuid: None,
             mig_parent_uuid: None,
             mig_profile: None,
-            name: format!("GPU {ordinal}"),
+            name: "GPU".into(),
             pci_bus_id: None,
             compute_capability: None,
             memory: DeviceMemoryInfo {
-                total_bytes: None,
-                used_bytes: None,
-                mold_used_bytes: None,
-                other_used_bytes: None,
+                total_bytes: Some(24),
+                used_bytes: Some(0),
+                mold_used_bytes: Some(0),
+                other_used_bytes: Some(0),
             },
             telemetry: DeviceTelemetry {
-                utilization_percent: None,
+                utilization_percent: Some(0),
                 temperature_c: None,
                 power_w: None,
             },
@@ -137,23 +146,18 @@ mod tests {
             activity: DeviceActivity::Idle,
             schedulable: true,
             unschedulable_reason: None,
-            loaded_models: Vec::new(),
+            loaded_models: vec![],
             active_work_id: None,
-            planned_work_ids: Vec::new(),
+            planned_work_ids: vec![],
         }
     }
 
     #[test]
-    fn resolves_stable_id_or_display_ordinal() {
-        let devices = vec![device("cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0)];
-        assert_eq!(resolve_device(&devices, "0").unwrap().id, devices[0].id);
-        assert_eq!(
-            resolve_device(&devices, "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap()
-                .id,
-            devices[0].id
-        );
-        assert!(resolve_device(&devices, "1").is_err());
+    fn resolves_stable_id_before_display_ordinal() {
+        let devices = vec![device("cuda:stable", 7), device("7", 2)];
+        assert_eq!(resolve_device(&devices, "7").unwrap().id, "7");
+        assert_eq!(resolve_device(&devices, "2").unwrap().id, "7");
+        assert!(resolve_device(&devices, "3").is_err());
     }
 
     #[test]
@@ -161,7 +165,7 @@ mod tests {
         let mut legacy = ServerCapabilities::default();
         legacy.devices.available = true;
         legacy.devices.restart_enable = true;
-        let mut disabled = device("cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0);
+        let mut disabled = device("cuda:disabled", 0);
         disabled.desired_enabled = false;
         disabled.admin_state = DeviceAdminState::Disabled;
         assert!(ensure_supported(&legacy, &disabled, true).is_ok());
@@ -173,16 +177,9 @@ mod tests {
 
         legacy.devices.lifecycle = true;
         legacy.dispatch.v2_authoritative = false;
-        assert!(
-            ensure_supported(&legacy, &disabled, true).is_ok(),
-            "restart recovery remains available when lifecycle is advertised without authoritative dispatch"
-        );
-        assert!(
-            ensure_supported(&legacy, &enabled, false).is_err(),
-            "live mutation requires both lifecycle and authoritative dispatch"
-        );
+        assert!(ensure_supported(&legacy, &disabled, true).is_ok());
+        assert!(ensure_supported(&legacy, &enabled, false).is_err());
 
-        legacy.devices.lifecycle = true;
         legacy.dispatch.v2_authoritative = true;
         assert!(ensure_supported(&legacy, &enabled, false).is_ok());
     }

@@ -1,5 +1,10 @@
 import { defineStore } from "pinia";
-import { listDevices } from "@studio/api/devices";
+import { listDevices, type DeviceInfo } from "@studio/api/devices";
+import {
+  parseQueueListing,
+  predictedCompletionUnixMs,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { OutputMetadata, ServerStatus } from "../lib/api/types";
 import { useGenerationStore } from "./generation";
@@ -44,6 +49,8 @@ export interface HostQueueSnapshot {
   /** Schedulable GPU ordinals from `/api/devices`, with `/api/status.gpus`
    * fallback for older servers. */
   gpuOrdinals: number[];
+  devices?: DeviceInfo[] | null;
+  plan?: QueuePlan | null;
   error: string | null;
 }
 
@@ -135,6 +142,7 @@ export const useJobsStore = defineStore("jobs", {
     async refreshHost(host: HostView) {
       const target = this.targetFor(host);
       if (!target || host.status !== "ready") return;
+      const hosts = useHostsStore();
       const previous = this.queues[host.id];
       try {
         // Capabilities are fetched once per host and cached — they only
@@ -152,7 +160,7 @@ export const useJobsStore = defineStore("jobs", {
             () => null,
           ));
         const [listing, status, devices] = await Promise.all([
-          apiJsonTo<{ entries: QueueEntry[] }>(target, "/api/queue"),
+          apiJsonTo<unknown>(target, "/api/queue").then(parseQueueListing),
           apiJsonTo<ServerStatus & { queue_paused?: boolean }>(target, "/api/status"),
           listDevices(target).then(
             (snapshot) => snapshot.devices,
@@ -161,7 +169,17 @@ export const useJobsStore = defineStore("jobs", {
         ]);
         this.queues[host.id] = {
           hostId: host.id,
-          entries: listing.entries ?? [],
+          entries: (listing.entries ?? [])
+            .filter(
+              (entry) => entry.state === "queued" || entry.state === "running",
+            )
+            .map((entry) => {
+              const { target_gpu: targetGpu, ...rest } = entry;
+              const local = rest as QueueEntry;
+              if (targetGpu != null) local.target_gpu = targetGpu;
+              return local;
+            }),
+          plan: listing.plan,
           paused: status.queue_paused ?? null,
           caps,
           gpuOrdinals:
@@ -172,8 +190,14 @@ export const useJobsStore = defineStore("jobs", {
               : (status.gpus ?? [])
                   .filter((gpu) => gpu.state !== "degraded")
                   .map((gpu) => gpu.ordinal),
+          devices,
           error: null,
         };
+        const telemetry = hosts.telemetry[host.id];
+        if (telemetry) {
+          telemetry.predictedCompletionMs =
+            listing.plan == null ? null : predictedCompletionUnixMs(listing.plan);
+        }
       } catch (err) {
         this.queues[host.id] = {
           hostId: host.id,
@@ -181,6 +205,8 @@ export const useJobsStore = defineStore("jobs", {
           paused: previous?.paused ?? null,
           caps: previous?.caps ?? null,
           gpuOrdinals: previous?.gpuOrdinals ?? [],
+          devices: previous?.devices ?? null,
+          plan: previous?.plan ?? null,
           error: String(err),
         };
       }

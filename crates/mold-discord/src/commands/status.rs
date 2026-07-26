@@ -8,9 +8,18 @@ use anyhow::Result;
 pub async fn status(ctx: Context<'_>) -> Result<()> {
     ctx.defer().await?;
 
-    match ctx.data().client.server_status().await {
+    let (status, devices, queue) = tokio::join!(
+        ctx.data().client.server_status(),
+        ctx.data().client.devices(),
+        ctx.data().client.list_queue()
+    );
+    match status {
         Ok(server_status) => {
-            let embed_data = format::format_server_status(&server_status);
+            let embed_data = format::format_server_status_with_devices(
+                &server_status,
+                devices.as_ref().ok(),
+                queue.as_ref().ok(),
+            );
             let embed = handler::embed_data_to_create_embed(&embed_data);
 
             ctx.send(poise::CreateReply::default().embed(embed)).await?;

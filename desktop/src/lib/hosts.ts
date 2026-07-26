@@ -128,18 +128,23 @@ export interface RoutableHost {
   status: "connecting" | "ready" | "error";
   /** Live queue depth; null while unknown. */
   queueDepth: number | null;
+  /** Latest projected completion. Unknown sorts behind a known prediction. */
+  predictedCompletionMs?: number | null;
 }
 
 /**
- * Auto routing: the ready host with the shallowest queue wins; unknown depth
- * counts as busiest; the local host wins ties (no network hop). Null when
- * nothing is ready.
+ * Auto routing: predicted completion wins when available, then legacy queue
+ * depth. Unknown values count as busiest; the local host wins full ties.
  */
 export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
+    const finish = (x: RoutableHost) =>
+      x.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
     const depth = (x: RoutableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
+    if (finish(h) < finish(best)) return h;
+    if (finish(h) > finish(best)) return best;
     if (depth(h) < depth(best)) return h;
     if (depth(h) === depth(best) && h.kind === "local" && best.kind !== "local") return h;
     return best;

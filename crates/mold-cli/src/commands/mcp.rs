@@ -466,6 +466,7 @@ impl McpServer {
             .server_status()
             .await
             .map_err(|e| format!("failed to read server status: {e}"))?;
+        let devices = self.client.devices().await.ok();
 
         let mut lines = vec![
             format!("mold server {}", status.version),
@@ -473,13 +474,32 @@ impl McpServer {
             format!("loaded models: {}", status.models_loaded.join(", ")),
             format!("uptime: {}s", status.uptime_secs),
         ];
-        if let Some(hostname) = status.hostname {
+        if let Some(hostname) = &status.hostname {
             lines.push(format!("host: {hostname}"));
         }
-        if let Some(memory) = status.memory_status {
-            lines.push(memory);
+        if let Some(memory) = &status.memory_status {
+            lines.push(memory.clone());
         }
-        if let Some(gpus) = status.gpus {
+        if let Some(device_state) = devices.as_ref().filter(|state| !state.devices.is_empty()) {
+            for device in &device_state.devices {
+                lines.push(format!(
+                    "device {} (gpu {}): {} ({:?}/{:?}){}",
+                    device.id,
+                    device
+                        .ordinal
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    device.name,
+                    device.admin_state,
+                    device.health,
+                    device
+                        .loaded_models
+                        .first()
+                        .map(|model| format!(", loaded {model}"))
+                        .unwrap_or_default()
+                ));
+            }
+        } else if let Some(gpus) = &status.gpus {
             for gpu in gpus {
                 lines.push(format!(
                     "gpu {}: {} ({:?}){}",
@@ -487,6 +507,7 @@ impl McpServer {
                     gpu.name,
                     gpu.state,
                     gpu.loaded_model
+                        .as_ref()
                         .map(|m| format!(", loaded {m}"))
                         .unwrap_or_default()
                 ));
@@ -496,7 +517,13 @@ impl McpServer {
             lines.push(format!("queue depth: {depth}"));
         }
 
-        Ok(text_result(lines.join("\n")))
+        Ok(json!({
+            "content": [{ "type": "text", "text": lines.join("\n") }],
+            "structuredContent": {
+                "status": status,
+                "devices": devices.map(|state| state.devices).unwrap_or_default(),
+            }
+        }))
     }
 
     async fn resolve_loras(

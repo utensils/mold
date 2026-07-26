@@ -63,6 +63,7 @@ export interface HostView {
   primary: boolean;
   queueDepth: number | null;
   queueCapacity: number | null;
+  predictedCompletionMs?: number | null;
   version: string | null;
   /** Stable server-installation UUID; null until learned. Dedupe key. */
   instanceId: string | null;
@@ -71,6 +72,7 @@ export interface HostView {
 interface HostTelemetry {
   queueDepth: number | null;
   queueCapacity: number | null;
+  predictedCompletionMs?: number | null;
   version: string | null;
   /** Loaded-model names from `/api/status` (absent before the first poll). */
   modelsLoaded?: string[];
@@ -180,6 +182,7 @@ export const useHostsStore = defineStore("hosts", {
         primary: true,
         queueDepth: t?.queueDepth ?? null,
         queueCapacity: t?.queueCapacity ?? null,
+        predictedCompletionMs: t?.predictedCompletionMs ?? null,
         version: t?.version ?? null,
         instanceId: t?.instanceId ?? null,
       };
@@ -223,6 +226,7 @@ export const useHostsStore = defineStore("hosts", {
           primary: false,
           queueDepth: t?.queueDepth ?? null,
           queueCapacity: t?.queueCapacity ?? null,
+          predictedCompletionMs: t?.predictedCompletionMs ?? null,
           version: t?.version ?? null,
           instanceId,
         });
@@ -501,6 +505,8 @@ export const useHostsStore = defineStore("hosts", {
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
+              predictedCompletionMs:
+                this.telemetry[host.id]?.predictedCompletionMs ?? null,
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
