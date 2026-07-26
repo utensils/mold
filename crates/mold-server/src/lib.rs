@@ -284,39 +284,20 @@ pub async fn run_server(
     // rather than inventing an ordinal identity.
     let selected_ordinals: std::collections::BTreeSet<_> =
         selected.iter().map(|gpu| gpu.ordinal).collect();
-    let backend = if cfg!(feature = "cuda") {
-        mold_core::GpuBackend::Cuda
-    } else {
-        mold_core::GpuBackend::Metal
-    };
     let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
     let inventory = discovered
         .iter()
-        .map(|gpu| device_registry::DiscoveredDevice {
-            stable_id: (backend == mold_core::GpuBackend::Metal)
-                .then(|| "metal:default".to_string()),
-            backend,
-            visible_ordinal: Some(gpu.ordinal),
-            device_kind: if backend == mold_core::GpuBackend::Metal {
-                mold_core::DeviceKind::Metal
-            } else {
-                mold_core::DeviceKind::UnknownCuda
-            },
-            nvml_uuid: None,
-            physical_uuid: None,
-            mig_uuid: None,
-            mig_parent_uuid: None,
-            mig_profile: None,
-            pci_bus_id: None,
-            name: gpu.name.clone(),
-            compute_capability: None,
-            total_memory_bytes: Some(gpu.total_vram_bytes),
-            startup_allowed: selected_ordinals.contains(&gpu.ordinal),
-            telemetry_ordinal: if backend == mold_core::GpuBackend::Metal {
+        .map(|gpu| {
+            let telemetry_ordinal = if gpu.backend == mold_core::GpuBackend::Metal {
                 Some(gpu.ordinal)
             } else {
                 resources::physical_ordinal_for_worker(gpu.ordinal, visible_devices.as_deref())
-            },
+            };
+            device_registry::DiscoveredDevice::from_runtime_gpu(
+                gpu,
+                selected_ordinals.contains(&gpu.ordinal),
+                telemetry_ordinal,
+            )
         })
         .collect();
     state.device_registry = std::sync::Arc::new(device_registry::DeviceRegistry::new(

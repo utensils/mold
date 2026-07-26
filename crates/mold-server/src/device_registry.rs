@@ -42,6 +42,38 @@ pub struct DiscoveredDevice {
     pub telemetry_ordinal: Option<usize>,
 }
 
+impl DiscoveredDevice {
+    pub fn from_runtime_gpu(
+        gpu: &mold_inference::device::DiscoveredGpu,
+        startup_allowed: bool,
+        telemetry_ordinal: Option<usize>,
+    ) -> Self {
+        let device_kind = match gpu.device_kind {
+            Some(mold_inference::device::CudaDeviceKind::FullGpu) => DeviceKind::FullGpu,
+            Some(mold_inference::device::CudaDeviceKind::Mig) => DeviceKind::Mig,
+            Some(mold_inference::device::CudaDeviceKind::UnknownCuda) => DeviceKind::UnknownCuda,
+            None => DeviceKind::Metal,
+        };
+        Self {
+            stable_id: gpu.stable_id.clone(),
+            backend: gpu.backend,
+            visible_ordinal: Some(gpu.ordinal),
+            device_kind,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            pci_bus_id: gpu.pci_bus_id.clone(),
+            name: gpu.name.clone(),
+            compute_capability: gpu.compute_capability,
+            total_memory_bytes: Some(gpu.total_vram_bytes),
+            startup_allowed,
+            telemetry_ordinal,
+        }
+    }
+}
+
 /// Adapter boundary for CUDA/Metal identity discovery. The registry remains
 /// independent of cudarc and NVML APIs.
 pub trait DeviceDiscoveryAdapter: Send + Sync {
@@ -436,6 +468,37 @@ fn worker_telemetry_ordinal(backend: GpuBackend, ordinal: usize) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_cuda_discovery_preserves_stable_identity_and_metadata() {
+        let gpu = mold_inference::device::DiscoveredGpu {
+            ordinal: 3,
+            stable_id: Some("cuda:0123456789abcdef0123456789abcdef".into()),
+            raw_cuda_uuid: Some([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ]),
+            device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: "NVIDIA RTX 3090".into(),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: Some("00000000:01:00.0".into()),
+            total_vram_bytes: 24_000_000_000,
+            free_vram_bytes: 20_000_000_000,
+        };
+
+        let mapped = DiscoveredDevice::from_runtime_gpu(&gpu, true, Some(7));
+
+        assert_eq!(mapped.stable_id, gpu.stable_id);
+        assert_eq!(mapped.backend, GpuBackend::Cuda);
+        assert_eq!(mapped.visible_ordinal, Some(3));
+        assert_eq!(mapped.device_kind, DeviceKind::FullGpu);
+        assert_eq!(mapped.compute_capability, Some((8, 6)));
+        assert_eq!(mapped.pci_bus_id.as_deref(), Some("00000000:01:00.0"));
+        assert!(mapped.startup_allowed);
+        assert_eq!(mapped.telemetry_ordinal, Some(7));
+    }
 
     fn discovered(stable_id: Option<&str>, startup_allowed: bool) -> DiscoveredDevice {
         DiscoveredDevice {
