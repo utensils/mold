@@ -170,9 +170,7 @@ export const useJobsStore = defineStore("jobs", {
         this.queues[host.id] = {
           hostId: host.id,
           entries: (listing.entries ?? [])
-            .filter(
-              (entry) => entry.state === "queued" || entry.state === "running",
-            )
+            .filter((entry) => entry.state === "queued" || entry.state === "running")
             .map((entry) => {
               const { target_gpu: targetGpu, ...rest } = entry;
               const local = rest as QueueEntry;

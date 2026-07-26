@@ -2433,7 +2433,7 @@ async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
     Json(current_device_state(&state))
 }
 
-fn current_device_state(state: &AppState) -> DeviceState {
+pub(crate) fn current_device_state(state: &AppState) -> DeviceState {
     let resources = state.resources.latest();
     let mut snapshot =
         state
@@ -4301,12 +4301,12 @@ fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
 }
 
 /// `GET /api/events` — SSE stream of server-wide [`mold_core::ServerEvent`]s:
-/// job lifecycle (queued/started/ended, mirrored off the job registry) and
-/// gallery mutations (added/removed). One connection observes the whole
-/// server, so clients don't need a held stream per job to know when the
-/// gallery changed. Deltas only — bootstrap current state from
-/// `GET /api/queue` + `GET /api/gallery` after subscribing. Event name:
-/// `event`. Feature-detect via `capabilities.events.available`.
+/// job lifecycle, gallery mutations, queue replans, and semantic device
+/// lifecycle/health transitions. One connection observes the whole server.
+/// Deltas only — bootstrap or repair gaps from `GET /api/queue`,
+/// `GET /api/devices`, and `GET /api/gallery`. Raw utilization/memory
+/// telemetry remains on `/api/resources/stream`. Event name: `event`.
+/// Feature-detect via `capabilities.events.available`.
 #[utoipa::path(
     get,
     path = "/api/events",

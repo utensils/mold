@@ -508,6 +508,7 @@ export type ServerEvent =
   | { type: "gallery_removed"; filename: string }
   | { type: "queue_paused" }
   | { type: "queue_resumed" }
+  | { type: "queue_plan_changed"; plan: import("@studio/api/queuePlan").QueuePlan }
   | {
       type: "device_state_changed";
       device_id: string;

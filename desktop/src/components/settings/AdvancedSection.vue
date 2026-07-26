@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import { listDevices, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
@@ -12,6 +12,7 @@ import { useToastStore } from "../../stores/toasts";
 import { useConnectionStore } from "../../stores/connection";
 import { schemaFor } from "../../lib/settingsSchema";
 import type { ConfigRow } from "../../lib/api/types";
+import { subscribeToDeviceSnapshots } from "../../lib/api/deviceEvents";
 
 defineProps<{ filter?: ((row: ConfigRow) => boolean) | undefined }>();
 
@@ -21,6 +22,7 @@ const connection = useConnectionStore();
 const devices = ref<DeviceInfo[]>([]);
 const plan = ref<QueuePlan | null>(null);
 const mutatingDeviceId = ref<string | null>(null);
+let deviceEventsAbort: AbortController | null = null;
 
 function target() {
   return connection.baseUrl ? { baseUrl: connection.baseUrl, apiKey: connection.apiKey } : null;
@@ -66,9 +68,28 @@ async function unpinWork(workId: string) {
   }
 }
 
-watch([() => connection.baseUrl, () => connection.apiKey], () => void loadDevices(), {
-  immediate: true,
-});
+watch(
+  [() => connection.baseUrl, () => connection.apiKey],
+  () => {
+    deviceEventsAbort?.abort();
+    deviceEventsAbort = null;
+    const apiTarget = target();
+    if (!apiTarget) {
+      void loadDevices();
+      return;
+    }
+    // Establish an authoritative snapshot even when this is an older server
+    // without `/api/events`; onOpen and relevant deltas repair it thereafter.
+    void loadDevices();
+    deviceEventsAbort = new AbortController();
+    subscribeToDeviceSnapshots(apiTarget, deviceEventsAbort.signal, () => {
+      void loadDevices();
+    });
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => deviceEventsAbort?.abort());
 
 async function save(row: ConfigRow, value: ConfigRow["value"]) {
   const error = await config.save(row.key, value);

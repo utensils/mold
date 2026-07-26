@@ -140,8 +140,7 @@ export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
-    const finish = (x: RoutableHost) =>
-      x.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
+    const finish = (x: RoutableHost) => x.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
     const depth = (x: RoutableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
     if (finish(h) < finish(best)) return h;
     if (finish(h) > finish(best)) return best;

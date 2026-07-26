@@ -627,8 +627,7 @@ fn process_owner_work(
         }
         OwnerWork::PostUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_post_generation_upscale(worker, *job);
-            true
+            process_post_generation_upscale(worker, *job)
         }
         OwnerWork::StandaloneUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
@@ -671,7 +670,9 @@ fn process_legacy_owner_work(
         OwnerWork::PromptExpansion(job) => {
             let _ = process_prompt_expansion(worker, *job);
         }
-        OwnerWork::PostUpscale(job) => process_post_generation_upscale(worker, *job),
+        OwnerWork::PostUpscale(job) => {
+            let _ = process_post_generation_upscale(worker, *job);
+        }
         OwnerWork::StandaloneUpscale(job) => {
             let _ = process_standalone_upscale(worker, *job);
         }
@@ -771,7 +772,7 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> 
     successful
 }
 
-fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) {
+fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) -> bool {
     let cleanup = GenerationCleanup::new(&job.generation);
     #[cfg(test)]
     pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PrePostUpscale);
@@ -797,6 +798,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     {
         quarantine_poisoned_worker(worker);
     }
+    let successful = result.is_ok();
     let (image, original, error) = settle_post_generation_upscale(job.image, result);
     if let Some(error) = error {
         tracing::warn!(
@@ -807,6 +809,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     }
     finish_generation_success(*job.generation, job.response, image, original);
     drop(cleanup);
+    successful
 }
 
 fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {

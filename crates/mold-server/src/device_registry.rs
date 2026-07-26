@@ -112,6 +112,7 @@ impl DeviceDiscoveryAdapter for StaticDeviceDiscovery {
 pub struct DeviceRegistry {
     discovery: Arc<dyn DeviceDiscoveryAdapter>,
     explicit_preferences: RwLock<BTreeMap<String, bool>>,
+    transient_unavailable: RwLock<BTreeSet<String>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     transient_ids: Mutex<HashMap<String, String>>,
     mutation_sequence: AtomicU64,
@@ -144,6 +145,7 @@ impl DeviceRegistry {
         Self {
             discovery,
             explicit_preferences: RwLock::new(explicit_preferences),
+            transient_unavailable: RwLock::new(BTreeSet::new()),
             metadata_db,
             transient_ids: Mutex::new(HashMap::new()),
             mutation_sequence: AtomicU64::new(0),
@@ -200,6 +202,34 @@ impl DeviceRegistry {
 
     pub fn mutation_sequence(&self) -> u64 {
         self.mutation_sequence.load(Ordering::SeqCst)
+    }
+
+    /// Record a scheduler transport/start failure in the authoritative device
+    /// projection. Returns true only for a real health transition.
+    pub fn mark_unavailable(&self, device_id: &str) -> bool {
+        let changed = self
+            .transient_unavailable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(device_id.to_string());
+        if changed {
+            self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
+    }
+
+    /// Clear a transient scheduler failure when the worker announces Ready.
+    /// Returns true only for a real health transition.
+    pub fn mark_available(&self, device_id: &str) -> bool {
+        let changed = self
+            .transient_unavailable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(device_id);
+        if changed {
+            self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
     }
 
     pub fn snapshot(
@@ -277,6 +307,10 @@ impl DeviceRegistry {
             .explicit_preferences
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let transient_unavailable = self
+            .transient_unavailable
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let devices = discovered
             .into_iter()
             .map(|device| {
@@ -338,6 +372,8 @@ impl DeviceRegistry {
                             .load(std::sync::atomic::Ordering::SeqCst)
                         {
                             DeviceHealth::Poisoned
+                        } else if transient_unavailable.contains(&id) {
+                            DeviceHealth::Unavailable
                         } else if worker_ref.is_degraded() {
                             DeviceHealth::Degraded
                         } else {
@@ -833,6 +869,37 @@ mod tests {
         assert_eq!(
             state.devices[0].unschedulable_reason.as_deref(),
             Some("device_startup_excluded")
+        );
+    }
+
+    #[test]
+    fn transient_worker_unavailability_is_authoritative_until_ready() {
+        let id = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::new(vec![discovered(Some(id), true)])),
+            Arc::new(None),
+        );
+        let pool = GpuPool {
+            workers: vec![worker(0)],
+        };
+        let jobs = crate::job_registry::JobRegistry::new();
+
+        assert_eq!(
+            registry.snapshot(&pool, None, &jobs).devices[0].health,
+            DeviceHealth::Healthy
+        );
+        assert!(registry.mark_unavailable(id));
+        let unavailable = registry.snapshot(&pool, None, &jobs);
+        assert_eq!(unavailable.devices[0].health, DeviceHealth::Unavailable);
+        assert!(!unavailable.devices[0].schedulable);
+        assert!(
+            !registry.mark_unavailable(id),
+            "idempotent transitions stay silent"
+        );
+        assert!(registry.mark_available(id));
+        assert_eq!(
+            registry.snapshot(&pool, None, &jobs).devices[0].health,
+            DeviceHealth::Healthy
         );
     }
 

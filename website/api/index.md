@@ -581,11 +581,11 @@ RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long
 
 ## `/api/events`
 
-`GET /api/events` is a single SSE stream of **server-wide** lifecycle events —
-every generation job's queued/started/ended transitions plus gallery
-additions and removals — so a client can keep its gallery and queue views
-live over one connection instead of holding a stream per job. Frames use the
-event name `event` with an internally tagged JSON payload:
+`GET /api/events` is a single SSE stream of **server-wide** lifecycle events:
+generation jobs, gallery changes, versioned queue replans, and semantic device
+lifecycle/health transitions. Raw utilization and memory telemetry remain on
+`GET /api/resources/stream`. Frames use the event name `event` with an
+internally tagged JSON payload:
 
 ```text
 event: event
@@ -606,17 +606,21 @@ data: {"type":"gallery_removed","filename":"mold-flux-dev-q4-1752300000000.png"}
 
 Event semantics:
 
-| `type`            | Meaning                                                                                                                                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job_queued`      | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
-| `job_started`     | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
-| `job_ended`       | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
-| `gallery_added`   | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed` | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `type`                 | Meaning                                                                                                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`           | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
+| `job_started`          | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
+| `job_ended`            | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
+| `gallery_added`        | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed`      | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `queue_plan_changed`   | The scheduler published a newer versioned queue plan. Replace tentative lanes only when `plan_version` advances.                                                                                  |
+| `device_state_changed` | Device administration, worker health, or activity changed. Treat the payload as a hint and refetch `GET /api/devices`; telemetry-only samples do not emit this event.                             |
 
 The stream carries **deltas only** — there is no initial snapshot. Subscribe
-first, then bootstrap current state from `GET /api/queue` and
-`GET /api/gallery` so nothing lands in the gap. Feature-detect with
+first, then bootstrap current state from `GET /api/queue`, `GET /api/devices`,
+and `GET /api/gallery`. Refetch those authoritative snapshots after every
+reconnect because lagged broadcast frames are intentionally not replayed.
+Feature-detect with
 `GET /api/capabilities` (`"events": {"available": true}`); servers older than
 this endpoint omit the field. Keep-alive pings arrive every 15 s.
 

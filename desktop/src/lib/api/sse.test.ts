@@ -37,7 +37,7 @@ describe("sseStream", () => {
     );
   });
 
-  it("reports the first successful connection only once across reconnects", async () => {
+  it("reports every successful connection so consumers can refetch after reconnects", async () => {
     const onOpen = vi.fn();
     fetchEventSource.mockImplementation(async (_url: string, options: { onopen: Function }) => {
       const response = new Response(null, { status: 200 });
@@ -52,6 +52,6 @@ describe("sseStream", () => {
       target: { baseUrl: "http://127.0.0.1:7680", apiKey: null },
     });
 
-    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledTimes(2);
   });
 });

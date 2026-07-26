@@ -90,6 +90,25 @@ export const useEventsStore = defineStore("events", {
           if (queue) queue.paused = ev.type === "queue_paused";
           break;
         }
+        case "queue_plan_changed": {
+          const primary = useHostsStore().primaryHost;
+          const queue = primary ? useJobsStore().queues[primary.id] : undefined;
+          if (queue && (!queue.plan || queue.plan.plan_version < ev.plan.plan_version)) {
+            queue.plan = ev.plan;
+          }
+          break;
+        }
+        case "device_state_changed": {
+          const primary = useHostsStore().primaryHost;
+          const queue = primary ? useJobsStore().queues[primary.id] : undefined;
+          if (queue) {
+            queue.devices = ev.state.devices;
+            queue.gpuOrdinals = ev.state.devices
+              .filter((device) => device.schedulable && device.ordinal !== null)
+              .map((device) => device.ordinal as number);
+          }
+          break;
+        }
         // job_* frames: the generation store tracks its own jobs via their
         // per-job streams; queue-wide UI can subscribe here later.
         default:

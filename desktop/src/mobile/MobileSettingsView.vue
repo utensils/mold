@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
   canMutateDevice,
@@ -14,6 +14,7 @@ import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import type { MobileSettings } from "./settings";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 
 const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
@@ -52,6 +53,7 @@ const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const deviceError = ref("");
+let deviceEventsAbort: AbortController | null = null;
 
 async function loadDevices(): Promise<void> {
   if (!props.host) {
@@ -90,7 +92,29 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
   }
 }
 
-watch(() => props.host?.id, loadDevices, { immediate: true });
+watch(
+  () => [props.host?.id, props.host?.baseUrl, props.host?.apiKey] as const,
+  () => {
+    deviceEventsAbort?.abort();
+    deviceEventsAbort = null;
+    if (!props.host) {
+      void loadDevices();
+      return;
+    }
+    // Do not make initial rendering depend on SSE support. The stream's
+    // onOpen callback refetches again to close the subscribe/bootstrap gap.
+    void loadDevices();
+    deviceEventsAbort = new AbortController();
+    subscribeToDeviceSnapshots(
+      mobileHostTarget(props.host),
+      deviceEventsAbort.signal,
+      () => void loadDevices(),
+    );
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => deviceEventsAbort?.abort());
 </script>
 
 <template>

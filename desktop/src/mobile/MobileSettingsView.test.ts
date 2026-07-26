@@ -2,10 +2,11 @@ import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
-const { apiJsonTo, openExternalMock, setDeviceEnabled } = vi.hoisted(() => ({
+const { apiJsonTo, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(() => ({
   apiJsonTo: vi.fn(),
   openExternalMock: vi.fn(),
   setDeviceEnabled: vi.fn(),
+  subscribeMock: vi.fn(),
 }));
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
@@ -16,11 +17,15 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
   setDeviceEnabled,
 }));
+vi.mock("../lib/api/deviceEvents", () => ({
+  subscribeToDeviceSnapshots: subscribeMock,
+}));
 
 beforeEach(() => {
   openExternalMock.mockClear();
   apiJsonTo.mockReset();
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
+  subscribeMock.mockReset();
 });
 
 describe("MobileSettingsView", () => {
@@ -116,6 +121,7 @@ describe("MobileSettingsView", () => {
         power_w: null,
       },
       desired_enabled: true,
+      restart_required: false,
       admin_state: "enabled",
       health: "healthy",
       activity: "idle",
@@ -171,5 +177,14 @@ describe("MobileSettingsView", () => {
     await vi.waitFor(() =>
       expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable"),
     );
+    expect(subscribeMock).toHaveBeenCalledWith(
+      { baseUrl: host.baseUrl, apiKey: host.apiKey },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+
+    wrapper.unmount();
+    const signal = subscribeMock.mock.calls[0]?.[1] as AbortSignal;
+    expect(signal.aborted).toBe(true);
   });
 });

@@ -777,6 +777,40 @@ fn validate_worker_grant(
     Ok(ready)
 }
 
+type DeviceEventSignature = Vec<(
+    String,
+    bool,
+    mold_core::DeviceAdminState,
+    mold_core::DeviceHealth,
+    mold_core::DeviceActivity,
+    bool,
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+)>;
+
+/// Semantic device transitions only. Raw telemetry and plan membership have
+/// dedicated streams/events and must not generate 1 Hz `/api/events` storms.
+fn device_event_signature(state: &mold_core::DeviceState) -> DeviceEventSignature {
+    state
+        .devices
+        .iter()
+        .map(|device| {
+            (
+                device.id.clone(),
+                device.desired_enabled,
+                device.admin_state,
+                device.health,
+                device.activity,
+                device.schedulable,
+                device.unschedulable_reason.clone(),
+                device.loaded_models.clone(),
+                device.active_work_id.clone(),
+            )
+        })
+        .collect()
+}
+
 struct Coordinator {
     state: AppState,
     planner: Planner,
@@ -799,6 +833,7 @@ struct Coordinator {
     last_paused: bool,
     last_worker_claims: BTreeMap<String, usize>,
     last_device_preferences_sequence: u64,
+    last_device_event_signature: Option<DeviceEventSignature>,
     plan_invalidations: BTreeMap<String, u8>,
     dispatch_retry_round: u8,
     dispatch_retry_not_before_ms: Option<u64>,
@@ -862,6 +897,7 @@ impl Coordinator {
             last_paused: false,
             last_worker_claims: BTreeMap::new(),
             last_device_preferences_sequence: 0,
+            last_device_event_signature: None,
             plan_invalidations: BTreeMap::new(),
             dispatch_retry_round: 0,
             dispatch_retry_not_before_ms: None,
@@ -2587,6 +2623,7 @@ impl Coordinator {
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
+                            self.state.device_registry.mark_unavailable(&device_id);
                             grant_failed = true;
                             break;
                         }
@@ -2667,6 +2704,7 @@ impl Coordinator {
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
+                            self.state.device_registry.mark_unavailable(&device_id);
                             grant_failed = true;
                             break;
                         }
@@ -2809,6 +2847,20 @@ impl Coordinator {
             });
     }
 
+    fn publish_device_state_if_changed(&mut self) {
+        let state = crate::routes::current_device_state(&self.state);
+        let signature = device_event_signature(&state);
+        if self.last_device_event_signature.as_ref() == Some(&signature) {
+            return;
+        }
+        self.last_device_event_signature = Some(signature);
+        self.state
+            .events
+            .publish(mold_core::ServerEvent::DeviceStateChanged {
+                state: Box::new(state),
+            });
+    }
+
     fn reject_all_unstarted_for_fatal_cuda(&mut self) {
         self.reject_all_unstarted("CUDA context is fatally poisoned; server restart required");
     }
@@ -2931,6 +2983,10 @@ pub async fn run_scheduler_coordinator(
                 );
             }
             coordinator.reject_all_unstarted_for_fatal_cuda();
+            // Publish the poisoned health transition before supervision tears
+            // down the process. REST remains authoritative if the frame races
+            // a reconnect or shutdown.
+            coordinator.publish_device_state_if_changed();
             fatal = true;
             break;
         }
@@ -2942,6 +2998,7 @@ pub async fn run_scheduler_coordinator(
                 coordinator.dirty.clear_through(planned_state_version);
             }
         }
+        coordinator.publish_device_state_if_changed();
     }
     coordinator.stop_preparations().await;
     for worker in &coordinator.state.gpu_pool.workers {
@@ -3967,6 +4024,179 @@ mod tests {
         assert!(
             worker_rx.try_recv().is_err(),
             "low sampled host memory must block transport"
+        );
+    }
+
+    #[test]
+    fn device_event_signature_ignores_raw_telemetry_and_plan_membership() {
+        let mut state = mold_core::DeviceState {
+            devices: vec![mold_core::DeviceInfo {
+                id: "cuda:stable".into(),
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: Some(0),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: "GPU".into(),
+                pci_bus_id: None,
+                compute_capability: Some("8.6".into()),
+                memory: mold_core::DeviceMemoryInfo {
+                    total_bytes: Some(24 << 30),
+                    used_bytes: Some(1 << 30),
+                    mold_used_bytes: Some(1 << 30),
+                    other_used_bytes: Some(0),
+                },
+                telemetry: mold_core::DeviceTelemetry {
+                    utilization_percent: Some(10),
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                admin_state: mold_core::DeviceAdminState::Enabled,
+                health: mold_core::DeviceHealth::Healthy,
+                activity: mold_core::DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: Vec::new(),
+                active_work_id: None,
+                planned_work_ids: vec!["work-a".into()],
+            }],
+            plan_version: 1,
+        };
+        let original = device_event_signature(&state);
+
+        state.devices[0].telemetry.utilization_percent = Some(99);
+        state.devices[0].memory.used_bytes = Some(20 << 30);
+        state.devices[0].planned_work_ids = vec!["work-b".into()];
+        state.plan_version = 2;
+        assert_eq!(
+            device_event_signature(&state),
+            original,
+            "resource samples and plan publications have dedicated channels"
+        );
+
+        state.devices[0].health = mold_core::DeviceHealth::Unavailable;
+        assert_ne!(
+            device_event_signature(&state),
+            original,
+            "health transitions must invalidate the device snapshot"
+        );
+    }
+
+    #[test]
+    fn device_events_publish_once_per_semantic_health_transition() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let mut state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice::from_runtime_gpu(&worker.gpu, true, None),
+            ])),
+            Arc::new(None),
+        ));
+        let mut receiver = state.events.subscribe();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+
+        coordinator.publish_device_state_if_changed();
+        let first = receiver.try_recv().expect("initial semantic snapshot");
+        assert!(matches!(
+            first,
+            mold_core::ServerEvent::DeviceStateChanged { state }
+                if state.devices[0].health == mold_core::DeviceHealth::Healthy
+        ));
+        coordinator.publish_device_state_if_changed();
+        assert!(
+            receiver.try_recv().is_err(),
+            "unchanged snapshots must not emit duplicate events"
+        );
+
+        worker.poisoned.store(true, Ordering::SeqCst);
+        coordinator.publish_device_state_if_changed();
+        let poisoned = receiver.try_recv().expect("poison transition");
+        assert!(matches!(
+            poisoned,
+            mold_core::ServerEvent::DeviceStateChanged { state }
+                if state.devices[0].health == mold_core::DeviceHealth::Poisoned
+        ));
+    }
+
+    #[test]
+    fn failed_post_upscale_completion_never_trains_but_success_does() {
+        let make_coordinator = || {
+            let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+            let state = AppState::empty(
+                mold_core::Config::default(),
+                QueueHandle::new(ingress_tx),
+                Arc::new(GpuPool {
+                    workers: Vec::new(),
+                }),
+                1,
+            );
+            Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            )
+        };
+        let key = EstimateKey {
+            device_class: "cuda-sm86".into(),
+            model_fingerprint: "real-esrgan-x4plus:fp16".into(),
+            work_kind: "post_upscale".into(),
+            shape_bucket: "1024x1024".into(),
+            execution_fingerprint: "fp16".into(),
+        };
+        let complete = |coordinator: &mut Coordinator, successful| {
+            coordinator.leases.insert(
+                "cuda:stable".into(),
+                ActiveLease {
+                    work_id: "post-upscale".into(),
+                    plan_version: 1,
+                    worker_generation: 1,
+                    accepted: true,
+                    previous_target: None,
+                    started_at: Instant::now(),
+                    estimate_key: key.clone(),
+                },
+            );
+            let mut immediate = false;
+            coordinator.handle_worker_event(
+                WorkerEvent::Completed {
+                    device_id: "cuda:stable".into(),
+                    ordinal: 0,
+                    worker_generation: 1,
+                    successful,
+                },
+                &mut immediate,
+            );
+        };
+
+        let mut failed = make_coordinator();
+        complete(&mut failed, false);
+        assert!(
+            failed.estimates.exact(&key).is_none(),
+            "downgraded-to-original post-upscale failure must not train EWMA"
+        );
+
+        let mut succeeded = make_coordinator();
+        complete(&mut succeeded, true);
+        assert!(
+            succeeded.estimates.exact(&key).is_some(),
+            "successful post-upscale must train EWMA"
         );
     }
 

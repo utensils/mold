@@ -125,6 +125,51 @@ describe("event routing", () => {
     events.apply({ type: "queue_resumed" });
     expect(jobs.queues["local"]?.paused).toBe(false);
   });
+
+  it("reactively applies versioned queue plans and authoritative device snapshots", async () => {
+    connectWithBucket();
+    const { useJobsStore } = await import("./jobs");
+    const jobs = useJobsStore();
+    jobs.queues["local"] = {
+      hostId: "local",
+      entries: [],
+      paused: false,
+      caps: null,
+      gpuOrdinals: [],
+      devices: [],
+      plan: null,
+      error: null,
+    };
+    const events = useEventsStore();
+    const plan = {
+      plan_version: 7,
+      state_version: 9,
+      optimizer_state: "optimized",
+      dirty_since_unix_ms: null,
+      next_replan_at_unix_ms: null,
+      work_items: [],
+    };
+    events.apply({ type: "queue_plan_changed", plan });
+    expect(jobs.queues["local"]?.plan).toEqual(plan);
+
+    const device = {
+      id: "cuda:stable",
+      backend: "cuda",
+      ordinal: 0,
+      schedulable: false,
+    } as never;
+    events.apply({
+      type: "device_state_changed",
+      state: { devices: [device], plan_version: 7 },
+    });
+    expect(jobs.queues["local"]?.devices).toEqual([device]);
+
+    events.apply({
+      type: "queue_plan_changed",
+      plan: { ...plan, plan_version: 6 },
+    });
+    expect(jobs.queues["local"]?.plan?.plan_version).toBe(7);
+  });
 });
 
 describe("old-server fallback poller", () => {

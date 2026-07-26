@@ -505,8 +505,7 @@ export const useHostsStore = defineStore("hosts", {
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
-              predictedCompletionMs:
-                this.telemetry[host.id]?.predictedCompletionMs ?? null,
+              predictedCompletionMs: this.telemetry[host.id]?.predictedCompletionMs ?? null,
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
