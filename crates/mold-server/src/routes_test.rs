@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_patch_disables_idle_worker_and_publishes_event() {
+    async fn v2_disable_can_be_recovered_after_restart_into_legacy() {
         let worker = gpu_worker_stub(0);
         let pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: vec![worker].into(),
@@ -762,6 +762,30 @@ mod tests {
             .unwrap();
         assert_eq!(generation.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json_body(generation).await["code"], "NO_SCHEDULABLE_DEVICE");
+
+        let mut legacy = AppState::with_engine(MockEngine::ready());
+        legacy.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: Vec::new().into(),
+        });
+        legacy.device_registry = registry.clone();
+        legacy.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tokio::sync::mpsc::channel(1).0,
+            crate::dispatch_mode::DispatchMode::Legacy,
+            false,
+            false,
+        );
+        let recovery = app_with_state(legacy)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovery.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(recovery).await["restart_required"], true);
+        assert!(registry.desired_enabled(id));
     }
 
     #[tokio::test]
@@ -998,6 +1022,83 @@ mod tests {
                 ),
                 "{label} published an event before rejecting: {lifecycle_event:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn nonauthoritative_enable_persists_restart_recovery_without_live_mutation() {
+        for (label, mode) in [
+            ("legacy", crate::dispatch_mode::DispatchMode::Legacy),
+            ("observe", crate::dispatch_mode::DispatchMode::Observe),
+        ] {
+            let worker = gpu_worker_stub(0);
+            let pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = pool.clone();
+            install_worker_registry(&mut state);
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: Vec::new().into(),
+            });
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tokio::sync::mpsc::channel(1).0,
+                mode,
+                false,
+                mode == crate::dispatch_mode::DispatchMode::Observe,
+            );
+            let registry = state.device_registry.clone();
+            let id = "cuda:00000000000000000000000000000000";
+            registry.set_desired_enabled(id, false).unwrap();
+            let mut events = state.events.subscribe();
+            let app = app_with_state(state);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["desired_enabled"], true, "{label}");
+            assert_eq!(body["restart_required"], true, "{label}");
+            assert!(registry.desired_enabled(id), "{label}");
+            assert_eq!(pool.workers.len(), 1, "{label}");
+            assert!(!worker.shutdown_requested.load(Ordering::SeqCst), "{label}");
+            assert!(matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ));
+
+            let listed = app
+                .clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                json_body(listed).await["devices"][0]["restart_required"],
+                true,
+                "{label}"
+            );
+
+            let idempotent = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":true}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(idempotent.status(), StatusCode::OK, "{label}");
+            assert_eq!(json_body(idempotent).await["restart_required"], true);
         }
     }
 
@@ -2352,6 +2453,7 @@ mod tests {
         assert_eq!(body["queue"]["can_reorder"], true);
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
+        assert_eq!(body["devices"]["restart_enable"], false);
     }
 
     #[tokio::test]
@@ -2404,6 +2506,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "{label}");
             let body = json_body(response).await;
             assert_eq!(body["devices"]["lifecycle"], false, "{label}");
+            assert_eq!(body["devices"]["restart_enable"], true, "{label}");
         }
     }
 

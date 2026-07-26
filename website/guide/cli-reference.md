@@ -174,6 +174,9 @@ joins it. Re-enable starts a fresh owner thread; it never resets and reuses a
 CUDA primary context in-process. Desired enablement is machine-wide and
 persists across restarts and temporary device absence. A startup-excluded
 device still requires a restart with a broader `--gpus` selection.
+Live changes require Scheduler V2. In legacy or observe mode, `gpu enable`
+can recover a persistently-disabled, startup-selected device for the next
+server restart; live disable remains unavailable.
 
 ## `mold server discover`
 

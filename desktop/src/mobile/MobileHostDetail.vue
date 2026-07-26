@@ -10,6 +10,7 @@ import type {
   GpuSnapshot,
   ModelEntry,
   ResourceSnapshot,
+  ServerCapabilities,
   ServerStatus,
 } from "../lib/api/types";
 import { formatGB, formatUptime, percent } from "../lib/format";
@@ -41,6 +42,7 @@ const emit = defineEmits<{
 const status = ref<ServerStatus | null>(null);
 const snapshot = ref<DetailSnapshot | null>(null);
 const devices = ref<DeviceInfo[] | null>(null);
+const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
@@ -147,6 +149,7 @@ async function loadHost(): Promise<void> {
   status.value = null;
   snapshot.value = null;
   devices.value = null;
+  deviceCapabilities.value = null;
   installed.value = [];
   queue.value = [];
   queueApiAvailable.value = false;
@@ -156,15 +159,17 @@ async function loadHost(): Promise<void> {
   forgetPending.value = false;
 
   try {
-    const [nextStatus, models, nextDevices] = await Promise.all([
+    const [nextStatus, models, nextDevices, nextCapabilities] = await Promise.all([
       apiJsonTo<ServerStatus>(target.value, "/api/status"),
       apiJsonTo<ModelEntry[]>(target.value, "/api/models"),
       loadDevices().catch(() => null),
+      apiJsonTo<ServerCapabilities>(target.value, "/api/capabilities").catch(() => null),
     ]);
     if (epoch !== loadEpoch) return;
     status.value = nextStatus;
     installed.value = models.filter((model) => model.downloaded);
     devices.value = nextDevices;
+    deviceCapabilities.value = nextCapabilities;
     emit("status", { id: props.host.id, status: nextStatus });
     startLiveServices(epoch);
   } catch (caught) {
@@ -185,7 +190,7 @@ function deviceStateLabel(device: DeviceInfo): string {
 }
 
 async function toggleDevice(device: DeviceInfo): Promise<void> {
-  if (device.admin_state === "startup_excluded") return;
+  if (!canMutateDevice(device)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -198,6 +203,26 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
     next.delete(device.id);
     deviceMutations.value = next;
   }
+}
+
+function canMutateDevice(device: DeviceInfo): boolean {
+  if (device.admin_state === "startup_excluded") return false;
+  if (
+    deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.dispatch?.v2_authoritative
+  )
+    return true;
+  return !device.desired_enabled && deviceCapabilities.value?.devices?.restart_enable === true;
+}
+
+function deviceActionLabel(device: DeviceInfo): string {
+  if (
+    !device.desired_enabled &&
+    !deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.devices?.restart_enable
+  )
+    return "Enable on restart";
+  return device.desired_enabled ? "Disable" : "Enable";
 }
 
 function saveRename(): void {
@@ -404,6 +429,12 @@ onBeforeUnmount(() => {
           <h2 id="host-devices-title">GPU devices</h2>
           <span>{{ devices.length }}</span>
         </div>
+        <p v-if="!deviceCapabilities?.devices?.lifecycle" data-test="device-lifecycle-note">
+          <template v-if="deviceCapabilities?.devices?.restart_enable">
+            Live controls require Scheduler V2. Disabled GPUs can be enabled for the next restart.
+          </template>
+          <template v-else>Live GPU controls are unavailable on this server.</template>
+        </p>
         <ul class="mobile-data-list">
           <li v-for="device in devices" :key="device.id" data-test="device-row">
             <div>
@@ -419,12 +450,10 @@ onBeforeUnmount(() => {
               type="button"
               class="status-badge"
               :data-test="`device-toggle-${device.ordinal ?? device.id}`"
-              :disabled="
-                device.admin_state === 'startup_excluded' || deviceMutations.has(device.id)
-              "
+              :disabled="!canMutateDevice(device) || deviceMutations.has(device.id)"
               @click="toggleDevice(device)"
             >
-              {{ device.desired_enabled ? "Disable" : "Enable" }}
+              {{ deviceActionLabel(device) }}
             </button>
           </li>
         </ul>

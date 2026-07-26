@@ -59,6 +59,11 @@ describe("DeviceSettingsPanel", () => {
       version: "0.20.2",
       devices: [device],
     };
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      devices: { available: true, lifecycle: true, restart_enable: false },
+      dispatch: { active_mode: "v2", v2_authoritative: true, observes_v2_decisions: false },
+    };
     vi.spyOn(hosts, "refresh").mockResolvedValue(undefined);
   });
 
@@ -75,5 +80,27 @@ describe("DeviceSettingsPanel", () => {
       false,
     );
     expect(useHostsStore().refresh).toHaveBeenCalledOnce();
+  });
+
+  it("offers only restart recovery when live lifecycle is unavailable", async () => {
+    const hosts = useHostsStore();
+    hosts.telemetry.local!.devices = [
+      { ...device, desired_enabled: false, admin_state: "disabled", schedulable: false },
+    ];
+    hosts.capabilities.local = {
+      gallery: { can_delete: true },
+      devices: { available: true, lifecycle: false, restart_enable: true },
+      dispatch: {
+        active_mode: "legacy",
+        v2_authoritative: false,
+        observes_v2_decisions: false,
+      },
+    };
+    const wrapper = mount(DeviceSettingsPanel);
+    const button = wrapper.get("[data-test='settings-device-toggle-0']");
+    expect(button.text()).toBe("Enable on restart");
+    await button.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(expect.any(Object), device.id, true);
   });
 });

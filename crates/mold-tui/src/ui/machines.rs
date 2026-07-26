@@ -493,8 +493,17 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             }
         }
     }
+    let action = if app.machines.can_mutate_selected_device() {
+        if app.machines.selected_device_uses_restart_enable() {
+            "e Enable on restart"
+        } else {
+            "e Enable/disable"
+        }
+    } else {
+        "Live controls require Scheduler V2"
+    };
     lines.push(Line::from(Span::styled(
-        "g Next GPU · e Enable/disable",
+        format!("g Next GPU · {action}"),
         app.theme.dim(),
     )));
 }

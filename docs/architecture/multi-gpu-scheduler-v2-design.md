@@ -1567,6 +1567,10 @@ Semantics:
 - `409` startup-excluded device cannot be enabled without restart;
 - `503` worker start failed, with device remaining unavailable;
 - enabling while draining cancels shutdown if the current worker still exists.
+- outside authoritative V2, disabling returns `409`; enabling a
+  persisted-disabled startup-selected device writes restart recovery, returns
+  `202 restart_required` once and idempotent `200` thereafter, and remains
+  `restart_required` in inventory until the next process creates its owner.
 
 Authentication:
 
@@ -1748,6 +1752,11 @@ mold gpu enable <stable-id-or-ordinal>
 
 `mold ps`, `mold server status`, and MCP status display every device. JSON uses
 stable IDs. Human output may show ordinals.
+
+Clients fetch capabilities before rendering actions. Live controls require
+both `devices.lifecycle` and `dispatch.v2_authoritative`; otherwise only
+`devices.restart_enable` plus a currently disabled preference exposes
+**Enable on restart**.
 
 Forced-local multi-item generation uses the shared scheduler adapter. A single
 local request remains simple and must not incur a material startup regression.

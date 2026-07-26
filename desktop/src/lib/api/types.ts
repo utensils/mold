@@ -80,6 +80,17 @@ export interface ServerCapabilities {
   discovery?: { can_browse: boolean } | null;
   /** Absent on servers that predate `GET /api/events`. */
   events?: { available: boolean } | null;
+  /** Live lifecycle and restart-only recovery support. */
+  devices?: {
+    available?: boolean;
+    lifecycle?: boolean;
+    restart_enable?: boolean;
+  } | null;
+  dispatch?: {
+    active_mode?: string | null;
+    v2_authoritative?: boolean;
+    observes_v2_decisions?: boolean;
+  } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
 }

@@ -365,6 +365,19 @@ describe("SettingsPage", () => {
           }),
         } as Response;
       }
+      if (url.endsWith("/api/capabilities")) {
+        return {
+          ok: true,
+          json: async () => ({
+            devices: {
+              available: true,
+              lifecycle: true,
+              restart_enable: false,
+            },
+            dispatch: { active_mode: "v2", v2_authoritative: true },
+          }),
+        } as Response;
+      }
       if (url.includes("/api/devices/cuda%3A") && init?.method === "PATCH") {
         enabled = false;
         return {

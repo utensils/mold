@@ -109,6 +109,16 @@ export interface GalleryCapabilities {
 export interface ServerCapabilities {
   gallery?: GalleryCapabilities;
   discovery?: { can_browse: boolean };
+  devices?: {
+    available?: boolean;
+    lifecycle?: boolean;
+    restart_enable?: boolean;
+  };
+  dispatch?: {
+    active_mode?: string | null;
+    v2_authoritative?: boolean;
+    observes_v2_decisions?: boolean;
+  };
   queue?: {
     can_pause?: boolean;
     can_cancel_all?: boolean;

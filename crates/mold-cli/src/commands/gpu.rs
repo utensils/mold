@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use mold_core::{DeviceAdminState, DeviceInfo, MoldClient};
+use mold_core::{DeviceAdminState, DeviceInfo, MoldClient, ServerCapabilities};
 
 pub async fn list(json: bool) -> Result<()> {
     let devices = MoldClient::from_env().devices().await?;
@@ -33,11 +33,33 @@ pub async fn list(json: bool) -> Result<()> {
 
 pub async fn set(selector: &str, enabled: bool) -> Result<()> {
     let client = MoldClient::from_env();
+    let capabilities = client.server_capabilities().await?;
     let state = client.devices().await?;
     let device = resolve_device(&state.devices, selector)?;
+    ensure_supported(&capabilities, device, enabled)?;
     let updated = client.set_device_enabled(&device.id, enabled).await?;
-    println!("{}: {}", updated.name, admin_label(updated.admin_state));
+    if updated.restart_required {
+        println!("{}: enabled after server restart", updated.name);
+    } else {
+        println!("{}: {}", updated.name, admin_label(updated.admin_state));
+    }
     Ok(())
+}
+
+fn ensure_supported(
+    capabilities: &ServerCapabilities,
+    device: &DeviceInfo,
+    enabled: bool,
+) -> Result<()> {
+    if capabilities.devices.lifecycle && capabilities.dispatch.v2_authoritative {
+        return Ok(());
+    }
+    if enabled && !device.desired_enabled && capabilities.devices.restart_enable {
+        return Ok(());
+    }
+    bail!(
+        "live GPU controls require Scheduler V2; only a persistently-disabled GPU can be enabled for the next server restart"
+    )
 }
 
 fn resolve_device<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a DeviceInfo> {
@@ -109,6 +131,7 @@ mod tests {
                 power_w: None,
             },
             desired_enabled: true,
+            restart_required: false,
             admin_state: DeviceAdminState::Enabled,
             health: DeviceHealth::Healthy,
             activity: DeviceActivity::Idle,
@@ -131,5 +154,25 @@ mod tests {
             devices[0].id
         );
         assert!(resolve_device(&devices, "1").is_err());
+    }
+
+    #[test]
+    fn gates_live_controls_but_allows_restart_recovery() {
+        let mut legacy = ServerCapabilities::default();
+        legacy.devices.available = true;
+        legacy.devices.restart_enable = true;
+        let mut disabled = device("cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0);
+        disabled.desired_enabled = false;
+        disabled.admin_state = DeviceAdminState::Disabled;
+        assert!(ensure_supported(&legacy, &disabled, true).is_ok());
+        assert!(ensure_supported(&legacy, &disabled, false).is_err());
+
+        let mut enabled = disabled.clone();
+        enabled.desired_enabled = true;
+        assert!(ensure_supported(&legacy, &enabled, true).is_err());
+
+        legacy.devices.lifecycle = true;
+        legacy.dispatch.v2_authoritative = true;
+        assert!(ensure_supported(&legacy, &enabled, false).is_ok());
     }
 }

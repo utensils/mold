@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { apiJsonTo } from "../lib/api/client";
+import type { ServerCapabilities } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
 import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
@@ -42,6 +43,7 @@ function openPrivacyPolicy(): void {
 }
 
 const devices = ref<DeviceInfo[] | null>(null);
+const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const deviceError = ref("");
 
@@ -53,12 +55,37 @@ async function loadDevices(): Promise<void> {
   try {
     const target = mobileHostTarget(props.host);
     const value = await apiJsonTo<unknown>(target, "/api/devices");
+    const capabilities = await apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(
+      () => null,
+    );
     devices.value = parseDeviceListResponse(value).devices;
+    deviceCapabilities.value = capabilities;
     deviceError.value = "";
   } catch {
     // Older hosts do not expose runtime lifecycle controls.
     devices.value = null;
+    deviceCapabilities.value = null;
   }
+}
+
+function canMutate(device: DeviceInfo): boolean {
+  if (device.admin_state === "startup_excluded") return false;
+  if (
+    deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.dispatch?.v2_authoritative
+  )
+    return true;
+  return !device.desired_enabled && deviceCapabilities.value?.devices?.restart_enable === true;
+}
+
+function actionLabel(device: DeviceInfo): string {
+  if (
+    !device.desired_enabled &&
+    !deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.devices?.restart_enable
+  )
+    return "Enable on restart";
+  return device.desired_enabled ? "Disable" : "Enable";
 }
 
 function stateLabel(device: DeviceInfo): string {
@@ -70,7 +97,7 @@ function stateLabel(device: DeviceInfo): string {
 }
 
 async function toggleDevice(device: DeviceInfo): Promise<void> {
-  if (!props.host || device.admin_state === "startup_excluded") return;
+  if (!props.host || !canMutate(device)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -205,7 +232,15 @@ watch(() => props.host?.id, loadDevices, { immediate: true });
     >
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-devices-title">GPU devices</h2>
-        <p>Busy devices finish their current stage before switching off.</p>
+        <p v-if="deviceCapabilities?.devices?.lifecycle">
+          Busy devices finish their current stage before switching off.
+        </p>
+        <p v-else>
+          <template v-if="deviceCapabilities?.devices?.restart_enable">
+            Live controls require Scheduler V2. Disabled GPUs can be enabled for the next restart.
+          </template>
+          <template v-else>Live GPU controls are unavailable on this server.</template>
+        </p>
       </div>
       <p v-if="deviceError" class="status-line error-text" role="alert">{{ deviceError }}</p>
       <ul class="mobile-data-list">
@@ -221,10 +256,10 @@ watch(() => props.host?.id, loadDevices, { immediate: true });
             type="button"
             class="secondary-button"
             :data-test="`mobile-settings-device-toggle-${device.ordinal ?? device.id}`"
-            :disabled="device.admin_state === 'startup_excluded' || deviceMutations.has(device.id)"
+            :disabled="!canMutate(device) || deviceMutations.has(device.id)"
             @click="toggleDevice(device)"
           >
-            {{ device.desired_enabled ? "Disable" : "Enable" }}
+            {{ actionLabel(device) }}
           </button>
         </li>
       </ul>

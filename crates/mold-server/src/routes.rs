@@ -2431,11 +2431,23 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
 )]
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
     let resources = state.resources.latest();
-    Json(
+    let mut snapshot =
         state
             .device_registry
-            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry),
-    )
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    annotate_restart_required(&state, &mut snapshot);
+    Json(snapshot)
+}
+
+fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
+    if state.scheduled_work.v2_authoritative() {
+        return;
+    }
+    for device in &mut snapshot.devices {
+        device.restart_required = device.desired_enabled
+            && !device.schedulable
+            && device.admin_state != DeviceAdminState::StartupExcluded;
+    }
 }
 
 #[utoipa::path(
@@ -2460,16 +2472,6 @@ async fn patch_device(
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(request): Json<DeviceMutationRequest>,
 ) -> Result<axum::response::Response, ApiError> {
-    // Only an authoritative V2 coordinator can own lifecycle transitions.
-    // Reject every other runtime before discovery, persistence, worker
-    // mutation, or event publication.
-    if !state.scheduled_work.v2_authoritative() {
-        return Err(ApiError::with_code(
-            "runtime GPU lifecycle changes require an authoritative scheduler V2 runtime",
-            "DEVICE_LIFECYCLE_MODE_CONFLICT",
-            StatusCode::CONFLICT,
-        ));
-    }
     let discovered = state
         .device_registry
         .discovered_device(&device_id)
@@ -2480,6 +2482,46 @@ async fn patch_device(
                 "device '{device_id}' was excluded by startup selection and requires a restart"
             ),
             "DEVICE_STARTUP_EXCLUDED",
+            StatusCode::CONFLICT,
+        ));
+    }
+
+    // A non-authoritative runtime cannot touch live owners, but it must let an
+    // operator recover a persistently-disabled GPU for the next restart.
+    if !state.scheduled_work.v2_authoritative() && request.enabled {
+        let _mutation_guard = state.scheduler_mutation_fence.lock().await;
+        let already_enabled = state.device_registry.desired_enabled(&device_id);
+        if !already_enabled {
+            state
+                .device_registry
+                .set_desired_enabled(&device_id, true)
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to persist device preference: {error:#}"))
+                })?;
+        }
+        let resources = state.resources.latest();
+        let mut snapshot = state.device_registry.snapshot(
+            &state.gpu_pool,
+            resources.as_ref(),
+            &state.job_registry,
+        );
+        annotate_restart_required(&state, &mut snapshot);
+        let device = snapshot
+            .devices
+            .into_iter()
+            .find(|device| device.id == device_id)
+            .ok_or_else(|| ApiError::internal("device disappeared during preference mutation"))?;
+        let status = if device.restart_required && !already_enabled {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        return Ok((status, Json(device)).into_response());
+    }
+    if !state.scheduled_work.v2_authoritative() {
+        return Err(ApiError::with_code(
+            "disabling a live GPU requires an authoritative scheduler V2 runtime",
+            "DEVICE_LIFECYCLE_MODE_CONFLICT",
             StatusCode::CONFLICT,
         ));
     }
@@ -3026,6 +3068,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         devices: mold_core::DeviceCapabilities {
             available: true,
             lifecycle: state.scheduled_work.v2_authoritative(),
+            restart_enable: !state.scheduled_work.v2_authoritative(),
         },
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),

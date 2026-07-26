@@ -42,6 +42,7 @@ export interface DeviceInfo {
   memory: DeviceMemory;
   telemetry: DeviceTelemetry;
   desired_enabled: boolean;
+  restart_required?: boolean;
   admin_state: DeviceAdminState;
   health: DeviceHealth;
   activity: DeviceActivity;
@@ -216,7 +217,13 @@ function parseDevice(
     }
   }
 
-  return value as unknown as DeviceInfo;
+  return {
+    ...(value as unknown as DeviceInfo),
+    restart_required:
+      typeof value.restart_required === "boolean"
+        ? value.restart_required
+        : false,
+  };
 }
 
 export function parseDeviceListResponse(value: unknown): DeviceListResponse {

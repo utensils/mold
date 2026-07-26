@@ -88,7 +88,10 @@ servers advertise the accepted catalog sort values in
 server-assisted DNS-SD as `discovery.can_browse`, and the read-only device
 resource as `devices.available`. `devices.lifecycle` is true only when
 scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and
-unavailable runtimes report false. Clients must only request
+unavailable runtimes report false. Those runtimes advertise
+`devices.restart_enable` instead: clients may offer **Enable on restart** only
+for a device whose persisted preference is disabled. Live controls must also
+require `dispatch.v2_authoritative`. Clients must only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
@@ -903,6 +906,7 @@ provide are JSON `null`, not zero.
         "power_w": null
       },
       "desired_enabled": true,
+      "restart_required": false,
       "admin_state": "enabled",
       "health": "healthy",
       "activity": "idle",
@@ -932,10 +936,13 @@ the desired preference remains enabled, health is unavailable, and
 restart after correcting the driver/device fault. A delayed ready, stopped, or
 completion event from the predecessor cannot mutate or reap the replacement.
 
-Runtime mutation requires scheduler V2. Startup-excluded devices cannot be
-enabled in-process and return `409`; a process whose CUDA context was fatally
-poisoned requires restart. Exposed non-loopback servers require the configured
-API key for this endpoint.
+Runtime mutation requires scheduler V2. In legacy, observe, or maintenance
+mode, disabling still returns `409`, but enabling a persistently-disabled,
+startup-selected device records the preference for the next boot. The first
+such PATCH returns `202` with `restart_required:true`; repeated identical
+PATCHes return `200`, and subsequent device polls retain that flag until a
+restart creates the owner. Startup-excluded devices cannot use this recovery
+path and return `409`.
 
 ## `/api/models/pull`
 

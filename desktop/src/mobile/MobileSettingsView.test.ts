@@ -126,7 +126,12 @@ describe("MobileSettingsView", () => {
       planned_work_ids: [],
     };
     let load = 0;
-    apiJsonTo.mockImplementation(async () => {
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/capabilities")
+        return {
+          devices: { available: true, lifecycle: true, restart_enable: false },
+          dispatch: { active_mode: "v2", v2_authoritative: true },
+        };
       load += 1;
       return {
         devices: [
@@ -156,13 +161,15 @@ describe("MobileSettingsView", () => {
     );
 
     await wrapper.get("[data-test='mobile-settings-device-toggle-0']").trigger("click");
-    await vi.waitFor(() => expect(apiJsonTo).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(apiJsonTo).toHaveBeenCalledTimes(4));
 
     expect(setDeviceEnabled).toHaveBeenCalledWith(
       { baseUrl: host.baseUrl, apiKey: host.apiKey },
       device.id,
       false,
     );
-    expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable");
+    await vi.waitFor(() =>
+      expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable"),
+    );
   });
 });

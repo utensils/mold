@@ -204,7 +204,15 @@ beforeEach(() => {
     apiKey: "secret",
   });
   routeHolder.id = host.id;
-  caps = { queue: { can_reorder: false } };
+  caps = {
+    queue: { can_reorder: false },
+    devices: { available: true, lifecycle: true, restart_enable: false },
+    dispatch: {
+      active_mode: "v2",
+      v2_authoritative: true,
+      observes_v2_decisions: false,
+    },
+  };
   queueEntries = [];
   models = [];
   downloadsListing = { active: null, active_jobs: [], queued: [], history: [] };
@@ -460,6 +468,40 @@ describe("HostDetailPage — queue", () => {
       false,
     );
     expect(poll.refresh).toHaveBeenCalled();
+  });
+
+  it("gates legacy live controls and offers only restart recovery", async () => {
+    caps = {
+      queue: { can_reorder: false },
+      devices: { available: true, lifecycle: false, restart_enable: true },
+      dispatch: {
+        active_mode: "legacy",
+        v2_authoritative: false,
+        observes_v2_decisions: false,
+      },
+    };
+    poll.devices.value = [
+      makeDevice(0),
+      makeDevice(1, {
+        desired_enabled: false,
+        admin_state: "disabled",
+        schedulable: false,
+        restart_required: true,
+      }),
+    ];
+    const w = await mountDetail();
+    expect(
+      w.get('[data-test="device-toggle-0"]').attributes("disabled"),
+    ).toBeDefined();
+    const recovery = w.get('[data-test="device-toggle-1"]');
+    expect(recovery.text()).toBe("Enable on restart");
+    await recovery.trigger("click");
+    await flushPromises();
+    expect(setDeviceEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "cuda:1",
+      true,
+    );
   });
 });
 

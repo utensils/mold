@@ -93,6 +93,7 @@ describe("device API", () => {
     });
 
     expect(result.devices).toHaveLength(2);
+    expect(result.devices[0]?.restart_required).toBe(false);
     expect(result.devices.map((device) => device.id)).toEqual([
       "cuda:0123456789abcdef0123456789abcdef",
       "cuda:fedcba9876543210fedcba9876543210",
@@ -146,6 +147,7 @@ describe("device API", () => {
             power_w: null,
           },
           desired_enabled: false,
+          restart_required: true,
           admin_state: "draining",
           health: "healthy",
           activity: "generating",
@@ -168,6 +170,7 @@ describe("device API", () => {
     );
 
     expect(updated.admin_state).toBe("draining");
+    expect(updated.restart_required).toBe(true);
     const [url, init] = captured!;
     expect(url).toBe(
       "https://beast.tailnet.example/api/devices/cuda%3A0123456789abcdef0123456789abcdef",

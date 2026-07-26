@@ -20,6 +20,8 @@ import {
   setDeviceEnabled,
   type DeviceInfo,
 } from "@studio/api/devices";
+import { apiJsonTo } from "@studio/api/client";
+import type { ServerCapabilities } from "../types";
 import { originUrl } from "../lib/hostRegistry";
 import {
   deleteCatalogCredential,
@@ -136,19 +138,50 @@ async function removeCivitai() {
 const { status } = useStatusPoll();
 const version = computed(() => status.value?.version ?? "—");
 const devices = ref<DeviceInfo[] | null>(null);
+const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const originTarget = () => ({ baseUrl: originUrl(), apiKey: null });
 
 async function loadDevices() {
   try {
-    devices.value = (await listDevices(originTarget())).devices;
+    const nextDevices = await listDevices(originTarget());
+    const nextCapabilities = await apiJsonTo<ServerCapabilities>(
+      originTarget(),
+      "/api/capabilities",
+    ).catch(() => null);
+    devices.value = nextDevices.devices;
+    deviceCapabilities.value = nextCapabilities;
   } catch {
     devices.value = null;
+    deviceCapabilities.value = null;
   }
 }
 
+function canMutateDevice(device: DeviceInfo): boolean {
+  if (device.admin_state === "startup_excluded") return false;
+  if (
+    deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.dispatch?.v2_authoritative
+  )
+    return true;
+  return (
+    !device.desired_enabled &&
+    deviceCapabilities.value?.devices?.restart_enable === true
+  );
+}
+
+function deviceActionLabel(device: DeviceInfo): string {
+  if (
+    !device.desired_enabled &&
+    !deviceCapabilities.value?.devices?.lifecycle &&
+    deviceCapabilities.value?.devices?.restart_enable
+  )
+    return "Enable on restart";
+  return device.desired_enabled ? "Disable" : "Enable";
+}
+
 async function toggleDevice(device: DeviceInfo) {
-  if (device.admin_state === "startup_excluded") return;
+  if (!canMutateDevice(device)) return;
   const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
@@ -336,6 +369,19 @@ onMounted(() => {
     <template v-if="devices !== null">
       <p class="kicker">Advanced · GPU devices</p>
       <CardSurface class="settings__card" data-test="settings-device-controls">
+        <p
+          v-if="!deviceCapabilities?.devices?.lifecycle"
+          class="device-state"
+          data-test="settings-device-lifecycle-note"
+        >
+          <template v-if="deviceCapabilities?.devices?.restart_enable">
+            Live GPU controls require Scheduler V2. Disabled GPUs can be enabled
+            for the next server restart.
+          </template>
+          <template v-else>
+            Live GPU controls are unavailable on this server.
+          </template>
+        </p>
         <div
           v-for="device in devices"
           :key="device.id"
@@ -358,12 +404,11 @@ onMounted(() => {
             class="btn"
             :data-test="`settings-device-toggle-${device.ordinal ?? device.id}`"
             :disabled="
-              device.admin_state === 'startup_excluded' ||
-              deviceMutations.has(device.id)
+              !canMutateDevice(device) || deviceMutations.has(device.id)
             "
             @click="toggleDevice(device)"
           >
-            {{ device.desired_enabled ? "Disable" : "Enable" }}
+            {{ deviceActionLabel(device) }}
           </button>
         </div>
       </CardSurface>

@@ -3932,6 +3932,10 @@ pub struct DeviceInfo {
     pub memory: DeviceMemoryInfo,
     pub telemetry: DeviceTelemetry,
     pub desired_enabled: bool,
+    /// The requested preference is persisted, but a server restart is needed
+    /// before this device can become schedulable.
+    #[serde(default)]
+    pub restart_required: bool,
     pub admin_state: DeviceAdminState,
     pub health: DeviceHealth,
     pub activity: DeviceActivity,
@@ -3960,6 +3964,10 @@ pub struct DeviceCapabilities {
     /// This is `true` only while scheduler V2 owns dispatch; legacy, observe,
     /// maintenance, and otherwise unavailable runtimes report `false`.
     pub lifecycle: bool,
+    /// A disabled device can be persistently enabled for the next restart
+    /// even though live lifecycle mutation is not authoritative.
+    #[serde(default)]
+    pub restart_enable: bool,
 }
 
 /// Restart-time GPU dispatch rollout state.
@@ -4040,6 +4048,7 @@ mod device_types_tests {
                     power_w: None,
                 },
                 desired_enabled: true,
+                restart_required: false,
                 admin_state: DeviceAdminState::Enabled,
                 health: DeviceHealth::Healthy,
                 activity: DeviceActivity::Idle,

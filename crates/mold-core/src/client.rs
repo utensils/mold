@@ -769,6 +769,19 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Feature-detect optional server contracts before rendering controls.
+    pub async fn server_capabilities(&self) -> Result<crate::ServerCapabilities> {
+        let resp = self
+            .client
+            .get(format!("{}/api/capabilities", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<crate::ServerCapabilities>()
+            .await?;
+        Ok(resp)
+    }
+
     /// Read the server's stable, runtime-visible device inventory.
     pub async fn devices(&self) -> Result<DeviceState> {
         let resp = self

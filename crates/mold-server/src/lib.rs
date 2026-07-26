@@ -1464,6 +1464,33 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([GPU_0, GPU_1])
         );
+
+        // The non-authoritative restart-recovery API writes this same
+        // preference. The next Legacy/Observe boot must recreate the owner.
+        registry.set_desired_enabled(GPU_0, true).unwrap();
+        let recovered = startup_device_selection(&all, &registry);
+        assert_eq!(
+            recovered
+                .enabled
+                .iter()
+                .filter_map(|gpu| gpu.stable_id.as_deref())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([GPU_0])
+        );
+    }
+
+    #[test]
+    fn one_gpu_defaults_enabled_without_a_persisted_preference() {
+        const GPU_0: &str = "cuda:00000000000000000000000000000000";
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::default()),
+            Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap())),
+        );
+        let selected = vec![discovered_gpu(0, GPU_0)];
+        assert_eq!(
+            startup_device_selection(&selected, &registry).enabled.len(),
+            1
+        );
     }
 
     #[test]

@@ -152,6 +152,12 @@ function installApi(): void {
     if (path === "/api/devices") {
       return Promise.resolve({ devices: [], plan_version: 0 });
     }
+    if (path === "/api/capabilities") {
+      return Promise.resolve({
+        devices: { available: true, lifecycle: true, restart_enable: false },
+        dispatch: { active_mode: "v2", v2_authoritative: true },
+      });
+    }
     return Promise.reject(new Error(`Unexpected API path: ${path}`));
   });
 }

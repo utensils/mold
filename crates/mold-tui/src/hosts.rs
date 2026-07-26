@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
-use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerStatus};
+use mold_core::{DeviceInfo, DeviceState, MoldClient, ServerCapabilities, ServerStatus};
 use mold_db::settings::{self as keys, Settings};
 use mold_db::MetadataDb;
 
@@ -348,6 +348,8 @@ pub(crate) struct MachinesState {
     pub statuses: HashMap<String, HostStatus>,
     /// Authoritative `/api/devices` snapshots, keyed by machine row id.
     pub devices: HashMap<String, DeviceState>,
+    /// Capability gate paired with each device inventory.
+    pub capabilities: HashMap<String, ServerCapabilities>,
     /// Selected device in the detail pane. `g` cycles this independently of
     /// the queue-row selection, preserving the existing Up/Down queue keys.
     pub device_selected: usize,
@@ -466,6 +468,33 @@ impl MachinesState {
         self.devices.get(&id)?.devices.get(self.device_selected)
     }
 
+    pub fn can_mutate_selected_device(&self) -> bool {
+        let device = match self.selected_device() {
+            Some(device) => device,
+            None => return false,
+        };
+        if device.admin_state == mold_core::DeviceAdminState::StartupExcluded {
+            return false;
+        }
+        let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
+            return false;
+        };
+        (capabilities.devices.lifecycle && capabilities.dispatch.v2_authoritative)
+            || (!device.desired_enabled && capabilities.devices.restart_enable)
+    }
+
+    pub fn selected_device_uses_restart_enable(&self) -> bool {
+        let Some(device) = self.selected_device() else {
+            return false;
+        };
+        let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
+            return false;
+        };
+        !device.desired_enabled
+            && !capabilities.devices.lifecycle
+            && capabilities.devices.restart_enable
+    }
+
     pub fn select_next_device(&mut self) {
         let id = self.selected_machine_id();
         let len = self
@@ -488,6 +517,21 @@ impl MachinesState {
             }
             None => {
                 self.devices.remove(&host_id);
+            }
+        }
+    }
+
+    pub fn apply_capabilities(
+        &mut self,
+        host_id: String,
+        capabilities: Option<ServerCapabilities>,
+    ) {
+        match capabilities {
+            Some(capabilities) => {
+                self.capabilities.insert(host_id, capabilities);
+            }
+            None => {
+                self.capabilities.remove(&host_id);
             }
         }
     }
@@ -767,13 +811,18 @@ pub(crate) async fn fetch_host_status(
     let client = client_for_host(&entry);
     let status = client.server_status().await.ok().map(Box::new);
     let devices = client.devices().await.ok();
+    let capabilities = client.server_capabilities().await.ok();
     let _ = tx.send(BackgroundEvent::HostStatusUpdate {
         host_id: entry.id.clone(),
         status,
     });
     let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
-        host_id: entry.id,
+        host_id: entry.id.clone(),
         devices,
+    });
+    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+        host_id: entry.id,
+        capabilities,
     });
 }
 
@@ -1097,6 +1146,7 @@ mod tests {
                 power_w: None,
             },
             desired_enabled: true,
+            restart_required: false,
             admin_state: mold_core::DeviceAdminState::Enabled,
             health: mold_core::DeviceHealth::Healthy,
             activity: mold_core::DeviceActivity::Idle,
@@ -1124,6 +1174,22 @@ mod tests {
         st.select_next_device();
         assert_eq!(st.selected_device().and_then(|gpu| gpu.ordinal), Some(0));
         assert_eq!(st.queue_selected, 3);
+
+        let mut legacy = mold_core::ServerCapabilities::default();
+        legacy.devices.restart_enable = true;
+        st.apply_capabilities(LOCAL_HOST_ID.to_string(), Some(legacy));
+        assert!(!st.can_mutate_selected_device());
+        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].desired_enabled = false;
+        assert!(st.can_mutate_selected_device());
+        assert!(st.selected_device_uses_restart_enable());
+
+        let mut v2 = mold_core::ServerCapabilities::default();
+        v2.devices.lifecycle = true;
+        v2.dispatch.v2_authoritative = true;
+        st.apply_capabilities(LOCAL_HOST_ID.to_string(), Some(v2));
+        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].desired_enabled = true;
+        assert!(st.can_mutate_selected_device());
+        assert!(!st.selected_device_uses_restart_enable());
     }
 
     #[test]

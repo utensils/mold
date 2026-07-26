@@ -95,6 +95,10 @@ pub enum BackgroundEvent {
         host_id: String,
         devices: Option<mold_core::DeviceState>,
     },
+    HostCapabilitiesUpdate {
+        host_id: String,
+        capabilities: Option<mold_core::ServerCapabilities>,
+    },
     /// Per-host queue snapshot for the selected Machines row.
     HostQueueUpdate {
         host_id: String,
@@ -1692,6 +1696,10 @@ impl App {
                         host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
                         devices: client.devices().await.ok(),
                     });
+                    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        capabilities: client.server_capabilities().await.ok(),
+                    });
                 }
                 Err(_) => {
                     // Server became unreachable — clear stale status so the UI
@@ -1700,6 +1708,10 @@ impl App {
                     let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
                         host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
                         devices: None,
+                    });
+                    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+                        host_id: crate::hosts::LOCAL_HOST_ID.to_string(),
+                        capabilities: None,
                     });
                 }
             }
@@ -3556,6 +3568,13 @@ impl App {
                 if device.admin_state == mold_core::DeviceAdminState::StartupExcluded {
                     self.generate.error_message =
                         Some("This GPU was excluded at startup and requires a restart".to_string());
+                    return;
+                }
+                if !self.machines.can_mutate_selected_device() {
+                    self.generate.error_message = Some(
+                        "Live GPU controls require Scheduler V2; only a disabled GPU can be enabled for the next restart"
+                            .to_string(),
+                    );
                     return;
                 }
                 let enabled = !device.desired_enabled;
@@ -6066,6 +6085,12 @@ impl App {
                 }
                 BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
                     self.machines.apply_devices(host_id, devices);
+                }
+                BackgroundEvent::HostCapabilitiesUpdate {
+                    host_id,
+                    capabilities,
+                } => {
+                    self.machines.apply_capabilities(host_id, capabilities);
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);
