@@ -14,7 +14,7 @@ export type DeviceActivity =
   | "stopping";
 
 export interface DeviceMemory {
-  total_bytes: number;
+  total_bytes: number | null;
   used_bytes: number | null;
   mold_used_bytes: number | null;
   other_used_bytes: number | null;
@@ -97,6 +97,12 @@ function isNullableNumber(value: unknown): value is number | null {
   return (
     value === null || (typeof value === "number" && Number.isFinite(value))
   );
+}
+
+function isNullableNonnegativeNumber(
+  value: unknown,
+): value is number | null {
+  return isNullableNumber(value) && (value === null || value >= 0);
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -190,15 +196,11 @@ function parseDevice(
   if (!isRecord(memory)) {
     missing.push(`devices[${index}].memory`);
   } else {
-    if (
-      typeof memory.total_bytes !== "number" ||
-      !Number.isFinite(memory.total_bytes) ||
-      memory.total_bytes < 0
-    ) {
+    if (!isNullableNonnegativeNumber(memory.total_bytes)) {
       missing.push(`devices[${index}].memory.total_bytes`);
     }
     for (const key of ["used_bytes", "mold_used_bytes", "other_used_bytes"]) {
-      if (!isNullableNumber(memory[key])) {
+      if (!isNullableNonnegativeNumber(memory[key])) {
         missing.push(`devices[${index}].memory.${key}`);
       }
     }

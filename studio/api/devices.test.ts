@@ -61,7 +61,7 @@ describe("device API", () => {
               pci_bus_id: null,
               compute_capability: null,
               memory: {
-                total_bytes: 12_000_000_000,
+                total_bytes: null,
                 used_bytes: null,
                 mold_used_bytes: null,
                 other_used_bytes: null,
