@@ -2138,10 +2138,11 @@ description = "stale"
                 ]),
             ),
             (
-                "gpus = [\"cuda:0123\", \"GPU-fedc\"]",
+                "gpus = [\"cuda:0123\", \"GPU-fedc\", \"metal:default\"]",
                 crate::types::GpuSelection::Specific(vec![
                     crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
                     crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+                    crate::types::GpuSelector::Identifier("metal:default".to_string()),
                 ]),
             ),
         ];
@@ -2177,6 +2178,7 @@ description = "stale"
             crate::types::GpuSelection::Specific(vec![
                 crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
                 crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+                crate::types::GpuSelector::Identifier("metal:default".to_string()),
             ]),
         ];
 

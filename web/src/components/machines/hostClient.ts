@@ -21,6 +21,11 @@ import type {
 } from "../../types";
 import type { HostEntry } from "../../lib/hostRegistry";
 import { parseCurrentServerStatus } from "@studio/api/client";
+import {
+  listDevices,
+  type DeviceInfo,
+  type DeviceListResponse,
+} from "@studio/api/devices";
 
 export type HostStatus = ServerStatus;
 export type HostCapabilities = ServerCapabilities;
@@ -78,6 +83,12 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
   const value = await getJson<unknown>(host, "/api/status", signal);
   parseCurrentServerStatus(value);
   return value as HostStatus;
+}
+
+/** Current servers expose the authoritative full device inventory here.
+ * Callers deliberately treat a failed probe as an older-server fallback. */
+export function hostDevices(host: HostEntry): Promise<DeviceListResponse> {
+  return listDevices({ baseUrl: host.url, apiKey: host.apiKey ?? null });
 }
 
 export function hostDiscoveryPeers(host: HostEntry, signal?: AbortSignal) {
@@ -190,6 +201,8 @@ export function moveQueueJob(
 
 export interface HostPoll {
   status: Ref<HostStatus | null>;
+  /** Full current-server inventory, or null when the endpoint is unsupported. */
+  devices: Ref<DeviceInfo[] | null>;
   resources: Ref<ResourceSnapshot | null>;
   online: Ref<boolean>;
   /** Epoch ms of the last successful status read, or null before the first. */
@@ -218,6 +231,7 @@ export function useHostPoll(
 ): HostPoll {
   const intervalMs = options.intervalMs ?? 5000;
   const status = ref<HostStatus | null>(null);
+  const devices = ref<DeviceInfo[] | null>(null);
   const resources = ref<ResourceSnapshot | null>(null);
   const online = ref(false);
   const lastSeen = ref<number | null>(null);
@@ -233,13 +247,18 @@ export function useHostPoll(
     controller = new AbortController();
     const signal = controller.signal;
     try {
-      const [nextStatus, nextResources] = await Promise.all([
+      const [nextStatus, nextResources, nextDevices] = await Promise.all([
         hostStatus(host, signal),
         options.withResources
           ? hostResources(host, signal).catch(() => null)
           : Promise.resolve(null),
+        hostDevices(host).then(
+          (snapshot) => snapshot.devices,
+          () => null,
+        ),
       ]);
       status.value = nextStatus;
+      devices.value = nextDevices;
       if (options.withResources && nextResources)
         resources.value = nextResources;
       online.value = true;
@@ -271,5 +290,15 @@ export function useHostPoll(
   void tick();
   onBeforeUnmount(stop);
 
-  return { status, resources, online, lastSeen, error, loading, refresh, stop };
+  return {
+    status,
+    devices,
+    resources,
+    online,
+    lastSeen,
+    error,
+    loading,
+    refresh,
+    stop,
+  };
 }

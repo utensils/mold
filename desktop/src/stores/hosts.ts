@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
@@ -11,12 +12,7 @@ import {
 } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
-import type {
-  GpuInfo,
-  GpuWorkerStatus,
-  ServerCapabilities,
-  ServerStatus,
-} from "../lib/api/types";
+import type { GpuInfo, GpuWorkerStatus, ServerCapabilities, ServerStatus } from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -84,6 +80,9 @@ interface HostTelemetry {
   /** Every runtime worker from `/api/status.gpus`. Routing uses the largest
    * healthy device because one model must fit on one worker. */
   gpuWorkers?: GpuWorkerStatus[] | null;
+  /** Authoritative current-server inventory. Null means `/api/devices` is
+   * unsupported and routing must use the legacy status fields. */
+  devices?: DeviceInfo[] | null;
   /** Stable server-installation UUID from `/api/status`; absent on older servers. */
   instanceId?: string | null;
   /** Server-reported hostname from `/api/status`; drives the display label. */
@@ -91,9 +90,22 @@ interface HostTelemetry {
 }
 
 function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
-  const workers = telemetry?.gpuWorkers?.filter(
-    (worker) => worker.state !== "degraded",
-  );
+  if (telemetry?.devices != null) {
+    const devices = telemetry.devices.filter(
+      (device) => device.schedulable && device.ordinal !== null,
+    );
+    if (!devices.length) return null;
+    const strongest = devices.reduce((best, device) =>
+      (device.memory.total_bytes ?? 0) > (best.memory.total_bytes ?? 0) ? device : best,
+    );
+    return {
+      backend: strongest.backend,
+      name: strongest.name,
+      vramTotalMb:
+        strongest.memory.total_bytes === null ? null : strongest.memory.total_bytes / 1024 ** 2,
+    };
+  }
+  const workers = telemetry?.gpuWorkers?.filter((worker) => worker.state !== "degraded");
   if (workers?.length) {
     const strongest = workers.reduce((best, worker) =>
       worker.vram_total_bytes > best.vram_total_bytes ? worker : best,
@@ -104,7 +116,7 @@ function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
       vramTotalMb: strongest.vram_total_bytes / 1024 ** 2,
     };
   }
-  if (telemetry?.gpuWorkers?.length) return null;
+  if (telemetry?.gpuWorkers != null) return null;
   const legacy = telemetry?.gpuInfo;
   return legacy
     ? {
@@ -435,18 +447,26 @@ export const useHostsStore = defineStore("hosts", {
      * Auto, and a stale persisted id must never wedge every Generate click.
      */
     resolveRoute(selection: string | null, modelName: string | null = null): HostRoute | null {
-      const routable = this.all.map((h) => {
-        return {
-          ...h,
-          gpu: strongestRoutableGpu(this.telemetry[h.id]),
-        };
-      });
+      const routable = this.all
+        .filter((host) => {
+          const telemetry = this.telemetry[host.id];
+          if (telemetry?.devices != null)
+            return telemetry.devices.some((device) => device.schedulable);
+          const workers = telemetry?.gpuWorkers;
+          return workers == null || workers.some((worker) => worker.state !== "degraded");
+        })
+        .map((h) => {
+          return {
+            ...h,
+            gpu: strongestRoutableGpu(this.telemetry[h.id]),
+          };
+        });
       const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
 
       let chosen: (typeof routable)[number] | null;
       if (selection === "capable") {
         chosen = pickMostCapableHost(routable, modelHostIds.length > 0 ? modelHostIds : null);
-      } else if (selection !== null && routable.some((h) => h.id === selection)) {
+      } else if (selection !== null && this.all.some((h) => h.id === selection)) {
         chosen = routable.find((h) => h.id === selection && h.status === "ready") ?? null;
       } else {
         const withModel = routable.filter(
@@ -471,7 +491,13 @@ export const useHostsStore = defineStore("hosts", {
           if (!host.baseUrl || host.status === "connecting") return;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
           try {
-            const status = await apiJsonTo<ServerStatus>(target, "/api/status");
+            const [status, devices] = await Promise.all([
+              apiJsonTo<ServerStatus>(target, "/api/status"),
+              listDevices(target).then(
+                (snapshot) => snapshot.devices,
+                () => null,
+              ),
+            ]);
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
@@ -479,6 +505,7 @@ export const useHostsStore = defineStore("hosts", {
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
               gpuWorkers: status.gpus ?? null,
+              devices,
               instanceId: status.instance_id ?? null,
               hostname: status.hostname ?? null,
             };

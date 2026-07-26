@@ -610,6 +610,9 @@ pub async fn generate_chain(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    if let Some(reason) = state.generation_unavailable() {
+        return ApiError::generation_unavailable(reason).into_response();
+    }
     let shim = match shim_start_job(&state, req).await {
         Ok(shim) => shim,
         Err(api_err) => return api_err.into_response(),
@@ -693,6 +696,9 @@ pub async fn generate_chain_stream(
     headers: HeaderMap,
     Json(req): Json<ChainRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     let completion_payload = requested_sse_completion_payload(&headers)?;
     if completion_payload == SseCompletionPayload::MetadataOnly
         && state.config.read().await.is_output_disabled()

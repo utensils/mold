@@ -1242,6 +1242,9 @@ impl GpuSelection {
                     .get(..5)
                     .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cuda:"))
                     || token
+                        .get(..6)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("metal:"))
+                    || token
                         .get(..4)
                         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
                     || token
@@ -1251,7 +1254,7 @@ impl GpuSelection {
                     return Ok(GpuSelector::Identifier(token.to_string()));
                 }
                 anyhow::bail!(
-                    "invalid GPU selector '{token}': expected an ordinal, cuda: ID, GPU- UUID, or MIG- UUID"
+                    "invalid GPU selector '{token}': expected an ordinal, cuda: ID, metal: ID, GPU- UUID, or MIG- UUID"
                 )
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1674,7 +1677,8 @@ mod tests {
             GpuSelection::parse(
                 "1,cuda:0123456789abcdef0123456789abcdef,\
                  GPU-fedcba98-7654-3210-fedc-ba9876543210,\
-                 MIG-00112233-4455-6677-8899-aabbccddeeff"
+                 MIG-00112233-4455-6677-8899-aabbccddeeff,\
+                 metal:default"
             )
             .unwrap(),
             GpuSelection::Specific(vec![
@@ -1682,6 +1686,7 @@ mod tests {
                 GpuSelector::Identifier("cuda:0123456789abcdef0123456789abcdef".to_string()),
                 GpuSelector::Identifier("GPU-fedcba98-7654-3210-fedc-ba9876543210".to_string()),
                 GpuSelector::Identifier("MIG-00112233-4455-6677-8899-aabbccddeeff".to_string()),
+                GpuSelector::Identifier("metal:default".to_string()),
             ])
         );
     }

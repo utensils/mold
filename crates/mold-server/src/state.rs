@@ -176,6 +176,10 @@ pub struct AppState {
     // ── Multi-GPU fields ────────────────────────────────────────────────────
     /// GPU worker pool for multi-GPU dispatch.
     pub gpu_pool: Arc<GpuPool>,
+    /// `Some` means inference is intentionally unavailable (for example
+    /// `--gpus none`, or a GPU build whose visible devices have no usable
+    /// stable identity). Read routes and downloads remain available.
+    pub generation_unavailable_reason: Arc<RwLock<Option<String>>>,
     /// Read-only authoritative device inventory and preference projection.
     /// Dispatch remains on `gpu_pool` until scheduler V2 lands.
     pub device_registry: Arc<crate::device_registry::DeviceRegistry>,
@@ -428,6 +432,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -466,6 +471,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
@@ -508,6 +514,20 @@ impl AppState {
         Self::empty_gpu_pool()
     }
 
+    pub fn set_generation_unavailable(&self, reason: impl Into<String>) {
+        *self
+            .generation_unavailable_reason
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.into());
+    }
+
+    pub fn generation_unavailable(&self) -> Option<String> {
+        self.generation_unavailable_reason
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     #[cfg(test)]
     pub fn with_engine(engine: impl InferenceEngine + 'static) -> Self {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -519,6 +539,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -559,6 +580,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
@@ -599,6 +621,7 @@ impl AppState {
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new(),
             }),
+            generation_unavailable_reason: Arc::new(RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),

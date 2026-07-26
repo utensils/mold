@@ -71,8 +71,14 @@ const telemetry = computed(() =>
   deriveTelemetry(poll?.status.value ?? null, poll?.resources.value ?? null),
 );
 const gpuCount = computed(() => {
+  const devices = poll?.devices.value;
+  if (devices !== null && devices !== undefined)
+    return devices.filter(
+      (device) => device.schedulable && device.ordinal !== null,
+    ).length;
   const status = poll?.status.value;
-  if (status?.gpus?.length) return status.gpus.length;
+  if (status?.gpus != null)
+    return status.gpus.filter((gpu) => gpu.state !== "degraded").length;
   return status?.gpu_info ? 1 : 0;
 });
 const canReorder = computed(() => !!caps.value?.queue?.can_reorder);

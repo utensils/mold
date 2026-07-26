@@ -24,9 +24,13 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 const apiJsonTo = vi.fn();
+const listDevices = vi.fn();
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
+}));
+vi.mock("@studio/api/devices", () => ({
+  listDevices: (...a: unknown[]) => listDevices(...a),
 }));
 
 import { useAppPrefsStore } from "./appPrefs";
@@ -36,6 +40,45 @@ import { useHostModelsStore } from "./hostModels";
 import { useHostsStore } from "./hosts";
 import { useToastStore } from "./toasts";
 import type { ModelEntry, ServerCapabilities } from "../lib/api/types";
+import type { DeviceInfo } from "@studio/api/devices";
+
+function device(ordinal: number, overrides: Partial<DeviceInfo> = {}): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24 * 1024 ** 3,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
 
 function installedModel(name: string): ModelEntry {
   return {
@@ -117,6 +160,7 @@ beforeEach(() => {
   });
   installSettings(settings());
   apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
+  listDevices.mockRejectedValue(new Error("legacy server"));
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
   conn.status = "ready";
@@ -412,6 +456,55 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("capable")?.hostId).toBe("local");
   });
 
+  it("uses /api/devices and does not route excluded current-server GPUs", async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("http://hal9000:7680", null, null);
+    hosts.telemetry.local = {
+      queueDepth: 0,
+      queueCapacity: 200,
+      version: "0.20.0",
+      gpuInfo: {
+        backend: "cuda",
+        name: "NVIDIA B200",
+        vram_total_mb: 196608,
+        vram_used_mb: 0,
+      },
+      gpuWorkers: [
+        {
+          ordinal: 0,
+          name: "NVIDIA B200",
+          vram_total_bytes: 192 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+      devices: [
+        device(0, {
+          admin_state: "startup_excluded",
+          desired_enabled: false,
+          schedulable: false,
+          unschedulable_reason: "excluded by MOLD_GPUS",
+        }),
+      ],
+    };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 1,
+      queueCapacity: 200,
+      version: "0.20.0",
+      gpuInfo: {
+        backend: "cuda",
+        name: "NVIDIA RTX 4090",
+        vram_total_mb: 24576,
+        vram_used_mb: 0,
+      },
+      gpuWorkers: null,
+    };
+
+    expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
+    expect(hosts.resolveRoute("local")).toBeNull();
+  });
+
   it('resolveRoute("capable") infers the backend from the GPU name on older servers', async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();
@@ -635,6 +728,10 @@ describe("hosts store", () => {
         },
       ],
     });
+    listDevices.mockResolvedValue({
+      plan_version: 1,
+      devices: [device(0)],
+    });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
     await hosts.refresh();
@@ -644,6 +741,7 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
     expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
+    expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
   });
 
   it("connect() dedupes a server already connected under another address by instance id", async () => {

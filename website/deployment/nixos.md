@@ -138,7 +138,7 @@ works for SPA hot-iteration without recompiling Rust.
 | `openFirewall`     | bool        | `false`             | Open firewall port (also UDP 5353 when `mdns` is on)                 |
 | `mdns`             | bool        | `true`              | Advertise and browse `_mold._tcp`; `false` sets `MOLD_MDNS=0`        |
 | `defaultModel`     | null/string | `null`              | Default model name                                                   |
-| `gpus`             | null/string | `null`              | Which GPUs to use: `"0,1"` or `"all"` (null = every visible GPU)     |
+| `gpus`             | null/string | `null`              | `all`, `none`, ordinals, or stable CUDA/Metal/NVIDIA UUID IDs        |
 | `queueSize`        | null/int    | `null`              | Max queued generation jobs (null = default 200)                      |
 | `outputDir`        | null/string | `null`              | Image output directory (default: `homeDir/output`)                   |
 | `hfTokenFile`      | null/path   | `null`              | Path to overridable default HuggingFace token                        |

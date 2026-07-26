@@ -8,10 +8,12 @@ import {
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { HostEntry } from "../lib/hostRegistry";
 import type { ModelInfoExtended } from "../types";
+import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 /** Per-host canned `/api/status` + `/api/models` responses, keyed by host id. */
 const statuses = new Map<string, unknown>();
 const models = new Map<string, ModelInfoExtended[]>();
+const devices = new Map<string, DeviceListResponse>();
 
 vi.mock("../components/machines/hostClient", () => ({
   hostStatus: (host: HostEntry) => {
@@ -25,6 +27,12 @@ vi.mock("../components/machines/hostClient", () => ({
     return canned
       ? Promise.resolve(canned)
       : Promise.reject(new Error("unreachable"));
+  },
+  hostDevices: (host: HostEntry) => {
+    const canned = devices.get(host.id);
+    return canned
+      ? Promise.resolve(canned)
+      : Promise.reject(new Error("legacy server"));
   },
 }));
 
@@ -59,11 +67,53 @@ function status(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function device(
+  ordinal: number,
+  overrides: Partial<DeviceInfo> = {},
+): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24 * 1024 ** 3,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
+
 describe("useHostRouting", () => {
   beforeEach(() => {
     localStorage.clear();
     statuses.clear();
     models.clear();
+    devices.clear();
     __testing__.reset();
   });
 
@@ -312,6 +362,90 @@ describe("useHostRouting", () => {
       vramTotalMb: 80 * 1024,
     });
     expect(routing.resolve("flux-dev:q4")?.hostId).toBe(ORIGIN_HOST_ID);
+  });
+
+  it("does not route to a modern host that reports zero routable GPU workers", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    statuses.set(
+      ORIGIN_HOST_ID,
+      status({
+        gpu_info: null,
+        gpus: [],
+        queue_depth: 0,
+      }),
+    );
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    statuses.set(
+      studio.id,
+      status({
+        gpu_info: {
+          backend: "cuda",
+          name: "NVIDIA RTX 4090",
+          vram_total_mb: 24576,
+          vram_used_mb: 0,
+        },
+      }),
+    );
+    models.set(studio.id, [model("flux-dev:q4")]);
+    setGenerateTargetId(AUTO_TARGET_ID);
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.hosts.value[0]?.gpu).toBeNull();
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
+  });
+
+  it("uses /api/devices schedulability instead of misleading legacy worker rows", async () => {
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    statuses.set(
+      ORIGIN_HOST_ID,
+      status({
+        gpu_info: {
+          backend: "cuda",
+          name: "Excluded B200",
+          vram_total_mb: 196608,
+          vram_used_mb: 0,
+        },
+        gpus: [
+          {
+            ordinal: 0,
+            name: "Excluded B200",
+            vram_total_bytes: 192 * 1024 ** 3,
+            vram_used_bytes: 0,
+            state: "idle",
+          },
+        ],
+      }),
+    );
+    devices.set(ORIGIN_HOST_ID, {
+      plan_version: 1,
+      devices: [
+        device(0, {
+          name: "Excluded B200",
+          admin_state: "startup_excluded",
+          desired_enabled: false,
+          schedulable: false,
+          unschedulable_reason: "excluded by MOLD_GPUS",
+        }),
+      ],
+    });
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+
+    statuses.set(studio.id, status());
+    devices.set(studio.id, {
+      plan_version: 1,
+      devices: [device(1, { name: "RTX 3090" })],
+    });
+    models.set(studio.id, [model("flux-dev:q4")]);
+    setGenerateTargetId(AUTO_TARGET_ID);
+
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    expect(routing.hosts.value[0]?.status).toBe("error");
+    expect(routing.hosts.value[0]?.gpu).toBeNull();
+    expect(routing.resolve("flux-dev:q4")?.hostId).toBe(studio.id);
   });
 
   it("reads a forgotten sticky pick as Auto", async () => {

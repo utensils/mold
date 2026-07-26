@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { listDevices } from "@studio/api/devices";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import type { OutputMetadata, ServerStatus } from "../lib/api/types";
 import { useGenerationStore } from "./generation";
@@ -40,7 +41,8 @@ export interface HostQueueSnapshot {
   /** null until the host reports it (older servers never do). */
   paused: boolean | null;
   caps: HostQueueCaps | null;
-  /** GPU worker ordinals from `/api/status.gpus`; empty when unreported. */
+  /** Schedulable GPU ordinals from `/api/devices`, with `/api/status.gpus`
+   * fallback for older servers. */
   gpuOrdinals: number[];
   error: string | null;
 }
@@ -149,16 +151,27 @@ export const useJobsStore = defineStore("jobs", {
             }),
             () => null,
           ));
-        const [listing, status] = await Promise.all([
+        const [listing, status, devices] = await Promise.all([
           apiJsonTo<{ entries: QueueEntry[] }>(target, "/api/queue"),
           apiJsonTo<ServerStatus & { queue_paused?: boolean }>(target, "/api/status"),
+          listDevices(target).then(
+            (snapshot) => snapshot.devices,
+            () => null,
+          ),
         ]);
         this.queues[host.id] = {
           hostId: host.id,
           entries: listing.entries ?? [],
           paused: status.queue_paused ?? null,
           caps,
-          gpuOrdinals: (status.gpus ?? []).map((g) => g.ordinal),
+          gpuOrdinals:
+            devices !== null
+              ? devices
+                  .filter((device) => device.schedulable && device.ordinal !== null)
+                  .map((device) => device.ordinal as number)
+              : (status.gpus ?? [])
+                  .filter((gpu) => gpu.state !== "degraded")
+                  .map((gpu) => gpu.ordinal),
           error: null,
         };
       } catch (err) {

@@ -738,7 +738,7 @@ Examples:
         #[arg(long, help_heading = "Server")]
         dry_run: bool,
 
-        /// Comma-separated GPU ordinals to use for local generation (default: all)
+        /// GPUs for local generation: all, none, ordinals, or stable cuda:/metal:/GPU-/MIG- IDs
         #[arg(long, env = "MOLD_GPUS", help_heading = "Advanced")]
         gpus: Option<String>,
 
@@ -924,7 +924,7 @@ environment before starting mold serve.")]
         #[arg(long)]
         log_file: bool,
 
-        /// Comma-separated GPU ordinals to use (default: all discovered)
+        /// GPUs to use: all, none, ordinals, or stable cuda:/metal:/GPU-/MIG- IDs
         #[arg(long, env = "MOLD_GPUS")]
         gpus: Option<String>,
 

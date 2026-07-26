@@ -13,10 +13,12 @@ import type {
 } from "../types";
 import { addHost, getHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
+import type { DeviceInfo } from "@studio/api/devices";
 
 // Mutable fixtures the hostClient mock reads at call time.
 let poll: {
   status: ReturnType<typeof ref<HostStatus | null>>;
+  devices: ReturnType<typeof ref<DeviceInfo[] | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
@@ -122,6 +124,47 @@ function makeResources(over: Partial<ResourceSnapshot> = {}): ResourceSnapshot {
   };
 }
 
+function makeDevice(
+  ordinal: number,
+  overrides: Partial<DeviceInfo> = {},
+): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
+
 function queued(id: string, position: number): QueueEntry {
   return {
     id,
@@ -159,6 +202,7 @@ beforeEach(() => {
   requestText.mockReset().mockResolvedValue("Render box");
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
+    devices: ref<DeviceInfo[] | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
     lastSeen: ref<number | null>(Date.now()),
@@ -300,6 +344,49 @@ describe("HostDetailPage — queue", () => {
     });
     const w = await mountDetail();
     expect(w.find('[data-test="queue-lane"]').exists()).toBe(true);
+  });
+
+  it("does not build queue lanes from explicitly non-routable workers", async () => {
+    queueEntries = [queued("a", 0)];
+    poll.status.value = makeStatus({
+      gpu_info: {
+        name: "excluded GPU",
+        vram_total_mb: 24576,
+        vram_used_mb: 0,
+      },
+      gpus: [
+        {
+          ordinal: 0,
+          name: "excluded GPU 0",
+          vram_total_bytes: 24_000_000_000,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+        {
+          ordinal: 1,
+          name: "excluded GPU 1",
+          vram_total_bytes: 24_000_000_000,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+    });
+    poll.devices.value = [
+      makeDevice(0, {
+        admin_state: "startup_excluded",
+        desired_enabled: false,
+        schedulable: false,
+      }),
+      makeDevice(1, {
+        admin_state: "disabled",
+        desired_enabled: false,
+        schedulable: false,
+      }),
+    ];
+
+    const w = await mountDetail();
+
+    expect(w.find('[data-test="queue-lane"]').exists()).toBe(false);
   });
 });
 

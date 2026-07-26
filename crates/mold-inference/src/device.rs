@@ -318,10 +318,23 @@ pub fn resolve_gpu_selection(
                         vec![gpu]
                     }
                     GpuSelector::Identifier(identifier) => {
-                        let normalized = normalize_uuid_selector(identifier)?;
-                        gpus.iter()
-                            .filter(|gpu| uuid_selector_matches(gpu, &normalized))
-                            .collect::<Vec<_>>()
+                        if identifier
+                            .get(..6)
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("metal:"))
+                        {
+                            gpus.iter()
+                                .filter(|gpu| {
+                                    gpu.stable_id.as_deref().is_some_and(|stable_id| {
+                                        stable_id.eq_ignore_ascii_case(identifier)
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            let normalized = normalize_uuid_selector(identifier)?;
+                            gpus.iter()
+                                .filter(|gpu| uuid_selector_matches(gpu, &normalized))
+                                .collect::<Vec<_>>()
+                        }
                     }
                 };
 
@@ -1704,6 +1717,32 @@ mod tests {
             ]),
             "cuda:0123456789abcdeffedcba9876543210"
         );
+    }
+
+    #[test]
+    fn stable_metal_selector_resolves_the_advertised_device_id() {
+        let metal = DiscoveredGpu {
+            ordinal: 0,
+            stable_id: Some("metal:default".to_string()),
+            raw_cuda_uuid: None,
+            device_kind: None,
+            identity_error: None,
+            backend: GpuBackend::Metal,
+            name: "Apple Metal GPU".to_string(),
+            compute_capability: None,
+            pci_bus_id: None,
+            total_vram_bytes: 64_000_000_000,
+            free_vram_bytes: 48_000_000_000,
+        };
+        let selected = resolve_gpu_selection(
+            std::slice::from_ref(&metal),
+            &GpuSelection::parse("metal:default").unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].stable_id.as_deref(), Some("metal:default"));
+        assert_eq!(selected[0].backend, GpuBackend::Metal);
     }
 
     #[test]

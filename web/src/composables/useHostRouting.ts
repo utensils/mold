@@ -23,7 +23,12 @@ import {
   setGenerateTargetId,
   type HostEntry,
 } from "../lib/hostRegistry";
-import { hostModels, hostStatus } from "../components/machines/hostClient";
+import {
+  hostDevices,
+  hostModels,
+  hostStatus,
+} from "../components/machines/hostClient";
+import type { DeviceInfo } from "@studio/api/devices";
 import {
   AUTO_TARGET_ID,
   CAPABLE_TARGET_ID,
@@ -146,13 +151,35 @@ function gpuFrom(
  * historically describes GPU 0; using it when the additive `gpus` array is
  * present would make every other card invisible to routing.
  */
-function gpuFromStatus(status: ServerStatus): RoutableGpu | null {
+function gpuFromStatus(
+  status: ServerStatus,
+  devices: DeviceInfo[] | null,
+): RoutableGpu | null {
+  if (devices !== null) {
+    const workers = devices.filter(
+      (device) => device.schedulable && device.ordinal !== null,
+    );
+    if (!workers.length) return null;
+    const strongest = workers.reduce((best, device) =>
+      (device.memory.total_bytes ?? 0) > (best.memory.total_bytes ?? 0)
+        ? device
+        : best,
+    );
+    return {
+      backend: strongest.backend,
+      name: strongest.name,
+      vramTotalMb:
+        strongest.memory.total_bytes === null
+          ? null
+          : strongest.memory.total_bytes / 1024 ** 2,
+    };
+  }
   const legacy = status.gpu_info as GpuInfoWithBackend | null | undefined;
   const workers = status.gpus?.filter(
     (worker: GpuWorkerStatus) => worker.state !== "degraded",
   );
   if (!workers?.length) {
-    return status.gpus?.length ? null : gpuFrom(legacy);
+    return status.gpus != null ? null : gpuFrom(legacy);
   }
   const strongest = workers.reduce((best, worker) =>
     worker.vram_total_bytes > best.vram_total_bytes ? worker : best,
@@ -165,17 +192,25 @@ function gpuFromStatus(status: ServerStatus): RoutableGpu | null {
 }
 
 async function pollHost(entry: HostEntry): Promise<void> {
-  const [status, models] = await Promise.allSettled([
+  const [status, models, devices] = await Promise.allSettled([
     hostStatus(entry),
     hostModels(entry),
+    hostDevices(entry),
   ]);
   if (status.status === "fulfilled") {
+    const inventory =
+      devices.status === "fulfilled" ? devices.value.devices : null;
+    const generationReady =
+      inventory !== null
+        ? inventory.some((device) => device.schedulable)
+        : status.value.gpus == null ||
+          status.value.gpus.some((gpu) => gpu.state !== "degraded");
     telemetry.value = {
       ...telemetry.value,
       [entry.id]: {
-        status: "ready",
+        status: generationReady ? "ready" : "error",
         queueDepth: status.value.queue_depth ?? null,
-        gpu: gpuFromStatus(status.value),
+        gpu: gpuFromStatus(status.value, inventory),
       },
     };
   } else {

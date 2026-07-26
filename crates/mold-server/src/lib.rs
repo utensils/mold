@@ -62,6 +62,29 @@ fn trace_request_path<B>(request: &axum::http::Request<B>) -> &str {
     request.uri().path()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    GpuWorkers,
+    CpuFallback,
+    Maintenance,
+}
+
+fn classify_startup_mode(
+    selection: &GpuSelection,
+    discovered_count: usize,
+    selected_count: usize,
+    gpu_runtime_build: bool,
+) -> StartupMode {
+    if selected_count > 0 {
+        return StartupMode::GpuWorkers;
+    }
+    if matches!(selection, GpuSelection::None) || discovered_count > 0 || gpu_runtime_build {
+        StartupMode::Maintenance
+    } else {
+        StartupMode::CpuFallback
+    }
+}
+
 pub async fn run_server(
     bind: &str,
     port: u16,
@@ -94,6 +117,12 @@ pub async fn run_server(
 
     let discovered = mold_inference::device::discover_gpus();
     let selected = mold_inference::device::resolve_gpu_selection(&discovered, &gpu_selection)?;
+    let startup_mode = classify_startup_mode(
+        &gpu_selection,
+        discovered.len(),
+        selected.len(),
+        cfg!(any(feature = "cuda", feature = "metal")),
+    );
 
     let mut workers = Vec::new();
     let mut _gpu_thread_handles = Vec::new();
@@ -149,8 +178,20 @@ pub async fn run_server(
         );
     }
 
-    if selected.is_empty() {
-        info!("no GPUs discovered — server will operate in CPU/pull-only mode");
+    match startup_mode {
+        StartupMode::GpuWorkers => {}
+        StartupMode::CpuFallback => {
+            info!("CPU-only build — server generation uses the CPU correctness path");
+        }
+        StartupMode::Maintenance if matches!(gpu_selection, GpuSelection::None) => {
+            info!("GPU workers disabled by explicit selection; server is in maintenance mode");
+        }
+        StartupMode::Maintenance => {
+            tracing::warn!(
+                discovered = discovered.len(),
+                "no selected GPU worker is safe to start; generation is unavailable"
+            );
+        }
     }
 
     // Concise GPU summary for the mDNS TXT record (e.g. "2xNVIDIA GeForce RTX
@@ -209,7 +250,7 @@ pub async fn run_server(
         let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
         state.shared_pool = shared_pool;
         state
-    } else {
+    } else if startup_mode == StartupMode::CpuFallback {
         match ModelPaths::resolve(&model_name, &config) {
             Some(paths) => {
                 info!(model = %model_name, "configured model");
@@ -268,6 +309,16 @@ pub async fn run_server(
                 state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size)
             }
         }
+    } else {
+        let mut state = state::AppState::empty(config, queue_handle, gpu_pool.clone(), queue_size);
+        state.shared_pool = shared_pool;
+        let reason = if matches!(gpu_selection, GpuSelection::None) {
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)"
+        } else {
+            "generation is unavailable because no safely selected GPU worker is available"
+        };
+        state.set_generation_unavailable(reason);
+        state
     };
 
     // Open the gallery metadata DB (best-effort — server still runs without it).
@@ -367,39 +418,50 @@ pub async fn run_server(
         } else {
             Some(config_snapshot.effective_output_dir())
         };
-        let deps = chain_job_runner::RunnerDeps {
-            db: state.metadata_db.clone(),
-            jobs_root,
-            executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
-                state.gpu_pool.clone(),
-                config_snapshot,
-            )),
-            queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
-                state.queue.clone(),
-                state.gpu_pool.clone(),
-            )),
-            events: std::sync::Arc::new(chain_job_runner::JobEventBus::new()),
-            cancel: std::sync::Arc::new(chain_job_runner::CancelRegistry::new()),
-            job_locks: std::sync::Arc::new(chain_job_runner::JobMutationLocks::new()),
-            claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
-            output_dir,
-            server_events: Some(state.events.clone()),
-        };
-        state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
+        if state.generation_unavailable().is_none() {
+            let deps = chain_job_runner::RunnerDeps {
+                db: state.metadata_db.clone(),
+                jobs_root,
+                executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
+                    state.gpu_pool.clone(),
+                    config_snapshot,
+                )),
+                queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
+                    state.queue.clone(),
+                    state.gpu_pool.clone(),
+                )),
+                events: std::sync::Arc::new(chain_job_runner::JobEventBus::new()),
+                cancel: std::sync::Arc::new(chain_job_runner::CancelRegistry::new()),
+                job_locks: std::sync::Arc::new(chain_job_runner::JobMutationLocks::new()),
+                claims: std::sync::Arc::new(chain_job_runner::EphemeralClaims::default()),
+                output_dir,
+                server_events: Some(state.events.clone()),
+            };
+            state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
+        } else {
+            info!("durable chain runner disabled while generation is unavailable");
+        }
     }
 
     // Spawn the generation queue worker — processes jobs sequentially (single GPU).
     // Spawn queue worker: use multi-GPU dispatcher if GPUs are available,
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
-    if gpu_pool.worker_count() > 0 {
-        tokio::spawn(scheduler::run_scheduler_coordinator(
-            job_rx,
-            scheduler_worker_rx,
-            worker_state,
-        ));
-    } else {
-        tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+    match startup_mode {
+        StartupMode::GpuWorkers => {
+            tokio::spawn(scheduler::run_scheduler_coordinator(
+                job_rx,
+                scheduler_worker_rx,
+                worker_state,
+            ));
+        }
+        StartupMode::CpuFallback => {
+            tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+        }
+        StartupMode::Maintenance => {
+            drop(job_rx);
+            drop(scheduler_worker_rx);
+        }
     }
 
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
@@ -747,7 +809,8 @@ fn build_cors_layer() -> Result<CorsLayer> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cors_layer, trace_request_path};
+    use super::{build_cors_layer, classify_startup_mode, trace_request_path, StartupMode};
+    use mold_core::types::GpuSelection;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -780,5 +843,33 @@ mod tests {
         let path = trace_request_path(&request);
         assert_eq!(path, "/api/gallery/image/clip.mp4");
         assert!(!path.contains("secret-ticket"));
+    }
+
+    #[test]
+    fn explicit_none_is_maintenance_even_on_a_cuda_host() {
+        assert_eq!(
+            classify_startup_mode(&GpuSelection::None, 2, 0, true),
+            StartupMode::Maintenance
+        );
+    }
+
+    #[test]
+    fn visible_but_unusable_gpu_inventory_is_not_a_cpu_fallback() {
+        assert_eq!(
+            classify_startup_mode(&GpuSelection::All, 2, 0, true),
+            StartupMode::Maintenance
+        );
+    }
+
+    #[test]
+    fn only_a_true_cpu_build_uses_the_legacy_cpu_fallback() {
+        assert_eq!(
+            classify_startup_mode(&GpuSelection::All, 0, 0, false),
+            StartupMode::CpuFallback
+        );
+        assert_eq!(
+            classify_startup_mode(&GpuSelection::All, 0, 0, true),
+            StartupMode::Maintenance
+        );
     }
 }

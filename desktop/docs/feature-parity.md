@@ -212,7 +212,7 @@ and clears terminal, error, null-id, removed-host, and unmount state for retry.
 
 **Text-encoder quantization variants** (auto-fallback to largest that fits): `--t5-variant` (auto/fp16/q8/q6/q5/q4/q3), `--qwen3-variant` (Z-Image: auto/bf16/q8/q6/iq4/q3), `--qwen2-variant` (Qwen-Image: auto/bf16/q8..q2), `--qwen2-text-encoder-mode` (auto/gpu/cpu-stage/cpu). Env `MOLD_*_VARIANT`.
 
-**Perf**: `--offload` / `MOLD_OFFLOAD=1` (FLUX block-level CPU↔GPU streaming: ~24GB→2–4GB, 3–5× slower, auto under pressure), `--eager` (keep all components loaded), `--gpus` / `MOLD_GPUS` (ordinal selection). Tier-1 knobs: `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN` (+ `MOLD_ATTN_CHUNK`), plus many LTX-2/flux debug/tuning envs. Web `PlacementPanel.vue` surfaces placement UI; desktop `PlacementSection.vue` (Settings → Advanced) saves per-model placement defaults via `PUT`/`DELETE /api/config/model/:name/placement`.
+**Perf**: `--offload` / `MOLD_OFFLOAD=1` (FLUX block-level CPU↔GPU streaming: ~24GB→2–4GB, 3–5× slower, auto under pressure), `--eager` (keep all components loaded), `--gpus` / `MOLD_GPUS` (`all`, `none` maintenance mode, legacy ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs from `/api/devices`). Tier-1 knobs: `MOLD_KEEP_TE_RAM`, `MOLD_LORA_BYPASS`, `MOLD_VAE_TILED`, `MOLD_ATTN` (+ `MOLD_ATTN_CHUNK`), plus many LTX-2/flux debug/tuning envs. Web `PlacementPanel.vue` surfaces placement UI; desktop `PlacementSection.vue` (Settings → Advanced) saves per-model placement defaults via `PUT`/`DELETE /api/config/model/:name/placement`.
 
 ---
 

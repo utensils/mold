@@ -151,6 +151,14 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
+
+    pub fn generation_unavailable(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "GENERATION_UNAVAILABLE".to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -505,6 +513,9 @@ async fn prepare_generation(
     state: &AppState,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(Option<std::path::PathBuf>, Option<String>, Option<usize>), ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     // NOTE: the capacity check is enforced inside `state.queue.submit(...)` so
     // that a burst of concurrent callers can't all slip past an open check
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
@@ -1033,6 +1044,9 @@ async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1153,6 +1167,9 @@ async fn upscale_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1698,6 +1715,9 @@ async fn load_model(
     State(state): State<AppState>,
     Json(body): Json<LoadModelBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(reason) = state.generation_unavailable() {
+        return Err(ApiError::generation_unavailable(reason));
+    }
     if let Err(e) = model_manager::install_catalog_model(&state, &body.model).await {
         return Err(model_manager::install_error_to_api_error(&e));
     }
@@ -2282,6 +2302,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     let gpu_statuses =
         crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(&devices);
     let has_gpus = !gpu_statuses.is_empty();
+    let has_device_inventory = !devices.devices.is_empty();
 
     // Collect loaded models from GPU workers.
     let gpu_models_loaded: Vec<String> = gpu_statuses
@@ -2350,8 +2371,12 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         gpu_info: crate::device_registry::DeviceRegistry::legacy_gpu_info(&devices),
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
-        memory_status: mold_inference::device::memory_status_string(),
-        gpus: if has_gpus { Some(gpu_statuses) } else { None },
+        memory_status: crate::device_registry::DeviceRegistry::legacy_memory_status(&devices),
+        gpus: if has_device_inventory {
+            Some(gpu_statuses)
+        } else {
+            None
+        },
         queue_depth: Some(state.queue.pending()),
         queue_capacity: Some(state.queue_capacity),
         queue_paused: Some(state.queue_pause.is_paused()),

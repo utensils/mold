@@ -387,7 +387,7 @@ impl DeviceRegistry {
     }
 
     pub fn legacy_gpu_info(devices: &DeviceState) -> Option<GpuInfo> {
-        let device = devices.devices.first()?;
+        let device = devices.devices.iter().find(|device| device.schedulable)?;
         Some(GpuInfo {
             name: device.name.clone(),
             vram_total_mb: device.memory.total_bytes.unwrap_or(0) / (1024 * 1024),
@@ -400,6 +400,7 @@ impl DeviceRegistry {
         devices
             .devices
             .iter()
+            .filter(|device| device.schedulable)
             .filter_map(|device| {
                 let ordinal = device.ordinal?;
                 let state = if device.health == DeviceHealth::Degraded
@@ -427,6 +428,25 @@ impl DeviceRegistry {
                 })
             })
             .collect()
+    }
+
+    /// Human-readable compatibility text derived exclusively from the cached
+    /// registry projection. This must never query CUDA from an HTTP handler.
+    pub fn legacy_memory_status(devices: &DeviceState) -> Option<String> {
+        let device = devices.devices.iter().find(|device| device.schedulable)?;
+        let free = device
+            .memory
+            .total_bytes?
+            .saturating_sub(device.memory.used_bytes?);
+        let label = if device.backend == GpuBackend::Metal {
+            "Memory"
+        } else {
+            "VRAM"
+        };
+        Some(format!(
+            "{label}: {:.1} GB free",
+            free as f64 / 1_000_000_000.0
+        ))
     }
 
     fn transient_id_for(&self, device: &DiscoveredDevice) -> String {
@@ -485,6 +505,38 @@ fn worker_telemetry_ordinal(backend: GpuBackend, ordinal: usize) -> Option<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    fn worker(ordinal: usize) -> Arc<crate::gpu_pool::GpuWorker> {
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel(1);
+        Arc::new(crate::gpu_pool::GpuWorker {
+            gpu: mold_inference::device::DiscoveredGpu {
+                ordinal,
+                stable_id: Some(format!("cuda:{ordinal:032x}")),
+                raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: GpuBackend::Cuda,
+                name: format!("gpu{ordinal}"),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        })
+    }
 
     #[test]
     fn runtime_cuda_discovery_preserves_stable_identity_and_metadata() {
@@ -608,6 +660,49 @@ mod tests {
                 .copied(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn legacy_projection_contains_only_schedulable_devices() {
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::new(vec![
+                discovered(Some("cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), false),
+                DiscoveredDevice {
+                    stable_id: Some("cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                    visible_ordinal: Some(1),
+                    name: "active GPU".into(),
+                    telemetry_ordinal: Some(1),
+                    ..discovered(Some("cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), true)
+                },
+                DiscoveredDevice {
+                    stable_id: Some("cuda:cccccccccccccccccccccccccccccccc".into()),
+                    visible_ordinal: Some(2),
+                    name: "missing worker".into(),
+                    telemetry_ordinal: Some(2),
+                    ..discovered(Some("cuda:cccccccccccccccccccccccccccccccc"), true)
+                },
+            ])),
+            Arc::new(None),
+        );
+        let pool = crate::gpu_pool::GpuPool {
+            workers: vec![worker(1)],
+        };
+        let state = registry.snapshot(
+            &pool,
+            None,
+            &crate::job_registry::JobRegistry::with_events(crate::events::EventBroadcaster::new()),
+        );
+
+        assert_eq!(state.devices.len(), 3, "full inventory remains visible");
+        assert_eq!(
+            DeviceRegistry::legacy_gpu_info(&state)
+                .as_ref()
+                .map(|gpu| gpu.name.as_str()),
+            Some("active GPU")
+        );
+        let workers = DeviceRegistry::legacy_gpu_status_from_snapshot(&state);
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].ordinal, 1);
     }
 
     #[test]

@@ -496,11 +496,41 @@ mod tests {
         })
     }
 
+    fn install_worker_registry(state: &mut AppState) {
+        let devices = state
+            .gpu_pool
+            .workers
+            .iter()
+            .map(|worker| crate::device_registry::DiscoveredDevice {
+                stable_id: worker.gpu.stable_id.clone(),
+                backend: worker.gpu.backend,
+                visible_ordinal: Some(worker.gpu.ordinal),
+                device_kind: mold_core::DeviceKind::UnknownCuda,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                pci_bus_id: worker.gpu.pci_bus_id.clone(),
+                name: worker.gpu.name.clone(),
+                compute_capability: worker.gpu.compute_capability,
+                total_memory_bytes: Some(worker.gpu.total_vram_bytes),
+                startup_allowed: true,
+                telemetry_ordinal: Some(worker.gpu.ordinal),
+            })
+            .collect();
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(devices)),
+            Arc::new(None),
+        ));
+    }
+
     fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
         let mut state = AppState::with_engine(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: ordinals.iter().copied().map(gpu_worker_stub).collect(),
         });
+        install_worker_registry(&mut state);
         create_router(state)
     }
 
@@ -737,6 +767,7 @@ mod tests {
         assert_eq!(status["gpu_info"]["name"], "test-gpu-0");
         assert_eq!(status["gpu_info"]["vram_total_mb"], 24_576);
         assert_eq!(status["gpu_info"]["vram_used_mb"], 9_216);
+        assert_eq!(status["memory_status"], "VRAM: 16.1 GB free");
         assert_eq!(status["gpus"][0]["ordinal"], 0);
         assert_eq!(
             status["gpus"][0]["vram_used_bytes"],
@@ -746,6 +777,137 @@ mod tests {
             status["gpu_info"].get("id").is_none(),
             "legacy gpu_info shape must not gain device fields"
         );
+    }
+
+    #[test]
+    fn status_handler_has_no_live_inference_device_queries() {
+        let source = include_str!("routes.rs");
+        let start = source.find("async fn server_status").unwrap();
+        let end = source[start..].find("// ── /health").unwrap() + start;
+        let handler = &source[start..end];
+
+        assert!(!handler.contains("mold_inference::device"));
+        assert!(!handler.contains("memory_status_string"));
+        assert!(!handler.contains("free_vram_bytes"));
+        assert!(!handler.contains("CudaContext"));
+    }
+
+    #[tokio::test]
+    async fn status_omits_excluded_and_workerless_devices_but_devices_keeps_them() {
+        let worker = gpu_worker_stub(1);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        let discovered = |ordinal, id: &str, name: &str, startup_allowed| {
+            crate::device_registry::DiscoveredDevice {
+                stable_id: Some(id.into()),
+                backend: mold_core::GpuBackend::Cuda,
+                visible_ordinal: Some(ordinal),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                pci_bus_id: None,
+                name: name.into(),
+                compute_capability: Some((8, 6)),
+                total_memory_bytes: Some(24_000_000_000),
+                startup_allowed,
+                telemetry_ordinal: Some(ordinal),
+            }
+        };
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                discovered(
+                    0,
+                    "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "excluded GPU",
+                    false,
+                ),
+                discovered(
+                    1,
+                    "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "active GPU",
+                    true,
+                ),
+                discovered(
+                    2,
+                    "cuda:cccccccccccccccccccccccccccccccc",
+                    "workerless GPU",
+                    true,
+                ),
+            ])),
+            Arc::new(None),
+        ));
+        let app = app_with_state(state);
+
+        let devices = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(devices["devices"].as_array().unwrap().len(), 3);
+
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["gpu_info"]["name"], "active GPU");
+        assert_eq!(status["gpus"].as_array().unwrap().len(), 1);
+        assert_eq!(status["gpus"][0]["ordinal"], 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_generation_before_queueing() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(generate_body("must not run", 512, 512)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
+        assert!(body["error"].as_str().unwrap().contains("maintenance mode"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_mode_rejects_admin_model_load_before_resolution() {
+        let state = AppState::with_engine(MockEngine::ready());
+        state.set_generation_unavailable(
+            "generation is unavailable while GPU selection is 'none' (maintenance mode)",
+        );
+        let app = app_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/api/models/load")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"does-not-exist"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "GENERATION_UNAVAILABLE");
     }
 
     // ── /api/queue ───────────────────────────────────────────────────────────
@@ -2394,6 +2556,7 @@ mod tests {
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: vec![worker],
         });
+        install_worker_registry(&mut state);
         let app = app_with_state(state);
 
         let resp = app
@@ -2422,6 +2585,7 @@ mod tests {
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: vec![worker],
         });
+        install_worker_registry(&mut state);
         state.resources.publish(mold_core::ResourceSnapshot {
             hostname: "gpu-host".to_string(),
             timestamp: 1,
@@ -3552,6 +3716,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
@@ -3618,6 +3783,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
@@ -3887,6 +4053,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            generation_unavailable_reason: Arc::new(std::sync::RwLock::new(None)),
             device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),

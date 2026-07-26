@@ -3,9 +3,13 @@ import { createPinia, setActivePinia } from "pinia";
 
 const apiJsonTo = vi.fn();
 const apiFetchTo = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+const listDevices = vi.fn();
 vi.mock("../lib/api/client", () => ({
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
   apiFetchTo: (...a: unknown[]) => apiFetchTo(...a),
+}));
+vi.mock("@studio/api/devices", () => ({
+  listDevices: (...a: unknown[]) => listDevices(...a),
 }));
 
 import { useConnectionStore } from "./connection";
@@ -13,6 +17,45 @@ import { useHostsStore } from "./hosts";
 import { enrichQueueEntries, useJobsStore } from "./jobs";
 import { useToastStore } from "./toasts";
 import type { Job } from "./generation";
+import type { DeviceInfo } from "@studio/api/devices";
+
+function device(ordinal: number, overrides: Partial<DeviceInfo> = {}): DeviceInfo {
+  return {
+    id: `cuda:${ordinal}`,
+    backend: "cuda",
+    ordinal,
+    device_kind: "full_gpu",
+    nvml_uuid: `GPU-${ordinal}`,
+    physical_uuid: `GPU-${ordinal}`,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: `GPU ${ordinal}`,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24 * 1024 ** 3,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+    ...overrides,
+  };
+}
 
 function seedHosts() {
   const conn = useConnectionStore();
@@ -67,6 +110,7 @@ beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   apiFetchTo.mockResolvedValue(new Response(null, { status: 200 }));
+  listDevices.mockRejectedValue(new Error("legacy server"));
 });
 
 describe("jobs store", () => {
@@ -133,6 +177,57 @@ describe("jobs store", () => {
     const jobs = useJobsStore();
     await jobs.refresh();
     expect(jobs.queues["local"]?.gpuOrdinals).toEqual([]);
+  });
+
+  it("refresh() never creates queue lanes for non-routable worker rows", async () => {
+    seedHosts();
+    installApi({
+      gpus: [
+        { ordinal: 0, state: "degraded" },
+        { ordinal: 1, state: "idle" },
+      ] as never,
+    });
+    const jobs = useJobsStore();
+    await jobs.refresh();
+
+    expect(jobs.queues["local"]?.gpuOrdinals).toEqual([1]);
+  });
+
+  it("uses only /api/devices schedulable ordinals for current-server lanes", async () => {
+    seedHosts();
+    installApi({
+      gpus: [
+        { ordinal: 0, state: "idle" },
+        { ordinal: 1, state: "idle" },
+        { ordinal: 2, state: "idle" },
+        { ordinal: 3, state: "idle" },
+      ] as never,
+    });
+    listDevices.mockResolvedValue({
+      plan_version: 4,
+      devices: [
+        device(0, {
+          admin_state: "startup_excluded",
+          desired_enabled: false,
+          schedulable: false,
+        }),
+        device(1, {
+          admin_state: "disabled",
+          desired_enabled: false,
+          schedulable: false,
+        }),
+        device(2, {
+          health: "unavailable",
+          schedulable: false,
+        }),
+        device(3),
+      ],
+    });
+
+    const jobs = useJobsStore();
+    await jobs.refresh();
+
+    expect(jobs.queues["local"]?.gpuOrdinals).toEqual([3]);
   });
 
   it("reassignGpu PATCHes the owning host with a JSON target_gpu body", async () => {
