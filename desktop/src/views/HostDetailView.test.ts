@@ -12,6 +12,11 @@ vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
   currentTarget: () => ({ baseUrl: "http://127.0.0.1:49152", apiKey: null }),
 }));
+vi.mock("@studio/api/devices", () => ({
+  // This fixture models a legacy host, so the jobs store must fall back to
+  // the exact ordinals in the canned `/api/status` response.
+  listDevices: () => Promise.reject(new Error("legacy server in tests")),
+}));
 
 interface SseCall {
   path: string;
