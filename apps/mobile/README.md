@@ -75,7 +75,9 @@ pushed screen opened from the header.
   upscaled images carry the shared Upscaled badge.
 - **Models** merges installed models with Hugging Face and Civitai results,
   supports host/media/source/family/kind filters with a downloads/rating/recent
-  sort, gives every card and detail sheet a model-kind badge, explicitly marks
+  sort (the family list and a failed search reload themselves when the browsed
+  host's address, key, or reachability changes, and the family list falls back
+  to the families seen in results when the host taxonomy cannot be read), gives every card and detail sheet a model-kind badge, explicitly marks
   mature entries `18+ NSFW`, surfaces available description/source/license/tags/
   format/popularity and type-aware weights, and routes pull/load/unload/remove
   actions to the owning or selected host. Detail-sheet variant chips select an exact manifest

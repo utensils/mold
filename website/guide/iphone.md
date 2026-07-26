@@ -166,6 +166,11 @@ manifest model has multiple quantizations, its detail sheet
 shows variant chips with checkpoint sizes; the selected chip is the exact model
 the Pull action downloads.
 
+The family list comes from the browsed host. If that host is unreachable when
+Models opens — or its saved key has not been read from the Keychain yet — the
+list falls back to the families present in the results already on screen and
+reloads itself, together with a failed search, as soon as the host answers.
+
 The host selector controls where Models browses. Pulling a model can target a
 different ready host without changing the host selected in Create. With more
 than one target available, Mold opens a host picker.

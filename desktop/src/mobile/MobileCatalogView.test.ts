@@ -165,6 +165,14 @@ function scrollPastSentinel() {
   for (const observer of FakeIntersectionObserver.instances) observer.intersect(false);
 }
 
+/** Values offered by the Family filter, starting with the "All families" row. */
+function familyOptionValues(view: VueWrapper): string[] {
+  return view
+    .get("[data-test='mobile-catalog-family']")
+    .findAll("option")
+    .map((option) => option.attributes("value") ?? "");
+}
+
 function jsonResponse<T>(value: T): Response {
   return { json: () => Promise.resolve(value) } as Response;
 }
@@ -1463,6 +1471,74 @@ describe("MobileCatalogView", () => {
 
     expect(wrapper.find(".mobile-catalog-filters select").exists()).toBe(false);
     expect(wrapper.text()).toContain("installed:q8");
+  });
+
+  it("retries the family taxonomy once the host's keychain key arrives", async () => {
+    const offlineStudio: MobileHost = { ...studio, apiKey: "", online: false };
+    fetchCatalogFamilies.mockRejectedValueOnce(new Error("unauthorized"));
+    fetchCatalogFamilies.mockResolvedValue(["flux", "ltx2", "z-image"]);
+    wrapper = mountCatalog(studio.id, [offlineStudio]);
+    await flushPromises();
+    expect(fetchCatalogFamilies).toHaveBeenCalledWith(false, {
+      baseUrl: studio.baseUrl,
+      apiKey: null,
+    });
+    expect(familyOptionValues(wrapper)).not.toContain("z-image");
+
+    // The Keychain lookup resolves after mount and the probe finds the host.
+    await wrapper.setProps({ hosts: [{ ...studio, online: true }] });
+    await flushPromises();
+
+    expect(fetchCatalogFamilies).toHaveBeenLastCalledWith(false, targets.studio);
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "z-image"]);
+  });
+
+  it("re-runs a failed search when the browsed host comes back online", async () => {
+    const offlineStudio: MobileHost = { ...studio, online: false };
+    searchCatalog.mockRejectedValueOnce(new Error("fetch failed"));
+    wrapper = mountCatalog(studio.id, [offlineStudio]);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Couldn’t reach Studio");
+
+    await wrapper.setProps({ hosts: [{ ...studio, online: true }] });
+    await flushPromises();
+
+    expect(searchCatalog).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("Catalog model");
+    expect(wrapper.text()).not.toContain("Couldn’t reach Studio");
+  });
+
+  it("falls back to the families seen in results when the taxonomy is unavailable", async () => {
+    fetchCatalogFamilies.mockRejectedValue(new Error("fetch failed"));
+    searchCatalog.mockResolvedValue(
+      searchResponse([
+        entry("Video model", { id: "hf:video", family: "ltx2" }),
+        entry("Image model", { id: "hf:image", family: "z-image" }),
+      ]),
+    );
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+
+    // Installed inventory contributes its families too (flux from installed:q8).
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "z-image"]);
+
+    // Filtering must not collapse the list to the one family still on screen.
+    await wrapper.get(".mobile-catalog-filters select").setValue("ltx2");
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2", "z-image"]);
+  });
+
+  it("keeps the loaded family taxonomy when a later reload fails", async () => {
+    wrapper = mountCatalog(studio.id, [studio]);
+    await flushPromises();
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2"]);
+
+    fetchCatalogFamilies.mockRejectedValue(new Error("fetch failed"));
+    await wrapper.setProps({ hosts: [{ ...studio, online: false }] });
+    await flushPromises();
+
+    expect(fetchCatalogFamilies).toHaveBeenCalledTimes(2);
+    expect(familyOptionValues(wrapper)).toEqual(["", "flux", "ltx2"]);
   });
 
   it("resets detail loading state when a pending installed detail is replaced", async () => {
