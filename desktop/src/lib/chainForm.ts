@@ -64,7 +64,7 @@ export function newChainForm(): ChainForm {
     motionTailFrames: DEFAULT_MOTION_TAIL_FRAMES,
     enableAudio: false,
     startImage: null,
-    stages: [newStage()],
+    stages: [newStage(), newStage()],
   };
 }
 

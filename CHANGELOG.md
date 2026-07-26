@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Desktop Sequence is now a guided two-clip workflow.** Create requires a
+  description for every clip, filters out incompatible video checkpoints,
+  calls transitions **Continue motion**, **Cut**, and **Crossfade**, and keeps
+  frame, seed, source, audio, and TOML controls under progressive disclosure.
 - **Web Sequence is now a guided two-clip workflow and can render on remote machines.** Create starts explicit sequences with two plain-language clip cards, calls smooth/cut/fade transitions **Continue motion**, **Cut**, and **Crossfade**, requires every clip description, keeps TOML authoring under **Sequence tools**, and shows a clearer duration summary. Durable creation, authenticated event streaming, previews, and job actions now stay on the selected machine instead of silently falling back to the serving host. The reusable capability, duration, validation, and transition contracts live in the shared Studio package for native clients.
 - **Web and desktop Library gain a Lightroom-style thumbnail-size slider.** The compact small-to-large control sits in the top toolbar, updates the responsive web grid or desktop's justified contact sheet continuously, supports native keyboard range input, and remembers the chosen pixel size on each surface.
 - **iPhone can automatically save generated images to Photos.** A default-on Settings → Photos option mirrors desktop's automatic remote-output saving without retaining large base64 generation payloads in the WebView: after a still completes, Mold fetches the authenticated saved gallery file and hands it to the native Photos bridge. Post-generation upscales save both the original and upscaled image; videos remain streamable in Mold Library.

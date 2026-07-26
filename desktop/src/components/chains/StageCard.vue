@@ -30,7 +30,6 @@ const emit = defineEmits<{
   (e: "clear-image"): void;
 }>();
 
-const editing = ref(false);
 const previewUrl = ref<string | null>(null);
 
 const phase = computed<DevelopPhase>(() => {
@@ -50,7 +49,7 @@ const framesError = computed(() => frames8n1Error(props.stage.frames));
 // Accessible name for the develop/preview cell — its state is otherwise
 // conveyed only by the grain color (temperature semantics).
 const developAria = computed(() => {
-  const base = `Stage ${props.index + 1}`;
+  const base = `Clip ${props.index + 1}`;
   const state = props.jobStage?.state;
   if (state === "completed") return `${base}: completed`;
   if (state === "failed") return `${base}: failed`;
@@ -91,7 +90,7 @@ function snapFramesField() {
 <template>
   <div class="border-edge flex w-40 shrink-0 flex-col gap-1 rounded-chrome border bg-bench p-2">
     <div class="edge-code flex items-center justify-between">
-      <span>Stage {{ index + 1 }}</span>
+      <span>{{ index === 0 ? "Opening clip" : `Clip ${index + 1}` }}</span>
       <span class="data-mono">{{ stage.frames }}f</span>
     </div>
 
@@ -154,15 +153,14 @@ function snapFramesField() {
       + Image
     </button>
 
-    <!-- prompt (click to edit) -->
-    <button
-      type="button"
-      class="line-clamp-2 min-h-8 rounded-control px-1 text-left text-caption text-ink-2 hover:bg-bath hover:text-ink"
-      :title="stage.prompt || 'Add a prompt'"
-      @click="editing = !editing"
-    >
-      {{ stage.prompt || "Add a prompt…" }}
-    </button>
+    <textarea
+      v-model="stage.prompt"
+      data-selectable
+      rows="3"
+      :aria-label="`Clip ${index + 1} prompt`"
+      :placeholder="index === 0 ? 'How does the sequence begin?' : 'What happens next?'"
+      class="border-edge min-h-16 w-full resize-none rounded-control border bg-bath px-2 py-1.5 text-caption text-ink placeholder:text-ink-3"
+    />
 
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-1">
@@ -199,15 +197,8 @@ function snapFramesField() {
       </button>
     </div>
 
-    <!-- inline edit popover -->
-    <div v-if="editing" class="border-edge mt-1 rounded-control border bg-bath p-2">
-      <label class="text-caption text-ink-2">Prompt</label>
-      <textarea
-        v-model="stage.prompt"
-        data-selectable
-        rows="2"
-        class="border-edge mt-1 w-full resize-none rounded-control border bg-bench px-1.5 py-1 text-caption text-ink"
-      />
+    <details class="border-edge mt-1 rounded-control border bg-bath p-2">
+      <summary class="cursor-pointer text-caption text-ink-2">Clip tools</summary>
       <label class="mt-2 text-caption text-ink-2">Frames</label>
       <input
         v-model.number="stage.frames"
@@ -227,13 +218,6 @@ function snapFramesField() {
         placeholder="optional"
         class="border-edge mt-1 w-full resize-none rounded-control border bg-bench px-1.5 py-1 text-caption text-ink placeholder:text-ink-3"
       />
-      <button
-        type="button"
-        class="border-edge mt-2 h-7 w-full rounded-control border text-caption text-ink-2 hover:text-ink"
-        @click="editing = false"
-      >
-        Done
-      </button>
-    </div>
+    </details>
   </div>
 </template>

@@ -523,13 +523,14 @@ drawer. Retired browser routes such as `/catalog` render Page Not Found. Every r
 a live HF + Civitai proxy through `GET /api/catalog/search` with a 5-min
 in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
-Sequence-mode browse links enter this view with Video + Models filters. The web
-Create picker contains only sequence-capable installed models and selects one
-when available. A new Sequence starts with two required clip descriptions,
-uses the plain-language Continue motion / Cut / Crossfade transition labels,
-and keeps TOML import/export under Sequence tools. Durable sequence creation,
-events, previews, and actions follow the selected machine with its API key in
-headers rather than falling back to the web-serving origin.
+Sequence-mode browse links enter this view with Video + Models filters. Web and
+desktop Create pickers contain only sequence-capable installed models and
+select one when available. A new Sequence starts with two required clip
+descriptions, uses the plain-language Continue motion / Cut / Crossfade
+transition labels, and keeps frame, seed, source, audio, and TOML tools under
+progressive disclosure. Durable sequence creation, events, previews, and
+actions follow the selected machine with its API key in headers rather than
+falling back to the web-serving origin.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. HF separated-bundling entries

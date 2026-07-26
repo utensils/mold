@@ -236,7 +236,19 @@ and clears terminal, error, null-id, removed-host, and unmount state for retry.
 - Desktop layout parity: the Create settings inspector is left-edge resizable from 280–480 px with pointer or keyboard controls. A committed width persists through app settings, double-click resets it, and the 340 px default preserves one row for all five shape ratios. Its simplified essentials are the default; the Advanced toggle extends capability-gated, always-open icon sections below them in the same scrolling inspector without an overlay or canvas dimming. Web uses the same section headers and icons.
 - Settings layout parity: desktop cards and their row content fill one shared content column. Desktop's collapsed All settings groups and the web engine-configuration groups use the same halide icon plates, one-line summaries, and restrained token-derived tint over bench cards.
 
-Desktop parity: the Chains view's filmstrip builder supports per-stage **source images** (attach / replace / clear well on each `StageCard.vue`, thumbnail from base64) plus a chain-level **Start image** in the header, both picked via the shared `ImagePickerModal.vue` (upload or any connected host's gallery). The start image is projected onto `stages[0].source_image` at request/script build time (canonical `stages` form ignores top-level `source_image`); a stage's own image wins over the chain-level one. TOML **Export** emits inline `source_image_b64` per stage and **Open** parses `source_image_b64` / canonical `source_image` back (matching `mold_core::chain_toml` semantics, including the at-most-one-image-field rule); `source_image_path` is rejected with a pointer to `source_image_b64` since the composer has no script directory to resolve against. Images are b64-inlined in the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
+Desktop parity: Create's Sequence path starts with two required, directly
+editable clips and filters the model menu through the shared chain-capability
+contract. Plain-language transitions sit between clips; per-clip frame,
+negative-prompt, and source controls plus sequence-wide size, FPS, seed, audio,
+opening image, and TOML file tools stay available under progressive disclosure.
+The opening image is projected onto `stages[0].source_image` at request/script
+build time (canonical `stages` form ignores top-level `source_image`); a clip's
+own image wins. TOML **Export** emits inline `source_image_b64` per clip and
+**Open** parses `source_image_b64` / canonical `source_image` back (matching
+`mold_core::chain_toml` semantics, including the at-most-one-image-field rule);
+`source_image_path` is rejected with a pointer to `source_image_b64` since the
+composer has no script directory to resolve against. Images are b64-inlined in
+the `POST /api/chain-jobs` body, so multi-host routing is unaffected.
 
 ---
 
