@@ -806,8 +806,7 @@ enum LoraBypassMode {
 
 impl LoraBypassMode {
     fn from_env() -> Self {
-        match std::env::var("MOLD_LORA_BYPASS")
-            .ok()
+        match crate::runtime_env::value("MOLD_LORA_BYPASS")
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
@@ -1074,7 +1073,7 @@ impl FluxEngine {
     /// rebuilds. Disabling forces a sub-second `B@A·scale` recompute on the
     /// next rebuild, which is cheap on GPU.
     fn lora_delta_cache_handle(&self) -> Option<Arc<Mutex<super::lora::LoraDeltaCache>>> {
-        if std::env::var("MOLD_FLUX_DELTA_CACHE")
+        if crate::runtime_env::value("MOLD_FLUX_DELTA_CACHE")
             .map(|v| v == "0")
             .unwrap_or(false)
         {
@@ -2819,7 +2818,7 @@ impl FluxEngine {
         drop(t5_emb_state);
         drop(clip_emb_state);
         drop(img_state);
-        let keep_transformer_env = std::env::var("MOLD_FLUX_KEEP_TRANSFORMER")
+        let keep_transformer_env = crate::runtime_env::value("MOLD_FLUX_KEEP_TRANSFORMER")
             .map(|v| v == "1")
             .unwrap_or(false);
 

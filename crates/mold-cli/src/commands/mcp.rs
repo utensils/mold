@@ -898,6 +898,9 @@ fn job_summary_json(job: &AsyncGenerationJob) -> Value {
 
 fn progress_summary(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::DependencyWait { dependency, reason } => {
+            format!("waiting for dependency {dependency}: {reason}")
+        }
         SseProgressEvent::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
         SseProgressEvent::StageStart { name } => format!("stage started: {name}"),
         SseProgressEvent::StageDone { name, elapsed_ms } => {

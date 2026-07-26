@@ -254,6 +254,9 @@ pub struct GpuJob {
     /// Exact request-aware plan selected by the coordinator. Legacy adapters
     /// use `None`; V2 validates this on the owner thread before CUDA work.
     pub execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
+    /// All per-device dependency-prepared inputs retained across a fenced
+    /// transport rejection or pre-CUDA plan invalidation.
+    pub prepared_execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
     /// Version fence proving this job was granted by the authoritative
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.

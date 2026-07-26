@@ -21,7 +21,7 @@ impl Ltx2Backend {
     }
 
     pub(crate) fn detect() -> Self {
-        let force_cpu = std::env::var("MOLD_DEVICE")
+        let force_cpu = crate::runtime_env::value("MOLD_DEVICE")
             .map(|value| value.eq_ignore_ascii_case("cpu"))
             .unwrap_or(false);
         Self::from_availability(

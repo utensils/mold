@@ -169,16 +169,21 @@ pub(crate) fn build_local_engine_on_gpu(
         ov.qwen2_text_encoder_mode.as_deref(),
     );
 
-    let is_eager = ov.eager || std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1");
+    if ov.eager {
+        std::env::set_var("MOLD_EAGER", "1");
+    }
+    if ov.offload {
+        std::env::set_var("MOLD_OFFLOAD", "1");
+    }
+    let is_eager =
+        ov.eager || mold_inference::runtime_env::value("MOLD_EAGER").is_some_and(|v| v == "1");
     let load_strategy = if is_eager {
         LoadStrategy::Eager
     } else {
         LoadStrategy::Sequential
     };
-    if is_eager {
-        std::env::set_var("MOLD_EAGER", "1");
-    }
-    let is_offload = ov.offload || std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+    let is_offload =
+        ov.offload || mold_inference::runtime_env::value("MOLD_OFFLOAD").is_some_and(|v| v == "1");
 
     mold_inference::create_engine(
         model.to_string(),
@@ -195,7 +200,7 @@ pub(crate) fn build_local_engine_on_gpu(
 /// available-RAM headroom. Each ordinal maps to exactly the immutable plan
 /// that admitted it.
 #[cfg(any(feature = "cuda", feature = "metal"))]
-pub(crate) fn plan_local_batch(
+pub(crate) async fn plan_local_batch(
     request: &mold_core::GenerateRequest,
     config: &Config,
     ov: &EngineOverrides,
@@ -206,6 +211,12 @@ pub(crate) fn plan_local_batch(
 )> {
     use sysinfo::System;
 
+    if ov.eager {
+        std::env::set_var("MOLD_EAGER", "1");
+    }
+    if ov.offload {
+        std::env::set_var("MOLD_OFFLOAD", "1");
+    }
     let selected_ordinals = selected_local_gpu_ordinals(config, ov)?;
     let discovered = mold_inference::device::discover_gpus();
     let facts = discovered
@@ -223,13 +234,21 @@ pub(crate) fn plan_local_batch(
         anyhow::bail!("local scheduler has no discovered device with stable identity");
     }
     let offload_requested = ov.offload
-        || std::env::var("MOLD_OFFLOAD")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
-    let plans = mold_server::execution_plan::resolve_execution_plans(
+        || mold_inference::runtime_env::value("MOLD_OFFLOAD")
+            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    let prepared = mold_server::variant_dependencies::prepare_local_execution_inputs(
+        config,
+        request,
+        facts.clone(),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    let plans = mold_server::execution_plan::resolve_execution_plans_with_prepared(
         config,
         request,
         &facts,
         offload_requested,
+        Some(&prepared),
     )?;
     let by_ordinal = plans
         .into_iter()

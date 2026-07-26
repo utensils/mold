@@ -1008,8 +1008,8 @@ impl QwenImageEngine {
             gpu_ordinal,
             offload,
             shared_pool,
-            std::env::var("MOLD_QWEN2_VARIANT").ok(),
-            std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok(),
+            crate::runtime_env::value("MOLD_QWEN2_VARIANT"),
+            crate::runtime_env::value("MOLD_QWEN2_TEXT_ENCODER_MODE"),
         )
     }
 

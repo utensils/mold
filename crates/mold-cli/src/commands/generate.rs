@@ -1259,7 +1259,7 @@ async fn generate_local_batch(
         overrides.qwen2_text_encoder_mode.as_deref(),
     );
     let (assignments, execution_plans) =
-        plan_local_batch(&base_req, &effective_config, &overrides, batch as usize)?;
+        plan_local_batch(&base_req, &effective_config, &overrides, batch as usize).await?;
     let first_wave_len = assignments
         .iter()
         .copied()

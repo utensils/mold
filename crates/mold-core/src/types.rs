@@ -1428,6 +1428,12 @@ pub struct AdvancedPlacement {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseProgressEvent {
+    /// The job is waiting for a concrete model dependency to become locally
+    /// available. No accelerator lease has been granted at this point.
+    DependencyWait {
+        dependency: String,
+        reason: String,
+    },
     StageStart {
         name: String,
     },
@@ -2825,6 +2831,24 @@ mod tests {
                 bytes_total: 10_000_000,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn sse_progress_dependency_wait_roundtrip_is_typed() {
+        let event = SseProgressEvent::DependencyWait {
+            dependency: "Qwen3 q6".to_string(),
+            reason: "joining an in-progress encoder dependency download".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"dependency_wait""#));
+        let back: SseProgressEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            SseProgressEvent::DependencyWait {
+                dependency,
+                reason,
+            } if dependency == "Qwen3 q6" && reason.contains("in-progress")
         ));
     }
 

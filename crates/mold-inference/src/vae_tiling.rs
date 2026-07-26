@@ -95,7 +95,7 @@ pub enum TiledMode {
 /// (including unset) returns [`TiledMode::Auto`].
 pub fn resolve_mode() -> TiledMode {
     static CACHED: std::sync::OnceLock<TiledMode> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| parse_mode(std::env::var("MOLD_VAE_TILED").ok().as_deref()))
+    *CACHED.get_or_init(|| parse_mode(crate::runtime_env::value("MOLD_VAE_TILED").as_deref()))
 }
 
 fn parse_mode(value: Option<&str>) -> TiledMode {

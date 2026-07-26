@@ -31,7 +31,7 @@ fn ltx2_block_detail_enabled(index: usize) -> bool {
 }
 
 fn ltx2_load_debug_enabled() -> bool {
-    std::env::var_os("MOLD_LTX2_DEBUG_LOAD_BLOCKS").is_some()
+    crate::runtime_env::value("MOLD_LTX2_DEBUG_LOAD_BLOCKS").is_some()
 }
 
 fn tensor_debug_stats(xs: &Tensor) -> Result<(f32, f32, f32)> {
@@ -791,12 +791,11 @@ fn emulate_static_fp8_input_quantization(
     input_scale: &Tensor,
     compute_dtype: DType,
 ) -> Result<Tensor> {
-    let scale_mode = match std::env::var("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
-        Ok("divide") | Ok("emulate") => Fp8InputScaleMode::EmulateDivide,
-        Ok("multiply") => Fp8InputScaleMode::EmulateMultiply,
-        Ok("skip") => Fp8InputScaleMode::Skip,
-        Err(_) => Fp8InputScaleMode::Skip,
-        Ok(_) => Fp8InputScaleMode::Skip,
+    let scale_mode = match crate::runtime_env::value("MOLD_LTX2_FP8_INPUT_SCALE_MODE").as_deref() {
+        Some("divide") | Some("emulate") => Fp8InputScaleMode::EmulateDivide,
+        Some("multiply") => Fp8InputScaleMode::EmulateMultiply,
+        Some("skip") | None => Fp8InputScaleMode::Skip,
+        Some(_) => Fp8InputScaleMode::Skip,
     };
     let scale = input_scale.to_dtype(compute_dtype)?;
     match scale_mode {
@@ -815,11 +814,10 @@ fn emulate_static_fp8_input_quantization(
 }
 
 fn fp8_weight_scale_mode() -> Fp8WeightScaleMode {
-    match std::env::var("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE").as_deref() {
-        Ok("apply") | Ok("scaled-mm") => Fp8WeightScaleMode::Apply,
-        Ok("skip") => Fp8WeightScaleMode::Skip,
-        Err(_) => Fp8WeightScaleMode::Apply,
-        Ok(_) => Fp8WeightScaleMode::Apply,
+    match crate::runtime_env::value("MOLD_LTX2_FP8_WEIGHT_SCALE_MODE").as_deref() {
+        Some("apply") | Some("scaled-mm") => Fp8WeightScaleMode::Apply,
+        Some("skip") => Fp8WeightScaleMode::Skip,
+        None | Some(_) => Fp8WeightScaleMode::Apply,
     }
 }
 

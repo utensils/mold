@@ -1815,6 +1815,7 @@ async fn run_queue_dispatcher_with_tuning(
             registry: state.job_registry.clone(),
             events: state.events.clone(),
             execution_plan: None,
+            prepared_execution_inputs: None,
             lease: None,
         });
 
@@ -2180,7 +2181,7 @@ pub(crate) fn build_observed_dispatch(
             }
         };
         let offload_requested = matches!(
-            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
         match crate::execution_plan::resolve_execution_plans(
@@ -3852,6 +3853,7 @@ mod tests {
             registry: state.job_registry.clone(),
             events: state.events.clone(),
             execution_plan: None,
+            prepared_execution_inputs: None,
             lease: None,
         };
         worker.send_job(filler_job).unwrap();

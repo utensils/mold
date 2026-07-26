@@ -246,6 +246,10 @@ pub(crate) async fn render_progress(
             // Latent previews are for canvas clients; the terminal keeps
             // its step progress bar.
             SseProgressEvent::Preview { .. } => {}
+            SseProgressEvent::DependencyWait { dependency, reason } => {
+                pb.set_message(format!("Waiting for {dependency}: {reason}"));
+                pb.tick();
+            }
             SseProgressEvent::StageStart { name } => {
                 if let Some(db) = denoise_bar.take() {
                     db.finish_and_clear();

@@ -41,7 +41,7 @@ const GB: u64 = 1_000_000_000;
 ///    macOS is effectively a no-op anyway since pinning is CUDA-only).
 /// 3. Fallback: 16 GB — sane for a 32 GB machine if RAM probing fails.
 pub fn pinned_cap_bytes() -> u64 {
-    if let Ok(v) = std::env::var("MOLD_PINNED_VRAM_MAX_GB") {
+    if let Some(v) = crate::runtime_env::value("MOLD_PINNED_VRAM_MAX_GB") {
         if let Ok(gb) = v.trim().parse::<f64>() {
             if gb > 0.0 {
                 return (gb * GB as f64) as u64;
@@ -57,12 +57,12 @@ pub fn pinned_cap_bytes() -> u64 {
 /// (including unset) leaves it on. Default-on lets the offload path opt-out
 /// for debugging without anyone having to flip a flag.
 pub fn prefetch_enabled_from_env() -> bool {
-    match std::env::var("MOLD_OFFLOAD_PREFETCH") {
-        Ok(v) => !matches!(
+    match crate::runtime_env::value("MOLD_OFFLOAD_PREFETCH") {
+        Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "off" | "0" | "false"
         ),
-        Err(_) => true,
+        None => true,
     }
 }
 

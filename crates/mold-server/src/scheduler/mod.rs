@@ -235,6 +235,7 @@ struct PendingGeneration {
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
     preparation: PreparationState,
+    prepared_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
     retry_not_before_ms: Option<u64>,
 }
 
@@ -276,7 +277,7 @@ enum PreparationState {
 enum PreparationEvent {
     Ready {
         work_id: String,
-        expanded_prompt: Option<String>,
+        prepared: PreparedGeneration,
     },
     Failed {
         work_id: String,
@@ -284,7 +285,13 @@ enum PreparationEvent {
     },
 }
 
-type PreparationFuture = Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send>>;
+#[derive(Clone, Debug, Default)]
+struct PreparedGeneration {
+    expanded_prompt: Option<String>,
+    execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
+}
+
+type PreparationFuture = Pin<Box<dyn Future<Output = Result<PreparedGeneration, String>> + Send>>;
 
 trait DependencyPreparer: Send + Sync {
     fn prepare(
@@ -309,15 +316,28 @@ impl DependencyPreparer for PostUpscalePreparer {
         Box::pin(async move {
             crate::queue::ensure_post_upscale_model_downloaded(&state, &request, progress.as_ref())
                 .await?;
+            let execution_inputs = crate::variant_dependencies::prepare_execution_inputs(
+                &state,
+                &work_id,
+                &request,
+                progress.as_ref(),
+            )
+            .await?;
             if request.expand != Some(true) {
-                return Ok(None);
+                return Ok(PreparedGeneration {
+                    expanded_prompt: None,
+                    execution_inputs: Some(execution_inputs),
+                });
             }
             let config = state.config.read().await.clone();
             let settings = config.expand.clone().with_env_overrides();
             if !settings.is_local() {
                 // API-backed expansion remains CPU/network work and is
                 // resolved before queue admission by the route.
-                return Ok(None);
+                return Ok(PreparedGeneration {
+                    expanded_prompt: None,
+                    execution_inputs: Some(execution_inputs),
+                });
             }
             let family = config
                 .resolved_model_config(&request.model)
@@ -365,7 +385,10 @@ impl DependencyPreparer for PostUpscalePreparer {
                     }
                 }
             }?;
-            Ok(result.expanded.first().cloned())
+            Ok(PreparedGeneration {
+                expanded_prompt: result.expanded.first().cloned(),
+                execution_inputs: Some(execution_inputs),
+            })
         })
     }
 }
@@ -747,6 +770,7 @@ impl Coordinator {
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
+                prepared_inputs: None,
                 retry_not_before_ms: None,
             },
         );
@@ -816,9 +840,9 @@ impl Coordinator {
             let tx = self.preparation_tx.clone();
             self.preparation_tasks.spawn(async move {
                 let event = match preparer.prepare(state, id.clone(), request, progress).await {
-                    Ok(expanded_prompt) => PreparationEvent::Ready {
+                    Ok(prepared) => PreparationEvent::Ready {
                         work_id: id,
-                        expanded_prompt,
+                        prepared,
                     },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
@@ -829,20 +853,18 @@ impl Coordinator {
 
     fn handle_preparation_event(&mut self, event: PreparationEvent, immediate: &mut bool) {
         match event {
-            PreparationEvent::Ready {
-                work_id,
-                expanded_prompt,
-            } => {
+            PreparationEvent::Ready { work_id, prepared } => {
                 let Some(pending) = self.pending.get_mut(&work_id) else {
                     return;
                 };
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
-                if let Some(expanded_prompt) = expanded_prompt {
+                if let Some(expanded_prompt) = prepared.expanded_prompt {
                     pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
                     pending.job.request.prompt = expanded_prompt;
                 }
+                pending.prepared_inputs = prepared.execution_inputs;
                 pending.preparation = PreparationState::Ready;
                 self.mutate(immediate);
             }
@@ -958,7 +980,27 @@ impl Coordinator {
                     ?reason,
                     "worker rejected a fenced grant"
                 );
-                let rejected_lease = self.leases.remove(&device_id);
+                let rejected_work_id = grant.work.id().to_string();
+                // A rejection returns ownership of the transported payload
+                // even when its fence metadata is stale or corrupt. Reclaim
+                // the active lease by stable device/work identity, not by
+                // mutable epoch/version fields; those are the reason the
+                // worker rejected it. Never tear down a newer unrelated
+                // lease merely because a delayed event names its device.
+                let rejected_lease_device = self
+                    .leases
+                    .get(&device_id)
+                    .filter(|lease| lease.work_id == rejected_work_id)
+                    .map(|_| device_id.clone())
+                    .or_else(|| {
+                        self.leases
+                            .get(&grant.fence.device_id)
+                            .filter(|lease| lease.work_id == rejected_work_id)
+                            .map(|_| grant.fence.device_id.clone())
+                    });
+                let rejected_lease = rejected_lease_device
+                    .as_ref()
+                    .and_then(|device| self.leases.remove(device));
                 let previous_target = rejected_lease
                     .as_ref()
                     .and_then(|lease| lease.previous_target);
@@ -971,16 +1013,26 @@ impl Coordinator {
                 let preserved_ready_at_ms = rejected_lease
                     .as_ref()
                     .map_or_else(monotonic_ms, |lease| lease.ready_at_ms);
-                let work_id = grant.work.id().to_string();
-                self.memory.release(&work_id);
-                self.memory.collect_now();
-                if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
-                    worker.release_in_flight();
+                let work_id = rejected_work_id;
+                if rejected_lease.is_some() {
+                    self.memory.release(&work_id);
+                    self.memory.collect_now();
+                    let rejected_worker = rejected_lease_device.as_ref().and_then(|device| {
+                        self.state
+                            .gpu_pool
+                            .workers
+                            .iter()
+                            .find(|worker| worker_device_id(worker) == *device)
+                    });
+                    if let Some(worker) = rejected_worker {
+                        worker.release_in_flight();
+                    }
                 }
                 let LeaseGrant { work, retry, .. } = *grant;
                 match work {
                     OwnerWork::Generation(job) => {
-                        let generation_job = generation_from_gpu_job(*job);
+                        let (generation_job, prepared_inputs) =
+                            generation_and_prepared_from_gpu_job(*job);
                         if matches!(reason, LeaseRejection::FatalCuda) {
                             self.plan_invalidations.remove(&generation_job.id);
                             reject_generation(
@@ -1020,6 +1072,7 @@ impl Coordinator {
                                         bypass_count: preserved_bypass_count,
                                         warm_wait_started_ms: preserved_warm_wait_started_ms,
                                         preparation: PreparationState::Ready,
+                                        prepared_inputs: prepared_inputs.clone(),
                                         retry_not_before_ms: Some(
                                             monotonic_ms().saturating_add(backoff_ms),
                                         ),
@@ -1038,6 +1091,7 @@ impl Coordinator {
                                     bypass_count: preserved_bypass_count,
                                     warm_wait_started_ms: preserved_warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
+                                    prepared_inputs,
                                     retry_not_before_ms: None,
                                 },
                             );
@@ -1319,14 +1373,15 @@ impl Coordinator {
             )
         })?;
         let offload_requested = matches!(
-            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
-        let resolved = crate::execution_plan::resolve_execution_plans(
+        let resolved = crate::execution_plan::resolve_execution_plans_with_prepared(
             &config,
             &pending.job.request,
             device_facts,
             offload_requested,
+            pending.prepared_inputs.as_ref(),
         );
         #[cfg(test)]
         if matches!(
@@ -1367,6 +1422,27 @@ impl Coordinator {
                         decoder: None,
                     },
                     engine_config: mold_inference::FrozenEngineConfig::resolve(
+                        &pending.job.request.model,
+                        &config,
+                    ),
+                    admission_paths: mold_core::ModelPaths {
+                        transformer: std::path::PathBuf::from(&pending.job.request.model),
+                        transformer_shards: vec![],
+                        vae: std::path::PathBuf::from(&pending.job.request.model),
+                        spatial_upscaler: None,
+                        temporal_upscaler: None,
+                        distilled_lora: None,
+                        t5_encoder: None,
+                        clip_encoder: None,
+                        t5_tokenizer: None,
+                        clip_tokenizer: None,
+                        clip_encoder_2: None,
+                        clip_tokenizer_2: None,
+                        text_encoder_files: vec![],
+                        text_tokenizer: None,
+                        decoder: None,
+                    },
+                    admission_engine_config: mold_inference::FrozenEngineConfig::resolve(
                         &pending.job.request.model,
                         &config,
                     ),
@@ -1831,11 +1907,13 @@ impl Coordinator {
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
                     let ready_at_ms = pending.ready_at_ms;
                     let retry_not_before_ms = pending.retry_not_before_ms;
+                    let prepared_inputs = pending.prepared_inputs.clone();
                     let gpu_job = gpu_job_from_generation(
                         &self.state,
                         pending.job,
                         fence.clone(),
                         Some(execution_plan),
+                        prepared_inputs.clone(),
                     );
                     let grant = Box::new(LeaseGrant {
                         fence,
@@ -1896,6 +1974,7 @@ impl Coordinator {
                                     bypass_count,
                                     warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
+                                    prepared_inputs,
                                     retry_not_before_ms,
                                 },
                             );
@@ -2174,6 +2253,7 @@ fn gpu_job_from_generation(
     mut job: GenerationJob,
     lease: LeaseFence,
     execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
+    prepared_execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
 ) -> GpuJob {
     if let Some(plan) = execution_plan.as_ref() {
         crate::execution_plan::materialize_request(plan, &mut job.request);
@@ -2192,19 +2272,33 @@ fn gpu_job_from_generation(
         registry: state.job_registry.clone(),
         events: state.events.clone(),
         execution_plan,
+        prepared_execution_inputs,
         lease: Some(lease),
     }
 }
 
+fn generation_and_prepared_from_gpu_job(
+    job: GpuJob,
+) -> (
+    GenerationJob,
+    Option<crate::execution_plan::PreparedExecutionInputs>,
+) {
+    let prepared = job.prepared_execution_inputs;
+    (
+        GenerationJob {
+            id: job.id,
+            request: job.request,
+            completion_payload: job.completion_payload,
+            progress_tx: job.progress_tx,
+            result_tx: job.result_tx,
+            output_dir: job.output_dir,
+        },
+        prepared,
+    )
+}
+
 fn generation_from_gpu_job(job: GpuJob) -> GenerationJob {
-    GenerationJob {
-        id: job.id,
-        request: job.request,
-        completion_payload: job.completion_payload,
-        progress_tx: job.progress_tx,
-        result_tx: job.result_tx,
-        output_dir: job.output_dir,
-    }
+    generation_and_prepared_from_gpu_job(job).0
 }
 
 fn generation_from_owner_grant(grant: LeaseGrant) -> GenerationJob {
@@ -2321,7 +2415,7 @@ mod tests {
             _request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         ) -> PreparationFuture {
-            Box::pin(async { Ok(None) })
+            Box::pin(async { Ok(PreparedGeneration::default()) })
         }
     }
 
@@ -2477,7 +2571,10 @@ mod tests {
         coordinator.handle_preparation_event(
             PreparationEvent::Ready {
                 work_id: "expanded".to_string(),
-                expanded_prompt: Some("expanded prompt".to_string()),
+                prepared: PreparedGeneration {
+                    expanded_prompt: Some("expanded prompt".to_string()),
+                    execution_inputs: None,
+                },
             },
             &mut immediate,
         );
@@ -3317,7 +3414,7 @@ mod tests {
             memory_sample_generation: 1,
             memory_ledger_sequence: 1,
         };
-        let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone(), None);
+        let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone(), None, None);
         let child_id = "parent::post-upscale".to_string();
         let followup = ScheduledOwnerWork::new(
             child_id.clone(),
@@ -3805,11 +3902,18 @@ mod tests {
         );
         coordinator.dispatch_ready().await;
 
-        let first_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+        let mut first_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         };
         let first_plan_version = first_grant.fence.plan_version;
+        // A worker must return the transported payload even if every mutable
+        // fence generation disagrees with the coordinator. The reducer owns
+        // the exactly-once requeue/terminal decision from this point.
+        first_grant.fence.state_version = first_grant.fence.state_version.saturating_add(100);
+        first_grant.fence.plan_version = first_grant.fence.plan_version.saturating_add(100);
+        first_grant.fence.worker_generation =
+            first_grant.fence.worker_generation.saturating_add(100);
         assert_eq!(worker.in_flight.load(Ordering::SeqCst), 1);
         assert_eq!(coordinator.memory.reservations.len(), 1);
         assert_eq!(
@@ -3821,7 +3925,7 @@ mod tests {
             WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: 0,
-                worker_generation: 1,
+                worker_generation: 101,
                 grant: first_grant,
                 reason: LeaseRejection::PlanInvalidated(
                     crate::execution_plan::ExecutionPlanError::PlanInvalidated(
@@ -3970,7 +4074,7 @@ mod tests {
                 if request.prompt == "blocked-preparation" {
                     release.notified().await;
                 }
-                Ok(None)
+                Ok(PreparedGeneration::default())
             })
         }
     }

@@ -26,6 +26,7 @@ pub mod model_registry;
 pub(crate) mod nvfp4;
 pub mod progress;
 pub mod qwen_image;
+pub mod runtime_env;
 pub mod scheduler;
 pub mod sd15;
 pub mod sd3;

@@ -501,7 +501,7 @@ pub fn create_device(
 ) -> anyhow::Result<candle_core::Device> {
     use candle_core::Device;
     // MOLD_DEVICE=cpu forces CPU inference (for debugging Metal issues)
-    let force_cpu = std::env::var("MOLD_DEVICE")
+    let force_cpu = crate::runtime_env::value("MOLD_DEVICE")
         .map(|v| v.eq_ignore_ascii_case("cpu"))
         .unwrap_or(false);
     if force_cpu {
@@ -900,7 +900,22 @@ pub fn select_ltx2_gemma_device(
 /// The returned `Gpu` placement always points at `gpu_ordinal` — explicit
 /// `gpu` doesn't try to outsmart the user by walking siblings.
 pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemmaPlacement> {
-    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_DEVICE") {
+    resolve_ltx2_gemma_device_override_from_values(
+        crate::runtime_env::value("MOLD_LTX2_GEMMA_DEVICE").as_deref(),
+        crate::runtime_env::value("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").as_deref(),
+        gpu_ordinal,
+    )
+}
+
+/// Pure parser used by immutable scheduler plans and environment-isolated
+/// tests. Production callers normally use
+/// [`resolve_ltx2_gemma_device_override`].
+pub fn resolve_ltx2_gemma_device_override_from_values(
+    primary: Option<&str>,
+    legacy_force_cpu: Option<&str>,
+    gpu_ordinal: usize,
+) -> Option<LtxGemmaPlacement> {
+    if let Some(raw) = primary {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             let lower = trimmed.to_ascii_lowercase();
@@ -919,7 +934,7 @@ pub fn resolve_ltx2_gemma_device_override(gpu_ordinal: usize) -> Option<LtxGemma
         }
     }
 
-    if std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER").is_some() {
+    if legacy_force_cpu.is_some() {
         warn_once_legacy_force_cpu_prompt_encoder();
         return Some(LtxGemmaPlacement::Cpu);
     }
@@ -1155,7 +1170,7 @@ pub fn available_system_memory_bytes() -> Option<u64> {
 /// This mirrors ComfyUI's `text_encoder_offload_device()` behavior
 /// (`comfy/model_management.py:1012`).
 pub fn keep_te_in_ram() -> bool {
-    std::env::var("MOLD_KEEP_TE_RAM")
+    crate::runtime_env::value("MOLD_KEEP_TE_RAM")
         .map(|v| v == "1")
         .unwrap_or(false)
 }
@@ -1304,7 +1319,7 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
 /// memory has its own headroom and the OS swap already accounts for desktop
 /// pressure). Override via `MOLD_RESERVE_VRAM_MB`.
 pub fn reserved_vram_bytes() -> u64 {
-    if let Ok(s) = std::env::var("MOLD_RESERVE_VRAM_MB") {
+    if let Some(s) = crate::runtime_env::value("MOLD_RESERVE_VRAM_MB") {
         if let Ok(mb) = s.parse::<u64>() {
             return mb.saturating_mul(1_000_000);
         }
@@ -1501,7 +1516,9 @@ fn parse_vae_dtype_policy(value: Option<&str>) -> VaeDtypePolicy {
 
 pub fn resolved_vae_dtype_policy() -> VaeDtypePolicy {
     static CACHED: std::sync::OnceLock<VaeDtypePolicy> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| parse_vae_dtype_policy(std::env::var("MOLD_VAE_DTYPE").ok().as_deref()))
+    *CACHED.get_or_init(|| {
+        parse_vae_dtype_policy(crate::runtime_env::value("MOLD_VAE_DTYPE").as_deref())
+    })
 }
 
 pub(crate) fn resolve_vae_dtype(default_dtype: candle_core::DType) -> candle_core::DType {
@@ -1741,7 +1758,7 @@ pub(crate) fn preflight_memory_check(
     activation_bytes: u64,
 ) -> anyhow::Result<()> {
     // --eager or MOLD_EAGER=1 bypasses the check
-    if std::env::var("MOLD_EAGER").is_ok_and(|v| v == "1") {
+    if crate::runtime_env::value("MOLD_EAGER").is_some_and(|v| v == "1") {
         return Ok(());
     }
 

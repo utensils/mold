@@ -1845,6 +1845,9 @@ pub async fn reap_idle_warm_pod_if_needed() -> bool {
 fn format_progress_event(ev: &mold_core::types::SseProgressEvent) -> String {
     use mold_core::types::SseProgressEvent as E;
     match ev {
+        E::DependencyWait { dependency, reason } => {
+            format!("waiting for dependency {dependency}: {reason}")
+        }
         E::Preview { step, total, .. } => format!("denoise preview {step}/{total}"),
         E::StageStart { name } => format!("stage: {name}"),
         E::StageDone { name, elapsed_ms } => format!("done: {name} ({elapsed_ms}ms)"),

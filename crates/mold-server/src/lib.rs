@@ -33,6 +33,7 @@ pub mod routes_config;
 pub mod scheduler;
 mod signals;
 pub mod state;
+pub mod variant_dependencies;
 pub mod web_ui;
 
 #[cfg(all(test, feature = "metrics"))]
@@ -446,7 +447,8 @@ pub async fn run_server(
                     info!(text_tok = %text_tok.display());
                 }
 
-                let offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
+                let offload =
+                    mold_inference::runtime_env::value("MOLD_OFFLOAD").is_some_and(|v| v == "1");
                 let engine = mold_inference::create_engine_with_pool(
                     model_name,
                     paths,

@@ -159,6 +159,12 @@ pub struct ResolvedExecutionPlan {
     /// dispatch must not re-resolve these from mutable config or environment.
     pub engine_paths: ModelPaths,
     pub engine_config: mold_inference::FrozenEngineConfig,
+    /// Mutable inputs observed before dependency preparation. These remain
+    /// separate from the materialized engine inputs because an auto encoder
+    /// preference is intentionally replaced by one concrete per-device
+    /// variant during preparation.
+    pub admission_paths: ModelPaths,
+    pub admission_engine_config: mold_inference::FrozenEngineConfig,
     /// Ordered effective request/default LoRA stack. Scale uses IEEE bits so
     /// cache identity and equality preserve every finite wire value exactly.
     pub effective_loras: Vec<PlannedLora>,
@@ -192,6 +198,21 @@ pub struct DeviceFact {
     pub id: String,
     pub ordinal: usize,
     pub available_vram_bytes: u64,
+}
+
+/// Concrete engine inputs produced by asynchronous dependency preparation.
+///
+/// The map is keyed by stable runtime device id because mixed-capacity hosts
+/// can legitimately select different encoder variants for different GPUs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PreparedExecutionInputs {
+    pub by_device: BTreeMap<String, PreparedDeviceExecutionInputs>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedDeviceExecutionInputs {
+    pub engine_paths: ModelPaths,
+    pub engine_config: mold_inference::FrozenEngineConfig,
 }
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
@@ -265,11 +286,65 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
     }
 }
 
+/// Resolve hard request/config placement before dependency preparation.
+///
+/// This is intentionally artifact-only: it filters irrelevant sibling GPUs
+/// without consulting CUDA or performing downloads. Full memory admission
+/// still happens after dependencies are concrete.
+pub fn eligible_devices_for_request(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+) -> Result<Vec<DeviceFact>, ExecutionPlanError> {
+    let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: request.model.clone(),
+        }
+    })?;
+    let family = config
+        .resolved_model_config(&request.model)
+        .family
+        .or_else(|| {
+            mold_core::manifest::find_manifest(&request.model)
+                .map(|manifest| manifest.family.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let capabilities = capabilities_for_family(&family);
+    let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    let loras = effective_loras(config, request);
+    let artifacts = concrete_artifacts_for_family(&paths, &family, &loras, &engine_config);
+    let normalized = config.effective_placement(&request.model, request.placement.as_ref());
+    let effective = effective_constraints(&normalized, &artifacts);
+    validate_cpu_constraints(&family, &capabilities, &effective)?;
+    let hard = hard_device_ids(&effective, devices)?;
+    if hard.len() > 1 {
+        return Err(ExecutionPlanError::CrossDevicePlacement(
+            hard.into_iter().collect::<Vec<_>>().join(", "),
+        ));
+    }
+    let hard = hard.into_iter().next();
+    Ok(devices
+        .iter()
+        .filter(|device| hard.as_ref().is_none_or(|hard| hard == &device.id))
+        .cloned()
+        .collect())
+}
+
 pub fn resolve_execution_plans(
     config: &Config,
     request: &GenerateRequest,
     devices: &[DeviceFact],
     offload_requested: bool,
+) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    resolve_execution_plans_with_prepared(config, request, devices, offload_requested, None)
+}
+
+pub fn resolve_execution_plans_with_prepared(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+    offload_requested: bool,
+    prepared: Option<&PreparedExecutionInputs>,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
         ExecutionPlanError::MissingArtifacts {
@@ -291,9 +366,11 @@ pub fn resolve_execution_plans(
 
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
     let effective_loras = effective_loras(config, request);
-    let artifacts = concrete_artifacts_for_family(&paths, &family, &effective_loras);
-    let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
-    let constraints = effective_constraints(&normalized, &artifacts);
+    let admission_engine_config =
+        mold_inference::FrozenEngineConfig::resolve(&request.model, config);
+    let admission_artifacts =
+        concrete_artifacts_for_family(&paths, &family, &effective_loras, &admission_engine_config);
+    let constraints = effective_constraints(&normalized, &admission_artifacts);
     validate_cpu_constraints(&family, &capabilities, &constraints)?;
     let hard_devices = hard_device_ids(&constraints, devices)?;
     if hard_devices.len() > 1 {
@@ -302,22 +379,41 @@ pub fn resolve_execution_plans(
         ));
     }
     let hard_device = hard_devices.into_iter().next();
-    let context = PlanContext {
-        model: &request.model,
-        family: &family,
-        capabilities: &capabilities,
-        request,
-        paths: &paths,
-        engine_config: &engine_config,
-        effective_loras: &effective_loras,
-        artifacts: &artifacts,
-        effective: &constraints,
-        offload_requested,
-    };
     let candidates = devices
         .iter()
         .filter(|device| hard_device.as_ref().is_none_or(|hard| hard == &device.id))
-        .filter_map(|device| build_plan(&context, device))
+        .filter_map(|device| {
+            let inputs = match prepared {
+                Some(prepared) => prepared.by_device.get(&device.id).map(|prepared| {
+                    (
+                        prepared.engine_paths.clone(),
+                        prepared.engine_config.clone(),
+                    )
+                })?,
+                None => (paths.clone(), admission_engine_config.clone()),
+            };
+            let artifacts =
+                concrete_artifacts_for_family(&inputs.0, &family, &effective_loras, &inputs.1);
+            let effective = effective_constraints(&normalized, &artifacts);
+            if let Err(error) = validate_cpu_constraints(&family, &capabilities, &effective) {
+                return Some(Err(error));
+            }
+            let context = PlanContext {
+                model: &request.model,
+                family: &family,
+                capabilities: &capabilities,
+                request,
+                paths: &inputs.0,
+                engine_config: &inputs.1,
+                admission_paths: &paths,
+                admission_engine_config: &admission_engine_config,
+                effective_loras: &effective_loras,
+                artifacts: &artifacts,
+                effective: &effective,
+                offload_requested,
+            };
+            build_plan(&context, device)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if candidates.is_empty() {
         return Err(ExecutionPlanError::InsufficientVram);
@@ -342,32 +438,14 @@ pub fn validate_before_cuda(
     let current_paths = ModelPaths::resolve(model, config).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
     })?;
-    let family = config
-        .resolved_model_config(model)
-        .family
-        .or_else(|| {
-            mold_core::manifest::find_manifest(model).map(|manifest| manifest.family.clone())
-        })
-        .unwrap_or_else(|| "unknown".to_string());
     let current_loras = effective_loras(config, request);
-    let current_artifacts = concrete_artifacts_for_family(&current_paths, &family, &current_loras);
     let current_engine_config = mold_inference::FrozenEngineConfig::resolve(model, config);
-    if current_paths != plan.engine_paths
-        || current_engine_config != plan.engine_config
+    if current_paths != plan.admission_paths
+        || current_engine_config != plan.admission_engine_config
         || current_loras != plan.effective_loras
     {
         return Err(ExecutionPlanError::PlanInvalidated(
             "frozen engine paths, config, or LoRA stack changed after admission".into(),
-        ));
-    }
-    let planned_artifacts = plan
-        .components
-        .iter()
-        .map(|(role, component)| (role.clone(), component.artifact_path.clone()))
-        .collect::<BTreeMap<_, _>>();
-    if current_artifacts != planned_artifacts {
-        return Err(ExecutionPlanError::PlanInvalidated(
-            "resolved component artifacts changed after admission".into(),
         ));
     }
     for component in plan.components.values() {
@@ -454,6 +532,7 @@ fn concrete_artifacts_for_family(
     paths: &ModelPaths,
     family: &str,
     effective_loras: &[PlannedLora],
+    engine_config: &mold_inference::FrozenEngineConfig,
 ) -> BTreeMap<ComponentRole, PathBuf> {
     let mut artifacts = BTreeMap::new();
     artifacts.insert(ComponentRole::Transformer, paths.transformer.clone());
@@ -461,7 +540,11 @@ fn concrete_artifacts_for_family(
         artifacts.insert(ComponentRole::TransformerShard(index as u8), shard.clone());
     }
     artifacts.insert(ComponentRole::Vae, paths.vae.clone());
-    if let Some(path) = &paths.t5_encoder {
+    if let Some(path) = engine_config
+        .selected_t5_path
+        .as_ref()
+        .or(paths.t5_encoder.as_ref())
+    {
         artifacts.insert(ComponentRole::T5, path.clone());
     }
     if let Some(path) = &paths.t5_tokenizer {
@@ -479,7 +562,34 @@ fn concrete_artifacts_for_family(
     if let Some(path) = &paths.clip_tokenizer_2 {
         artifacts.insert(ComponentRole::ClipGTokenizer, path.clone());
     }
-    for (index, path) in paths.text_encoder_files.iter().enumerate() {
+    let selected_text_paths = if !engine_config.selected_qwen3_paths.is_empty() {
+        engine_config.selected_qwen3_paths.clone()
+    } else if let Some(path) = engine_config.selected_qwen2_path.as_ref() {
+        // Qwen-Image-Edit still consumes the native multimodal shards for
+        // vision even when its language path is the selected GGUF.
+        std::iter::once(path.clone())
+            .chain(
+                paths
+                    .text_encoder_files
+                    .iter()
+                    .filter(|candidate| *candidate != path)
+                    .cloned(),
+            )
+            .collect()
+    } else if !engine_config.selected_gemma_paths.is_empty() {
+        // `text_encoder_files` also carries the Gemma tokenizer anchor and
+        // optional LTX-2.3 text projection. Keep those host artifacts beside
+        // the exact selected Gemma weight files.
+        engine_config
+            .selected_gemma_paths
+            .iter()
+            .cloned()
+            .chain(paths.text_encoder_files.iter().cloned())
+            .collect()
+    } else {
+        paths.text_encoder_files.clone()
+    };
+    for (index, path) in selected_text_paths.iter().enumerate() {
         let index = index as u16;
         let role = match family {
             "ltx2" | "ltx-2" | "ltx2.3" => ComponentRole::GemmaShard(index),
@@ -655,6 +765,8 @@ struct PlanContext<'a> {
     request: &'a GenerateRequest,
     paths: &'a ModelPaths,
     engine_config: &'a mold_inference::FrozenEngineConfig,
+    admission_paths: &'a ModelPaths,
+    admission_engine_config: &'a mold_inference::FrozenEngineConfig,
     effective_loras: &'a [PlannedLora],
     artifacts: &'a BTreeMap<ComponentRole, PathBuf>,
     effective: &'a EffectivePlacement,
@@ -672,6 +784,22 @@ fn build_plan(
         context.family,
     ));
     let request_has_lora = !context.effective_loras.is_empty();
+    let gemma_placement = mold_inference::device::resolve_ltx2_gemma_device_override_from_values(
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_LTX2_GEMMA_DEVICE"),
+        context
+            .engine_config
+            .runtime_environment
+            .value("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER"),
+        device.ordinal,
+    );
+    let gemma_competes = matches!(
+        gemma_placement,
+        Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal))
+            if ordinal == device.ordinal
+    );
     let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
         context.request,
         context.paths,
@@ -679,6 +807,7 @@ fn build_plan(
         Some(device.available_vram_bytes),
         context.offload_requested,
         request_has_lora,
+        gemma_competes,
     );
     // A process-wide offload preference is advisory for concrete formats
     // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
@@ -720,6 +849,7 @@ fn build_plan(
         Some(device.available_vram_bytes),
         initial_memory.block_offload && !transformer_on_cpu,
         request_has_lora,
+        gemma_competes,
     );
     if memory.fits_available_memory != Some(true) {
         return None;
@@ -795,6 +925,8 @@ fn build_plan(
         components,
         engine_paths: context.paths.clone(),
         engine_config: context.engine_config.clone(),
+        admission_paths: context.admission_paths.clone(),
+        admission_engine_config: context.admission_engine_config.clone(),
         effective_loras: context.effective_loras.to_vec(),
         attention_backend: match context.engine_config.attention_backend {
             mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
@@ -1612,14 +1744,15 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         };
-        let artifacts = concrete_artifacts_for_family(&paths, "qwen-image", &[]);
+        let frozen = mold_inference::FrozenEngineConfig::resolve("unused", &Config::default());
+        let artifacts = concrete_artifacts_for_family(&paths, "qwen-image", &[], &frozen);
         assert!(artifacts.contains_key(&ComponentRole::T5));
         assert!(artifacts.contains_key(&ComponentRole::ClipL));
         assert!(artifacts.contains_key(&ComponentRole::ClipG));
         assert!(artifacts.contains_key(&ComponentRole::QwenShard(0)));
         assert!(artifacts.contains_key(&ComponentRole::QwenShard(1)));
         for family in ["flux2", "flux.2", "flux2-klein", "z-image"] {
-            let family_artifacts = concrete_artifacts_for_family(&paths, family, &[]);
+            let family_artifacts = concrete_artifacts_for_family(&paths, family, &[], &frozen);
             assert!(
                 family_artifacts.contains_key(&ComponentRole::QwenShard(0)),
                 "{family} must retain semantic Qwen topology"
@@ -1633,7 +1766,7 @@ mod tests {
             text_encoder_files: vec![root.path().join("qwen-0.safetensors")],
             ..paths
         };
-        let ltx_artifacts = concrete_artifacts_for_family(&sparse_ltx, "ltx2", &[]);
+        let ltx_artifacts = concrete_artifacts_for_family(&sparse_ltx, "ltx2", &[], &frozen);
         assert!(ltx_artifacts.contains_key(&ComponentRole::GemmaShard(0)));
         assert!(!ltx_artifacts.keys().any(|role| matches!(
             role,
@@ -1710,6 +1843,59 @@ mod tests {
         let advanced = mixed_materialized.advanced.unwrap();
         assert_eq!(advanced.t5, Some(DeviceRef::Cpu));
         assert!(matches!(advanced.clip_l, Some(DeviceRef::Device { .. })));
+    }
+
+    #[test]
+    fn prepared_inputs_are_per_device_and_preserve_admission_fences() {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "transformer-q4.gguf",
+            "vae.safetensors",
+            "t5.safetensors",
+            "selected-t5.safetensors",
+        ] {
+            std::fs::write(root.path().join(name), b"prepared").unwrap();
+        }
+        let config = config(root.path(), "flux", None);
+        let request = request(None);
+        let admission_paths = ModelPaths::resolve(&request.model, &config).unwrap();
+        let mut selected_paths = admission_paths.clone();
+        let selected_t5 = root.path().join("selected-t5.safetensors");
+        selected_paths.t5_encoder = Some(selected_t5.clone());
+        let mut selected_config =
+            mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
+        selected_config.t5_variant = Some("fp16".to_string());
+        selected_config.selected_t5_path = Some(selected_t5.clone());
+        let prepared = PreparedExecutionInputs {
+            by_device: BTreeMap::from([(
+                "cuda:0".to_string(),
+                PreparedDeviceExecutionInputs {
+                    engine_paths: selected_paths,
+                    engine_config: selected_config,
+                },
+            )]),
+        };
+
+        let plans = resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &devices(&[24 * GIB, 24 * GIB]),
+            false,
+            Some(&prepared),
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1, "unprepared sibling must not be admitted");
+        let plan = &plans[0];
+        assert_eq!(plan.device_id, "cuda:0");
+        assert_eq!(plan.engine_paths.t5_encoder.as_ref(), Some(&selected_t5));
+        assert_eq!(plan.admission_paths, admission_paths);
+        assert_eq!(
+            plan.components
+                .get(&ComponentRole::T5)
+                .map(|component| &component.artifact_path),
+            Some(&selected_t5)
+        );
+        validate_before_cuda(plan, "cuda:0", 0, &config, &request).unwrap();
     }
 
     #[test]

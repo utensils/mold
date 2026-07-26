@@ -214,6 +214,31 @@ pub(crate) fn preflight_memory_guard_with_available(
     available_bytes: u64,
     hint: Option<ActivationHint>,
 ) -> Result<(), ApiError> {
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
+    preflight_memory_guard_with_available_and_policy(
+        model_name,
+        paths,
+        active_vram_bytes,
+        available_bytes,
+        hint,
+        forced_offload,
+        gemma_competes,
+    )
+}
+
+pub(crate) fn preflight_memory_guard_with_available_and_policy(
+    model_name: &str,
+    paths: &ModelPaths,
+    active_vram_bytes: u64,
+    available_bytes: u64,
+    hint: Option<ActivationHint>,
+    forced_offload: bool,
+    gemma_competes: bool,
+) -> Result<(), ApiError> {
     // Streaming-transformer families (LTX-Video / LTX-2) load only a couple
     // of transformer blocks onto GPU at a time via `new_streaming` — the
     // file-size-based estimate (which assumes the whole transformer becomes
@@ -228,7 +253,7 @@ pub(crate) fn preflight_memory_guard_with_available(
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
     let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
+        && forced_offload)
         || large_flux_bf16_should_auto_offload(paths, hint);
     let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
     let qwen_quantized = qwen_family
@@ -237,7 +262,14 @@ pub(crate) fn preflight_memory_guard_with_available(
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-    let peak = base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    let peak = base_peak_memory_for_paths(
+        paths,
+        hint,
+        streaming,
+        flux_offload,
+        qwen_quantized,
+        gemma_competes,
+    );
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
@@ -270,6 +302,7 @@ fn base_peak_memory_for_paths(
     streaming: bool,
     flux_offload: bool,
     qwen_quantized: bool,
+    gemma_competes: bool,
 ) -> u64 {
     if streaming {
         // LTX-2 also pays for a Gemma 3 12B prompt encoder. Auto placement
@@ -278,7 +311,6 @@ fn base_peak_memory_for_paths(
         // must not reject that recoverable path. Only an explicit same-GPU pin
         // (`MOLD_LTX2_GEMMA_DEVICE=gpu`) is counted against this GPU because
         // the runtime will surface that OOM instead of rewriting the request.
-        let gemma_competes = ltx2_encoder_phase_competes_with_transformer_gpu(0);
         return streaming_transformer_peak(paths, gemma_competes);
     } else if flux_offload {
         return streaming_transformer_peak(paths, false);
@@ -416,7 +448,7 @@ fn qwen_image_quantized_sequential_peak(paths: &ModelPaths, hint: Option<Activat
 /// Whether preflight should count the LTX-2 Gemma prompt encoder against the
 /// transformer's GPU budget. Auto placement can recover from CUDA OOM by
 /// retrying the prompt path on CPU; explicit same-GPU placement cannot.
-fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
+pub(crate) fn ltx2_encoder_phase_competes_with_transformer_gpu(gpu_ordinal: usize) -> bool {
     matches!(
         mold_inference::device::resolve_ltx2_gemma_device_override(gpu_ordinal),
         Some(mold_inference::device::LtxGemmaPlacement::Gpu(ordinal)) if ordinal == gpu_ordinal
@@ -638,7 +670,7 @@ pub(crate) fn select_server_load_strategy_for_device(
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
 
-fn server_offload_enabled_for_paths_with_request(
+pub(crate) fn server_offload_enabled_for_paths_with_request(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
@@ -692,7 +724,7 @@ pub(crate) fn server_offload_enabled_for_paths(
     request_has_lora: bool,
 ) -> bool {
     let forced_offload = matches!(
-        std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     );
     server_offload_enabled_for_paths_with_request(paths, hint, request_has_lora, forced_offload)
@@ -703,9 +735,27 @@ pub(crate) fn request_requires_fresh_engine_for_offload_policy(
     hint: Option<ActivationHint>,
     request_has_lora: bool,
 ) -> bool {
+    let forced_offload = matches!(
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    request_requires_fresh_engine_for_offload_policy_with_request(
+        paths,
+        hint,
+        request_has_lora,
+        forced_offload,
+    )
+}
+
+pub(crate) fn request_requires_fresh_engine_for_offload_policy_with_request(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+    forced_offload: bool,
+) -> bool {
     request_has_lora
-        && server_offload_enabled_for_paths(paths, hint, false)
-        && !server_offload_enabled_for_paths(paths, hint, true)
+        && server_offload_enabled_for_paths_with_request(paths, hint, false, forced_offload)
+        && !server_offload_enabled_for_paths_with_request(paths, hint, true, forced_offload)
 }
 
 pub(crate) struct GenerationMemoryBudget {
@@ -732,6 +782,7 @@ pub(crate) fn estimate_generation_memory_for_request(
     available_memory_bytes: Option<u64>,
     forced_offload: bool,
     request_has_lora: bool,
+    gemma_competes: bool,
 ) -> GenerationMemoryBudget {
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
@@ -746,8 +797,14 @@ pub(crate) fn estimate_generation_memory_for_request(
     let flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit) && block_offload;
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && transformer_path_is_gguf(paths);
-    let base_peak =
-        base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
+    let base_peak = base_peak_memory_for_paths(
+        paths,
+        hint,
+        streaming,
+        flux_offload,
+        qwen_quantized,
+        gemma_competes,
+    );
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
     let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);

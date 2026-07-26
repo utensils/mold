@@ -3121,6 +3121,7 @@ mod tests {
             registry: JobRegistry::new(),
             events: crate::events::EventBroadcaster::new(),
             execution_plan: None,
+            prepared_execution_inputs: None,
             lease: None,
         }
     }
@@ -3281,6 +3282,7 @@ mod tests {
                 registry: JobRegistry::new(),
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
+                prepared_execution_inputs: None,
                 lease: Some(crate::scheduler::LeaseFence {
                     work_id: "stale".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
@@ -4175,6 +4177,7 @@ mod tests {
                     registry,
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: Some(plan),
+                    prepared_execution_inputs: None,
                     lease: None,
                 })),
                 retry: None,
@@ -4354,6 +4357,7 @@ mod tests {
                 registry,
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
+                prepared_execution_inputs: None,
                 lease: Some(fence("generate", 3)),
             })
             .unwrap();
@@ -4526,6 +4530,7 @@ mod tests {
                 registry: registry.clone(),
                 events: crate::events::EventBroadcaster::new(),
                 execution_plan: None,
+                prepared_execution_inputs: None,
                 lease: None,
             },
             &event_tx,
@@ -4607,6 +4612,7 @@ mod tests {
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: None,
+                    prepared_execution_inputs: None,
                     lease: None,
                 },
                 &scheduler_tx,
@@ -4664,6 +4670,7 @@ mod tests {
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),
                     execution_plan: None,
+                    prepared_execution_inputs: None,
                     lease: None,
                 },
                 &scheduler_tx,

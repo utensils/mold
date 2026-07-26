@@ -43,6 +43,32 @@ describe("generation SSE reducer", () => {
     expect(job.queuePosition).toBeNull();
   });
 
+  it("keeps dependency preparation queued before GPU work starts", () => {
+    const job = newJob(req);
+    applyProgress(job, { type: "queued", position: 1, id: "dep-job" });
+    applyProgress(job, {
+      type: "dependency_wait",
+      dependency: "T5 q6",
+      reason: "downloading selected encoder dependency",
+    });
+    expect(job.status).toBe("queued");
+    expect(job.stage).toBe("Waiting for T5 q6");
+    expect(job.id).toBe("dep-job");
+    applyProgress(job, {
+      type: "download_progress",
+      filename: "t5-q6.gguf",
+      file_index: 0,
+      total_files: 1,
+      bytes_downloaded: 50,
+      bytes_total: 100,
+      batch_bytes_downloaded: 50,
+      batch_bytes_total: 100,
+      batch_elapsed_ms: 20,
+    });
+    expect(job.status).toBe("queued");
+    expect(job.stage).toBe("Downloading t5-q6.gguf (50%)");
+  });
+
   it("post-denoise stages become 'finishing', never regress to loading", () => {
     // After the last denoise step the engine drops the transformer, loads
     // the VAE, and decodes — steps read 4/4 but the print isn't done. Those

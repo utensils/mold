@@ -116,6 +116,27 @@ export function applyProgress(job: Job, event: ProgressEvent): Job {
       job.queuePosition = event.position;
       if (event.id) job.id = event.id;
       break;
+    case "dependency_wait":
+      job.status = "queued";
+      job.stage = `Waiting for ${event.dependency}`;
+      break;
+    case "download_progress": {
+      job.status = "queued";
+      const percent =
+        event.bytes_total > 0
+          ? Math.round((event.bytes_downloaded / event.bytes_total) * 100)
+          : 0;
+      job.stage = `Downloading ${event.filename} (${percent}%)`;
+      break;
+    }
+    case "download_done":
+      job.status = "queued";
+      job.stage = `Dependency ready: ${event.filename}`;
+      break;
+    case "pull_complete":
+      job.status = "queued";
+      job.stage = `Dependency ready: ${event.model}`;
+      break;
     case "weight_load":
     case "stage_start":
       // Stages after the denoise loop (transformer drop, VAE decode, encode)

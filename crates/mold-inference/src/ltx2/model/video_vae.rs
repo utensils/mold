@@ -3,7 +3,6 @@
 use candle_core::{bail, DType, IndexOp, Result, Tensor};
 use candle_nn::{group_norm, ops, Conv2d, Conv2dConfig, GroupNorm, VarBuilder};
 use std::collections::HashMap;
-use std::env;
 use std::sync::{Arc, Mutex};
 
 fn cat_dim(xs: &[Tensor], dim: usize) -> Result<Tensor> {
@@ -1019,8 +1018,7 @@ fn temporal_output_frames_for_latents(latent_frames: usize, temporal_scale: usiz
 }
 
 fn positive_env_usize(key: &str) -> Option<usize> {
-    env::var(key)
-        .ok()
+    crate::runtime_env::value(key)
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
 }

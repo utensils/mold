@@ -93,7 +93,7 @@ impl Ltx2Engine {
             paths,
             load_strategy,
             gpu_ordinal,
-            std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok(),
+            crate::runtime_env::value("MOLD_LTX2_GEMMA_VARIANT"),
         )
     }
 
@@ -161,7 +161,7 @@ impl Ltx2Engine {
             paths,
             load_strategy,
             gpu_ordinal,
-            std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok(),
+            crate::runtime_env::value("MOLD_LTX2_GEMMA_VARIANT"),
         )
     }
 
@@ -456,7 +456,7 @@ impl Ltx2Engine {
                 Ok(device)
             }
             Ltx2Backend::Cpu => {
-                let forced_cpu = std::env::var("MOLD_DEVICE")
+                let forced_cpu = crate::runtime_env::value("MOLD_DEVICE")
                     .map(|value| value.eq_ignore_ascii_case("cpu"))
                     .unwrap_or(false);
                 if forced_cpu {

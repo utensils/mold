@@ -28,7 +28,7 @@ pub(crate) const CLIP_EOS_TOKEN: &str = "<|endoftext|>";
 /// framing, and the per-window pooled outputs are averaged into the single
 /// 768-dim conditioning vector that FLUX's `vector_in` stem expects.
 pub(crate) fn long_prompts_enabled() -> bool {
-    std::env::var("MOLD_LONG_PROMPTS")
+    crate::runtime_env::value("MOLD_LONG_PROMPTS")
         .map(|v| v == "1")
         .unwrap_or(false)
 }

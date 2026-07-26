@@ -23,7 +23,10 @@ pub(crate) type EngineProgressCallback = Arc<dyn Fn(mold_inference::ProgressEven
 pub use crate::memory_preflight::ActivationHint;
 #[cfg(test)]
 pub(crate) use crate::memory_preflight::{
-    check_model_memory_budget, preflight_memory_guard_with_available, rejection_suggestion,
+    check_model_memory_budget, preflight_memory_guard_with_available,
+    preflight_memory_guard_with_available_and_policy, rejection_suggestion,
+    request_requires_fresh_engine_for_offload_policy_with_request,
+    server_offload_enabled_for_paths_with_request,
 };
 pub(crate) use crate::memory_preflight::{
     effective_load_available_bytes, estimate_generation_memory_for_request, preflight_memory_guard,
@@ -661,7 +664,7 @@ pub(crate) async fn estimate_generation_memory(
             .max()
     });
     let forced_offload = matches!(
-        std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+        mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     );
     let estimate = estimate_generation_memory_for_request(
@@ -671,6 +674,7 @@ pub(crate) async fn estimate_generation_memory(
         available,
         forced_offload,
         request_has_effective_lora(req),
+        crate::memory_preflight::ltx2_encoder_phase_competes_with_transformer_gpu(0),
     );
 
     Ok(GenerationMemoryEstimate {
@@ -1436,81 +1440,6 @@ mod tests {
         assert_eq!(combined[0].supports_audio, Some(true));
     }
 
-    /// RAII guard for `MOLD_LTX2_GEMMA_DEVICE` (and the deprecated alias).
-    /// Drop restores the prior values so adjacent tests don't see stale
-    /// state. Cargo's parallel runner is serialized via a static mutex
-    /// because env vars are process-global.
-    struct Ltx2GemmaEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior_main: Option<std::ffi::OsString>,
-        prior_legacy: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for Ltx2GemmaEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("MOLD_LTX2_GEMMA_DEVICE");
-                std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-                if let Some(v) = self.prior_main.take() {
-                    std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", v);
-                }
-                if let Some(v) = self.prior_legacy.take() {
-                    std::env::set_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", v);
-                }
-            }
-        }
-    }
-
-    fn ltx2_gemma_env_guard(value: &str) -> Ltx2GemmaEnvGuard {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let prior_main = std::env::var_os("MOLD_LTX2_GEMMA_DEVICE");
-        let prior_legacy = std::env::var_os("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-        unsafe {
-            std::env::remove_var("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER");
-            std::env::set_var("MOLD_LTX2_GEMMA_DEVICE", value);
-        }
-        Ltx2GemmaEnvGuard {
-            _lock: lock,
-            prior_main,
-            prior_legacy,
-        }
-    }
-
-    struct OffloadEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for OffloadEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("MOLD_OFFLOAD");
-                if let Some(v) = self.prior.take() {
-                    std::env::set_var("MOLD_OFFLOAD", v);
-                }
-            }
-        }
-    }
-
-    fn offload_env_guard(value: &str) -> OffloadEnvGuard {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var_os("MOLD_OFFLOAD");
-        unsafe {
-            std::env::set_var("MOLD_OFFLOAD", value);
-        }
-        OffloadEnvGuard { _lock: lock, prior }
-    }
-
     /// Build a `ModelPaths` whose `transformer` and `vae` files exist on disk
     /// with a combined size of `total_bytes`. `estimate_peak_memory()` reads
     /// file sizes via `std::fs::metadata`, so the on-disk footprint is what
@@ -1757,7 +1686,6 @@ mod tests {
 
     #[test]
     fn preflight_accepts_forced_flux_offload_bf16_layout_on_24gb() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux_shaped_paths_with_sizes(24, 1, 10, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1767,8 +1695,15 @@ mod tests {
             family: ActivationFamily::FluxDit,
         };
 
-        let result =
-            preflight_memory_guard_with_available("flux-dev:bf16", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "flux-dev:bf16",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            true,
+            false,
+        );
 
         assert!(
             result.is_ok(),
@@ -1779,7 +1714,6 @@ mod tests {
 
     #[test]
     fn preflight_accepts_large_flux_bf16_auto_offload_on_24gb() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1807,7 +1741,6 @@ mod tests {
 
     #[test]
     fn server_auto_enables_offload_for_large_flux_bf16_without_env() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = flux_shaped_paths_with_sizes(23, 1, 9, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1818,7 +1751,7 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, false),
             "large FLUX BF16 checkpoints should load with block offload even \
              when MOLD_OFFLOAD is not globally forced"
         );
@@ -1964,7 +1897,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_sd3_gguf() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = sd3_gguf_paths_with_monolithic_vae(9, 16, 10, 1, 1);
         let hint = ActivationHint {
             width: 1024,
@@ -1975,14 +1907,13 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force unsupported SD3 GGUF block offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_zimage_gguf() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = zimage_gguf_paths(12, 1, 8);
         let hint = ActivationHint {
             width: 1024,
@@ -1993,14 +1924,13 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force unsupported Z-Image GGUF block offload"
         );
     }
 
     #[test]
     fn offload_env_is_preserved_for_zimage_bf16() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux_shaped_paths_with_sizes(6, 1, 8, 0);
         let hint = ActivationHint {
             width: 1024,
@@ -2011,14 +1941,13 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "BF16/FP Z-Image paths should still receive explicit offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_zimage_lora_with_ambiguous_family_hint() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2056,7 +1985,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "Z-Image LoRA requests must not receive global MOLD_OFFLOAD even \
              when duplicate catalog rows provide an ambiguous Flux hint"
         );
@@ -2064,7 +1993,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_lora_request() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2075,7 +2003,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "global MOLD_OFFLOAD must not force Flux.2 block offload for LoRA \
              requests because Flux.2 offload+LoRA is not supported"
         );
@@ -2083,7 +2011,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_lora_with_ambiguous_family_hint() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2122,7 +2049,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), true),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), true, true),
             "Flux.2 LoRA requests must not receive global MOLD_OFFLOAD even \
              when the catalog family hint is missing or ambiguous"
         );
@@ -2130,7 +2057,6 @@ mod tests {
 
     #[test]
     fn flux2_lora_request_requires_fresh_engine_when_plain_offload_was_enabled() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2168,7 +2094,12 @@ mod tests {
         };
 
         assert!(
-            request_requires_fresh_engine_for_offload_policy(&paths, Some(hint), true),
+            request_requires_fresh_engine_for_offload_policy_with_request(
+                &paths,
+                Some(hint),
+                true,
+                true,
+            ),
             "a cached Flux.2 engine loaded for plain offload must be recreated \
              before serving a LoRA request, otherwise the runtime still sees \
              offload+LoRA"
@@ -2177,7 +2108,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_preserved_for_plain_flux2_request() {
-        let _guard = offload_env_guard("1");
         let (_dir, paths) = flux2_klein9b_bf16_paths();
         let hint = ActivationHint {
             width: 1024,
@@ -2188,14 +2118,13 @@ mod tests {
         };
 
         assert!(
-            server_offload_enabled_for_paths(&paths, Some(hint), false),
+            server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "plain Flux.2 requests should still receive explicit offload"
         );
     }
 
     #[test]
     fn offload_env_is_ignored_for_flux2_gguf() {
-        let _guard = offload_env_guard("1");
         let (dir, mut paths) = flux2_klein9b_bf16_paths();
         let gguf = dir.path().join("flux2-klein-9b-q8.gguf");
         std::fs::File::create(&gguf)
@@ -2213,7 +2142,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force Flux.2 GGUF block offload \
              because GGUF variants use quantized transformer paths"
         );
@@ -2221,7 +2150,6 @@ mod tests {
 
     #[test]
     fn offload_env_is_ignored_for_flux2_nvfp4() {
-        let _guard = offload_env_guard("1");
         let dir = tempfile::tempdir().expect("tempdir");
         let mk = |name: &str, sz: u64| {
             let p = dir.path().join(name);
@@ -2259,7 +2187,7 @@ mod tests {
         };
 
         assert!(
-            !server_offload_enabled_for_paths(&paths, Some(hint), false),
+            !server_offload_enabled_for_paths_with_request(&paths, Some(hint), false, true),
             "global MOLD_OFFLOAD must not force Flux.2 NVFP4 block offload \
              because the NVFP4 streaming linear path is the memory-control mechanism"
         );
@@ -2477,7 +2405,6 @@ mod tests {
     /// at 2048² (where the budget grows past 1 GB) on the same card.
     #[test]
     fn preflight_memory_guard_accepts_resolution_for_activation_budget() {
-        let _guard = offload_env_guard("0");
         // Shape: 19 GB transformer, 1 GB VAE, 9 GB T5, 1 GB CLIP. Sequential
         // peak = max(10, 20) + 2 GB headroom = 22 GB. On a 25 GB card the
         // 90 % hard limit is 22.5 GB:
@@ -2867,7 +2794,6 @@ mod tests {
     /// that flips the hint plumbing back is caught.
     #[test]
     fn preflight_rejects_ltx2_22b_when_hint_marks_non_streaming() {
-        let _guard = offload_env_guard("0");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 0);
         // Use FluxDit family — same shape, no streaming flag — so the
         // preflight falls through to the file-size estimator and rejects
@@ -2896,7 +2822,6 @@ mod tests {
     /// see from the runtime, but the preflight captures it up-front.
     #[test]
     fn preflight_rejects_ltx2_when_encoder_phase_exceeds_card() {
-        let _guard = ltx2_gemma_env_guard("gpu");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2905,8 +2830,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            true,
+        );
         assert!(
             result.is_err(),
             "25 GB Gemma TE alone exceeds 90 %% of 24 GB during the encoder \
@@ -2922,7 +2854,6 @@ mod tests {
     /// the runtime fallback can run.
     #[test]
     fn preflight_admits_ltx2_auto_gemma_even_when_gpu_encoder_would_exceed_cap() {
-        let _guard = ltx2_gemma_env_guard("auto");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2931,8 +2862,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            false,
+        );
         assert!(
             result.is_ok(),
             "auto Gemma placement can fall back to CPU at runtime, so preflight \
@@ -2948,7 +2886,6 @@ mod tests {
     /// This is the load-bearing behavior on a single 3090 running cv:2752735.
     #[test]
     fn preflight_admits_ltx2_22b_with_25gb_gemma_when_resolver_picks_cpu() {
-        let _guard = ltx2_gemma_env_guard("cpu");
         let (_dir, paths) = ltx2_shaped_paths_with_sizes(46, 25);
         let hint = ActivationHint {
             width: 768,
@@ -2957,8 +2894,15 @@ mod tests {
             dtype_bytes: 2,
             family: ActivationFamily::Ltx2Video,
         };
-        let result =
-            preflight_memory_guard_with_available("cv:2752735", &paths, 0, 24 * GB, Some(hint));
+        let result = preflight_memory_guard_with_available_and_policy(
+            "cv:2752735",
+            &paths,
+            0,
+            24 * GB,
+            Some(hint),
+            false,
+            false,
+        );
         assert!(
             result.is_ok(),
             "with MOLD_LTX2_GEMMA_DEVICE=cpu the encoder phase should not \

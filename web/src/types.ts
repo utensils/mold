@@ -308,6 +308,7 @@ export interface QueueListing {
 }
 
 export type SseProgressEvent =
+  | { type: "dependency_wait"; dependency: string; reason: string }
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }
   | { type: "info"; message: string }
@@ -316,6 +317,27 @@ export type SseProgressEvent =
   /** Live latent preview: base64 PNG at latent resolution (client upscales). */
   | { type: "preview"; image: string; step: number; total: number }
   | { type: "queued"; position: number; id: string }
+  | {
+      type: "download_progress";
+      filename: string;
+      file_index: number;
+      total_files: number;
+      bytes_downloaded: number;
+      bytes_total: number;
+      batch_bytes_downloaded: number;
+      batch_bytes_total: number;
+      batch_elapsed_ms: number;
+    }
+  | {
+      type: "download_done";
+      filename: string;
+      file_index: number;
+      total_files: number;
+      batch_bytes_downloaded: number;
+      batch_bytes_total: number;
+      batch_elapsed_ms: number;
+    }
+  | { type: "pull_complete"; model: string }
   | {
       type: "weight_load";
       bytes_loaded: number;

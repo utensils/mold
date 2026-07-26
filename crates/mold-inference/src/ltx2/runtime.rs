@@ -4452,7 +4452,7 @@ fn load_ltx2_av_transformer_with_loras(
     progress: Option<&ProgressCallback>,
 ) -> Result<Ltx2AvTransformer3DModel> {
     let force_streaming = ltx2_force_streaming_enabled();
-    let force_eager = std::env::var_os("MOLD_LTX2_FORCE_EAGER").is_some();
+    let force_eager = crate::runtime_env::value("MOLD_LTX2_FORCE_EAGER").is_some();
     let config = ltx2_video_transformer_config(plan);
     let lora_registry = super::lora::load_lora_registry(loras)?;
     let checkpoint_path = Path::new(&plan.checkpoint_path);
@@ -4622,11 +4622,11 @@ enum Ltx2TransformerResidencyMode {
 }
 
 fn ltx2_force_streaming_enabled() -> bool {
-    if env::var_os("MOLD_LTX2_FORCE_STREAMING").is_some() {
+    if crate::runtime_env::value("MOLD_LTX2_FORCE_STREAMING").is_some() {
         return true;
     }
     matches!(
-        env::var("MOLD_OFFLOAD").ok().as_deref(),
+        crate::runtime_env::value("MOLD_OFFLOAD").as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
 }
@@ -4700,10 +4700,10 @@ fn should_use_ltx2_framewise_decode(
     latents: &Tensor,
     device: &candle_core::Device,
 ) -> Result<bool> {
-    if env::var_os("MOLD_LTX2_VAE_FORCE_FULL_DECODE").is_some() {
+    if crate::runtime_env::value("MOLD_LTX2_VAE_FORCE_FULL_DECODE").is_some() {
         return Ok(false);
     }
-    if env::var_os("MOLD_LTX2_VAE_FORCE_FRAMEWISE").is_some() {
+    if crate::runtime_env::value("MOLD_LTX2_VAE_FORCE_FRAMEWISE").is_some() {
         return Ok(true);
     }
     if !device.is_cuda() {
@@ -4966,26 +4966,25 @@ fn log_debug_vram(label: &str) {
 }
 
 fn ltx_debug_compare_uncond_enabled() -> bool {
-    env::var_os("MOLD_LTX_DEBUG_COMPARE_UNCOND").is_some()
+    crate::runtime_env::value("MOLD_LTX_DEBUG_COMPARE_UNCOND").is_some()
 }
 
 fn ltx_debug_alt_prompt() -> Option<String> {
-    env::var("MOLD_LTX_DEBUG_ALT_PROMPT")
-        .ok()
+    crate::runtime_env::value("MOLD_LTX_DEBUG_ALT_PROMPT")
         .map(|prompt| prompt.trim().to_string())
         .filter(|prompt| !prompt.is_empty())
 }
 
 fn ltx_debug_disable_audio_branch_enabled() -> bool {
-    env::var_os("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
+    crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH").is_some()
 }
 
 fn ltx_debug_disable_cross_attention_adaln_enabled() -> bool {
-    env::var_os("MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN").is_some()
+    crate::runtime_env::value("MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN").is_some()
 }
 
 fn ltx_debug_disable_transformer_gated_attention_enabled() -> bool {
-    env::var_os("MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION").is_some()
+    crate::runtime_env::value("MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION").is_some()
 }
 
 fn ltx_debug_log_file() -> &'static Mutex<Option<std::fs::File>> {

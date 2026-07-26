@@ -53,7 +53,7 @@ impl AttentionBackend {
     pub fn resolve() -> AttentionBackend {
         static CACHED: OnceLock<AttentionBackend> = OnceLock::new();
         *CACHED.get_or_init(|| {
-            let backend = parse_backend_env(std::env::var("MOLD_ATTN").ok().as_deref());
+            let backend = parse_backend_env(crate::runtime_env::value("MOLD_ATTN").as_deref());
             tracing::info!(backend = ?backend, "attention backend selected");
             backend
         })
@@ -90,7 +90,7 @@ fn parse_backend_env(raw: Option<&str>) -> AttentionBackend {
 pub fn resolved_chunk_policy() -> AttentionChunkPolicy {
     static CACHED: OnceLock<AttentionChunkPolicy> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let raw = std::env::var("MOLD_ATTN_CHUNK").ok();
+        let raw = crate::runtime_env::value("MOLD_ATTN_CHUNK");
         match raw.as_deref().map(str::trim) {
             Some("0") => AttentionChunkPolicy::Off,
             Some(value) if value.eq_ignore_ascii_case("off") => AttentionChunkPolicy::Off,

@@ -157,7 +157,7 @@ pub(crate) fn resolve_cfg_plus(req: &GenerateRequest) -> bool {
         return explicit;
     }
     matches!(
-        std::env::var("MOLD_CFG_PLUS").ok().as_deref(),
+        crate::runtime_env::value("MOLD_CFG_PLUS").as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
 }

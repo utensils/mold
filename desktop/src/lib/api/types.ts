@@ -271,6 +271,7 @@ export interface GenerateRequest {
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
 export type ProgressEvent =
   | { type: "queued"; position: number; id?: string }
+  | { type: "dependency_wait"; dependency: string; reason: string }
   | { type: "stage_start"; name: string }
   | { type: "stage_done"; name: string; elapsed_ms: number }
   | { type: "info"; message: string }
