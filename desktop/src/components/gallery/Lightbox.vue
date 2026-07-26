@@ -155,9 +155,9 @@ function onDelete() {
 }
 
 /** Save the print to a user-chosen location. Self-contained: fetch the
- *  authed full-size bytes (origin-aware) and hand them to the browser as a
- *  download. Videos and stills alike. */
-async function download() {
+ *  authed full-size bytes (origin-aware) and hand them to the WebView's file
+ *  saver. Videos and stills alike. */
+async function saveMedia() {
   try {
     const path = galleryMediaPath(props.item.filename, props.source);
     const { apiFetch, apiFetchTo } = await import("../../lib/api/client");
@@ -401,10 +401,11 @@ async function download() {
           </button>
           <button
             type="button"
+            data-test="save-media"
             class="border-ce h-10 flex-1 rounded-control border text-body font-semibold text-ink-2 transition-colors duration-100 hover:text-ink"
-            @click="download"
+            @click="saveMedia"
           >
-            Download
+            {{ video ? "Save video" : "Save image" }}
           </button>
         </div>
         <div class="mt-2 flex gap-2.5">

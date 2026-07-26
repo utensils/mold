@@ -31,9 +31,9 @@ beforeEach(() => {
   setActivePinia(createPinia());
 });
 
-function mountLightbox(selectedItem: GalleryImage = item) {
+function mountLightbox(selectedItem: GalleryImage = item, video = false) {
   return mount(Lightbox, {
-    props: { item: selectedItem, index: 0, count: 3, video: false },
+    props: { item: selectedItem, index: 0, count: 3, video },
     global: { stubs: { AuthedMedia: { template: "<div />" } } },
   });
 }
@@ -188,5 +188,12 @@ describe("Lightbox a11y", () => {
       expect.arrayContaining([expect.objectContaining({ label: "Copy image", disabled: false })]),
     );
     wrapper.unmount();
+  });
+});
+
+describe("Lightbox save action", () => {
+  it("uses native save language for images and videos", () => {
+    expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save image");
+    expect(mountLightbox(item, true).get("[data-test='save-media']").text()).toBe("Save video");
   });
 });
