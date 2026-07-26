@@ -103,6 +103,9 @@ Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch N requires exactly N non-empty
 prompts before its inline review workspace appears; edits and specifically named
 stale work remain local until explicit approval, refresh, collapse, or discard.
+Create generation queues and stale reasons resolve opaque catalog IDs through
+the selected host's inventory for display, while requests and saved provenance
+retain the stable ID.
 `useMobileDownloadsStore` is the sole Models/Create pull authority and keeps
 missing-model Connecting/Starting/Queued/Pulling/Ready/error recovery on that
 frozen host. Create retains one immutable input/route recovery record and an

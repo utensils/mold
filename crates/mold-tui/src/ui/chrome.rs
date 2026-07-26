@@ -278,6 +278,10 @@ pub enum ActivityKind {
 /// with unknown values are omitted rather than faked (queue depth only
 /// appears when a server reports it).
 pub fn activity_line(app: &App) -> (ActivityKind, String) {
+    let model_name = mold_core::ModelInfoExtended::human_name_for(
+        &app.generate.params.model,
+        &app.models.catalog,
+    );
     let queue_seg = app
         .resource_info
         .server_status
@@ -294,7 +298,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
                 format!("pulling · {}", p.download_status_text()),
             );
         }
-        let mut s = format!("developing · {}", app.generate.params.model);
+        let mut s = format!("developing · {model_name}");
         if p.denoise_total > 0 {
             s.push_str(&format!(" · {}/{}", p.denoise_step, p.denoise_total));
         }
@@ -331,7 +335,7 @@ pub fn activity_line(app: &App) -> (ActivityKind, String) {
         return (ActivityKind::Done, s);
     }
 
-    let mut s = format!("idle · {}", app.generate.params.model);
+    let mut s = format!("idle · {model_name}");
     let (_, chip) = host_chip(app);
     s.push_str(&format!(" · {chip}"));
     if let Some(mem) = app

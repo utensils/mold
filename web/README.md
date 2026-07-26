@@ -63,6 +63,8 @@ router; the SPA fallback handles everything else and reuses
   probe. Create snapshots the chosen route for generation, preprocessing,
   expansion, cancellation, and queue reconciliation; prepared expansion
   batches keep their reviewed prompts and provenance together on that machine.
+  Generation captions and stale reasons use inventory-backed model titles while
+  retaining stable catalog IDs in requests and persisted metadata.
 - **Feed ↔ Grid toggle** in the header, persisted in `localStorage`.
   **Feed** (default) is a Tumblr-style single-column stream — full-bleed
   edge-to-edge cards on mobile, constrained reading width on desktop,

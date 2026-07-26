@@ -39,6 +39,12 @@ uses **Prepare N variations** and opens an inline review workspace before any
 generation request is queued. Each prompt can be edited or removed; the whole
 set can be regenerated or discarded.
 
+On desktop, a Batch 1 rewrite whose model, family, or host changed is never a
+dead Generate click: an immediate recovery notice can **Re-expand and
+generate** from the original prompt on the current route, **Generate expanded
+prompt anyway** as an explicit current-route override, or **Restore original**.
+The notice uses readable model names, larger error copy, and a copy button.
+
 Mold resolves the selected Create host before expansion and keeps that exact
 route for every sibling. It rejects responses that do not contain exactly N
 non-empty prompts. Changing the source prompt, model, host, or Batch count keeps

@@ -293,6 +293,44 @@ describe("MobileApp generation queue", () => {
     expect((fieldControl("Negative prompt").element as HTMLInputElement).value).toBe("text");
   });
 
+  it("recovers a stale quick expansion with readable current-model actions", async () => {
+    const catalogModel: ModelEntry = {
+      ...model,
+      name: "cv:1759168",
+      family: "sdxl",
+      display_name: "Juggernaut XL - Ragnarok",
+      description: "Juggernaut XL - Ragnarok by RunDiffusion",
+    };
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return Promise.resolve(status);
+      if (path === "/api/models") return Promise.resolve([model, catalogModel]);
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await fieldControl("Prompt").setValue("a lighthouse");
+    await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+    await flushPromises();
+    await fieldControl("Model").setValue(catalogModel.name);
+    await flushPromises();
+
+    const stale = wrapper.get("[data-test='mobile-quick-expansion-stale']");
+    expect(stale.text()).toContain("Juggernaut XL - Ragnarok");
+    expect(stale.text()).not.toContain("cv:1759168");
+    expect(stale.find("[data-test='mobile-reexpand-and-develop']").exists()).toBe(true);
+    expect(stale.find("[data-test='mobile-develop-expanded-anyway']").exists()).toBe(true);
+
+    await stale.get("[data-test='mobile-develop-expanded-anyway']").trigger("click");
+    await flushPromises();
+    expect(openStreams).toHaveLength(1);
+    expect(openStreams[0]?.options.body).toMatchObject({
+      model: catalogModel.name,
+      prompt: "a lighthouse · prepared 1",
+      original_prompt: "a lighthouse",
+    });
+  });
+
   it("merges the preset negative when a styled quick expansion clears the chip", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

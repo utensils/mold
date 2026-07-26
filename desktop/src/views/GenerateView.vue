@@ -14,6 +14,7 @@ import StarterCards from "../components/generate/StarterCards.vue";
 import TemplatesPanel from "../components/generate/TemplatesPanel.vue";
 import ExpansionPullStatus from "../components/generate/ExpansionPullStatus.vue";
 import PreparedExpansionBatch from "../components/generate/PreparedExpansionBatch.vue";
+import GenerateErrorNotice from "../components/generate/GenerateErrorNotice.vue";
 import MissingModelDialog from "../components/generate/MissingModelDialog.vue";
 import CreateHeader from "../components/create/CreateHeader.vue";
 import ActivityStrip from "../components/create/ActivityStrip.vue";
@@ -78,6 +79,7 @@ import { isMissingModelError } from "../lib/generateErrors";
 import { startCatalogDownload } from "../lib/api/catalog";
 import { computeEtaSeconds, useDownloadsStore, type DownloadsState } from "../stores/downloads";
 import { usePullResumeStore } from "../stores/pullResume";
+import { modelDisplayNameForId } from "../lib/models";
 import { localMediaPath, mediaPath } from "../lib/gallery/media";
 import { ApiError, apiFetch, apiFetchTo } from "../lib/api/client";
 import { blobToBase64 } from "../lib/image";
@@ -311,6 +313,15 @@ const chainReject = computed(() => {
 const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
 );
+const modelLabels = computed(
+  () =>
+    new Map(
+      installedModels.value.map((model) => [
+        model.name,
+        modelDisplayNameForId(model.name, installedModels.value),
+      ]),
+    ),
+);
 const showStarterCards = computed(() =>
   shouldShowStarterCards({
     connectionReady: conn.ready,
@@ -376,6 +387,7 @@ const preparedStaleReasons = computed(() => {
       hosts.all.filter((host) => host.status === "ready").map((host) => host.id),
     ),
     hostLabels: new Map(hosts.all.map((host) => [host.id, host.label])),
+    modelLabels: modelLabels.value,
     hostTargets: new Map(
       hosts.all.flatMap((host) =>
         host.baseUrl
@@ -410,9 +422,16 @@ const quickStaleReasons = computed(() => {
     model: form.model,
     family: form.family,
     selectedHostPolicy: stickyTarget.value,
+    modelLabels: modelLabels.value,
     ...currentHostSnapshot(),
   });
 });
+const quickStaleMessage = computed(() =>
+  quickStaleReasons.value.length
+    ? `${quickStaleReasons.value.join(" ")} Choose how to continue.`
+    : "",
+);
+const currentModelLabel = computed(() => modelDisplayNameForId(form.model, installedModels.value));
 
 // Availability data is demand-driven: fetch when the set of ready hosts
 // changes. immediate so routing is model-aware on the FIRST Generate click.
@@ -450,8 +469,12 @@ const previewFrameStyle = computed(() => ({
 const edgeCode = computed(() => {
   const j = job.value;
   if (!j) return "";
-  const name = j.model.toUpperCase().replace(":", "·");
-  const s = j.result ? `S ${j.result.seed_used}` : `S ${j.visualSeed.slice(0, 12)}`;
+  const name = modelDisplayNameForId(j.model, installedModels.value);
+  const s = j.result
+    ? `S ${j.result.seed_used}`
+    : j.visualSeed.startsWith(`${j.model}·`)
+      ? "S random"
+      : `S ${j.visualSeed.slice(0, 12)}`;
   const stepPart = `${j.status === "complete" ? j.total : j.step}/${j.total}`;
   const size = j.result ? `${j.result.width}×${j.result.height}` : `${j.width}×${j.height}`;
   const time = j.result ? `${(j.result.generation_time_ms / 1000).toFixed(1)}s` : "";
@@ -711,6 +734,24 @@ function restoreQuickExpansion() {
   quickExpansionOriginal.value = null;
   quickExpansionSnapshot.value = null;
   expansionError.value = null;
+}
+
+async function generateExpandedAnyway() {
+  if (!quickExpansionSnapshot.value) return;
+  submissionGuard.invalidate();
+  quickExpansionSnapshot.value = null;
+  expansionError.value = null;
+  await generate();
+}
+
+async function reexpandAndGenerate() {
+  if (!quickExpansionSnapshot.value || quickExpansionOriginal.value === null) return;
+  restoreQuickExpansion();
+  await nextTick();
+  await expandForCurrentBatch();
+  if (quickExpansionSnapshot.value && quickStaleReasons.value.length === 0) {
+    await generate();
+  }
 }
 
 function editPreparedPrompt(payload: { id: string; text: string }) {
@@ -977,7 +1018,6 @@ async function generate() {
     return;
   }
   if (quickExpansionSnapshot.value && quickStaleReasons.value.length > 0) {
-    expansionError.value = `${quickStaleReasons.value.join(" ")} Restore or expand again before generating.`;
     return;
   }
 
@@ -1489,7 +1529,13 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div class="edge-code mt-2 max-w-full truncate" :title="edgeCode">{{ edgeCode }}</div>
+            <div
+              data-test="generation-edge-code"
+              class="edge-code mt-2 max-w-full truncate"
+              :title="edgeCode"
+            >
+              {{ edgeCode }}
+            </div>
 
             <!-- Batch dots -->
             <div v-if="siblings.length > 1" class="mt-2 flex items-center gap-1.5">
@@ -1509,9 +1555,11 @@ onBeforeUnmount(() => {
               </span>
             </div>
 
-            <p v-if="job?.status === 'error'" class="mt-2 text-caption text-stop">
-              {{ job.error }}
-            </p>
+            <GenerateErrorNotice
+              v-if="job?.status === 'error'"
+              class="mt-3 w-full"
+              :message="job.error ?? 'Generation failed for an unknown reason.'"
+            />
           </div>
 
           <!-- Empty -->
@@ -1527,13 +1575,46 @@ onBeforeUnmount(() => {
 
         <!-- Batch-1 expansion status (prepared batches carry their own inline
              surfaces; these are the composer-level ones). -->
-        <div
-          v-if="expansionError && !preparedBatch && !expansionMissingModel"
-          role="alert"
-          class="border-stop/45 mx-5 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-control border bg-stop/10 px-2.5 py-2 text-caption text-stop"
+        <GenerateErrorNotice
+          v-if="quickStaleReasons.length && !preparedBatch"
+          data-test="quick-expansion-stale"
+          class="mx-5 mb-2"
+          :message="quickStaleMessage"
         >
-          <span>{{ expansionError }}</span>
-        </div>
+          <template #actions>
+            <button
+              type="button"
+              data-test="reexpand-and-generate"
+              class="rounded-control bg-stop px-3 py-1.5 text-body font-semibold text-on-accent transition-colors hover:brightness-105 active:translate-y-px disabled:opacity-50"
+              :disabled="expansionRunning || preparedSubmitting"
+              @click="reexpandAndGenerate"
+            >
+              Re-expand for {{ currentModelLabel }} and generate
+            </button>
+            <button
+              type="button"
+              data-test="generate-expanded-anyway"
+              class="border-stop/50 rounded-control border px-3 py-1.5 text-body font-medium text-stop transition-colors hover:bg-stop/10 active:translate-y-px disabled:opacity-50"
+              :disabled="expansionRunning || preparedSubmitting"
+              @click="generateExpandedAnyway"
+            >
+              Generate expanded prompt anyway
+            </button>
+            <button
+              type="button"
+              data-test="restore-expanded-original"
+              class="rounded-control px-3 py-1.5 text-body text-ink-2 transition-colors hover:text-ink active:translate-y-px"
+              @click="restoreQuickExpansion"
+            >
+              Restore original
+            </button>
+          </template>
+        </GenerateErrorNotice>
+        <GenerateErrorNotice
+          v-else-if="expansionError && !preparedBatch && !expansionMissingModel"
+          class="mx-5 mb-2"
+          :message="expansionError"
+        />
         <ExpansionPullStatus
           v-if="expansionError && expansionMissingModel && expansionPullStatus && !preparedBatch"
           :model="expansionMissingModel.model"

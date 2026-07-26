@@ -72,7 +72,7 @@ import { useStatusPoll } from "../composables/useStatusPoll";
 import { useHostRouting } from "../composables/useHostRouting";
 import { ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
-import { modelDisplayName } from "../lib/modelName";
+import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
 import type { HostRoute } from "../lib/hostRouting";
 import type {
   ChainRequestWire,
@@ -207,7 +207,7 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
     reasons.push("Source prompt changed after these variations were prepared.");
   if (form.state.value.model !== batch.model)
     reasons.push(
-      `Model changed from "${batch.model}" to "${form.state.value.model}".`,
+      `Model changed from "${modelDisplayNameForId(batch.model, models.value)}" to "${modelDisplayNameForId(form.state.value.model, models.value)}".`,
     );
   if (currentFamily.value !== batch.family)
     reasons.push(
@@ -237,7 +237,7 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
     reasons.push("Expanded prompt changed after it was prepared.");
   if (form.state.value.model !== snapshot.model)
     reasons.push(
-      `Model changed from "${snapshot.model}" to "${form.state.value.model}".`,
+      `Model changed from "${modelDisplayNameForId(snapshot.model, models.value)}" to "${modelDisplayNameForId(form.state.value.model, models.value)}".`,
     );
   if (currentFamily.value !== snapshot.family)
     reasons.push(
@@ -255,6 +255,39 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
       `${snapshot.route?.label ?? "This server"} is no longer the prepared generation route.`,
     );
   return reasons;
+}
+const quickConflictReasons = computed(() =>
+  quickPrepared.value ? quickStaleReasons(quickPrepared.value) : [],
+);
+const quickConflictMessage = computed(() =>
+  quickConflictReasons.value.length
+    ? `${quickConflictReasons.value.join(" ")} Choose how to continue.`
+    : "",
+);
+
+async function generateExpandedAnyway(): Promise<void> {
+  if (!quickPrepared.value) return;
+  composerError.value = null;
+  await onSubmit(true);
+}
+
+async function reexpandCurrentPrompt(): Promise<void> {
+  if (!quickPrepared.value || prevPrompt.value === null) return;
+  undoExpand();
+  await nextTick();
+  await onExpand();
+}
+
+async function copyQuickConflict(): Promise<void> {
+  await copyErrorMessage(quickConflictMessage.value);
+}
+
+async function copyErrorMessage(message: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(message);
+  } catch {
+    toast("error", "Could not copy the error message.");
+  }
 }
 
 // Phone surface → the Advanced sheet instead of the inline power column.
@@ -707,7 +740,7 @@ const resultCaption = computed(() => {
   const secs = Math.round(r.generation_time_ms / 1000);
   // Name the machine that actually rendered it — an unrouted job ran here.
   const where = job?.hostLabel ?? "this server";
-  return `${r.model} · seed ${r.seed_used} · ${secs}s · ${where}`;
+  return `${modelDisplayNameForId(r.model, models.value)} · seed ${r.seed_used} · ${secs}s · ${where}`;
 });
 
 function openLatestResult() {
@@ -916,7 +949,7 @@ function resolveSubmitRoute(): HostRoute | null | false {
   return route;
 }
 
-async function onSubmit() {
+async function onSubmit(allowStaleQuick = false) {
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
   // list is empty, so a model check first would blame the model instead), and
@@ -924,12 +957,12 @@ async function onSubmit() {
   const quick = quickPrepared.value;
   if (quick) {
     const stale = quickStaleReasons(quick);
-    if (stale.length) {
-      composerError.value = `${stale.join(" ")} Undo or expand again before generating.`;
+    if (stale.length && !allowStaleQuick) {
       return;
     }
   }
-  const route = quick ? cloneRoute(quick.route) : resolveSubmitRoute();
+  const route =
+    quick && !allowStaleQuick ? cloneRoute(quick.route) : resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
   const decision = chainDecision.value;
@@ -1516,11 +1549,67 @@ onBeforeUnmount(() => {
           <EstimateBadge :request="estimateRequest" :target="estimateTarget" />
 
           <div
-            v-if="submitStatus"
-            class="rounded-control bg-stop/10 px-3 py-1.5 text-xs text-stop"
+            v-if="quickConflictReasons.length"
+            class="rounded-control border border-stop/45 bg-stop/10 px-3 py-2.5 text-sm leading-relaxed text-stop"
+            role="alert"
+            data-test="web-quick-expansion-stale"
+          >
+            <div class="flex items-start gap-2">
+              <p class="min-w-0 flex-1">{{ quickConflictMessage }}</p>
+              <button
+                type="button"
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyQuickConflict"
+              >
+                <Icon name="copy" :size="16" />
+              </button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                data-test="web-reexpand-current-prompt"
+                class="rounded-control bg-stop px-3 py-1.5 font-semibold text-on-accent"
+                @click="reexpandCurrentPrompt"
+              >
+                Re-expand for {{ currentModelLabel }}
+              </button>
+              <button
+                type="button"
+                data-test="web-generate-expanded-anyway"
+                class="rounded-control border border-stop/50 px-3 py-1.5 font-medium"
+                @click="generateExpandedAnyway"
+              >
+                Generate expanded prompt anyway
+              </button>
+              <button
+                type="button"
+                class="rounded-control px-3 py-1.5 text-ink-2 hover:text-ink"
+                @click="undoExpand"
+              >
+                Restore original
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-else-if="submitStatus"
+            class="rounded-control bg-stop/10 px-3 py-2 text-sm leading-relaxed text-stop"
             data-test="composer-submit-error"
           >
-            {{ submitStatus }}
+            <div class="flex items-start gap-2">
+              <p class="min-w-0 flex-1">{{ submitStatus }}</p>
+              <button
+                type="button"
+                class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control border border-stop/40 hover:bg-stop/10"
+                aria-label="Copy error message"
+                title="Copy error message"
+                @click="copyErrorMessage(submitStatus)"
+              >
+                <Icon name="copy" :size="16" />
+              </button>
+            </div>
           </div>
 
           <div

@@ -46,12 +46,14 @@ export interface CurrentQuickExpansionInputs {
   selectedHostPolicy: HostSelectionPolicy;
   readyHostIds: ReadonlySet<string>;
   hostLabels: ReadonlyMap<string, string>;
+  modelLabels?: ReadonlyMap<string, string>;
   hostTargets?: CurrentPreparedExpansionInputs["hostTargets"];
 }
 
 export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs {
   readyHostIds: ReadonlySet<string>;
   hostLabels: ReadonlyMap<string, string>;
+  modelLabels?: ReadonlyMap<string, string>;
   hostTargets?: ReadonlyMap<
     string,
     {
@@ -61,6 +63,10 @@ export interface CurrentPreparedExpansionInputs extends PreparedExpansionInputs 
       instanceId?: string | null;
     }
   >;
+}
+
+function modelLabel(name: string, labels?: ReadonlyMap<string, string>): string {
+  return labels?.get(name) ?? name;
 }
 
 /**
@@ -169,7 +175,9 @@ export function preparedExpansionStaleReasons(
     reasons.push("Source prompt changed after these variations were prepared.");
   }
   if (current.model !== batch.model) {
-    reasons.push(`Model changed from "${batch.model}" to "${current.model}".`);
+    reasons.push(
+      `Model changed from "${modelLabel(batch.model, current.modelLabels)}" to "${modelLabel(current.model, current.modelLabels)}".`,
+    );
   }
   if (current.family !== batch.family) {
     reasons.push(`Model family changed from "${batch.family}" to "${current.family}".`);
@@ -211,7 +219,9 @@ export function quickExpansionStaleReasons(
     reasons.push("Expanded prompt changed after it was prepared.");
   }
   if (current.model !== snapshot.model) {
-    reasons.push(`Model changed from "${snapshot.model}" to "${current.model}".`);
+    reasons.push(
+      `Model changed from "${modelLabel(snapshot.model, current.modelLabels)}" to "${modelLabel(current.model, current.modelLabels)}".`,
+    );
   }
   if (current.family !== snapshot.family) {
     reasons.push(`Model family changed from "${snapshot.family}" to "${current.family}".`);
