@@ -79,6 +79,87 @@ struct StartupPlan {
     start_legacy_cache_evictor: bool,
 }
 
+/// Owns every dedicated GPU OS thread from the instant it is spawned.
+///
+/// `run_server` has fallible initialization after device discovery. Keeping
+/// workers and join handles in one guard makes those early returns
+/// transactional: dropping the guard fences every worker, wakes idle receivers,
+/// and joins every thread before returning the startup error.
+#[derive(Default)]
+struct GpuOwnerThreads {
+    workers: Vec<std::sync::Arc<gpu_pool::GpuWorker>>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl GpuOwnerThreads {
+    fn track(
+        &mut self,
+        worker: std::sync::Arc<gpu_pool::GpuWorker>,
+        handle: std::thread::JoinHandle<()>,
+    ) {
+        self.workers.push(worker);
+        self.handles.push(handle);
+    }
+
+    fn request_shutdown(&self) {
+        for worker in &self.workers {
+            worker.request_shutdown();
+        }
+    }
+
+    fn join_all(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for handle in self.handles.drain(..) {
+            let thread_name = handle
+                .thread()
+                .name()
+                .unwrap_or("<unnamed GPU owner>")
+                .to_string();
+            if let Err(payload) = handle.join() {
+                failures.push(format!(
+                    "{thread_name}: {}",
+                    panic_payload_message(payload.as_ref())
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("GPU owner thread join failed: {}", failures.join("; "))
+        }
+    }
+
+    fn shutdown_and_join(mut self) -> Result<()> {
+        self.request_shutdown();
+        self.join_all()
+    }
+}
+
+impl Drop for GpuOwnerThreads {
+    fn drop(&mut self) {
+        if self.handles.is_empty() {
+            return;
+        }
+        self.request_shutdown();
+        if let Err(error) = self.join_all() {
+            // Drop is the startup-error fallback and cannot replace the
+            // original initialization error. Do not silently discard a thread
+            // panic: preserve it in the server log.
+            tracing::error!(error = %format!("{error:#}"), "failed to join GPU owners during rollback");
+        }
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 fn classify_startup_mode(
     selection: &GpuSelection,
     discovered_count: usize,
@@ -164,7 +245,7 @@ pub async fn run_server(
     );
 
     let mut workers = Vec::new();
-    let mut gpu_thread_handles = Vec::new();
+    let mut gpu_owner_threads = GpuOwnerThreads::default();
     let (scheduler_worker_tx, scheduler_worker_rx) =
         tokio::sync::mpsc::unbounded_channel::<scheduler::WorkerEvent>();
 
@@ -204,7 +285,7 @@ pub async fn run_server(
                 scheduler_worker_tx.clone(),
                 cache_idle_ttl,
             );
-            gpu_thread_handles.push(handle);
+            gpu_owner_threads.track(worker.clone(), handle);
             workers.push(worker);
         }
     }
@@ -796,20 +877,13 @@ pub async fn run_server(
     }
     // Also issue shutdown from the owner even if the coordinator panicked
     // before its normal teardown path.
-    for worker in &gpu_pool.workers {
-        worker.request_shutdown();
-    }
     // The coordinator sends an explicit shutdown command to every idle owner
     // and sets the shared flag for any owner finishing a current lease.
     // Joining here makes an in-process server restart incapable of inheriting
     // detached CUDA owner threads or contexts.
-    tokio::task::spawn_blocking(move || {
-        for handle in gpu_thread_handles {
-            let _ = handle.join();
-        }
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("failed to join GPU owner threads: {error}"))?;
+    tokio::task::spawn_blocking(move || gpu_owner_threads.shutdown_and_join())
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to run GPU owner join task: {error}"))??;
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");
@@ -893,10 +967,17 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, StartupMode,
+        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, GpuOwnerThreads,
+        StartupMode,
     };
+    use crate::gpu_pool::{GpuWorker, GpuWorkerCommand};
+    use crate::{gpu_worker, model_cache};
     use mold_core::types::GpuSelection;
-    use std::sync::Mutex;
+    use mold_inference::device::{CudaDeviceKind, DiscoveredGpu};
+    use mold_inference::shared_pool::SharedPool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -982,5 +1063,90 @@ mod tests {
             classify_startup_mode(&GpuSelection::All, 0, 0, true),
             StartupMode::Maintenance
         );
+    }
+
+    fn owner_test_worker() -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        (
+            Arc::new(GpuWorker {
+                gpu: DiscoveredGpu {
+                    ordinal: 0,
+                    stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
+                    raw_cuda_uuid: Some([0; 16]),
+                    device_kind: Some(CudaDeviceKind::FullGpu),
+                    identity_error: None,
+                    backend: mold_core::GpuBackend::Cuda,
+                    name: "startup-guard-test".to_string(),
+                    compute_capability: Some((8, 6)),
+                    pci_bus_id: None,
+                    total_vram_bytes: 24 << 30,
+                    free_vram_bytes: 24 << 30,
+                },
+                model_cache: Arc::new(Mutex::new(model_cache::ModelCache::new(1))),
+                resident_model: Arc::new(RwLock::new(None)),
+                active_generation: Arc::new(RwLock::new(None)),
+                model_load_lock: Arc::new(Mutex::new(())),
+                shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+                in_flight: AtomicUsize::new(0),
+                consecutive_failures: AtomicUsize::new(0),
+                poisoned: AtomicBool::new(false),
+                fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                shutdown_requested: AtomicBool::new(false),
+                owner_thread_id: std::sync::OnceLock::new(),
+                degraded_until: RwLock::new(None),
+                job_tx,
+            }),
+            job_rx,
+        )
+    }
+
+    #[test]
+    fn post_owner_startup_error_requests_shutdown_and_joins_owner() {
+        let (worker, job_rx) = owner_test_worker();
+        let weak_worker = Arc::downgrade(&worker);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle =
+            gpu_worker::spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+
+        let mut owners = GpuOwnerThreads::default();
+        owners.track(worker, handle);
+        let startup_result: anyhow::Result<()> = (|| {
+            let _owners = owners;
+            anyhow::bail!("synthetic post-owner startup failure")
+        })();
+
+        assert!(startup_result.is_err());
+        assert!(
+            event_rx.blocking_recv().is_none(),
+            "startup error must join the owner and drop its scheduler sender"
+        );
+        assert!(
+            weak_worker.upgrade().is_none(),
+            "no worker/channel ownership cycle may survive startup cleanup"
+        );
+    }
+
+    #[test]
+    fn owner_join_panic_is_reported() {
+        let panicking = std::thread::Builder::new()
+            .name("gpu-worker-panics-in-test".to_string())
+            .spawn(|| panic!("synthetic owner panic"))
+            .unwrap();
+        let owners = GpuOwnerThreads {
+            workers: Vec::new(),
+            handles: vec![panicking],
+        };
+
+        let error = owners
+            .shutdown_and_join()
+            .expect_err("owner panic must be returned to the server owner");
+        let message = format!("{error:#}");
+        assert!(message.contains("gpu-worker-panics-in-test"));
+        assert!(message.contains("synthetic owner panic"));
     }
 }

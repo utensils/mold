@@ -46,6 +46,44 @@ fn run_gpu_owner(
     cache_idle_ttl: Duration,
     idle_poll: Duration,
 ) {
+    run_gpu_owner_entrypoint(worker, || {
+        run_gpu_owner_loop(worker, job_rx, scheduler_tx, cache_idle_ttl, idle_poll);
+    });
+}
+
+fn run_gpu_owner_entrypoint(run_worker: &GpuWorker, entrypoint: impl FnOnce()) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(entrypoint));
+    if let Err(payload) = outcome {
+        // The panic may have crossed arbitrary Candle/cudarc state, including
+        // idle eviction and destructor paths outside process_job. Quarantine
+        // the context and use a stored Notify permit so startup-time panics
+        // cannot race ahead of the server shutdown waiter.
+        quarantine_poisoned_worker(run_worker);
+        tracing::error!(
+            gpu = run_worker.gpu.ordinal,
+            panic = %panic_payload_message(payload.as_ref()),
+            "GPU owner thread panicked; quarantining context and stopping server"
+        );
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    }
+}
+
+fn run_gpu_owner_loop(
+    worker: &GpuWorker,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    cache_idle_ttl: Duration,
+    idle_poll: Duration,
+) {
     if worker
         .owner_thread_id
         .set(std::thread::current().id())
@@ -53,7 +91,7 @@ fn run_gpu_owner(
     {
         worker.poisoned.store(true, Ordering::SeqCst);
         worker.fatal_cuda_error.store(true, Ordering::SeqCst);
-        worker.fatal_cuda_shutdown.notify_waiters();
+        worker.fatal_cuda_shutdown.notify_one();
         tracing::error!(
             gpu = worker.gpu.ordinal,
             "GPU worker owner thread was initialized more than once"
@@ -153,13 +191,7 @@ fn run_gpu_owner(
             // A panic may have crossed arbitrary Candle/cudarc state.
             // Treat the owner context as fatal and let supervision
             // restart the process; never attempt an in-process reset.
-            worker.poisoned.store(true, Ordering::SeqCst);
-            worker.fatal_cuda_error.store(true, Ordering::SeqCst);
-            worker.fatal_cuda_shutdown.notify_waiters();
-            tracing::error!(
-                gpu = worker.gpu.ordinal,
-                "GPU owner thread panicked; quarantining context and stopping server"
-            );
+            quarantine_poisoned_worker(worker);
         }
         let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
             device_id: device_id.clone(),
@@ -506,12 +538,19 @@ fn fatal_cuda_user_message(model_name: &str) -> String {
 }
 
 fn quarantine_poisoned_worker(worker: &GpuWorker) {
+    // Latch and notify before touching any lock that the faulting path may have
+    // poisoned. `notify_one` stores a permit when the server has not reached
+    // its shutdown waiter yet, which makes startup-time owner panics fail
+    // closed too.
     worker.poisoned.store(true, Ordering::SeqCst);
-    worker.set_resident_model(None);
-    worker.consecutive_failures.store(3, Ordering::SeqCst);
-    *worker.degraded_until.write().unwrap() = None;
     worker.fatal_cuda_error.store(true, Ordering::SeqCst);
     worker.fatal_cuda_shutdown.notify_one();
+    worker.consecutive_failures.store(3, Ordering::SeqCst);
+    worker.set_resident_model(None);
+    *worker
+        .degraded_until
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     tracing::error!(
         gpu = worker.gpu.ordinal,
         "GPU worker quarantined after fatal CUDA context error; shutting down for process restart"
@@ -3055,6 +3094,24 @@ mod tests {
         )
         .await
         .expect("fatal CUDA quarantine must wake server shutdown");
+    }
+
+    #[tokio::test]
+    async fn panic_outside_process_job_is_contained_and_signals_restart() {
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+
+        run_gpu_owner_entrypoint(&worker, || {
+            panic!("synthetic idle-eviction panic");
+        });
+
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            worker.fatal_cuda_shutdown.notified(),
+        )
+        .await
+        .expect("outer owner panic must wake fail-closed server shutdown");
     }
 
     #[test]
