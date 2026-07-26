@@ -242,7 +242,7 @@ impl LocalExpander {
         let mut in_thinking = false;
 
         // Process the prompt through the model first
-        let mut offset = {
+        let prompt_offset = {
             let input = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
             let _logits = model.forward(&input, 0)?;
             input_ids.len()
@@ -250,10 +250,9 @@ impl LocalExpander {
 
         // Generate new tokens one at a time
         let mut last_token = *input_ids.last().unwrap_or(&0);
-        for _ in 0..max_new_tokens {
+        for generated_offset in 0..max_new_tokens {
             let input = Tensor::new(&[last_token], &device)?.unsqueeze(0)?;
-            let logits = model.forward(&input, offset)?;
-            offset += 1;
+            let logits = model.forward(&input, prompt_offset + generated_offset)?;
 
             // Sample next token
             let next_token = sample_token(&logits, config.temperature, config.top_p)?;

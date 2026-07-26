@@ -1035,18 +1035,16 @@ fn create_server_expander(
 
     #[cfg(feature = "expand")]
     {
-        if let Some(local) =
-            mold_inference::expand::LocalExpander::from_config(_config, Some(&settings.model))
-        {
-            return Ok(Box::new(
+        match mold_inference::expand::LocalExpander::from_config(_config, Some(&settings.model)) {
+            Some(local) => Ok(Box::new(
                 local
                     .with_gpu_selection(_gpu_selection)
                     .with_preferred_gpu(_preferred_gpu),
-            ));
+            )),
+            None => Err(ApiError::validation(
+                "local expand model not found — run: mold pull qwen3-expand".to_string(),
+            )),
         }
-        return Err(ApiError::validation(
-            "local expand model not found — run: mold pull qwen3-expand".to_string(),
-        ));
     }
 
     #[cfg(not(feature = "expand"))]

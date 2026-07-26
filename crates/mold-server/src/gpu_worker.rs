@@ -294,7 +294,7 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
             })?
             .with_gpu_selection(mold_core::GpuSelection::Specific(vec![selector]))
             .with_preferred_gpu(Some(worker.gpu.ordinal));
-            return expander.expand(&job.prompt, &job.expand_config);
+            expander.expand(&job.prompt, &job.expand_config)
         }
         #[cfg(not(feature = "expand"))]
         {
