@@ -182,6 +182,6 @@ app, or custom client. The documentation covers the
 
 Core contributors:
 [James Brink](https://jamesbrink.online/) and
-[Jeffrey Dilley](https://github.com/jdilley).
+[Jeffrey Dilley](mailto:jeff.dilley@gmail.com).
 
 Licensed under the [MIT License](LICENSE).
