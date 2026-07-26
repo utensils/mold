@@ -2524,6 +2524,7 @@ mod tests {
         let worker_for_job = worker.clone();
         let panic_request = request.clone();
         tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
             process_job(
                 &worker_for_job,
                 GpuJob {
@@ -2541,6 +2542,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     lease: None,
                 },
+                &scheduler_tx,
             );
         })
         .await
@@ -2578,6 +2580,7 @@ mod tests {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let worker_for_job = worker.clone();
         tokio::task::spawn_blocking(move || {
+            let (scheduler_tx, _scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
             process_job(
                 &worker_for_job,
                 GpuJob {
@@ -2595,6 +2598,7 @@ mod tests {
                     events: crate::events::EventBroadcaster::new(),
                     lease: None,
                 },
+                &scheduler_tx,
             );
         })
         .await
