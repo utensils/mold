@@ -525,9 +525,13 @@ pub(crate) async fn validate_and_normalize_chain_family(
     }
 
     let config = state.config.read().await;
-    let family = config
-        .resolved_model_config(&req.model)
+    let resolved_model = config.resolved_model_config(&req.model);
+    let canonical_model = mold_core::manifest::resolve_model_name(&req.model);
+    let manifest = mold_core::manifest::find_manifest(&canonical_model);
+    let family = resolved_model
         .family
+        .clone()
+        .or_else(|| manifest.map(|model| model.family.clone()))
         .unwrap_or_default();
     // Only reject early when we positively know the family is non-chain-capable.
     // An empty family means the model isn't in the manifest yet (catalog
@@ -538,6 +542,23 @@ pub(crate) async fn validate_and_normalize_chain_family(
             "model '{}' (family '{}') does not support chained video generation",
             req.model, family
         )));
+    }
+    if !family.is_empty() {
+        let sequence = crate::chain_limits::sequence_support(
+            &req.model,
+            &family,
+            resolved_model.spatial_upscaler.is_some()
+                || manifest.is_some_and(|model| {
+                    model.files.iter().any(|file| {
+                        file.component == mold_core::manifest::ModelComponent::SpatialUpscaler
+                    })
+                }),
+        );
+        if !sequence.supported {
+            return Err(ApiError::validation(sequence.reason.unwrap_or_else(|| {
+                format!("model '{}' cannot render sequences", req.model)
+            })));
+        }
     }
     if family == "ltx-video" && req.motion_tail_frames > 0 {
         // LtxVideoEngine has no img2vid path, so the carry tail can't anchor
@@ -1185,6 +1206,20 @@ mod tests {
         state.metadata_db = Arc::new(Some(db));
         state.chain_jobs = Some(handle);
         state
+    }
+
+    #[tokio::test]
+    async fn chain_preflight_rejects_ltx2_two_stage_before_creating_a_job() {
+        let state = AppState::for_tests();
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "ltx-2.3-22b-dev:fp8".into();
+
+        let error = validate_and_normalize_chain_family(&state, &mut request)
+            .await
+            .expect_err("two-stage LTX-2 must be rejected at the API boundary");
+
+        assert!(error.error.contains("two-stage"));
+        assert!(error.error.contains("distilled"));
     }
 
     struct HandlerFailingExecutor;

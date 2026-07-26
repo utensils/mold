@@ -37,6 +37,7 @@ function ltx2Limits(): api.ChainLimits {
     transition_modes: ["smooth", "cut", "fade"],
     quantization_family: "fp8",
     supports_audio: true,
+    supports_sequence: true,
   };
 }
 
@@ -52,6 +53,7 @@ function ltxVideoLimits(): api.ChainLimits {
     transition_modes: ["smooth", "cut", "fade"],
     quantization_family: "fp8",
     supports_audio: false,
+    supports_sequence: true,
   };
 }
 
@@ -103,6 +105,28 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     expect(w.find('[data-test="script-composer-enable-audio"]').exists()).toBe(
       false,
     );
+  });
+
+  it("shows the pipeline reason and disables Generate when the model cannot sequence", async () => {
+    vi.spyOn(api, "fetchChainLimits").mockResolvedValueOnce({
+      ...ltx2Limits(),
+      model: "ltx-2.3-22b-dev:fp8",
+      supports_sequence: false,
+      sequence_unsupported_reason:
+        "This checkpoint selects the two-stage LTX-2 pipeline.",
+    });
+    const w = mount(ScriptComposer, {
+      props: { ...props(), model: "ltx-2.3-22b-dev:fp8" },
+    });
+    await flushPromises();
+
+    expect(w.get('[data-test="chain-pipeline-unsupported"]').text()).toContain(
+      "two-stage LTX-2",
+    );
+    expect(
+      (w.get('[data-test="script-generate"]').element as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 
   it("pluralizes the stage count in the summary line (1 stage vs N stages)", async () => {

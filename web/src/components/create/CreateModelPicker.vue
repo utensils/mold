@@ -16,6 +16,8 @@ import { modelDisplayName } from "../../lib/modelName";
 const props = defineProps<{
   models: ModelInfoExtended[];
   model: string;
+  browseTo?: string;
+  emptyLabel?: string;
 }>();
 
 const emit = defineEmits<{ select: [model: ModelInfoExtended] }>();
@@ -55,7 +57,7 @@ function onChange(event: Event) {
   <div class="mp" data-test="create-model-picker">
     <div class="mp__head">
       <span class="mp__kicker">Model</span>
-      <RouterLink to="/models" class="mp__browse">
+      <RouterLink :to="browseTo ?? '/models'" class="mp__browse">
         Browse all
         <Icon name="chevron-right" :size="12" />
       </RouterLink>
@@ -67,6 +69,9 @@ function onChange(event: Event) {
       aria-label="Model"
       @change="onChange"
     >
+      <option v-if="groups.length === 0" value="" disabled>
+        {{ emptyLabel ?? "No models installed" }}
+      </option>
       <optgroup
         v-for="group in groups"
         :key="group.family"

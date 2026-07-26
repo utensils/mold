@@ -7,6 +7,12 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceSupport {
+    pub supported: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChainLimits {
     pub model: String,
@@ -22,6 +28,12 @@ pub struct ChainLimits {
     /// toggle; the chain endpoint refuses `enable_audio: true` upstream
     /// when this is false. Single source of truth: `mold_inference::chain::capability_for_family`.
     pub supports_audio: bool,
+    /// Whether the model's effective runtime pipeline can render sequence
+    /// stages. This is model-specific: an LTX-2 dev checkpoint with its
+    /// spatial upscaler selects TwoStage, which render-chain v1 cannot run.
+    pub supports_sequence: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence_unsupported_reason: Option<String>,
 }
 
 /// Per-model-family hardcoded caps. Keyed by the family string returned by
@@ -35,6 +47,32 @@ pub fn family_cap(family: &str) -> Option<u32> {
 /// users get a clear upfront error instead of silently-dropped audio.
 pub fn family_supports_audio(family: &str) -> bool {
     mold_inference::chain::capability_for_family(family).is_some_and(|c| c.supports_audio)
+}
+
+/// Resolve the sequence renderer's model-specific pipeline gate. LTX-2
+/// distilled checkpoints use Distilled, while non-distilled checkpoints use
+/// TwoStage when a spatial upscaler is present and OneStage otherwise.
+pub fn sequence_support(model: &str, family: &str, has_spatial_upscaler: bool) -> SequenceSupport {
+    if family_cap(family).is_none() {
+        return SequenceSupport {
+            supported: false,
+            reason: Some(format!("{family} models do not render video sequences")),
+        };
+    }
+    if family != "ltx2" || model.contains("distilled") || !has_spatial_upscaler {
+        return SequenceSupport {
+            supported: true,
+            reason: None,
+        };
+    }
+    SequenceSupport {
+        supported: false,
+        reason: Some(
+            "This checkpoint selects the two-stage LTX-2 pipeline, which is for single videos. \
+             Sequences currently require a distilled LTX-2 checkpoint or a one-stage catalog checkpoint."
+                .into(),
+        ),
+    }
 }
 
 /// Compute the chain-limits response for a resolved model name.
@@ -51,6 +89,13 @@ pub fn compute_limits(model: &str, family: &str, quant: &str, free_vram_bytes: u
     let recommended = cap;
 
     const MAX_STAGES: u32 = 16;
+    let has_spatial_upscaler = mold_core::manifest::find_manifest(model).is_some_and(|manifest| {
+        manifest
+            .files
+            .iter()
+            .any(|file| file.component == mold_core::manifest::ModelComponent::SpatialUpscaler)
+    });
+    let sequence = sequence_support(model, family, has_spatial_upscaler);
     ChainLimits {
         model: model.to_string(),
         frames_per_clip_cap: cap,
@@ -61,6 +106,8 @@ pub fn compute_limits(model: &str, family: &str, quant: &str, free_vram_bytes: u
         transition_modes: vec!["smooth".into(), "cut".into(), "fade".into()],
         quantization_family: quant.to_string(),
         supports_audio: family_supports_audio(family),
+        supports_sequence: sequence.supported,
+        sequence_unsupported_reason: sequence.reason,
     }
 }
 
@@ -114,6 +161,31 @@ mod tests {
             lim.supports_audio,
             "ltx2 family has the AV transformer + audio VAE / vocoder path",
         );
+        assert!(
+            lim.supports_sequence,
+            "the distilled pipeline is supported by sequence rendering",
+        );
+        assert!(lim.sequence_unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn ltx2_dev_with_spatial_upscaler_is_not_sequence_compatible() {
+        let support = sequence_support("ltx-2.3-22b-dev:fp8", "ltx2", true);
+        assert!(!support.supported);
+        assert!(
+            support
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("two-stage")),
+            "the UI needs an actionable pipeline-specific reason",
+        );
+    }
+
+    #[test]
+    fn ltx2_catalog_checkpoint_without_upscaler_uses_supported_one_stage_pipeline() {
+        let support = sequence_support("cv:3143864", "ltx2", false);
+        assert!(support.supported);
+        assert!(support.reason.is_none());
     }
 
     #[test]

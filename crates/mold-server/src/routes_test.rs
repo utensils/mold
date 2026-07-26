@@ -5686,6 +5686,30 @@ mod tests {
             limits["supports_audio"], true,
             "ltx2 family advertises audio so the SPA can show the toggle",
         );
+        assert_eq!(limits["supports_sequence"], true);
+        assert!(limits["sequence_unsupported_reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn capabilities_chain_limits_rejects_ltx2_two_stage_pipeline_up_front() {
+        let app = app_empty();
+        let response = app
+            .oneshot(
+                Request::get("/api/capabilities/chain-limits?model=ltx-2.3-22b-dev:fp8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let limits: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(limits["supports_sequence"], false);
+        assert!(limits["sequence_unsupported_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("two-stage")));
     }
 
     #[tokio::test]
@@ -5754,6 +5778,10 @@ mod tests {
         assert_eq!(
             limits["supports_audio"], false,
             "chain limits must preserve the checkpoint-specific audio capability",
+        );
+        assert_eq!(
+            limits["supports_sequence"], true,
+            "single-file catalog checkpoints without an upscaler use one-stage",
         );
     }
 

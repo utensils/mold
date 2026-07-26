@@ -32,13 +32,16 @@ let mock: {
   refreshInstalled: ReturnType<typeof vi.fn>;
   refresh: ReturnType<typeof vi.fn>;
   openInstalledDetail: ReturnType<typeof vi.fn>;
+  setFilter: ReturnType<typeof vi.fn>;
 };
+
+const routeQuery = ref<Record<string, unknown>>({});
 
 vi.mock("../composables/useCatalog", () => ({
   useCatalog: () => mock,
 }));
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ query: {} }),
+  useRoute: () => ({ query: routeQuery.value }),
 }));
 
 const mountPage = () =>
@@ -54,6 +57,7 @@ const mountPage = () =>
   });
 
 beforeEach(() => {
+  routeQuery.value = {};
   mock = {
     tab: ref("installed"),
     installed: ref<ModelInfoExtended[]>([]),
@@ -65,6 +69,7 @@ beforeEach(() => {
     refreshInstalled: vi.fn(),
     refresh: vi.fn(),
     openInstalledDetail: vi.fn(),
+    setFilter: vi.fn(),
   };
 });
 
@@ -148,5 +153,24 @@ describe("ModelsPage — Models workspace", () => {
     const w = mountPage();
     expect(w.find("[data-test=discover-tab]").exists()).toBe(true);
     expect(w.find("[data-test=installed-tab]").exists()).toBe(false);
+  });
+
+  it("opens sequence discovery on the Discover tab with video checkpoints filtered", () => {
+    routeQuery.value = {
+      tab: "discover",
+      type: "video",
+      kind: "checkpoint",
+      intent: "sequence",
+    };
+    const w = mountPage();
+
+    expect(mock.setTab).toHaveBeenCalledWith("discover");
+    expect(mock.setFilter).toHaveBeenCalledWith({
+      modality: "video",
+      kind: "checkpoint",
+    });
+    expect(w.get("[data-test='sequence-model-guide']").text()).toContain(
+      "sequence",
+    );
   });
 });

@@ -262,10 +262,14 @@ const canAddStage = computed(() => script.value.stage.length < maxStages.value);
 const chainUnavailable = computed(
   () => limitsLoaded.value && limits.value === null,
 );
+const sequenceUnsupported = computed(
+  () => limits.value?.supports_sequence === false,
+);
 
 const canGenerate = computed(
   () =>
     limits.value !== null &&
+    !sequenceUnsupported.value &&
     !overCap.value &&
     script.value.stage.some((s) => s.prompt.trim()),
 );
@@ -414,6 +418,17 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
       data-test="chain-unavailable"
     >
       this model can't chain sequences.
+    </p>
+    <p
+      v-else-if="sequenceUnsupported"
+      class="rounded border border-warning/30 bg-warning/10 px-3 py-2 text-center font-mono text-[11px] leading-relaxed text-warning"
+      data-test="chain-pipeline-unsupported"
+      role="alert"
+    >
+      {{
+        limits?.sequence_unsupported_reason ??
+        "This model's pipeline can't render sequences."
+      }}
     </p>
     <button
       class="w-full rounded-control-lg py-2.5 text-sm font-semibold transition"

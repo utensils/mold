@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 import CatalogCardGrid from "./CatalogCardGrid.vue";
 
+const toastMock = vi.fn();
+vi.mock("../lib/toasts", () => ({
+  toast: (...args: unknown[]) => toastMock(...args),
+}));
+
 // Stub IntersectionObserver so jsdom/happy-dom mounts don't crash on it.
 // The test inspects markup rather than driving observer callbacks.
 class FakeIntersectionObserver {
@@ -64,6 +69,7 @@ vi.mock("../composables/useCatalog", () => ({
 }));
 
 beforeEach(() => {
+  toastMock.mockReset();
   (globalThis as any).IntersectionObserver = FakeIntersectionObserver;
   mockState = {
     entries: ref([baseEntry]),
@@ -104,6 +110,24 @@ describe("CatalogCardGrid result count", () => {
     const w = mount(CatalogCardGrid);
     expect(w.find('[data-testid="catalog-result-count"]').text()).toBe(
       "1 result",
+    );
+  });
+});
+
+describe("CatalogCardGrid download feedback", () => {
+  it("shows a user-visible error when a catalog pull is rejected", async () => {
+    mockState.startDownload.mockRejectedValueOnce(
+      new Error("not a supported built-in model or LoRA"),
+    );
+    const w = mount(CatalogCardGrid);
+
+    w.getComponent({ name: "CatalogCard" }).vm.$emit("pull");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(toastMock).toHaveBeenCalledWith(
+      "error",
+      "not a supported built-in model or LoRA",
     );
   });
 });

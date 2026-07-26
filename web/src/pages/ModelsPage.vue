@@ -19,6 +19,7 @@ import CatalogTopbar from "../components/CatalogTopbar.vue";
 import CatalogCardGrid from "../components/CatalogCardGrid.vue";
 import InstalledModelRow from "../components/models/InstalledModelRow.vue";
 import ModelDetailDrawer from "../components/models/ModelDetailDrawer.vue";
+import type { CatalogKind } from "../types";
 
 const cat = useCatalog();
 const route = useRoute();
@@ -26,6 +27,32 @@ watch(
   () => route.query.tab,
   (tab) => {
     if (tab === "installed" || tab === "discover") cat.setTab(tab);
+  },
+  { immediate: true },
+);
+watch(
+  () => [route.query.type, route.query.kind] as const,
+  ([type, kind]) => {
+    const modality = type === "image" || type === "video" ? type : undefined;
+    const allowedKinds: CatalogKind[] = [
+      "checkpoint",
+      "lora",
+      "vae",
+      "text-encoder",
+      "tokenizer",
+      "clip",
+      "control-net",
+    ];
+    const catalogKind =
+      typeof kind === "string" && allowedKinds.includes(kind as CatalogKind)
+        ? (kind as CatalogKind)
+        : undefined;
+    if (modality || catalogKind) {
+      cat.setFilter({
+        modality,
+        kind: catalogKind,
+      });
+    }
   },
   { immediate: true },
 );
@@ -152,6 +179,15 @@ onMounted(() => {
 
     <!-- Discover -->
     <section v-else data-test="discover-tab">
+      <div
+        v-if="route.query.intent === 'sequence'"
+        data-test="sequence-model-guide"
+        class="mb-4 rounded-2xl border border-safelight/30 bg-safelight/10 px-4 py-3 text-sm text-ink-2"
+      >
+        <strong class="text-rebate">Choose a model for sequences.</strong>
+        Distilled LTX-2 checkpoints support smooth continuation between clips;
+        two-stage dev checkpoints currently render single videos only.
+      </div>
       <CatalogTopbar />
       <div class="discover">
         <CatalogSidebar class="discover__sidebar" />

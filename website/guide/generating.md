@@ -4,6 +4,11 @@ The web Create composer shows an advisory peak-VRAM estimate for the selected
 machine before you submit. Video models expose their supported camera-motion
 controls under Advanced, and a durable sequence remains attached after a page
 reload so its server-side progress does not disappear from the workspace.
+Switching to **Sequence** filters the model picker to compatible installed
+video checkpoints and selects one when possible. If none are installed,
+**Browse video models** opens Models → Discover with the Video and Models
+filters already applied. Two-stage LTX-2 dev checkpoints render single clips;
+multi-stage sequences require a distilled or one-stage checkpoint.
 
 On phone-sized web views, Create keeps every interactive target at least 44px
 high and editable fields at a zoom-safe 16px.
@@ -201,7 +206,9 @@ on-disk byte size understates the BF16 weights reconstructed by the runtime.
 If the Gemma prompt encoder exhausts VRAM, Mold retries only Gemma on CPU while
 keeping the transformer and video VAE on CUDA.
 Multi-prompt chains support both one-stage and distilled LTX-2 checkpoints;
-multi-pass and specialized conditioning pipelines remain explicit non-chain modes.
+multi-pass and specialized conditioning pipelines remain explicit non-chain
+modes. Mold checks this before creating a durable job and keeps server, stage,
+cancel, resume, and retake errors visible on the job card.
 
 Some community checkpoints contain only the video transformer (plus Mold's
 separate video VAE) and do not include the audio VAE or vocoder. Mold detects
