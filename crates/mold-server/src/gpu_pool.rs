@@ -174,6 +174,9 @@ pub struct GpuJob {
     /// Server-wide event broadcast so the worker's save path can emit
     /// `gallery_added` alongside the DB upsert (mirrors `AppState.events`).
     pub events: Arc<crate::events::EventBroadcaster>,
+    /// Exact request-aware plan selected by the coordinator. Legacy adapters
+    /// use `None`; V2 validates this on the owner thread before CUDA work.
+    pub execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
     /// Version fence proving this job was granted by the authoritative
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.

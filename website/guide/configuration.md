@@ -138,16 +138,17 @@ Environment variables take precedence over config file values.
 
 ### Core
 
-| Variable             | Default                            | Description                                                                                                                     |
-| -------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache                                                                                             |
-| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                                                                                                              |
-| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                                                                                                               |
-| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory                                                                                                         |
-| `MOLD_PORT`          | `7680`                             | Server port                                                                                                                     |
-| `MOLD_MDNS`          | `1` (on)                           | Set `0`/`false` to disable `mold serve` LAN advertising and server-assisted DNS-SD browsing (requires the `mdns` build feature) |
-| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`                                                                                                      |
-| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                                       |
+| Variable             | Default                            | Description                                                                                                                                |
+| -------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MOLD_HOME`          | `~/.mold`                          | Base directory for config and cache                                                                                                        |
+| `MOLD_DEFAULT_MODEL` | `flux2-klein:q8`                   | Default model name                                                                                                                         |
+| `MOLD_HOST`          | `http://localhost:7680`            | Remote server URL                                                                                                                          |
+| `MOLD_MODELS_DIR`    | `$MOLD_HOME/models`                | Model storage directory                                                                                                                    |
+| `MOLD_PORT`          | `7680`                             | Server port                                                                                                                                |
+| `MOLD_MDNS`          | `1` (on)                           | Set `0`/`false` to disable `mold serve` LAN advertising and server-assisted DNS-SD browsing (requires the `mdns` build feature)            |
+| `MOLD_DISPATCH_MODE` | `v2`                               | Reserved rollout contract (`legacy`, `observe`, or `v2`). Startup does not consume this switch yet, so setting it currently has no effect. |
+| `LAMBDA_API_KEY`     | unset                              | Overrides `lambda.api_key`                                                                                                                 |
+| `MOLD_LOG`           | `info` (serve) / `warn` (cli, tui) | Log level                                                                                                                                  |
 
 ### Generation
 
@@ -333,6 +334,21 @@ an explicit request placement is the complete placement decision; otherwise
 environment values override the persisted per-model placement and unspecified
 components remain `auto`. The server normalizes this once before admission, so
 validation, scheduling, and inference consume the same placement.
+
+Scheduler V2 resolves that normalized shape into a concrete admission plan per
+eligible device before dispatch. Plans include exact artifact paths and identity
+fingerprints, materialized placement, inferred precision/quantization metadata,
+planned load/offload mode, sampled free-VRAM peak, and incremental host RAM.
+Explicit CPU/device values never become scoring hints: an unavailable device or
+components pinned across different GPUs blocks the request. Automatic CPU
+placement is considered only under measured/static memory pressure and only for
+a family/component path Mold implements. The GPU owner validates the selected
+device and artifacts again before CUDA work; a changed artifact invalidates the
+plan instead of being silently substituted.
+
+Forced-local batches (`mold run --local --batch N`) use the same deterministic
+assignment core across all GPUs selected by `--gpus`/`MOLD_GPUS`. There is no
+two-GPU limit; a one-item run keeps the existing best-free-GPU selection.
 
 The web UI's **Placement** panel, the desktop app's **Settings → Advanced**
 placement editor, the `GET`/`PUT`/`DELETE /api/config/model/:name/placement`

@@ -1530,6 +1530,7 @@ async fn run_queue_dispatcher_with_tuning(
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            execution_plan: None,
             lease: None,
         });
 
@@ -2730,6 +2731,7 @@ mod tests {
             queue: state.queue.clone(),
             registry: state.job_registry.clone(),
             events: state.events.clone(),
+            execution_plan: None,
             lease: None,
         };
         worker.send_job(filler_job).unwrap();

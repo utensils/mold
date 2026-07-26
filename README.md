@@ -59,6 +59,13 @@ GPU startup defaults to `all`. `--gpus` / `MOLD_GPUS` also accepts `none`
 persistent configuration because ordinals are process-local. Maintenance mode
 keeps inventory, telemetry, downloads, and settings available but rejects
 generation and model-load requests.
+Scheduler admission uses each device's sampled free VRAM rather than total
+capacity and freezes a concrete per-component execution plan before dispatch.
+Explicit CPU/device placement is a hard constraint; missing devices and
+cross-GPU component pins fail instead of falling back. `mold run --local
+--batch N` uses the same deterministic assignment core across every GPU
+selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
+selection.
 
 ## Install
 

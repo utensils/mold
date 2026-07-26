@@ -1032,6 +1032,23 @@ impl Coordinator {
     }
 
     fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
+        let sampled_free = self
+            .state
+            .resources
+            .latest()
+            .map(|snapshot| {
+                snapshot
+                    .gpus
+                    .into_iter()
+                    .map(|gpu| {
+                        (
+                            (gpu.backend, gpu.ordinal),
+                            gpu.vram_total.saturating_sub(gpu.vram_used),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
         self.state
             .gpu_pool
             .workers
@@ -1075,11 +1092,91 @@ impl Coordinator {
                     },
                     available_at_ms: None,
                     worker_generation: ready.map_or(0, |ready| ready.generation),
-                    available_vram_bytes: worker.gpu.total_vram_bytes,
+                    // The periodic resource sample is authoritative. Before
+                    // its first tick, discovery's driver sample is still an
+                    // actual free-memory reading; total VRAM is never used as
+                    // a proxy for free capacity.
+                    available_vram_bytes: sampled_free
+                        .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                        .copied()
+                        .unwrap_or(worker.gpu.free_vram_bytes),
                     warm_execution_fingerprints: warm,
                 }
             })
             .collect()
+    }
+
+    fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
+        self.device_snapshots()
+            .into_iter()
+            .filter(|device| device.is_schedulable())
+            .filter_map(|device| {
+                let worker = self
+                    .state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .find(|worker| worker_device_id(worker) == device.id.as_str())?;
+                Some(crate::execution_plan::DeviceFact {
+                    id: device.id.to_string(),
+                    ordinal: worker.gpu.ordinal,
+                    available_vram_bytes: device.available_vram_bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn generation_plans(
+        &self,
+        pending: &PendingGeneration,
+    ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, String> {
+        let config = self
+            .state
+            .config
+            .try_read()
+            .map_err(|_| "configuration changed while resolving execution plan".to_string())?;
+        let offload_requested = matches!(
+            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        let resolved = crate::execution_plan::resolve_execution_plans(
+            &config,
+            &pending.job.request,
+            &self.device_facts(),
+            offload_requested,
+        );
+        #[cfg(test)]
+        if matches!(
+            resolved,
+            Err(crate::execution_plan::ExecutionPlanError::MissingArtifacts { .. })
+        ) {
+            // Coordinator unit tests deliberately use synthetic requests with
+            // no filesystem model. Keep their transport/fencing focus without
+            // weakening production admission.
+            let estimate = crate::queue::estimate_model_vram(&pending.job.request.model);
+            return Ok(self
+                .device_facts()
+                .into_iter()
+                .filter(|device| device.available_vram_bytes >= estimate)
+                .map(|device| crate::execution_plan::ResolvedExecutionPlan {
+                    device_id: device.id,
+                    device_ordinal: device.ordinal,
+                    model_fingerprint: pending.job.request.model.clone(),
+                    effective_placement: crate::execution_plan::EffectivePlacement {
+                        components: BTreeMap::new(),
+                    },
+                    components: BTreeMap::new(),
+                    attention_backend: crate::execution_plan::AttentionBackend::Auto,
+                    offload_mode: crate::execution_plan::OffloadMode::None,
+                    predicted_vram_peak_bytes: estimate,
+                    predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
+                    determinism_class:
+                        crate::execution_plan::DeterminismClass::CpuSeededCrossBackend,
+                    execution_fingerprint: pending.job.request.model.clone(),
+                })
+                .collect());
+        }
+        resolved.map_err(|error| error.to_string())
     }
 
     fn work_snapshots(&self) -> Vec<WorkSnapshot> {
@@ -1095,27 +1192,22 @@ impl Coordinator {
             .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
             .map(|(id, pending)| {
                 let model = pending.job.request.model.as_str();
-                let estimate = crate::queue::estimate_model_vram(model);
                 let failed = crate::gpu_pool::failed_ordinals_for_model(model);
                 let candidates = self
-                    .state
-                    .gpu_pool
-                    .workers
-                    .iter()
-                    .filter(|worker| !failed.contains(&worker.gpu.ordinal))
-                    .map(|worker| {
-                        let device_id = worker_device_id(worker);
-                        let overflow = estimate.saturating_sub(worker.gpu.total_vram_bytes);
-                        let transient =
-                            (estimate / 8).clamp(MIN_TRANSIENT_HOST_RAM, 2 * 1024 * 1024 * 1024);
+                    .generation_plans(pending)
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(job_id = id, %error, "generation has no valid execution plan");
+                        Vec::new()
+                    })
+                    .into_iter()
+                    .filter(|plan| !failed.contains(&plan.device_ordinal))
+                    .map(|plan| {
                         CandidatePlacement::new(
-                            DeviceId::new(device_id),
-                            ExecutionFingerprint::new(model),
-                            overflow.saturating_add(transient),
+                            DeviceId::new(plan.device_id),
+                            ExecutionFingerprint::new(plan.execution_fingerprint),
+                            plan.predicted_host_increment_bytes,
                         )
-                        // Block offloading remains a valid placement: only the
-                        // resident portion must fit this device.
-                        .with_vram(estimate.min(worker.gpu.total_vram_bytes))
+                        .with_vram(plan.predicted_vram_peak_bytes)
                     })
                     .collect::<Vec<_>>();
                 let mut work = WorkSnapshot::new(
@@ -1360,9 +1452,24 @@ impl Coordinator {
                     break;
                 }
                 if let Some(pending) = self.pending.remove(&id) {
+                    let execution_plan = self.generation_plans(&pending).ok().and_then(|plans| {
+                        plans.into_iter().find(|plan| plan.device_id == device_id)
+                    });
+                    let Some(execution_plan) = execution_plan else {
+                        self.pending.insert(id.clone(), pending);
+                        worker.release_in_flight();
+                        self.state_version = self.state_version.saturating_add(1);
+                        grant_failed = true;
+                        break;
+                    };
                     let bypass_count = pending.bypass_count;
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
-                    let gpu_job = gpu_job_from_generation(&self.state, pending.job, fence.clone());
+                    let gpu_job = gpu_job_from_generation(
+                        &self.state,
+                        pending.job,
+                        fence.clone(),
+                        Some(execution_plan),
+                    );
                     let grant = Box::new(LeaseGrant {
                         fence,
                         work: OwnerWork::Generation(Box::new(gpu_job)),
@@ -1669,7 +1776,15 @@ pub async fn run_scheduler_coordinator(
     tracing::info!("multi-GPU scheduler coordinator stopped");
 }
 
-fn gpu_job_from_generation(state: &AppState, job: GenerationJob, lease: LeaseFence) -> GpuJob {
+fn gpu_job_from_generation(
+    state: &AppState,
+    mut job: GenerationJob,
+    lease: LeaseFence,
+    execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
+) -> GpuJob {
+    if let Some(plan) = execution_plan.as_ref() {
+        job.request.placement = Some(crate::execution_plan::materialized_placement(plan));
+    }
     GpuJob {
         id: job.id,
         model: job.request.model.clone(),
@@ -1683,6 +1798,7 @@ fn gpu_job_from_generation(state: &AppState, job: GenerationJob, lease: LeaseFen
         queue: state.queue.clone(),
         registry: state.job_registry.clone(),
         events: state.events.clone(),
+        execution_plan,
         lease: Some(lease),
     }
 }
@@ -2095,6 +2211,51 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             assert_eq!(leased_devices.len(), count, "duplicate device lease");
         }
+    }
+
+    #[test]
+    fn scheduler_capacity_uses_sampled_free_vram_not_total() {
+        let (worker, _rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".into(),
+            timestamp: 1,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu-0".into(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 << 30,
+                vram_used: 19 << 30,
+                vram_used_by_mold: Some(1 << 30),
+                vram_used_by_other: Some(18 << 30),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 128 << 30,
+                used: 1 << 30,
+                used_by_mold: 0,
+                used_by_other: 1 << 30,
+            },
+            cpu: None,
+        });
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        assert_eq!(
+            coordinator.device_snapshots()[0].available_vram_bytes,
+            5 << 30
+        );
     }
 
     #[test]
@@ -2555,7 +2716,7 @@ mod tests {
             memory_sample_generation: 1,
             memory_ledger_sequence: 1,
         };
-        let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone());
+        let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone(), None);
         let child_id = "parent::post-upscale".to_string();
         let followup = ScheduledOwnerWork::new(
             child_id.clone(),

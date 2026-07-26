@@ -926,6 +926,27 @@ fn process_job(
         return;
     }
 
+    if let Some(plan) = job.execution_plan.as_ref() {
+        let worker_id = crate::scheduler::worker_device_id(worker);
+        let config = job.config.blocking_read();
+        if let Err(error) = crate::execution_plan::validate_before_cuda(
+            plan,
+            &worker_id,
+            worker.gpu.ordinal,
+            &config,
+            &job.model,
+        ) {
+            let message = error.to_string();
+            if let Some(ref tx) = job.progress_tx {
+                let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                    message: message.clone(),
+                }));
+            }
+            let _ = job.result_tx.send(Err(message));
+            return;
+        }
+    }
+
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
     // The V2 coordinator claims the row atomically before transport. Legacy
@@ -2444,6 +2465,7 @@ mod tests {
             queue: QueueHandle::new(queue_tx),
             registry: JobRegistry::new(),
             events: crate::events::EventBroadcaster::new(),
+            execution_plan: None,
             lease: None,
         }
     }
@@ -2558,6 +2580,7 @@ mod tests {
                 queue: QueueHandle::new(queue_tx),
                 registry: JobRegistry::new(),
                 events: crate::events::EventBroadcaster::new(),
+                execution_plan: None,
                 lease: Some(crate::scheduler::LeaseFence {
                     work_id: "stale".to_string(),
                     device_id: crate::scheduler::worker_device_id(&worker),
@@ -3100,6 +3123,7 @@ mod tests {
                 queue,
                 registry,
                 events: crate::events::EventBroadcaster::new(),
+                execution_plan: None,
                 lease: Some(fence("generate", 3)),
             })
             .unwrap();
@@ -3271,6 +3295,7 @@ mod tests {
                 queue: queue.clone(),
                 registry: registry.clone(),
                 events: crate::events::EventBroadcaster::new(),
+                execution_plan: None,
                 lease: None,
             },
             &event_tx,
@@ -3351,6 +3376,7 @@ mod tests {
                     queue: queue.clone(),
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
                     lease: None,
                 },
                 &scheduler_tx,
@@ -3407,6 +3433,7 @@ mod tests {
                     queue: followup_queue,
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),
+                    execution_plan: None,
                     lease: None,
                 },
                 &scheduler_tx,

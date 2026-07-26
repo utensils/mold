@@ -1037,7 +1037,7 @@ async fn generate_remote_blocking(
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
-async fn prepare_local_engine(
+async fn prepare_local_request(
     req: &GenerateRequest,
     config: &Config,
     gpus: Option<String>,
@@ -1051,8 +1051,13 @@ async fn prepare_local_engine(
     cli_height: Option<u32>,
     cli_steps: Option<u32>,
     cli_guidance: Option<f64>,
-) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
-    use super::local_engine::{build_local_engine, resolve_or_pull_model, EngineOverrides};
+) -> Result<(
+    GenerateRequest,
+    mold_core::ModelPaths,
+    Config,
+    super::local_engine::EngineOverrides,
+)> {
+    use super::local_engine::{resolve_or_pull_model, EngineOverrides};
     use mold_core::validate_generate_request;
 
     let model_name = req.model.clone();
@@ -1084,20 +1089,53 @@ async fn prepare_local_engine(
 
     validate_generate_request(&req).map_err(|e| anyhow::anyhow!(e))?;
 
-    let engine = build_local_engine(
-        &model_name,
-        paths,
-        &effective_config,
-        &EngineOverrides {
-            gpus,
-            t5_variant: t5_variant_override,
-            qwen3_variant: qwen3_variant_override,
-            qwen2_variant: qwen2_variant_override,
-            qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
-            eager,
-            offload,
-        },
-    )?;
+    let overrides = EngineOverrides {
+        gpus,
+        t5_variant: t5_variant_override,
+        qwen3_variant: qwen3_variant_override,
+        qwen2_variant: qwen2_variant_override,
+        qwen2_text_encoder_mode: qwen2_text_encoder_mode_override,
+        eager,
+        offload,
+    };
+    Ok((req, paths, effective_config, overrides))
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_local_engine(
+    req: &GenerateRequest,
+    config: &Config,
+    gpus: Option<String>,
+    t5_variant_override: Option<String>,
+    qwen3_variant_override: Option<String>,
+    qwen2_variant_override: Option<String>,
+    qwen2_text_encoder_mode_override: Option<String>,
+    eager: bool,
+    offload: bool,
+    cli_width: Option<u32>,
+    cli_height: Option<u32>,
+    cli_steps: Option<u32>,
+    cli_guidance: Option<f64>,
+) -> Result<(GenerateRequest, Box<dyn mold_inference::InferenceEngine>)> {
+    use super::local_engine::build_local_engine;
+    let (req, paths, config, overrides) = prepare_local_request(
+        req,
+        config,
+        gpus,
+        t5_variant_override,
+        qwen3_variant_override,
+        qwen2_variant_override,
+        qwen2_text_encoder_mode_override,
+        eager,
+        offload,
+        cli_width,
+        cli_height,
+        cli_steps,
+        cli_guidance,
+    )
+    .await?;
+    let engine = build_local_engine(&req.model, paths, &config, &overrides)?;
     Ok((req, engine))
 }
 
@@ -1174,7 +1212,31 @@ async fn generate_local_batch(
     output_format: OutputFormat,
     preview: bool,
 ) -> Result<GenerateResponse> {
-    let (base_req, mut engine) = prepare_local_engine(
+    if batch == 1 {
+        return generate_local(
+            req,
+            config,
+            gpus,
+            t5_variant_override,
+            qwen3_variant_override,
+            qwen2_variant_override,
+            qwen2_text_encoder_mode_override,
+            eager,
+            offload,
+            cli_width,
+            cli_height,
+            cli_steps,
+            cli_guidance,
+        )
+        .await;
+    }
+
+    use super::local_engine::{
+        apply_local_engine_env_overrides, build_local_engine_on_gpu, local_batch_assignments,
+        selected_local_gpu_ordinals,
+    };
+
+    let (base_req, paths, effective_config, overrides) = prepare_local_request(
         req,
         config,
         gpus,
@@ -1190,15 +1252,128 @@ async fn generate_local_batch(
         cli_guidance,
     )
     .await?;
+    apply_local_engine_env_overrides(
+        overrides.t5_variant.as_deref(),
+        overrides.qwen3_variant.as_deref(),
+        overrides.qwen2_variant.as_deref(),
+        overrides.qwen2_text_encoder_mode.as_deref(),
+    );
+    let ordinals = selected_local_gpu_ordinals(&effective_config, &overrides)?;
+    let assignments = local_batch_assignments(&ordinals, batch as usize)?;
+    let first_wave_len = ordinals.len().min(batch as usize);
+    let mut per_device = std::collections::BTreeMap::<usize, Vec<(u32, GenerateRequest)>>::new();
+    let shared_work = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<(
+        u32,
+        GenerateRequest,
+    )>::new()));
+    for (index, ordinal) in assignments.into_iter().enumerate() {
+        let mut iter_req = base_req.clone();
+        let index = index as u32;
+        iter_req.seed = Some(base_seed.wrapping_add(index as u64));
+        iter_req.batch_size = 1;
+        if let Some(prompt) = batch_prompts.and_then(|prompts| prompts.get(index as usize)) {
+            iter_req.prompt = prompt.clone();
+        }
+        if batch > 1 {
+            if (index as usize) < first_wave_len {
+                status!(
+                    "{} Queued local item {}/{} on GPU {} (seed: {})",
+                    theme::icon_info(),
+                    index + 1,
+                    batch,
+                    ordinal,
+                    iter_req.seed.unwrap(),
+                );
+            } else {
+                status!(
+                    "{} Queued local item {}/{} for the next free GPU (seed: {})",
+                    theme::icon_info(),
+                    index + 1,
+                    batch,
+                    iter_req.seed.unwrap(),
+                );
+            }
+        }
+        if (index as usize) < first_wave_len {
+            per_device
+                .entry(ordinal)
+                .or_default()
+                .push((index, iter_req));
+        } else {
+            shared_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back((index, iter_req));
+        }
+    }
 
-    engine = tokio::task::spawn_blocking(
-        move || -> Result<Box<dyn mold_inference::InferenceEngine>> {
-            let mut engine = engine;
+    let mut workers = tokio::task::JoinSet::new();
+    let mut progress_tasks = Vec::new();
+    for (ordinal, work) in per_device {
+        let model = base_req.model.clone();
+        let paths = paths.clone();
+        let config = effective_config.clone();
+        let overrides = overrides.clone();
+        let shared_work = std::sync::Arc::clone(&shared_work);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
+        let render = tokio::spawn(render_progress(rx));
+        workers.spawn_blocking(move || -> Result<Vec<(u32, GenerateResponse)>> {
+            // Engine construction, loading, generation, and drop all remain
+            // on this device's one local owner thread.
+            mold_inference::device::init_thread_gpu_ordinal(ordinal);
+            let mut engine =
+                build_local_engine_on_gpu(&model, paths, &config, &overrides, ordinal)?;
+            engine.set_on_progress(Box::new(move |event| {
+                let _ = tx.send(event.into());
+            }));
             engine.load()?;
-            Ok(engine)
-        },
-    )
-    .await??;
+            let mut completed = Vec::new();
+            for (index, request) in work {
+                completed.push((index, engine.generate(&request)?));
+            }
+            loop {
+                let next = shared_work
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pop_front();
+                let Some((index, request)) = next else {
+                    break;
+                };
+                completed.push((index, engine.generate(&request)?));
+            }
+            engine.clear_on_progress();
+            Ok(completed)
+        });
+        progress_tasks.push(render);
+    }
+
+    let mut completed = Vec::with_capacity(batch as usize);
+    let mut first_error = None;
+    while let Some(result) = workers.join_next().await {
+        match result {
+            Ok(Ok(items)) => completed.extend(items),
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
+        }
+    }
+    // Do not let an early sibling failure detach other GPU work. Every owner
+    // task runs to completion, drops its progress sender, and is joined before
+    // this call reports the first error.
+    for render in progress_tasks {
+        let _ = render.await;
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    completed.sort_by_key(|(index, _)| *index);
 
     let mut all_images: Vec<ImageData> = Vec::with_capacity(batch as usize);
     let mut last_video: Option<mold_core::VideoData> = None;
@@ -1206,46 +1381,7 @@ async fn generate_local_batch(
     let mut last_seed_used = base_seed;
     let mut last_model = String::new();
 
-    for i in 0..batch {
-        let mut iter_req = base_req.clone();
-        iter_req.seed = Some(base_seed.wrapping_add(i as u64));
-        iter_req.batch_size = 1;
-
-        // Use per-batch expanded prompt if available
-        if let Some(prompts) = batch_prompts {
-            if let Some(p) = prompts.get(i as usize) {
-                iter_req.prompt = p.clone();
-            }
-        }
-
-        if batch > 1 {
-            status!(
-                "{} Generating image {}/{} (seed: {})",
-                theme::icon_info(),
-                i + 1,
-                batch,
-                iter_req.seed.unwrap(),
-            );
-        }
-
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
-        engine.set_on_progress(Box::new(move |event| {
-            let _ = tx.send(event.into());
-        }));
-
-        let handle = tokio::task::spawn_blocking(
-            move || -> Result<(Box<dyn mold_inference::InferenceEngine>, GenerateResponse)> {
-                let mut engine = engine;
-                let response = engine.generate(&iter_req)?;
-                Ok((engine, response))
-            },
-        );
-        let render = tokio::spawn(render_progress(rx));
-        let (mut returned_engine, response) = handle.await??;
-        returned_engine.clear_on_progress(); // drop tx so render_progress can drain and exit
-        let _ = render.await;
-        engine = returned_engine;
-
+    for (i, response) in completed {
         total_time_ms += response.generation_time_ms;
         last_seed_used = response.seed_used;
         last_model = response.model.clone();

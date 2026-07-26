@@ -3146,6 +3146,7 @@ dependencies = [
  "mold-ai-db",
  "mold-ai-discord",
  "mold-ai-inference",
+ "mold-ai-scheduler",
  "mold-ai-server",
  "mold-ai-tui",
  "predicates",

@@ -6,8 +6,10 @@ pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
 pub mod device_registry;
+pub mod dispatch_mode;
 pub mod downloads;
 pub mod events;
+pub mod execution_plan;
 pub mod gpu_pool;
 pub mod gpu_worker;
 pub mod instance;
