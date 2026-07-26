@@ -43,6 +43,41 @@ export interface TelemetryView {
   storageLabel: string | null;
 }
 
+export interface HostCardGpuSummary {
+  label: string;
+  used: number;
+  total: number;
+}
+
+export function deriveHostCardGpu(
+  status: ServerStatus | null,
+): HostCardGpuSummary | null {
+  const gpus = status?.gpus ?? [];
+  if (gpus.length > 0) {
+    const counts = new Map<string, number>();
+    for (const gpu of gpus) {
+      counts.set(gpu.name, (counts.get(gpu.name) ?? 0) + 1);
+    }
+    const label = [...counts.entries()]
+      .map(([name, count]) => (count > 1 ? `${count}× ${name}` : name))
+      .join(" + ");
+    return {
+      label,
+      used: gpus.reduce((sum, gpu) => sum + gpu.vram_used_bytes, 0),
+      total: gpus.reduce((sum, gpu) => sum + gpu.vram_total_bytes, 0),
+    };
+  }
+
+  const info = status?.gpu_info;
+  return info
+    ? {
+        label: info.name,
+        used: info.vram_used_mb * 1_000_000,
+        total: info.vram_total_mb * 1_000_000,
+      }
+    : null;
+}
+
 function pct(used: number, total: number): number | null {
   if (!total || total <= 0) return null;
   return Math.min(100, Math.max(0, (used / total) * 100));
