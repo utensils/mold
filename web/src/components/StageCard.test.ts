@@ -11,6 +11,7 @@ function props(stage: ChainStageToml, isFirst = false) {
     stage,
     framesPerClipCap: 97,
     fadeFramesMax: 32,
+    motionTailFrames: 0,
   };
 }
 
@@ -59,6 +60,20 @@ describe("StageCard source image affordance", () => {
       props: props({ prompt: "", frames: 97 }),
     });
     expect(card.find(".drag-handle").exists()).toBe(true);
+  });
+
+  it("hides durations that cannot exceed the active motion tail", () => {
+    const card = mount(StageCard, {
+      props: {
+        ...props({ prompt: "", frames: 25 }),
+        motionTailFrames: 17,
+      },
+    });
+    expect(
+      card
+        .findAll(".sc__frames option")
+        .map((option) => Number(option.attributes("value"))),
+    ).toEqual([25, 33, 41, 49, 57, 65, 73, 81, 89, 97]);
   });
 
   it("emits pick-image when the attach button is clicked", async () => {

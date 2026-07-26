@@ -23,6 +23,7 @@ function props() {
     width: 1216,
     height: 704,
     fps: 24,
+    family: "ltx2",
   };
 }
 
@@ -85,12 +86,22 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
   it("hides the audio toggle for chain-capable but video-only families (LTX-Video)", async () => {
     vi.spyOn(api, "fetchChainLimits").mockResolvedValueOnce(ltxVideoLimits());
     const w = mount(ScriptComposer, {
-      props: { ...props(), model: "ltx-video-0.9.7-distilled:fp8" },
+      props: {
+        ...props(),
+        model: "ltx-video-0.9.7-distilled:fp8",
+        family: "ltx-video",
+      },
     });
     await flushPromises();
 
     const toggle = w.find('[data-test="script-composer-enable-audio"]');
     expect(toggle.exists()).toBe(false);
+    expect(w.text()).toContain("Join clips");
+    expect(
+      w
+        .findAll(".sc__frames option")
+        .map((option) => Number(option.attributes("value"))),
+    ).toContain(9);
   });
 
   it("hides the audio toggle when chain-limits fails (model not chain-capable)", async () => {
@@ -98,7 +109,7 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
       new Error("not chain-capable"),
     );
     const w = mount(ScriptComposer, {
-      props: { ...props(), model: "flux-dev:q4" },
+      props: { ...props(), model: "flux-dev:q4", family: "flux" },
     });
     await flushPromises();
 
@@ -183,7 +194,11 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
     );
     vi.spyOn(api, "fetchChainLimits").mockResolvedValueOnce(ltxVideoLimits());
     const w = mount(ScriptComposer, {
-      props: { ...props(), model: "ltx-video-0.9.7-distilled:fp8" },
+      props: {
+        ...props(),
+        model: "ltx-video-0.9.7-distilled:fp8",
+        family: "ltx-video",
+      },
     });
     await flushPromises();
 
@@ -197,5 +212,6 @@ describe("ScriptComposer — audio toggle visibility & default", () => {
       localStorage.getItem("mold.chain.draft.v2") ?? "{}",
     );
     expect(persisted.chain.enable_audio).toBeUndefined();
+    expect(persisted.chain.motion_tail_frames).toBe(0);
   });
 });

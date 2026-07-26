@@ -523,14 +523,17 @@ drawer. Retired browser routes such as `/catalog` render Page Not Found. Every r
 a live HF + Civitai proxy through `GET /api/catalog/search` with a 5-min
 in-process cache keyed by `sort=downloads|recent|rating` (no SQLite catalog
 table, no scanner, no scrape); unknown sort values return 422.
-Sequence-mode browse links enter this view with Video + Models filters. Web and
-desktop Create pickers contain only sequence-capable installed models and
-select one when available. A new Sequence starts with two required clip
-descriptions, uses the plain-language Continue motion / Cut / Crossfade
-transition labels, and keeps frame, seed, source, audio, and TOML tools under
+Sequence-mode browse links enter this view with Video + Models filters. Web,
+desktop, and iPhone Create pickers contain only sequence-capable installed
+models and select one when available. A new Sequence starts with two required clip
+descriptions, uses Continue motion / Cut / Crossfade for context-capable
+LTX-2 and Join clips for LTX-Video's zero-tail fallback, and keeps frame
+choices strictly above the active motion tail. Seed, source, audio, and TOML tools stay under
 progressive disclosure. Durable sequence creation, events, previews, and
 actions follow the selected machine with its API key in headers rather than
-falling back to the web-serving origin.
+falling back to another engine. iPhone persists only the host identity and
+durable job ID; the snapshotted route's API key stays in Keychain, and a saved
+instance identity must match exactly before recovery reattaches.
 
 **Pull catalog ids:** `mold pull hf:author/repo` and `mold pull cv:618692`
 hit the upstream APIs directly for the recipe. HF separated-bundling entries

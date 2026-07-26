@@ -166,6 +166,28 @@ button {
   padding: 16px max(16px, env(safe-area-inset-right)) 16px max(16px, env(safe-area-inset-left));
 }
 
+.mobile-create-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--edge);
+  border-radius: 13px;
+  background: var(--bench);
+}
+
+.mobile-create-mode button {
+  min-height: 44px;
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-weight: 650;
+}
+
+.mobile-create-mode button.active {
+  color: var(--on-accent);
+  background: var(--safelight);
+}
+
 .mobile-shell.is-settings-open .mobile-content {
   padding-bottom: max(24px, env(safe-area-inset-bottom));
 }

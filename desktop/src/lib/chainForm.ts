@@ -7,6 +7,7 @@
 import { parse as parseToml } from "smol-toml";
 import type { ChainRequest, ChainScript, ChainStage, TransitionMode } from "./api/types";
 import { DEFAULT_FADE_FRAMES, DEFAULT_MOTION_TAIL_FRAMES, DEFAULT_FPS } from "./chain";
+import { DEFAULT_SEQUENCE_CLIP_FRAMES } from "@studio/lib/sequence";
 
 export interface ChainStageForm {
   prompt: string;
@@ -43,7 +44,7 @@ export interface ChainForm {
 export function newStage(prompt = ""): ChainStageForm {
   return {
     prompt,
-    frames: 97,
+    frames: DEFAULT_SEQUENCE_CLIP_FRAMES,
     transition: "smooth",
     fadeFrames: DEFAULT_FADE_FRAMES,
     negativePrompt: "",
