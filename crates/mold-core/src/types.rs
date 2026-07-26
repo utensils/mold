@@ -1170,31 +1170,151 @@ pub struct GpuInfo {
     pub backend: Option<GpuBackend>,
 }
 
+/// One startup GPU selector.
+///
+/// Ordinals are legacy, process-local selectors resolved against the current
+/// CUDA-visible inventory. Identifiers are stable Mold IDs (`cuda:...`) or
+/// NVIDIA UUID forms (`GPU-...` / `MIG-...`) and are resolved after discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GpuSelector {
+    Ordinal(usize),
+    Identifier(String),
+}
+
+impl std::fmt::Display for GpuSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordinal(ordinal) => ordinal.fmt(formatter),
+            Self::Identifier(identifier) => identifier.fmt(formatter),
+        }
+    }
+}
+
 /// GPU selection for multi-GPU setups.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+///
+/// The custom untagged serde shape preserves the original TOML contract:
+/// `gpus = []` and `"all"` select all visible devices, `"none"` selects
+/// maintenance mode, numeric arrays are legacy ordinal allowlists, and string
+/// arrays contain UUID-based selectors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum GpuSelection {
     /// Use all discovered GPUs (default).
     #[default]
     All,
-    /// Use only these specific GPU ordinals.
-    Specific(Vec<usize>),
+    /// Start without GPU workers.
+    None,
+    /// Use only devices matching these startup selectors.
+    Specific(Vec<GpuSelector>),
 }
 
 impl GpuSelection {
-    /// Parse from comma-separated string like "0,1,2".
+    /// Parse a comma-separated CLI/environment selector list.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
-        if s.is_empty() || s.to_lowercase() == "all" {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
             return Ok(Self::All);
         }
-        let ordinals: Vec<usize> = s
+        if trimmed.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+
+        let selectors = trimmed
             .split(',')
-            .map(|s| s.trim().parse::<usize>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("invalid GPU ordinal: {e}"))?;
-        if ordinals.is_empty() {
-            return Ok(Self::All);
+            .map(|token| {
+                let token = token.trim();
+                if token.is_empty() {
+                    anyhow::bail!("GPU selector entries must not be empty");
+                }
+                if token.eq_ignore_ascii_case("all") {
+                    anyhow::bail!("'all' cannot be combined with specific GPU selectors");
+                }
+                if token.eq_ignore_ascii_case("none") {
+                    anyhow::bail!("'none' cannot be combined with specific GPU selectors");
+                }
+                if token.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return token
+                        .parse::<usize>()
+                        .map(GpuSelector::Ordinal)
+                        .map_err(|error| anyhow::anyhow!("invalid GPU ordinal '{token}': {error}"));
+                }
+                if token
+                    .get(..5)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cuda:"))
+                    || token
+                        .get(..4)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+                    || token
+                        .get(..4)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+                {
+                    return Ok(GpuSelector::Identifier(token.to_string()));
+                }
+                anyhow::bail!(
+                    "invalid GPU selector '{token}': expected an ordinal, cuda: ID, GPU- UUID, or MIG- UUID"
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self::Specific(selectors))
+    }
+}
+
+impl Serialize for GpuSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::All => serializer.serialize_str("all"),
+            Self::None => serializer.serialize_str("none"),
+            Self::Specific(selectors) => selectors.serialize(serializer),
         }
-        Ok(Self::Specific(ordinals))
+    }
+}
+
+impl<'de> Deserialize<'de> for GpuSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Keyword(String),
+            Ordinals(Vec<usize>),
+            Identifiers(Vec<String>),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Keyword(keyword) if keyword.eq_ignore_ascii_case("all") => Ok(Self::All),
+            Repr::Keyword(keyword) if keyword.eq_ignore_ascii_case("none") => Ok(Self::None),
+            Repr::Keyword(keyword) => Err(serde::de::Error::custom(format!(
+                "invalid gpus keyword '{keyword}': expected 'all' or 'none'"
+            ))),
+            Repr::Ordinals(ordinals) if ordinals.is_empty() => Ok(Self::All),
+            Repr::Ordinals(ordinals) => Ok(Self::Specific(
+                ordinals.into_iter().map(GpuSelector::Ordinal).collect(),
+            )),
+            Repr::Identifiers(identifiers) if identifiers.is_empty() => Ok(Self::All),
+            Repr::Identifiers(identifiers) => {
+                let selectors = identifiers
+                    .into_iter()
+                    .map(|identifier| match Self::parse(&identifier) {
+                        Ok(Self::Specific(mut selectors))
+                            if selectors.len() == 1
+                                && matches!(selectors[0], GpuSelector::Identifier(_)) =>
+                        {
+                            Ok(selectors.remove(0))
+                        }
+                        Ok(_) => Err(serde::de::Error::custom(format!(
+                            "gpus string arrays must contain UUID selectors, not '{identifier}'"
+                        ))),
+                        Err(error) => Err(serde::de::Error::custom(error)),
+                    })
+                    .collect::<Result<Vec<_>, D::Error>>()?;
+                Ok(Self::Specific(selectors))
+            }
+        }
     }
 }
 
@@ -1527,6 +1647,41 @@ pub enum GpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_selection_parses_all_none_and_legacy_empty() {
+        assert_eq!(GpuSelection::parse("").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("   ").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("ALL").unwrap(), GpuSelection::All);
+        assert_eq!(GpuSelection::parse("none").unwrap(), GpuSelection::None);
+    }
+
+    #[test]
+    fn gpu_selection_parses_ordinals_and_uuid_selectors() {
+        assert_eq!(
+            GpuSelection::parse(
+                "1,cuda:0123456789abcdef0123456789abcdef,\
+                 GPU-fedcba98-7654-3210-fedc-ba9876543210,\
+                 MIG-00112233-4455-6677-8899-aabbccddeeff"
+            )
+            .unwrap(),
+            GpuSelection::Specific(vec![
+                GpuSelector::Ordinal(1),
+                GpuSelector::Identifier("cuda:0123456789abcdef0123456789abcdef".to_string()),
+                GpuSelector::Identifier("GPU-fedcba98-7654-3210-fedc-ba9876543210".to_string()),
+                GpuSelector::Identifier("MIG-00112233-4455-6677-8899-aabbccddeeff".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn gpu_selection_rejects_keywords_mixed_with_specific_selectors() {
+        let error = GpuSelection::parse("all,0").unwrap_err().to_string();
+        assert!(error.contains("'all'"));
+
+        let error = GpuSelection::parse("none,GPU-abc").unwrap_err().to_string();
+        assert!(error.contains("'none'"));
+    }
 
     #[test]
     fn output_format_from_str_png() {

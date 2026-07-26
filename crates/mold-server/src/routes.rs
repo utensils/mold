@@ -607,16 +607,21 @@ pub(crate) async fn resolve_server_local_media_paths(
 }
 
 fn active_gpu_selection(state: &AppState) -> GpuSelection {
-    let ordinals: Vec<usize> = state
+    let selectors: Vec<mold_core::types::GpuSelector> = state
         .gpu_pool
         .workers
         .iter()
-        .map(|w| w.gpu.ordinal)
+        .map(|worker| {
+            worker.gpu.stable_id.as_ref().map_or_else(
+                || mold_core::types::GpuSelector::Ordinal(worker.gpu.ordinal),
+                |id| mold_core::types::GpuSelector::Identifier(id.clone()),
+            )
+        })
         .collect();
-    if ordinals.is_empty() {
-        GpuSelection::All
+    if selectors.is_empty() {
+        GpuSelection::None
     } else {
-        GpuSelection::Specific(ordinals)
+        GpuSelection::Specific(selectors)
     }
 }
 

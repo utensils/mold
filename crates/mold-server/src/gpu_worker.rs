@@ -1354,7 +1354,14 @@ mod tests {
         Arc::new(GpuWorker {
             gpu: DiscoveredGpu {
                 ordinal: 0,
+                stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
+                raw_cuda_uuid: Some([0; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
                 name: "fake-gpu-0".to_string(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
                 total_vram_bytes: 24_000_000_000,
                 free_vram_bytes: 24_000_000_000,
             },

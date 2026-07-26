@@ -136,19 +136,26 @@ pub(crate) fn build_local_engine(
         None => config.gpu_selection(),
     };
     let discovered = mold_inference::device::discover_gpus();
-    let available = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-    let gpu_ordinal = mold_inference::device::select_best_gpu(&available)
-        .map(|g| g.ordinal)
-        .unwrap_or(0);
+    let available = mold_inference::device::resolve_gpu_selection(&discovered, &gpu_selection)?;
+    let gpu_ordinal = if let Some(gpu) = mold_inference::device::select_best_gpu(&available) {
+        gpu.ordinal
+    } else if matches!(gpu_selection, mold_core::types::GpuSelection::None) {
+        anyhow::bail!("GPU selection 'none' cannot run local inference");
+    } else if !discovered.is_empty() {
+        anyhow::bail!("no CUDA device with a stable identity is available for local inference");
+    } else {
+        // CPU-only builds and hosts retain the existing correctness fallback.
+        0
+    };
 
-    Ok(mold_inference::create_engine(
+    mold_inference::create_engine(
         model.to_string(),
         paths,
         config,
         load_strategy,
         gpu_ordinal,
         is_offload,
-    )?)
+    )
 }
 
 #[cfg(test)]

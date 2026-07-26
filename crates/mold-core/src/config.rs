@@ -493,9 +493,12 @@ pub struct Config {
     #[serde(default)]
     pub lambda: crate::lambda::LambdaSettings,
 
-    /// GPU ordinals to use (None = all available).
+    /// GPUs to use at startup (None = all visible).
+    ///
+    /// Accepts legacy ordinal arrays, stable/NVIDIA UUID string arrays, and
+    /// explicit `"all"` / `"none"` keywords.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpus: Option<Vec<usize>>,
+    pub gpus: Option<crate::types::GpuSelection>,
 
     /// Max queued requests before 503 (default: 200).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,12 +605,7 @@ impl Default for Config {
 impl Config {
     /// Build a `GpuSelection` from the config's `gpus` field.
     pub fn gpu_selection(&self) -> crate::types::GpuSelection {
-        match &self.gpus {
-            Some(ordinals) if !ordinals.is_empty() => {
-                crate::types::GpuSelection::Specific(ordinals.clone())
-            }
-            _ => crate::types::GpuSelection::All,
-        }
+        self.gpus.clone().unwrap_or_default()
     }
 
     /// Return the configured queue size or the default (200).

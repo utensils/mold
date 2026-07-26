@@ -1,7 +1,8 @@
 use crate::engine::LoadStrategy;
 use crate::progress::ProgressReporter;
-use mold_core::types::GpuSelection;
+use mold_core::types::{GpuBackend, GpuSelection, GpuSelector};
 use std::cell::Cell;
+use std::collections::BTreeSet;
 
 // ── Thread-local GPU ordinal guard ─────────────────────────────────────────
 //
@@ -59,9 +60,115 @@ fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
 #[derive(Debug, Clone)]
 pub struct DiscoveredGpu {
     pub ordinal: usize,
+    /// Opaque backend-qualified identity. CUDA IDs exist only when the driver
+    /// returns a UUID; ordinals are never substituted as durable identity.
+    pub stable_id: Option<String>,
+    /// Exact bytes returned by `cuDeviceGetUuid_v2`.
+    pub raw_cuda_uuid: Option<[u8; 16]>,
+    /// CUDA kind when this is a CUDA device. `None` identifies Metal.
+    pub device_kind: Option<CudaDeviceKind>,
+    /// Identity/discovery failure that makes an otherwise visible device
+    /// unavailable for worker startup.
+    pub identity_error: Option<String>,
+    pub backend: GpuBackend,
     pub name: String,
+    pub compute_capability: Option<(u16, u16)>,
+    pub pci_bus_id: Option<String>,
     pub total_vram_bytes: u64,
     pub free_vram_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaDeviceKind {
+    FullGpu,
+    Mig,
+    UnknownCuda,
+}
+
+/// Build the public opaque identity directly from CUDA's UUID bytes.
+pub fn stable_cuda_id(uuid: [u8; 16]) -> String {
+    let mut id = String::with_capacity("cuda:".len() + uuid.len() * 2);
+    id.push_str("cuda:");
+    for byte in uuid {
+        use std::fmt::Write as _;
+        write!(&mut id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    id
+}
+
+/// A UUID-form `CUDA_VISIBLE_DEVICES` token proves the textual CUDA kind.
+///
+/// Numeric entries and an unset variable still preserve UUID identity, but
+/// do not prove whether CUDA returned a full GPU or a MIG compute instance.
+pub fn cuda_device_kind_from_visible_token(token: Option<&str>) -> CudaDeviceKind {
+    let token = token.map(str::trim);
+    if token.is_some_and(|value| {
+        value
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+    }) {
+        CudaDeviceKind::Mig
+    } else if token.is_some_and(|value| {
+        value
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+    }) {
+        CudaDeviceKind::FullGpu
+    } else {
+        CudaDeviceKind::UnknownCuda
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_visible_token(ordinal: usize) -> Option<String> {
+    std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()?
+        .split(',')
+        .nth(ordinal)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(feature = "cuda")]
+fn raw_cuda_uuid_v2(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
+) -> Result<[u8; 16], candle_core::cuda_backend::cudarc::driver::DriverError> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    use std::mem::MaybeUninit;
+
+    let mut uuid = MaybeUninit::<sys::CUuuid>::uninit();
+    // SAFETY: `context.cu_device()` is a live CUdevice obtained by cudarc and
+    // `uuid` points to writable storage of the exact CUDA ABI type.
+    unsafe {
+        sys::cuDeviceGetUuid_v2(uuid.as_mut_ptr(), context.cu_device()).result()?;
+        Ok(uuid.assume_init().bytes.map(|byte| byte as u8))
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_pci_bus_id(
+    context: &candle_core::cuda_backend::cudarc::driver::CudaContext,
+) -> Option<String> {
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    use std::ffi::CStr;
+
+    let mut buffer = [0_i8; 32];
+    // SAFETY: CUDA writes at most `buffer.len()` bytes and the CUdevice comes
+    // from the live cudarc context.
+    unsafe {
+        sys::cuDeviceGetPCIBusId(
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            context.cu_device(),
+        )
+        .result()
+        .ok()?;
+        CStr::from_ptr(buffer.as_ptr())
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
 }
 
 /// Discover all available GPUs on the system.
@@ -83,19 +190,68 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
                                 let name = ctx
                                     .name()
                                     .unwrap_or_else(|_| format!("CUDA Device {ordinal}"));
-                                // `CudaContext::new` binds the calling thread to
-                                // this ordinal, so `mem_get_info` returns this GPU's
-                                // VRAM.
-                                let (free, total) =
-                                    driver::result::mem_get_info().unwrap_or((0, 0));
+                                let compute_capability =
+                                    ctx.compute_capability().ok().and_then(|(major, minor)| {
+                                        Some((
+                                            u16::try_from(major).ok()?,
+                                            u16::try_from(minor).ok()?,
+                                        ))
+                                    });
+                                let pci_bus_id = cuda_pci_bus_id(&ctx);
+                                // The UUID call is the identity authority. A
+                                // failure leaves the record visible but
+                                // unavailable; no ordinal identity is minted.
+                                let (stable_id, raw_cuda_uuid, identity_error) =
+                                    match raw_cuda_uuid_v2(&ctx) {
+                                        Ok(uuid) => (Some(stable_cuda_id(uuid)), Some(uuid), None),
+                                        Err(error) => {
+                                            let message = format!(
+                                                "CUDA UUID lookup failed for visible device {ordinal}: {error}"
+                                            );
+                                            tracing::warn!("{message}");
+                                            (None, None, Some(message))
+                                        }
+                                    };
+                                // `CudaContext::new` binds the calling thread
+                                // to this ordinal, so this query is not
+                                // affected by physical-ordinal remapping.
+                                let (free, total) = ctx.mem_get_info().unwrap_or((0, 0));
                                 gpus.push(DiscoveredGpu {
                                     ordinal,
+                                    stable_id,
+                                    raw_cuda_uuid,
+                                    device_kind: Some(cuda_device_kind_from_visible_token(
+                                        cuda_visible_token(ordinal).as_deref(),
+                                    )),
+                                    identity_error,
+                                    backend: GpuBackend::Cuda,
                                     name,
+                                    compute_capability,
+                                    pci_bus_id,
                                     total_vram_bytes: total as u64,
                                     free_vram_bytes: free as u64,
                                 });
                             }
-                            Err(e) => tracing::warn!("failed to open CUDA device {ordinal}: {e}"),
+                            Err(error) => {
+                                let message =
+                                    format!("failed to open CUDA device {ordinal}: {error}");
+                                tracing::warn!("{message}");
+                                gpus.push(DiscoveredGpu {
+                                    ordinal,
+                                    stable_id: None,
+                                    raw_cuda_uuid: None,
+                                    device_kind: Some(cuda_device_kind_from_visible_token(
+                                        cuda_visible_token(ordinal).as_deref(),
+                                    )),
+                                    identity_error: Some(message),
+                                    backend: GpuBackend::Cuda,
+                                    name: format!("CUDA Device {ordinal}"),
+                                    compute_capability: None,
+                                    pci_bus_id: None,
+                                    total_vram_bytes: 0,
+                                    free_vram_bytes: 0,
+                                });
+                            }
                         }
                     }
                 }
@@ -112,7 +268,14 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
             let free = free_system_memory_bytes().unwrap_or(0);
             gpus.push(DiscoveredGpu {
                 ordinal: 0,
+                stable_id: Some("metal:default".to_string()),
+                raw_cuda_uuid: None,
+                device_kind: None,
+                identity_error: None,
+                backend: GpuBackend::Metal,
                 name: "Apple Metal GPU".to_string(),
+                compute_capability: None,
+                pci_bus_id: None,
                 total_vram_bytes: total,
                 free_vram_bytes: free,
             });
@@ -122,16 +285,166 @@ pub fn discover_gpus() -> Vec<DiscoveredGpu> {
     gpus
 }
 
-/// Filter discovered GPUs by user selection.
-pub fn filter_gpus(gpus: &[DiscoveredGpu], selection: &GpuSelection) -> Vec<DiscoveredGpu> {
+/// Resolve startup selectors against the current visible inventory.
+///
+/// UUID selectors are matched against raw CUDA identity and remain stable
+/// across `CUDA_VISIBLE_DEVICES` reordering. Invalid and ambiguous selectors
+/// fail instead of silently starting a different device set.
+pub fn resolve_gpu_selection(
+    gpus: &[DiscoveredGpu],
+    selection: &GpuSelection,
+) -> anyhow::Result<Vec<DiscoveredGpu>> {
     match selection {
-        GpuSelection::All => gpus.to_vec(),
-        GpuSelection::Specific(ordinals) => gpus
+        GpuSelection::None => Ok(Vec::new()),
+        GpuSelection::All => Ok(gpus
             .iter()
-            .filter(|g| ordinals.contains(&g.ordinal))
+            .filter(|gpu| gpu.stable_id.is_some())
             .cloned()
-            .collect(),
+            .collect()),
+        GpuSelection::Specific(selectors) => {
+            let mut selected_ids = BTreeSet::new();
+            for selector in selectors {
+                let matches = match selector {
+                    GpuSelector::Ordinal(ordinal) => {
+                        let Some(gpu) = gpus.iter().find(|gpu| gpu.ordinal == *ordinal) else {
+                            anyhow::bail!(
+                                "GPU ordinal {ordinal} did not match the current visible inventory; {}",
+                                visible_gpu_choices(gpus)
+                            );
+                        };
+                        if gpu.stable_id.is_none() {
+                            anyhow::bail!(
+                                "GPU ordinal {ordinal} is visible but has no stable CUDA identity: {}",
+                                gpu.identity_error.as_deref().unwrap_or("UUID unavailable")
+                            );
+                        }
+                        vec![gpu]
+                    }
+                    GpuSelector::Identifier(identifier) => {
+                        let normalized = normalize_uuid_selector(identifier)?;
+                        gpus.iter()
+                            .filter(|gpu| uuid_selector_matches(gpu, &normalized))
+                            .collect::<Vec<_>>()
+                    }
+                };
+
+                if matches.is_empty() {
+                    anyhow::bail!(
+                        "GPU selector '{}' did not match any device; {}",
+                        gpu_selector_display(selector),
+                        visible_gpu_choices(gpus)
+                    );
+                }
+                if matches.len() > 1 {
+                    anyhow::bail!(
+                        "GPU selector '{}' is ambiguous; matches: {}",
+                        gpu_selector_display(selector),
+                        matches
+                            .iter()
+                            .filter_map(|gpu| gpu.stable_id.as_deref())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if let Some(id) = matches[0].stable_id.as_ref() {
+                    selected_ids.insert(id.clone());
+                }
+            }
+
+            Ok(gpus
+                .iter()
+                .filter(|gpu| {
+                    gpu.stable_id
+                        .as_ref()
+                        .is_some_and(|id| selected_ids.contains(id))
+                })
+                .cloned()
+                .collect())
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NvidiaUuidKind {
+    AnyCuda,
+    FullGpu,
+    Mig,
+}
+
+struct NormalizedUuidSelector {
+    hex_prefix: String,
+    kind: NvidiaUuidKind,
+}
+
+fn normalize_uuid_selector(identifier: &str) -> anyhow::Result<NormalizedUuidSelector> {
+    let identifier = identifier.trim();
+    let (suffix, kind) = if identifier
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cuda:"))
+    {
+        (&identifier[5..], NvidiaUuidKind::AnyCuda)
+    } else if identifier
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GPU-"))
+    {
+        (&identifier[4..], NvidiaUuidKind::FullGpu)
+    } else if identifier
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MIG-"))
+    {
+        (&identifier[4..], NvidiaUuidKind::Mig)
+    } else {
+        anyhow::bail!("invalid GPU selector '{identifier}': expected cuda:, GPU-, or MIG- UUID");
+    };
+    let hex_prefix = suffix
+        .chars()
+        .filter(|character| *character != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if hex_prefix.is_empty()
+        || hex_prefix.len() > 32
+        || !hex_prefix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!(
+            "invalid GPU UUID selector '{identifier}': expected 1 to 32 hexadecimal digits"
+        );
+    }
+    Ok(NormalizedUuidSelector { hex_prefix, kind })
+}
+
+fn uuid_selector_matches(gpu: &DiscoveredGpu, selector: &NormalizedUuidSelector) -> bool {
+    let Some(uuid) = gpu.raw_cuda_uuid else {
+        return false;
+    };
+    let kind_matches = match (selector.kind, gpu.device_kind) {
+        (NvidiaUuidKind::AnyCuda, _) => true,
+        (NvidiaUuidKind::FullGpu, Some(CudaDeviceKind::Mig)) => false,
+        (NvidiaUuidKind::Mig, Some(CudaDeviceKind::FullGpu)) => false,
+        (NvidiaUuidKind::FullGpu | NvidiaUuidKind::Mig, _) => true,
+    };
+    kind_matches && stable_cuda_id(uuid)["cuda:".len()..].starts_with(selector.hex_prefix.as_str())
+}
+
+fn gpu_selector_display(selector: &GpuSelector) -> String {
+    match selector {
+        GpuSelector::Ordinal(ordinal) => ordinal.to_string(),
+        GpuSelector::Identifier(identifier) => identifier.clone(),
+    }
+}
+
+fn visible_gpu_choices(gpus: &[DiscoveredGpu]) -> String {
+    let choices = gpus
+        .iter()
+        .map(|gpu| {
+            format!(
+                "{}={}",
+                gpu.ordinal,
+                gpu.stable_id.as_deref().unwrap_or("<uuid unavailable>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("visible choices: [{}]", choices)
 }
 
 /// Select the single best GPU (most free VRAM) for local CLI use.
@@ -1400,6 +1713,206 @@ pub fn memory_status_string() -> Option<String> {
 mod tests {
     use super::*;
 
+    fn identified_gpu(ordinal: usize, uuid: [u8; 16]) -> DiscoveredGpu {
+        DiscoveredGpu {
+            ordinal,
+            stable_id: Some(stable_cuda_id(uuid)),
+            raw_cuda_uuid: Some(uuid),
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
+            name: format!("gpu{ordinal}"),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: Some(format!("00000000:{ordinal:02x}:00.0")),
+            total_vram_bytes: 24 * GB,
+            free_vram_bytes: 20 * GB,
+        }
+    }
+
+    #[test]
+    fn stable_cuda_identity_uses_lowercase_raw_uuid_bytes() {
+        assert_eq!(
+            stable_cuda_id([
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+                0x32, 0x10,
+            ]),
+            "cuda:0123456789abcdeffedcba9876543210"
+        );
+    }
+
+    #[test]
+    fn cuda_visible_tokens_prove_only_explicit_full_or_mig_kind() {
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("GPU-01234567-89ab-cdef-0123-456789abcdef")),
+            CudaDeviceKind::FullGpu
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("MIG-01234567-89ab-cdef-0123-456789abcdef")),
+            CudaDeviceKind::Mig
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(Some("1")),
+            CudaDeviceKind::UnknownCuda
+        );
+        assert_eq!(
+            cuda_device_kind_from_visible_token(None),
+            CudaDeviceKind::UnknownCuda
+        );
+    }
+
+    #[test]
+    fn startup_selection_supports_none_all_and_legacy_ordinals() {
+        let gpus = vec![identified_gpu(0, [0x11; 16]), identified_gpu(1, [0x22; 16])];
+
+        assert!(resolve_gpu_selection(&gpus, &GpuSelection::None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &GpuSelection::All)
+                .unwrap()
+                .iter()
+                .map(|gpu| gpu.ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            resolve_gpu_selection(
+                &gpus,
+                &GpuSelection::Specific(vec![GpuSelector::Ordinal(1)])
+            )
+            .unwrap()[0]
+                .stable_id
+                .as_deref(),
+            Some("cuda:22222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn startup_selection_tracks_uuid_across_visible_ordinal_reordering() {
+        let first = vec![identified_gpu(0, [0xaa; 16]), identified_gpu(1, [0xbb; 16])];
+        let reordered = vec![identified_gpu(0, [0xbb; 16]), identified_gpu(1, [0xaa; 16])];
+        let selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )]);
+
+        assert_eq!(
+            resolve_gpu_selection(&first, &selection).unwrap()[0].ordinal,
+            0
+        );
+        assert_eq!(
+            resolve_gpu_selection(&reordered, &selection).unwrap()[0].ordinal,
+            1
+        );
+    }
+
+    #[test]
+    fn startup_selection_accepts_nvidia_gpu_and_mig_uuid_forms() {
+        let mut full = identified_gpu(
+            0,
+            [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ],
+        );
+        full.device_kind = Some(CudaDeviceKind::FullGpu);
+        let mut mig = identified_gpu(
+            1,
+            [
+                0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+                0x32, 0x10,
+            ],
+        );
+        mig.device_kind = Some(CudaDeviceKind::Mig);
+        let gpus = vec![full, mig];
+
+        let full_selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "GPU-01234567-89ab-cdef-0123-456789abcdef".to_string(),
+        )]);
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &full_selection).unwrap()[0].ordinal,
+            0
+        );
+
+        let mig_selection = GpuSelection::Specific(vec![GpuSelector::Identifier(
+            "MIG-fedcba98-7654-3210-fedc-ba9876543210".to_string(),
+        )]);
+        assert_eq!(
+            resolve_gpu_selection(&gpus, &mig_selection).unwrap()[0].ordinal,
+            1
+        );
+    }
+
+    #[test]
+    fn startup_selection_rejects_ambiguous_or_missing_uuid_prefixes() {
+        let gpus = vec![
+            identified_gpu(0, [0xaa; 16]),
+            identified_gpu(1, [0xaa, 0xab, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        ];
+
+        let ambiguous =
+            GpuSelection::Specific(vec![GpuSelector::Identifier("cuda:aa".to_string())]);
+        let error = resolve_gpu_selection(&gpus, &ambiguous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ambiguous"));
+        assert!(error.contains("cuda:aaaaaaaa"));
+        assert!(error.contains("cuda:aaab0000"));
+
+        let missing = GpuSelection::Specific(vec![GpuSelector::Identifier("GPU-ff".to_string())]);
+        let error = resolve_gpu_selection(&gpus, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not match"));
+        assert!(error.contains("visible choices"));
+    }
+
+    #[test]
+    fn uuid_lookup_failures_never_fall_back_to_ordinal_identity() {
+        let unavailable = DiscoveredGpu {
+            ordinal: 0,
+            stable_id: None,
+            raw_cuda_uuid: None,
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: Some("UUID unavailable".to_string()),
+            backend: GpuBackend::Cuda,
+            name: "visible but unavailable".to_string(),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
+            total_vram_bytes: 24 * GB,
+            free_vram_bytes: 20 * GB,
+        };
+
+        assert!(
+            resolve_gpu_selection(std::slice::from_ref(&unavailable), &GpuSelection::All)
+                .unwrap()
+                .is_empty()
+        );
+        let error = resolve_gpu_selection(
+            &[unavailable],
+            &GpuSelection::Specific(vec![GpuSelector::Ordinal(0)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("stable CUDA identity"));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn live_cuda_discovery_uses_driver_uuid_identity_when_devices_exist() {
+        let gpus = discover_gpus();
+        for gpu in gpus {
+            assert_eq!(gpu.backend, GpuBackend::Cuda);
+            let raw = gpu
+                .raw_cuda_uuid
+                .unwrap_or_else(|| panic!("visible GPU {} has no raw CUDA UUID", gpu.ordinal));
+            let expected_id = stable_cuda_id(raw);
+            assert_eq!(gpu.stable_id.as_deref(), Some(expected_id.as_str()));
+            assert!(gpu.identity_error.is_none());
+            assert!(gpu.compute_capability.is_some());
+            assert!(gpu.pci_bus_id.as_deref().is_some_and(|id| id.contains(':')));
+        }
+    }
+
     // --- fmt_gb tests ---
 
     #[test]
@@ -1978,7 +2491,14 @@ mod tests {
     fn gpu(ordinal: usize, free_gb: u64) -> DiscoveredGpu {
         DiscoveredGpu {
             ordinal,
+            stable_id: Some(format!("cuda:{ordinal:032x}")),
+            raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+            device_kind: Some(CudaDeviceKind::UnknownCuda),
+            identity_error: None,
+            backend: GpuBackend::Cuda,
             name: format!("gpu{ordinal}"),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
             total_vram_bytes: 24 * GB,
             free_vram_bytes: free_gb * GB,
         }

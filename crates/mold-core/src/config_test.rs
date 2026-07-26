@@ -2124,6 +2124,72 @@ description = "stale"
     // ── TOML serde edge cases ───────────────────────────────────────────
 
     #[test]
+    fn config_gpu_selection_preserves_legacy_and_explicit_modes() {
+        let cases = [
+            ("", crate::types::GpuSelection::All),
+            ("gpus = []", crate::types::GpuSelection::All),
+            ("gpus = \"all\"", crate::types::GpuSelection::All),
+            ("gpus = \"none\"", crate::types::GpuSelection::None),
+            (
+                "gpus = [1, 0]",
+                crate::types::GpuSelection::Specific(vec![
+                    crate::types::GpuSelector::Ordinal(1),
+                    crate::types::GpuSelector::Ordinal(0),
+                ]),
+            ),
+            (
+                "gpus = [\"cuda:0123\", \"GPU-fedc\"]",
+                crate::types::GpuSelection::Specific(vec![
+                    crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
+                    crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+                ]),
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let config: Config = toml::from_str(source).unwrap();
+            assert_eq!(config.gpu_selection(), expected, "source: {source}");
+        }
+    }
+
+    #[test]
+    fn config_gpu_selection_rejects_mixed_selector_arrays() {
+        let error = toml::from_str::<Config>(r#"gpus = [0, "cuda:0123"]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("gpus"));
+
+        for source in [r#"gpus = ["all"]"#, r#"gpus = ["none"]"#] {
+            let error = toml::from_str::<Config>(source).unwrap_err().to_string();
+            assert!(error.contains("UUID selector"), "source: {source}");
+        }
+    }
+
+    #[test]
+    fn config_gpu_selection_roundtrips_untagged_toml_shapes() {
+        let selections = [
+            crate::types::GpuSelection::All,
+            crate::types::GpuSelection::None,
+            crate::types::GpuSelection::Specific(vec![
+                crate::types::GpuSelector::Ordinal(1),
+                crate::types::GpuSelector::Ordinal(0),
+            ]),
+            crate::types::GpuSelection::Specific(vec![
+                crate::types::GpuSelector::Identifier("cuda:0123".to_string()),
+                crate::types::GpuSelector::Identifier("GPU-fedc".to_string()),
+            ]),
+        ];
+
+        for selection in selections {
+            let mut config = Config::default();
+            config.gpus = Some(selection.clone());
+            let serialized = toml::to_string(&config).unwrap();
+            let parsed: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(parsed.gpu_selection(), selection);
+        }
+    }
+
+    #[test]
     fn config_deser_with_expand_section() {
         let toml_str = r#"
 default_model = "flux-dev"

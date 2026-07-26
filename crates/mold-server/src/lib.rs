@@ -91,15 +91,7 @@ pub async fn run_server(
     let fatal_cuda_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
 
     let discovered = mold_inference::device::discover_gpus();
-    let selected = mold_inference::device::filter_gpus(&discovered, &gpu_selection);
-
-    if selected.is_empty() && !discovered.is_empty() {
-        anyhow::bail!(
-            "No GPUs matched selection {:?} (discovered: {:?})",
-            gpu_selection,
-            discovered.iter().map(|g| g.ordinal).collect::<Vec<_>>()
-        );
-    }
+    let selected = mold_inference::device::resolve_gpu_selection(&discovered, &gpu_selection)?;
 
     let mut workers = Vec::new();
     let mut _gpu_thread_handles = Vec::new();

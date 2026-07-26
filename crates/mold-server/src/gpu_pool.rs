@@ -491,7 +491,14 @@ mod tests {
         let worker = Arc::new(GpuWorker {
             gpu: DiscoveredGpu {
                 ordinal,
+                stable_id: Some(format!("cuda:{ordinal:032x}")),
+                raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
                 name: format!("test-gpu-{ordinal}"),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
                 total_vram_bytes,
                 free_vram_bytes: total_vram_bytes,
             },

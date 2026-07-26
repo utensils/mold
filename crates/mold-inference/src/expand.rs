@@ -14,8 +14,8 @@ use mold_core::expand::{ExpandConfig, ExpandResult, PromptExpander};
 use mold_core::expand_prompts::{build_batch_messages, build_single_messages, format_chatml};
 
 use crate::device::{
-    discover_gpus, expand_vram_threshold, filter_gpus, memory_status_string,
-    preflight_memory_check, select_expand_device_with_preference, ExpandPlacement,
+    discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
+    resolve_gpu_selection, select_expand_device_with_preference, ExpandPlacement,
 };
 use crate::progress::{ProgressCallback, ProgressReporter};
 use mold_core::types::GpuSelection;
@@ -142,7 +142,7 @@ impl LocalExpander {
         // `discover_gpus()` returns an empty list on CPU-only builds, which
         // lands us directly on CPU.
         let discovered = discover_gpus();
-        let gpus = filter_gpus(&discovered, &self.gpu_selection);
+        let gpus = resolve_gpu_selection(&discovered, &self.gpu_selection)?;
         let is_metal = candle_core::utils::metal_is_available();
         let placement =
             select_expand_device_with_preference(&gpus, threshold, is_metal, self.preferred_gpu);
