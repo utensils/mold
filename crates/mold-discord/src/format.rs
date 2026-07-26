@@ -18,6 +18,9 @@ const COLOR_ERROR: u32 = 0xED4245; // red
 /// Format an SSE progress event into a human-readable status line.
 pub fn format_progress(event: &SseProgressEvent) -> String {
     match event {
+        SseProgressEvent::DependencyWait { dependency, reason } => {
+            format!("Waiting for {dependency}: {reason}")
+        }
         SseProgressEvent::Queued { position, .. } => {
             if *position == 0 {
                 "Starting generation...".to_string()
@@ -449,6 +452,18 @@ mod tests {
             id: String::new(),
         };
         assert_eq!(format_progress(&event), "Starting generation...");
+    }
+
+    #[test]
+    fn format_progress_dependency_wait() {
+        let event = SseProgressEvent::DependencyWait {
+            dependency: "ltx2.3-vae".to_string(),
+            reason: "download in progress".to_string(),
+        };
+        assert_eq!(
+            format_progress(&event),
+            "Waiting for ltx2.3-vae: download in progress"
+        );
     }
 
     #[test]

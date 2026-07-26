@@ -6160,6 +6160,12 @@ fn reduce_progress_state(progress: &mut ProgressState, event: SseProgressEvent) 
         // Latent previews are for canvas clients (web SPA / desktop app);
         // the TUI progress bar already tracks DenoiseStep.
         SseProgressEvent::Preview { .. } => {}
+        SseProgressEvent::DependencyWait { dependency, reason } => {
+            progress.current_stage = Some(format!("Waiting for {dependency}: {reason}"));
+            progress.stage_started_at = None;
+            progress.clear_download();
+            progress.clear_weight();
+        }
         SseProgressEvent::StageStart { name } => {
             progress.current_stage = Some(name);
             // Each StageStart counts as a new pipeline step; tracking the
@@ -6432,6 +6438,34 @@ mod tests {
         let state = ProgressState::default();
         assert_eq!(state.download_file_index, 0);
         assert_eq!(state.download_total_files, 0);
+    }
+
+    #[test]
+    fn dependency_wait_is_visible_without_counting_as_a_started_stage() {
+        let mut state = ProgressState {
+            stage_index: 3,
+            stage_started_at: Some(std::time::Instant::now()),
+            download_filename: "stale.safetensors".to_string(),
+            weight_component: "stale".to_string(),
+            ..Default::default()
+        };
+
+        reduce_progress_state(
+            &mut state,
+            SseProgressEvent::DependencyWait {
+                dependency: "ltx2.3-vae".to_string(),
+                reason: "download in progress".to_string(),
+            },
+        );
+
+        assert_eq!(
+            state.current_stage.as_deref(),
+            Some("Waiting for ltx2.3-vae: download in progress")
+        );
+        assert_eq!(state.stage_index, 3);
+        assert!(state.stage_started_at.is_none());
+        assert!(state.download_filename.is_empty());
+        assert!(state.weight_component.is_empty());
     }
 
     #[test]
