@@ -5,9 +5,9 @@ use crate::chain_job::{
 };
 use crate::error::MoldError;
 use crate::types::{
-    ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse, ImageData,
-    LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus, SseCompleteEvent,
-    SseErrorEvent, SseProgressEvent, VideoData,
+    DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
+    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -769,6 +769,19 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Read the server's stable, runtime-visible device inventory.
+    pub async fn devices(&self) -> Result<DeviceState> {
+        let resp = self
+            .client
+            .get(format!("{}/api/devices", self.base_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<DeviceState>()
+            .await?;
+        Ok(resp)
+    }
+
     /// Snapshot the server's generation queue (`GET /api/queue`).
     ///
     /// The listing covers everything currently queued or running — completed
@@ -1384,6 +1397,63 @@ mod tests {
             "/models/cv-827325/fluxRealSkin-V2.safetensors"
         );
         assert_eq!(loras[0].trained_words, ["realskin"]);
+    }
+
+    #[tokio::test]
+    async fn devices_fetches_and_parses_the_stable_inventory() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": [{
+                    "id": "cuda:0123456789abcdef0123456789abcdef",
+                    "backend": "cuda",
+                    "ordinal": 0,
+                    "device_kind": "full_gpu",
+                    "nvml_uuid": null,
+                    "physical_uuid": null,
+                    "mig_uuid": null,
+                    "mig_parent_uuid": null,
+                    "mig_profile": null,
+                    "name": "test gpu",
+                    "pci_bus_id": null,
+                    "compute_capability": "8.6",
+                    "memory": {
+                        "total_bytes": 24_000_000_000_u64,
+                        "used_bytes": null,
+                        "mold_used_bytes": null,
+                        "other_used_bytes": null
+                    },
+                    "telemetry": {
+                        "utilization_percent": null,
+                        "temperature_c": null,
+                        "power_w": null
+                    },
+                    "desired_enabled": true,
+                    "admin_state": "enabled",
+                    "health": "healthy",
+                    "activity": "idle",
+                    "schedulable": true,
+                    "unschedulable_reason": null,
+                    "loaded_models": [],
+                    "active_work_id": null,
+                    "planned_work_ids": []
+                }],
+                "plan_version": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let devices = MoldClient::new(&server.uri()).devices().await.unwrap();
+        assert_eq!(
+            devices.devices[0].id,
+            "cuda:0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(devices.devices[0].device_kind, crate::DeviceKind::FullGpu);
+        assert_eq!(devices.devices[0].memory.used_bytes, None);
     }
 
     // ── Queue endpoints ──────────────────────────────────────────────────

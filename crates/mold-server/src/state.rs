@@ -176,6 +176,9 @@ pub struct AppState {
     // ── Multi-GPU fields ────────────────────────────────────────────────────
     /// GPU worker pool for multi-GPU dispatch.
     pub gpu_pool: Arc<GpuPool>,
+    /// Read-only authoritative device inventory and preference projection.
+    /// Dispatch remains on `gpu_pool` until scheduler V2 lands.
+    pub device_registry: Arc<crate::device_registry::DeviceRegistry>,
     /// Maximum queue capacity (for status reporting and 503 responses).
     pub queue_capacity: usize,
 
@@ -425,6 +428,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -462,6 +466,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool,
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),
@@ -514,6 +519,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -553,6 +559,7 @@ impl AppState {
             instance_id: Arc::new(uuid::Uuid::new_v4().to_string()),
             discovery: Arc::new(DiscoveryState::default()),
             gpu_pool: Self::empty_gpu_pool(),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(cache)),
             active_generation: Arc::new(RwLock::new(None)),
@@ -592,6 +599,7 @@ impl AppState {
             gpu_pool: Arc::new(GpuPool {
                 workers: Vec::new(),
             }),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(Mutex::new(ModelCache::new(resolve_max_cached_models()))),
             active_generation: Arc::new(RwLock::new(None)),

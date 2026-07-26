@@ -138,7 +138,7 @@ Every `main()` calls `mold_db::config_sync::install_config_post_load_hook()`, wh
 
 ## Metadata DB
 
-`MOLD_HOME/mold.db` (override: `MOLD_DB_PATH`; disable: `MOLD_DB_DISABLE=1`). Current `SCHEMA_VERSION` lives in `crates/mold-db/src/migrations.rs`. Tables: `generations` (gallery rows), `settings` (KV, profile-scoped), `model_prefs` (per-resolved-model generation params, profile-scoped), `prompt_history`. Migrations are forward-only via `PRAGMA user_version`; add to `MIGRATIONS[]` and bump `SCHEMA_VERSION`.
+`MOLD_HOME/mold.db` (override: `MOLD_DB_PATH`; disable: `MOLD_DB_DISABLE=1`). Current `SCHEMA_VERSION` lives in `crates/mold-db/src/migrations.rs`. Tables: `generations` (gallery rows), `settings` (KV, profile-scoped), `model_prefs` (per-resolved-model generation params, profile-scoped), `prompt_history`, and machine-wide `device_preferences` (absent row = enabled by default; discovery never writes). Migrations are forward-only via `PRAGMA user_version`; add to `MIGRATIONS[]` and bump `SCHEMA_VERSION`.
 
 Gallery writes happen in the server (`queue.rs` upserts after disk write; background `reconcile(output_dir)` on startup), CLI (`crates/mold-cli/src/metadata_db.rs` via `record_local_save`), and TUI (`gallery_scan.rs`). DB is additive — embedded PNG/JPEG `mold:parameters` still get written, and open/upsert failures log and keep working. Open-time `quick_check` and query-time gallery corruption recovery quarantine `mold.db` plus WAL/SHM as `mold.db.corrupt-<timestamp>*` under a cross-process recovery lock, recreate the schema, and reconcile gallery rows from disk; the retained quarantine is the only source for manually salvaging settings/history.
 

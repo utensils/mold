@@ -593,6 +593,151 @@ mod tests {
         assert!(ct.contains("application/json"));
     }
 
+    #[tokio::test]
+    async fn devices_returns_registry_workers_with_nullable_telemetry() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:0123456789abcdef0123456789abcdef".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(0),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                    physical_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: Some("00000000:01:00.0".into()),
+                    name: "NVIDIA GeForce RTX 3090".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: true,
+                    telemetry_ordinal: Some(0),
+                },
+            ])),
+            Arc::new(None),
+        ));
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["plan_version"], 0);
+        assert_eq!(body["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["devices"][0]["id"],
+            "cuda:0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(body["devices"][0]["device_kind"], "full_gpu");
+        assert_eq!(body["devices"][0]["desired_enabled"], true);
+        assert_eq!(body["devices"][0]["schedulable"], true);
+        assert_eq!(
+            body["devices"][0]["telemetry"]["utilization_percent"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            body["devices"][0]["memory"]["used_bytes"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        state.device_registry = Arc::new(crate::device_registry::DeviceRegistry::new(
+            Arc::new(crate::device_registry::StaticDeviceDiscovery::new(vec![
+                crate::device_registry::DiscoveredDevice {
+                    stable_id: Some("cuda:fedcba9876543210fedcba9876543210".into()),
+                    backend: mold_core::GpuBackend::Cuda,
+                    visible_ordinal: Some(0),
+                    device_kind: mold_core::DeviceKind::FullGpu,
+                    nvml_uuid: None,
+                    physical_uuid: None,
+                    mig_uuid: None,
+                    mig_parent_uuid: None,
+                    mig_profile: None,
+                    pci_bus_id: None,
+                    name: "test-gpu-0".into(),
+                    compute_capability: Some((8, 6)),
+                    total_memory_bytes: Some(24_000_000_000),
+                    startup_allowed: true,
+                    telemetry_ordinal: Some(0),
+                },
+            ])),
+            Arc::new(None),
+        ));
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "gpu-host".into(),
+            timestamp: 1,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "test-gpu-0".into(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 9_000_000_000,
+                vram_used_by_mold: Some(8_000_000_000),
+                vram_used_by_other: Some(1_000_000_000),
+                gpu_utilization: Some(41),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64_000_000_000,
+                used: 20_000_000_000,
+                used_by_mold: 2_000_000_000,
+                used_by_other: 18_000_000_000,
+            },
+            cpu: None,
+        });
+        let app = app_with_state(state);
+
+        let devices = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            devices["devices"][0]["memory"]["used_bytes"],
+            9_000_000_000_u64
+        );
+        assert_eq!(
+            devices["devices"][0]["memory"]["mold_used_bytes"],
+            8_000_000_000_u64
+        );
+        assert_eq!(
+            devices["devices"][0]["telemetry"]["utilization_percent"],
+            41
+        );
+
+        let status = json_body(
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status["gpu_info"]["name"], "test-gpu-0");
+        assert_eq!(status["gpu_info"]["vram_total_mb"], 24_000);
+        assert_eq!(status["gpu_info"]["vram_used_mb"], 9_000);
+        assert_eq!(status["gpus"][0]["ordinal"], 0);
+        assert_eq!(status["gpus"][0]["vram_used_bytes"], 9_000_000_000_u64);
+        assert!(
+            status["gpu_info"].get("id").is_none(),
+            "legacy gpu_info shape must not gain device fields"
+        );
+    }
+
     // ── /api/queue ───────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1321,6 +1466,8 @@ mod tests {
         assert_eq!(body["queue"]["can_pause"], true);
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
+        assert_eq!(body["devices"]["available"], true);
+        assert_eq!(body["devices"]["lifecycle"], false);
     }
 
     /// Clients feature-detect server-side catalog sorting against this
@@ -2967,6 +3114,10 @@ mod tests {
             spec["paths"]["/api/generate"].is_object(),
             "spec should have /api/generate path"
         );
+        assert!(
+            spec["paths"]["/api/devices"]["get"].is_object(),
+            "spec should document GET /api/devices"
+        );
     }
 
     // ── /api/docs ────────────────────────────────────────────────────────────
@@ -3391,6 +3542,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
@@ -3456,6 +3608,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),
@@ -3724,6 +3877,7 @@ mod tests {
             gpu_pool: std::sync::Arc::new(crate::gpu_pool::GpuPool {
                 workers: Vec::new(),
             }),
+            device_registry: crate::device_registry::DeviceRegistry::empty(),
             queue_capacity: 200,
             model_cache: Arc::new(tokio::sync::Mutex::new(cache)),
             active_generation: Arc::new(std::sync::RwLock::new(None)),

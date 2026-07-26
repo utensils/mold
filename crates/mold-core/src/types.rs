@@ -1637,7 +1637,19 @@ pub struct RamSnapshot {
     pub used_by_other: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum GpuBackend {
     Cuda,
@@ -3758,6 +3770,121 @@ pub struct ExpandCapabilities {
     pub backend: ExpandBackend,
 }
 
+// ── Device inventory ────────────────────────────────────────────────────────
+
+/// Runtime-visible device classification. CUDA ordinals are deliberately not
+/// encoded here: clients must treat [`DeviceInfo::id`] as the durable,
+/// backend-qualified identity and `ordinal` as a process-local display hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    FullGpu,
+    Mig,
+    UnknownCuda,
+    Metal,
+}
+
+/// Administrator-requested lifecycle state. Phase A exposes this state
+/// read-only; lifecycle mutation lands in a later phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAdminState {
+    StartupExcluded,
+    Enabled,
+    Draining,
+    Disabled,
+}
+
+/// Transient device health. Health is never persisted as a user preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+    Poisoned,
+}
+
+/// Current worker activity, orthogonal to administrative and health state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceActivity {
+    Idle,
+    Loading,
+    Generating,
+    Upscaling,
+    AdminLoading,
+    Stopping,
+}
+
+/// Device memory snapshot. Unsupported or unavailable operational values are
+/// explicit JSON `null`, never fabricated zeroes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceMemoryInfo {
+    pub total_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    pub mold_used_bytes: Option<u64>,
+    pub other_used_bytes: Option<u64>,
+}
+
+/// Optional operational telemetry from the server's background sampler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceTelemetry {
+    pub utilization_percent: Option<u8>,
+    pub temperature_c: Option<f32>,
+    pub power_w: Option<f32>,
+}
+
+/// One runtime-visible compute device returned by `GET /api/devices`.
+///
+/// Stable IDs are opaque strings such as
+/// `cuda:0123456789abcdef0123456789abcdef` or `metal:default`. Consumers must
+/// URL-encode them and must not parse their components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub backend: GpuBackend,
+    pub ordinal: Option<usize>,
+    pub device_kind: DeviceKind,
+    pub nvml_uuid: Option<String>,
+    pub physical_uuid: Option<String>,
+    pub mig_uuid: Option<String>,
+    pub mig_parent_uuid: Option<String>,
+    pub mig_profile: Option<String>,
+    pub name: String,
+    pub pci_bus_id: Option<String>,
+    pub compute_capability: Option<String>,
+    pub memory: DeviceMemoryInfo,
+    pub telemetry: DeviceTelemetry,
+    pub desired_enabled: bool,
+    pub admin_state: DeviceAdminState,
+    pub health: DeviceHealth,
+    pub activity: DeviceActivity,
+    pub schedulable: bool,
+    pub unschedulable_reason: Option<String>,
+    pub loaded_models: Vec<String>,
+    pub active_work_id: Option<String>,
+    pub planned_work_ids: Vec<String>,
+}
+
+/// Read-only device inventory response. `plan_version` remains zero until the
+/// versioned scheduler plan is introduced; keeping the field now avoids a
+/// later response-shape fork.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeviceState {
+    pub devices: Vec<DeviceInfo>,
+    pub plan_version: u64,
+}
+
+/// Device API feature detection for clients talking to mixed-version hosts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCapabilities {
+    /// `GET /api/devices` is present.
+    pub available: bool,
+    /// Runtime enable/disable lifecycle mutation is present.
+    pub lifecycle: bool,
+}
+
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
 /// the shape extensible — future areas (inpainting, upscaling modes, etc.)
 /// can add their own sub-structs without churning existing fields.
@@ -3776,10 +3903,91 @@ pub struct ServerCapabilities {
     /// of their responses working (can_pause = can_cancel_all = false).
     #[serde(default)]
     pub queue: QueueCapabilities,
+    /// Absent on older servers. Missing means the read-only device resource
+    /// and lifecycle controls are unavailable.
+    #[serde(default)]
+    pub devices: DeviceCapabilities,
     /// Absent on older servers. Unlike default-false capability groups,
     /// absence here means unknown so newer clients may still try expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expand: Option<ExpandCapabilities>,
+}
+
+#[cfg(test)]
+mod device_types_tests {
+    use super::*;
+
+    #[test]
+    fn device_state_serializes_nullable_telemetry_and_stable_enums() {
+        let state = DeviceState {
+            devices: vec![DeviceInfo {
+                id: "cuda:0123456789abcdef0123456789abcdef".into(),
+                backend: GpuBackend::Cuda,
+                ordinal: Some(0),
+                device_kind: DeviceKind::FullGpu,
+                nvml_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                physical_uuid: Some("GPU-01234567-89ab-cdef-0123-456789abcdef".into()),
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: "NVIDIA GeForce RTX 3090".into(),
+                pci_bus_id: Some("00000000:01:00.0".into()),
+                compute_capability: Some("8.6".into()),
+                memory: DeviceMemoryInfo {
+                    total_bytes: Some(24_000_000_000),
+                    used_bytes: None,
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: DeviceTelemetry {
+                    utilization_percent: None,
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                admin_state: DeviceAdminState::Enabled,
+                health: DeviceHealth::Healthy,
+                activity: DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: vec![],
+                active_work_id: None,
+                planned_work_ids: vec![],
+            }],
+            plan_version: 0,
+        };
+
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["devices"][0]["device_kind"], "full_gpu");
+        assert_eq!(json["devices"][0]["admin_state"], "enabled");
+        assert_eq!(json["devices"][0]["health"], "healthy");
+        assert_eq!(json["devices"][0]["activity"], "idle");
+        assert_eq!(
+            json["devices"][0]["telemetry"]["utilization_percent"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["devices"][0]["memory"]["used_bytes"],
+            serde_json::Value::Null
+        );
+
+        let round_trip: DeviceState = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip.devices[0].device_kind, DeviceKind::FullGpu);
+        assert_eq!(
+            round_trip.devices[0].memory.total_bytes,
+            Some(24_000_000_000)
+        );
+    }
+
+    #[test]
+    fn old_capabilities_default_device_api_to_unavailable() {
+        let caps: ServerCapabilities = serde_json::from_str(
+            r#"{"gallery":{"can_delete":true},"catalog":{"available":false,"families":[]}}"#,
+        )
+        .unwrap();
+        assert!(!caps.devices.available);
+        assert!(!caps.devices.lifecycle);
+    }
 }
 
 /// One prompt-history row returned by `GET /api/history`. Deliberately a

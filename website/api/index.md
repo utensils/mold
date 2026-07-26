@@ -53,6 +53,7 @@ clients, and custom integrations on one generation contract.
 | `POST`   | `/api/upscale/stream`                     | Upscale with SSE tile progress                                                                                    |
 | `GET`    | `/api/resources`                          | Latest RAM/GPU resource snapshot                                                                                  |
 | `GET`    | `/api/resources/stream`                   | Resource snapshots as SSE                                                                                         |
+| `GET`    | `/api/devices`                            | Stable runtime-visible device inventory with nullable cached telemetry                                            |
 | `GET`    | `/api/events`                             | Server-wide lifecycle events (job + gallery) as SSE                                                               |
 | `GET`    | `/api/queue`                              | Server-authoritative job listing (queued + running, UUIDv4 ids); used by the SPA to reconcile dropped SSE streams |
 | `PATCH`  | `/api/queue/:id`                          | Update the preferred GPU lane and/or dispatch position for a queued job                                           |
@@ -83,7 +84,9 @@ clients, and custom integrations on one generation contract.
 servers advertise the accepted catalog sort values in
 `catalog.sort` (`downloads`, `recent`, `rating`), queue controls as
 `queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`, and
-server-assisted DNS-SD as `discovery.can_browse`. Clients must only request
+server-assisted DNS-SD as `discovery.can_browse`, and the read-only device
+resource as `devices.available` (`devices.lifecycle` remains false until
+runtime enable/disable controls are available). Clients must only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
@@ -851,6 +854,60 @@ Example response:
 
 Older single-GPU clients can still read `gpu_info`; multi-GPU-aware clients
 should prefer `gpus[]`, `queue_depth`, and `queue_capacity`.
+
+## `/api/devices`
+
+`GET /api/devices` is the stable multi-device resource. Device `id` values are
+opaque and must be URL-encoded rather than parsed; CUDA ordinals are
+process-local display hints. Operational values that the active sampler cannot
+provide are JSON `null`, not zero.
+
+```json
+{
+  "devices": [
+    {
+      "id": "cuda:0123456789abcdef0123456789abcdef",
+      "backend": "cuda",
+      "ordinal": 0,
+      "device_kind": "full_gpu",
+      "nvml_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+      "physical_uuid": "GPU-01234567-89ab-cdef-0123-456789abcdef",
+      "mig_uuid": null,
+      "mig_parent_uuid": null,
+      "mig_profile": null,
+      "name": "NVIDIA GeForce RTX 3090",
+      "pci_bus_id": "00000000:01:00.0",
+      "compute_capability": "8.6",
+      "memory": {
+        "total_bytes": 25769803776,
+        "used_bytes": 8589934592,
+        "mold_used_bytes": null,
+        "other_used_bytes": null
+      },
+      "telemetry": {
+        "utilization_percent": 41,
+        "temperature_c": null,
+        "power_w": null
+      },
+      "desired_enabled": true,
+      "admin_state": "enabled",
+      "health": "healthy",
+      "activity": "idle",
+      "schedulable": true,
+      "unschedulable_reason": null,
+      "loaded_models": [],
+      "active_work_id": null,
+      "planned_work_ids": []
+    }
+  ],
+  "plan_version": 0
+}
+```
+
+`plan_version` remains `0` until the versioned scheduler plan is active.
+Phase A is read-only: there is no device mutation endpoint yet. Desired
+enablement is machine-wide; a newly seen device with no explicit preference
+defaults to enabled.
 
 ## `/api/models/pull`
 

@@ -320,6 +320,18 @@ CREATE TABLE chain_job_stages (
 );
 "#;
 
+/// v12 → machine-wide desired device enablement. This table is deliberately
+/// not profile-scoped: hardware administration applies to the whole server.
+/// Missing rows mean enabled-by-default, so merely discovering a device never
+/// writes to the database.
+const V12_DEVICE_PREFERENCES: &str = r#"
+CREATE TABLE device_preferences (
+    device_id       TEXT PRIMARY KEY,
+    desired_enabled INTEGER NOT NULL CHECK (desired_enabled IN (0, 1)),
+    updated_at      INTEGER NOT NULL
+);
+"#;
+
 /// Ordered list of schema migrations. Version numbers must be strictly
 /// increasing — [`apply_pending`] validates this at startup.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -367,11 +379,15 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 11,
         kind: MigrationKind::Sql(V11_CHAIN_JOBS),
     },
+    Migration {
+        version: 12,
+        kind: MigrationKind::Sql(V12_DEVICE_PREFERENCES),
+    },
 ];
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// v1 → v2: rewrite every `output_dir` value to its canonical form so
 /// rows written by the v0.8.x release (which keyed on raw paths) keep
@@ -747,7 +763,12 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 11);
+        assert_eq!(SCHEMA_VERSION, 12);
+        assert!(table_exists(&conn, "device_preferences"));
+        assert_eq!(
+            column_names(&conn, "device_preferences"),
+            vec!["device_id", "desired_enabled", "updated_at"]
+        );
     }
 
     /// v6: `settings` keeps every existing row under `profile = 'default'`
@@ -826,6 +847,40 @@ mod tests {
             .unwrap();
         assert_eq!(profile, "default");
         assert_eq!(width, 1024);
+    }
+
+    #[test]
+    fn v11_to_v12_adds_empty_machine_wide_device_preferences() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 11)
+        {
+            match &migration.kind {
+                MigrationKind::Sql(sql) => tx.execute_batch(sql).unwrap(),
+                MigrationKind::Rust(run) => run(&tx).unwrap(),
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 11;").unwrap();
+        tx.commit().unwrap();
+
+        apply_pending(&mut conn).unwrap();
+
+        assert_eq!(current_version(&conn).unwrap(), 12);
+        assert!(table_exists(&conn, "device_preferences"));
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM device_preferences", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "discovery must not create preference rows");
+        assert!(
+            !column_names(&conn, "device_preferences")
+                .iter()
+                .any(|column| column == "profile"),
+            "device preferences are machine-wide, not profile-scoped"
+        );
     }
 
     /// v6: two rows with the same `key` but different `profile` values
@@ -999,8 +1054,8 @@ mod v9_tests {
     use rusqlite::Connection;
 
     #[test]
-    fn schema_version_is_eleven() {
-        assert_eq!(SCHEMA_VERSION, 11);
+    fn schema_version_is_twelve() {
+        assert_eq!(SCHEMA_VERSION, 12);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 pub mod chain_jobs;
 pub mod config_sync;
 mod db;
+mod device_preferences;
 pub mod metadata_io;
 pub mod migrations;
 mod model_prefs;
@@ -22,6 +23,7 @@ pub mod scan;
 pub mod settings;
 
 pub use db::MetadataDb;
+pub use device_preferences::{DevicePreference, DevicePreferences};
 pub use migrations::SCHEMA_VERSION;
 pub use model_prefs::ModelPrefs;
 pub use path::{canonical_dir, canonical_dir_string};

@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::Engine as _;
 use mold_core::{
-    types::GpuSelection, ActiveGenerationStatus, DiskUsage, GenerateRequest, GpuBackend, GpuInfo,
+    types::GpuSelection, ActiveGenerationStatus, DeviceState, DiskUsage, GenerateRequest,
     GpuWorkerState, ModelInfoExtended, ResourceSnapshot, ServerStatus, SseErrorEvent,
     SseProgressEvent,
 };
@@ -184,6 +184,7 @@ use crate::queue::clean_error_message;
         delete_model,
         create_gallery_media_token,
         server_status,
+        list_devices,
         list_queue,
         patch_queue_job,
         cancel_queue_job,
@@ -227,6 +228,14 @@ use crate::queue::clean_error_message;
         mold_core::ServerStatus,
         mold_core::ActiveGenerationStatus,
         mold_core::GpuInfo,
+        mold_core::DeviceState,
+        mold_core::DeviceInfo,
+        mold_core::DeviceKind,
+        mold_core::DeviceAdminState,
+        mold_core::DeviceHealth,
+        mold_core::DeviceActivity,
+        mold_core::DeviceMemoryInfo,
+        mold_core::DeviceTelemetry,
         mold_core::DiskUsage,
         mold_core::DiscoveryPeer,
         mold_core::SseProgressEvent,
@@ -390,6 +399,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/resources/stream", get(get_resources_stream))
         .route("/api/events", get(stream_events))
         .route("/api/status", get(server_status))
+        .route("/api/devices", get(list_devices))
         .route("/api/queue", get(list_queue).delete(cancel_all_queue))
         .route("/api/queue/pause", post(pause_queue))
         .route("/api/queue/resume", post(resume_queue))
@@ -2233,30 +2243,18 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         tokio::task::spawn_blocking(move || cache.store(models_disk_usage(&models_dir)));
     }
 
-    // Aggregate worker state from the pool, then overlay physical memory from
-    // the always-on NVML/nvidia-smi resource sampler. CUDA context queries can
-    // fail after an illegal-access Xid and used to turn a real 35 GB leak into
-    // a misleading zero in /api/status.
-    let mut gpu_statuses = state.gpu_pool.gpu_status();
-    if let Some(resources) = state.resources.latest() {
-        let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
-        for status in &mut gpu_statuses {
-            let Some(physical_ordinal) = crate::resources::physical_ordinal_for_worker(
-                status.ordinal,
-                visible_devices.as_deref(),
-            ) else {
-                continue;
-            };
-            if let Some(snapshot) = resources
-                .gpus
-                .iter()
-                .find(|gpu| gpu.ordinal == physical_ordinal)
-            {
-                status.vram_total_bytes = snapshot.vram_total;
-                status.vram_used_bytes = snapshot.vram_used;
-            }
-        }
-    }
+    // One registry snapshot backs both the additive device API and legacy
+    // status projections. It reads only the 1 Hz telemetry cache and worker
+    // atomics/locks; status never shells out or queries CUDA.
+    let resources = state.resources.latest();
+    let devices =
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let gpu_statuses = crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(
+        &state.gpu_pool,
+        &devices,
+    );
     let has_gpus = !gpu_statuses.is_empty();
 
     // Collect loaded models from GPU workers.
@@ -2323,7 +2321,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         models_loaded,
         busy,
         current_generation,
-        gpu_info: query_gpu_info(),
+        gpu_info: crate::device_registry::DeviceRegistry::legacy_gpu_info(&devices),
         uptime_secs: state.start_time.elapsed().as_secs(),
         hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
         memory_status: mold_inference::device::memory_status_string(),
@@ -2334,6 +2332,25 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         instance_id: Some(state.instance_id.as_ref().clone()),
         models_disk,
     })
+}
+
+/// Stable read-only inventory of every runtime-visible device. Unsupported
+/// telemetry stays null and the handler never performs device discovery.
+#[utoipa::path(
+    get,
+    path = "/api/devices",
+    tag = "server",
+    responses(
+        (status = 200, description = "Runtime-visible device inventory", body = DeviceState),
+    )
+)]
+async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
+    let resources = state.resources.latest();
+    Json(
+        state
+            .device_registry
+            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry),
+    )
 }
 
 // ── /health ───────────────────────────────────────────────────────────────────
@@ -2738,6 +2755,10 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_pause: true,
             can_cancel_all: true,
             can_reorder: true,
+        },
+        devices: mold_core::DeviceCapabilities {
+            available: true,
+            lifecycle: false,
         },
         expand: Some(expand),
     })
@@ -3691,62 +3712,6 @@ async fn scalar_docs() -> impl IntoResponse {
 </body>
 </html>"#,
     )
-}
-
-// ── GPU info ──────────────────────────────────────────────────────────────────
-
-fn query_gpu_info() -> Option<GpuInfo> {
-    query_cuda_gpu_info().or_else(query_metal_gpu_info)
-}
-
-fn query_cuda_gpu_info() -> Option<GpuInfo> {
-    let nvidia_smi = if std::path::Path::new("/run/current-system/sw/bin/nvidia-smi").exists() {
-        "/run/current-system/sw/bin/nvidia-smi"
-    } else {
-        "nvidia-smi"
-    };
-
-    let output = std::process::Command::new(nvidia_smi)
-        .args([
-            "--query-gpu=name,memory.total,memory.used",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8(output.stdout).ok()?;
-    let line = text.lines().next()?;
-    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    Some(GpuInfo {
-        name: parts[0].to_string(),
-        vram_total_mb: parts[1].parse().ok()?,
-        vram_used_mb: parts[2].parse().ok()?,
-        backend: Some(GpuBackend::Cuda),
-    })
-}
-
-/// Metal fallback (macOS only elsewhere returns an empty snapshot): unified
-/// memory means "VRAM" is the addressable system RAM — same convention as
-/// `/api/resources`. Gives Macs a non-null `gpu_info` so clients can rank
-/// hosts by backend/VRAM without a resources stream.
-fn query_metal_gpu_info() -> Option<GpuInfo> {
-    let gpu = crate::resources::metal_snapshot().into_iter().next()?;
-    Some(GpuInfo {
-        name: gpu.name,
-        // Resource snapshots are bytes; GpuInfo is MB (1 MB = 1_000_000,
-        // matching `parse_nvidia_smi_line`).
-        vram_total_mb: gpu.vram_total / 1_000_000,
-        vram_used_mb: gpu.vram_used / 1_000_000,
-        backend: Some(GpuBackend::Metal),
-    })
 }
 
 // ─── Downloads UI (Agent A) ──────────────────────────────────────────────────

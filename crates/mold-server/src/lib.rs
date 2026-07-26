@@ -5,6 +5,7 @@ pub mod chain_job_runner;
 pub mod chain_limits;
 pub mod test_support;
 // Agent A (downloads)
+pub mod device_registry;
 pub mod downloads;
 pub mod events;
 pub mod gpu_pool;
@@ -275,6 +276,53 @@ pub async fn run_server(
             );
         }
     }
+
+    // Freeze discovery-owned facts into the read registry. CUDA UUID/type
+    // fields are intentionally supplied through this adapter boundary by the
+    // UUID-first discovery change; the legacy baseline has no persistable
+    // CUDA identity, so such workers remain visible-but-unavailable here
+    // rather than inventing an ordinal identity.
+    let selected_ordinals: std::collections::BTreeSet<_> =
+        selected.iter().map(|gpu| gpu.ordinal).collect();
+    let backend = if cfg!(feature = "cuda") {
+        mold_core::GpuBackend::Cuda
+    } else {
+        mold_core::GpuBackend::Metal
+    };
+    let visible_devices = std::env::var("CUDA_VISIBLE_DEVICES").ok();
+    let inventory = discovered
+        .iter()
+        .map(|gpu| device_registry::DiscoveredDevice {
+            stable_id: (backend == mold_core::GpuBackend::Metal)
+                .then(|| "metal:default".to_string()),
+            backend,
+            visible_ordinal: Some(gpu.ordinal),
+            device_kind: if backend == mold_core::GpuBackend::Metal {
+                mold_core::DeviceKind::Metal
+            } else {
+                mold_core::DeviceKind::UnknownCuda
+            },
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            pci_bus_id: None,
+            name: gpu.name.clone(),
+            compute_capability: None,
+            total_memory_bytes: Some(gpu.total_vram_bytes),
+            startup_allowed: selected_ordinals.contains(&gpu.ordinal),
+            telemetry_ordinal: if backend == mold_core::GpuBackend::Metal {
+                Some(gpu.ordinal)
+            } else {
+                resources::physical_ordinal_for_worker(gpu.ordinal, visible_devices.as_deref())
+            },
+        })
+        .collect();
+    state.device_registry = std::sync::Arc::new(device_registry::DeviceRegistry::new(
+        std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
+        state.metadata_db.clone(),
+    ));
 
     // Resolve the persistent instance id (ephemeral when the DB is
     // unavailable). Scoped per (data dir, port) so two servers sharing one
