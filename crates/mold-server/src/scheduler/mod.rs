@@ -516,8 +516,33 @@ impl ReplanWindow {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HostMemoryReading {
+    total_bytes: u64,
+    available_bytes: u64,
+}
+
+trait HostMemorySampler: Send + Sync {
+    fn sample(&self) -> HostMemoryReading;
+}
+
+struct SystemHostMemorySampler;
+
+impl HostMemorySampler for SystemHostMemorySampler {
+    fn sample(&self) -> HostMemoryReading {
+        let ram = crate::resources::ram_snapshot();
+        HostMemoryReading {
+            total_bytes: ram.total,
+            available_bytes: ram
+                .available
+                .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct HostMemoryLedger {
+    sampler: Arc<dyn HostMemorySampler>,
     sample: Option<MemorySample>,
     sequence: u64,
     reservations: BTreeMap<String, HostReservation>,
@@ -545,8 +570,9 @@ struct HostReservation {
 }
 
 impl HostMemoryLedger {
-    fn new() -> Self {
+    fn new(sampler: Arc<dyn HostMemorySampler>) -> Self {
         Self {
+            sampler,
             sample: None,
             sequence: 0,
             reservations: BTreeMap::new(),
@@ -556,12 +582,11 @@ impl HostMemoryLedger {
     fn collect_now(&mut self) {
         self.sequence = self.sequence.saturating_add(1);
         let collection_started_sequence = self.sequence;
-        let ram = crate::resources::ram_snapshot();
+        let reading = self.sampler.sample();
         self.publish_sample(
             collection_started_sequence,
-            ram.total,
-            ram.available
-                .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
+            reading.total_bytes,
+            reading.available_bytes,
         );
     }
 
@@ -775,9 +800,21 @@ struct BeforeGrantHook {
 
 impl Coordinator {
     fn new(state: AppState) -> Self {
-        let mut memory = HostMemoryLedger::new();
+        Self::with_preparer_and_sampler(
+            state,
+            Arc::new(PostUpscalePreparer),
+            Arc::new(SystemHostMemorySampler),
+        )
+    }
+
+    fn with_preparer_and_sampler(
+        state: AppState,
+        preparer: Arc<dyn DependencyPreparer>,
+        sampler: Arc<dyn HostMemorySampler>,
+    ) -> Self {
+        let mut memory = HostMemoryLedger::new(sampler);
         memory.collect_now();
-        Self::with_preparer_and_memory(state, Arc::new(PostUpscalePreparer), memory)
+        Self::with_preparer_and_memory(state, preparer, memory)
     }
 
     fn with_preparer_and_memory(
@@ -2823,11 +2860,66 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex, RwLock};
 
-    fn ample_memory() -> HostMemoryLedger {
-        let mut memory = HostMemoryLedger::new();
-        let started = memory.begin_collection();
-        memory.publish_sample(started, 128 << 30, 112 << 30);
+    #[derive(Clone)]
+    struct FixedHostMemorySampler {
+        reading: HostMemoryReading,
+    }
+
+    impl HostMemorySampler for FixedHostMemorySampler {
+        fn sample(&self) -> HostMemoryReading {
+            self.reading
+        }
+    }
+
+    struct ScriptedHostMemorySampler {
+        readings: Mutex<std::collections::VecDeque<HostMemoryReading>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedHostMemorySampler {
+        fn new(readings: impl IntoIterator<Item = HostMemoryReading>) -> Arc<Self> {
+            Arc::new(Self {
+                readings: Mutex::new(readings.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl HostMemorySampler for ScriptedHostMemorySampler {
+        fn sample(&self) -> HostMemoryReading {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.readings
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted host-memory sample exhausted")
+        }
+    }
+
+    fn memory_reading(total_gib: u64, available_gib: u64) -> HostMemoryReading {
+        HostMemoryReading {
+            total_bytes: total_gib << 30,
+            available_bytes: available_gib << 30,
+        }
+    }
+
+    fn unsampled_memory(total_bytes: u64, available_bytes: u64) -> HostMemoryLedger {
+        HostMemoryLedger::new(Arc::new(FixedHostMemorySampler {
+            reading: HostMemoryReading {
+                total_bytes,
+                available_bytes,
+            },
+        }))
+    }
+
+    fn sampled_memory(total_bytes: u64, available_bytes: u64) -> HostMemoryLedger {
+        let mut memory = unsampled_memory(total_bytes, available_bytes);
+        memory.collect_now();
         memory
+    }
+
+    fn ample_memory() -> HostMemoryLedger {
+        sampled_memory(128 << 30, 112 << 30)
     }
 
     #[test]
@@ -3150,7 +3242,7 @@ mod tests {
 
     #[test]
     fn stale_plan_or_memory_generation_cannot_reserve() {
-        let mut ledger = HostMemoryLedger::new();
+        let mut ledger = unsampled_memory(40 << 30, 20 << 30);
         let started = ledger.begin_collection();
         ledger.publish_sample(started, 40 << 30, 20 << 30);
         let planner = Planner::default();
@@ -3179,7 +3271,7 @@ mod tests {
 
     #[test]
     fn concurrent_ledger_change_rejects_the_entire_matching_without_partial_reservations() {
-        let mut ledger = HostMemoryLedger::new();
+        let mut ledger = unsampled_memory(48 << 30, 40 << 30);
         let initial = ledger.begin_collection();
         ledger.publish_sample(initial, 48 << 30, 40 << 30);
         let planner = Planner::default();
@@ -3266,7 +3358,7 @@ mod tests {
 
     #[test]
     fn aggregate_eight_plus_eight_is_rejected_against_twelve_gib_headroom() {
-        let mut ledger = HostMemoryLedger::new();
+        let mut ledger = unsampled_memory(40 << 30, 20 << 30);
         let started = ledger.begin_collection();
         ledger.publish_sample(started, 40 << 30, 20 << 30);
         assert_eq!(ledger.headroom_bytes(), 12 << 30);
@@ -3294,7 +3386,7 @@ mod tests {
 
     #[test]
     fn concurrent_sample_keeps_commit_charged_until_following_collection() {
-        let mut ledger = HostMemoryLedger::new();
+        let mut ledger = unsampled_memory(40 << 30, 32 << 30);
         let initial = ledger.begin_collection();
         ledger.publish_sample(initial, 40 << 30, 32 << 30);
         ledger.reservations.insert(
@@ -3325,7 +3417,7 @@ mod tests {
 
     #[test]
     fn delayed_allocation_and_unavailable_sampler_remain_conservative() {
-        let mut unavailable = HostMemoryLedger::new();
+        let mut unavailable = unsampled_memory(40 << 30, 32 << 30);
         assert_eq!(unavailable.headroom_bytes(), 0);
 
         let started = unavailable.begin_collection();
@@ -3346,6 +3438,64 @@ mod tests {
                 "an uncommitted reservation must never be absorbed by samples"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn injected_low_memory_sample_blocks_dispatch_without_host_pressure_dependency() {
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let sampler = ScriptedHostMemorySampler::new([memory_reading(40, 8)]);
+        let mut coordinator = Coordinator::with_preparer_and_sampler(
+            state,
+            Arc::new(ImmediatePreparer),
+            sampler.clone(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "host-pressure-block",
+                "synthetic-model",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "host-pressure-block".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+
+        coordinator.dispatch_ready().await;
+
+        assert_eq!(sampler.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(coordinator.memory.headroom_bytes(), 0);
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("host-pressure-block"));
+        assert!(coordinator.leases.is_empty());
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "low sampled host memory must block transport"
+        );
     }
 
     #[test]
@@ -4087,10 +4237,12 @@ mod tests {
                 },
             })),
         );
-        let mut coordinator = Coordinator::with_preparer_and_memory(
+        let sampler =
+            ScriptedHostMemorySampler::new([memory_reading(128, 112), memory_reading(128, 104)]);
+        let mut coordinator = Coordinator::with_preparer_and_sampler(
             state,
             Arc::new(ImmediatePreparer),
-            ample_memory(),
+            sampler.clone(),
         );
         coordinator.leases.insert(
             device_id.clone(),
@@ -4125,6 +4277,15 @@ mod tests {
                 worker_generation: 1,
             },
             &mut immediate,
+        );
+        assert_eq!(sampler.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            coordinator
+                .memory
+                .sample
+                .map(|sample| sample.available_bytes),
+            Some(104 << 30),
+            "completion must resample through the injected production path"
         );
         coordinator.handle_worker_event(
             WorkerEvent::Ready {
@@ -4534,10 +4695,16 @@ mod tests {
             .register("plan-invalidated", "flux-dev:q4");
         queue.submit(job, 4).await.unwrap();
 
-        let mut coordinator = Coordinator::with_preparer_and_memory(
+        let sampler = ScriptedHostMemorySampler::new([
+            memory_reading(128, 112),
+            memory_reading(128, 104),
+            memory_reading(128, 104),
+            memory_reading(128, 104),
+        ]);
+        let mut coordinator = Coordinator::with_preparer_and_sampler(
             state.clone(),
             Arc::new(ImmediatePreparer),
-            ample_memory(),
+            sampler.clone(),
         );
         let mut immediate = false;
         coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
@@ -4720,6 +4887,11 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("invalidated 3 consecutive times"));
+        assert_eq!(
+            sampler.calls.load(Ordering::SeqCst),
+            4,
+            "initial collection plus every rejected retry must use the injected sampler"
+        );
     }
 
     struct SelectiveBlockingPreparer {

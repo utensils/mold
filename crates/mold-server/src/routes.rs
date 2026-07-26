@@ -2460,11 +2460,12 @@ async fn patch_device(
     authenticated: Option<Extension<crate::auth::ApiKeyAuthenticated>>,
     Json(request): Json<DeviceMutationRequest>,
 ) -> Result<axum::response::Response, ApiError> {
-    // Legacy and Observe own different dispatch protocols. Reject before
-    // discovery, persistence, worker mutation, or event publication.
-    if state.scheduled_work.dispatch_mode() != crate::dispatch_mode::DispatchMode::V2 {
+    // Only an authoritative V2 coordinator can own lifecycle transitions.
+    // Reject every other runtime before discovery, persistence, worker
+    // mutation, or event publication.
+    if !state.scheduled_work.v2_authoritative() {
         return Err(ApiError::with_code(
-            "runtime GPU lifecycle changes require MOLD_DISPATCH_MODE=v2",
+            "runtime GPU lifecycle changes require an authoritative scheduler V2 runtime",
             "DEVICE_LIFECYCLE_MODE_CONFLICT",
             StatusCode::CONFLICT,
         ));

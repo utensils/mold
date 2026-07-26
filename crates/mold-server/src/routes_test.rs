@@ -542,6 +542,14 @@ mod tests {
         ));
     }
 
+    fn install_authoritative_v2(state: &mut AppState) {
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+    }
+
     fn app_with_worker_pool(engine: MockEngine, ordinals: &[usize]) -> axum::Router {
         let mut state = AppState::with_engine(engine);
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
@@ -711,6 +719,7 @@ mod tests {
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = pool.clone();
         install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
         let registry = state.device_registry.clone();
         let mut events = state.events.subscribe();
         let app = app_with_state(state);
@@ -765,6 +774,7 @@ mod tests {
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = pool.clone();
         install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
         let registry = state.device_registry.clone();
         let app = app_with_state(state);
         let id = "cuda:00000000000000000000000000000000";
@@ -867,6 +877,7 @@ mod tests {
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = pool;
         install_worker_registry(&mut state);
+        install_authoritative_v2(&mut state);
         let app = app_with_state(state);
         let id = "cuda:00000000000000000000000000000000";
         let draining = tokio::time::timeout(
@@ -906,11 +917,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_and_observe_device_patch_reject_before_state_or_event_mutation() {
-        for mode in [
-            crate::dispatch_mode::DispatchMode::Legacy,
-            crate::dispatch_mode::DispatchMode::Observe,
-        ] {
+    async fn nonauthoritative_device_patch_rejects_before_state_or_event_mutation() {
+        let cases = [
+            (
+                "legacy",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Legacy,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "observe",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Observe,
+                    false,
+                    true,
+                ),
+            ),
+            (
+                "v2-maintenance",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::V2,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "v2-unavailable",
+                crate::scheduler::ScheduledWorkHandle::default(),
+            ),
+        ];
+        for (label, scheduled_work) in cases {
             let worker = gpu_worker_stub(0);
             worker.in_flight.store(1, Ordering::SeqCst);
             let pool = Arc::new(crate::gpu_pool::GpuPool {
@@ -919,9 +960,7 @@ mod tests {
             let mut state = AppState::with_engine(MockEngine::ready());
             state.gpu_pool = pool.clone();
             install_worker_registry(&mut state);
-            let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
-            state.scheduled_work =
-                crate::scheduler::ScheduledWorkHandle::for_mode(scheduled_tx, mode);
+            state.scheduled_work = scheduled_work;
             let registry = state.device_registry.clone();
             let mut events = state.events.subscribe();
             let app = app_with_state(state);
@@ -937,17 +976,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::CONFLICT, "{mode:?}");
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{label}");
             assert_eq!(
                 json_body(response).await["code"],
                 "DEVICE_LIFECYCLE_MODE_CONFLICT"
             );
-            assert!(registry.desired_enabled(id), "{mode:?}");
-            assert_eq!(pool.workers.len(), 1, "{mode:?}");
+            assert!(registry.desired_enabled(id), "{label}");
+            assert_eq!(pool.workers.len(), 1, "{label}");
             assert_eq!(
                 worker.drain_state.load(Ordering::SeqCst),
                 crate::gpu_pool::DRAIN_RUNNING,
-                "{mode:?}"
+                "{label}"
             );
             assert!(!worker.shutdown_requested.load(Ordering::SeqCst));
             let lifecycle_event = events.try_recv();
@@ -957,7 +996,7 @@ mod tests {
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty)
                         | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
                 ),
-                "{mode:?} published an event before rejecting: {lifecycle_event:?}"
+                "{label} published an event before rejecting: {lifecycle_event:?}"
             );
         }
     }
@@ -1053,6 +1092,7 @@ mod tests {
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                     scheduler_tx,
+                    owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached: 1,
                     cache_idle_ttl: Duration::from_secs(60),
                 },
@@ -1156,6 +1196,7 @@ mod tests {
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                     scheduler_tx,
+                    owner_spawner: Arc::new(crate::gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached: 1,
                     cache_idle_ttl: Duration::from_secs(60),
                 },
@@ -1186,6 +1227,7 @@ mod tests {
             ])),
             Arc::new(None),
         ));
+        install_authoritative_v2(&mut state);
 
         let response = app_with_state(state)
             .oneshot(
@@ -1235,6 +1277,7 @@ mod tests {
             ])),
             Arc::new(None),
         ));
+        install_authoritative_v2(&mut state);
         let app = app_with_state(state);
 
         let unknown = app

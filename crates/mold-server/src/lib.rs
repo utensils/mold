@@ -446,6 +446,7 @@ pub async fn run_server(
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
                     scheduler_tx: scheduler_worker_tx.clone(),
+                    owner_spawner: std::sync::Arc::new(gpu_pool::RuntimeOwnerThreadSpawner),
                     max_cached,
                     cache_idle_ttl,
                 },

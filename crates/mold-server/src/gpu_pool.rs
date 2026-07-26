@@ -802,12 +802,37 @@ impl GpuWorker {
     }
 }
 
+pub(crate) trait OwnerThreadSpawner: Send + Sync {
+    fn spawn(
+        &self,
+        worker: Arc<GpuWorker>,
+        job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+        scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+        cache_idle_ttl: Duration,
+    ) -> std::io::Result<std::thread::JoinHandle<()>>;
+}
+
+pub(crate) struct RuntimeOwnerThreadSpawner;
+
+impl OwnerThreadSpawner for RuntimeOwnerThreadSpawner {
+    fn spawn(
+        &self,
+        worker: Arc<GpuWorker>,
+        job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+        scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+        cache_idle_ttl: Duration,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        crate::gpu_worker::spawn_gpu_thread_async(worker, job_rx, scheduler_tx, cache_idle_ttl)
+    }
+}
+
 pub(crate) struct WorkerFactory {
     pub devices: BTreeMap<String, DiscoveredGpu>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
     pub fatal_cuda_error: Arc<AtomicBool>,
     pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
     pub scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    pub owner_spawner: Arc<dyn OwnerThreadSpawner>,
     pub max_cached: usize,
     pub cache_idle_ttl: Duration,
 }
@@ -1210,24 +1235,36 @@ impl WorkerSet {
             degraded_until: RwLock::new(None),
             job_tx,
         });
-        let handle = crate::gpu_worker::spawn_gpu_thread_async(
+        let owner_key = OwnerKey {
+            device_id: device_id.to_string(),
+            owner_epoch,
+        };
+        let handle = match factory.owner_spawner.spawn(
             worker.clone(),
             job_rx,
             factory.scheduler_tx.clone(),
             factory.cache_idle_ttl,
-        )
-        .map_err(|error| format!("failed to start GPU owner thread: {error}"))?;
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let error = format!("failed to start GPU owner thread: {error}");
+                if lifecycle.starting.get(device_id) == Some(&owner_epoch) {
+                    lifecycle.starting.remove(device_id);
+                }
+                lifecycle.start_announced.remove(&owner_key);
+                lifecycle.ready_seen.remove(&owner_key);
+                lifecycle.failed_seen.remove(&owner_key);
+                lifecycle
+                    .start_failures
+                    .insert(device_id.to_string(), error.clone());
+                return Err(error);
+            }
+        };
         self.active
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(worker);
-        lifecycle.handles.insert(
-            OwnerKey {
-                device_id: device_id.to_string(),
-                owner_epoch,
-            },
-            handle,
-        );
+        lifecycle.handles.insert(owner_key, handle);
         Ok(owner_epoch)
     }
 
@@ -1690,6 +1727,7 @@ mod tests {
                     fatal_cuda_error: Arc::new(AtomicBool::new(false)),
                     fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
                     scheduler_tx,
+                    owner_spawner: Arc::new(RuntimeOwnerThreadSpawner),
                     max_cached: 1,
                     cache_idle_ttl: Duration::from_secs(60),
                 },
@@ -1717,6 +1755,87 @@ mod tests {
         assert_eq!(workers.len(), 1);
         assert_eq!(workers.snapshot()[0].owner_epoch, 2);
         workers.shutdown_and_join_all();
+    }
+
+    struct FailFirstOwnerSpawner {
+        attempts: AtomicUsize,
+    }
+
+    impl OwnerThreadSpawner for FailFirstOwnerSpawner {
+        fn spawn(
+            &self,
+            worker: Arc<GpuWorker>,
+            job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+            scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+            _cache_idle_ttl: Duration,
+        ) -> std::io::Result<std::thread::JoinHandle<()>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(std::io::Error::other("synthetic thread spawn failure"));
+            }
+            std::thread::Builder::new()
+                .name("synthetic-owner-spawn-retry".to_string())
+                .spawn(move || {
+                    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Ready {
+                        device_id: crate::scheduler::worker_device_id(&worker),
+                        ordinal: worker.gpu.ordinal,
+                        owner_epoch: worker.owner_epoch,
+                        worker_generation: 1,
+                    });
+                    drop(job_rx);
+                })
+        }
+    }
+
+    #[tokio::test]
+    async fn synchronous_spawn_failure_clears_starting_and_retry_uses_fresh_epoch() {
+        let (template, _template_rx) = test_worker(0, 24_000_000_000);
+        let device_id = crate::scheduler::worker_device_id(&template);
+        let workers = WorkerSet::from(Vec::new());
+        let (scheduler_tx, mut scheduler_rx) = tokio::sync::mpsc::unbounded_channel();
+        let spawner = Arc::new(FailFirstOwnerSpawner {
+            attempts: AtomicUsize::new(0),
+        });
+        workers
+            .install_factory(
+                WorkerFactory {
+                    devices: BTreeMap::from([(device_id.clone(), template.gpu.clone())]),
+                    shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    scheduler_tx,
+                    owner_spawner: spawner.clone(),
+                    max_cached: 1,
+                    cache_idle_ttl: Duration::from_secs(60),
+                },
+                Vec::new(),
+            )
+            .unwrap();
+
+        let error = workers.start(&device_id).unwrap_err();
+        assert!(error.contains("synthetic thread spawn failure"));
+        assert!(!workers.is_starting(&device_id));
+        assert!(workers.is_empty());
+        assert!(workers
+            .last_start_error(&device_id)
+            .is_some_and(|error| error.contains("synthetic thread spawn failure")));
+        assert!(
+            scheduler_rx.try_recv().is_err(),
+            "failed spawn cannot emit Ready"
+        );
+
+        let retry_epoch = workers.start(&device_id).unwrap();
+        assert_eq!(retry_epoch, 2);
+        assert_eq!(spawner.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers.snapshot()[0].owner_epoch, retry_epoch);
+        assert!(matches!(
+            scheduler_rx.recv().await.unwrap(),
+            crate::scheduler::WorkerEvent::Ready { owner_epoch: 2, .. }
+        ));
+
+        assert!(workers.wait_and_reap(&device_id, retry_epoch));
+        assert!(workers.is_empty());
     }
 
     #[test]
