@@ -37,6 +37,19 @@ checksum_for() {
   ' "$sums"
 }
 
+if awk '
+  {
+    candidate = $2
+    sub(/^\*/, "", candidate)
+    sub(/^\.\//, "", candidate)
+  }
+  candidate == "mold-release-provenance.json" { found = 1 }
+  END { exit !found }
+' "$sums"; then
+  echo "SHA256SUMS already contains release provenance; generate provenance from artifact-only checksums, then append its checksum" >&2
+  exit 65
+fi
+
 sm86_name="mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz"
 sm89_name="mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz"
 sm86_archive_sha="$(checksum_for "$sm86_name")" \

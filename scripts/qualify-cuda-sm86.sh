@@ -9,6 +9,9 @@ Usage:
   qualify-cuda-sm86.sh \
     --release-tag <vMAJOR.MINOR.PATCH> \
     --sm86-binary <mold-x86_64-unknown-linux-gnu-cuda-sm86> \
+    --sm86-archive <mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz> \
+    --sm89-binary <mold-x86_64-unknown-linux-gnu-cuda-sm89> \
+    --sm89-archive <mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz> \
     --image-model <installed-flux-model-id> \
     --video-model <installed-video-model-id> \
     --chain-script <mold.chain.v1.toml> \
@@ -24,18 +27,22 @@ successful CUDA Driver API load of an exact embedded sm86 PTX module followed
 by normal full-Mold generation.
 
 PTX is compatible only with equal-or-higher device compute capabilities. An
-sm89 artifact is expected to fail on this sm86 hardware and must be recorded as
-a separate negative incompatibility regression, never as a positive smoke.
+exact sm89 ELF pinned to the same release is submitted to the CUDA Driver as a
+mandatory exact-ELF negative CUDA Driver control. It must be rejected on sm86
+hardware and is never treated as runtime generation or hardware qualification.
 Process-wide CUDA_FORCE_PTX_JIT is not used because it also forces NVIDIA
 runtime libraries through JIT and can fail before Mold's own PTX is reached.
 
-This records evidence; it is not a cryptographic attestation service and does
-not provision hardware.
+This produces cryptographically bound local evidence but is not a signed
+third-party attestation service and does not provision hardware.
 EOF
 }
 
 release_tag=""
 sm86_binary=""
+sm86_archive=""
+sm89_binary=""
+sm89_archive=""
 image_model=""
 video_model=""
 chain_script=""
@@ -46,6 +53,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-tag) release_tag="${2:-}"; shift 2 ;;
     --sm86-binary) sm86_binary="${2:-}"; shift 2 ;;
+    --sm86-archive) sm86_archive="${2:-}"; shift 2 ;;
+    --sm89-binary) sm89_binary="${2:-}"; shift 2 ;;
+    --sm89-archive) sm89_archive="${2:-}"; shift 2 ;;
     --image-model|--model) image_model="${2:-}"; shift 2 ;;
     --video-model) video_model="${2:-}"; shift 2 ;;
     --chain-script) chain_script="${2:-}"; shift 2 ;;
@@ -74,8 +84,14 @@ done
 [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] \
   || { echo "--timeout-seconds must be a positive integer" >&2; exit 64; }
 [[ -x "$sm86_binary" ]] || { echo "sm86 binary is not executable: $sm86_binary" >&2; exit 66; }
+[[ -f "$sm86_archive" ]] || { echo "sm86 archive is missing: $sm86_archive" >&2; exit 66; }
+[[ -x "$sm89_binary" ]] || { echo "sm89 binary is not executable: $sm89_binary" >&2; exit 66; }
+[[ -f "$sm89_archive" ]] || { echo "sm89 archive is missing: $sm89_archive" >&2; exit 66; }
 
 sm86_binary="$(realpath "$sm86_binary")"
+sm86_archive="$(realpath "$sm86_archive")"
+sm89_binary="$(realpath "$sm89_binary")"
+sm89_archive="$(realpath "$sm89_archive")"
 
 scratch_dir="$(mktemp -d)"
 trap 'rm -rf "$scratch_dir"' EXIT
@@ -85,12 +101,45 @@ report="$(realpath -m "$report")"
 evidence_dir="${report}.d"
 mkdir -p "$evidence_dir"
 
-provenance_url="https://github.com/utensils/mold/releases/download/${release_tag}/mold-release-provenance.json"
-provenance_path="$scratch_dir/mold-release-provenance.json"
+release_base_url="https://github.com/utensils/mold/releases/download/${release_tag}"
+provenance_url="${release_base_url}/mold-release-provenance.json"
+checksums_url="${release_base_url}/SHA256SUMS"
+provenance_path="$evidence_dir/mold-release-provenance.json"
+checksums_path="$evidence_dir/SHA256SUMS"
 curl --fail --silent --show-error --location \
   --retry 3 --retry-delay 1 --retry-connrefused \
   "$provenance_url" -o "$provenance_path" \
   || { echo "failed to fetch trusted official release provenance: $provenance_url" >&2; exit 69; }
+curl --fail --silent --show-error --location \
+  --retry 3 --retry-delay 1 --retry-connrefused \
+  "$checksums_url" -o "$checksums_path" \
+  || { echo "failed to fetch trusted official release checksums: $checksums_url" >&2; exit 69; }
+
+checksum_for() {
+  local filename="$1"
+  awk -v filename="$filename" '
+    {
+      candidate = $2
+      sub(/^\*/, "", candidate)
+      sub(/^\.\//, "", candidate)
+    }
+    candidate == filename {
+      if (found++) exit 2
+      value = $1
+    }
+    END {
+      if (found != 1 || value !~ /^[0-9a-f]{64}$/) exit 1
+      print value
+    }
+  ' "$checksums_path"
+}
+
+provenance_expected_sha="$(checksum_for "mold-release-provenance.json")" \
+  || { echo "SHA256SUMS does not bind exactly one release provenance file" >&2; exit 65; }
+provenance_actual_sha="$(sha256sum "$provenance_path" | awk '{print $1}')"
+[[ "$provenance_actual_sha" == "$provenance_expected_sha" ]] \
+  || { echo "release provenance does not match SHA256SUMS" >&2; exit 65; }
+checksums_sha="$(sha256sum "$checksums_path" | awk '{print $1}')"
 
 jq -e --arg tag "$release_tag" '
   .schema_version == "mold.release.provenance.v1"
@@ -100,22 +149,50 @@ jq -e --arg tag "$release_tag" '
   and .artifacts.sm86.cuda_target == "sm_86"
   and (.artifacts.sm86.archive_sha256 | test("^[0-9a-f]{64}$"))
   and (.artifacts.sm86.binary_sha256 | test("^[0-9a-f]{64}$"))
+  and .artifacts.sm89.filename == "mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz"
+  and .artifacts.sm89.cuda_target == "sm_89"
+  and (.artifacts.sm89.archive_sha256 | test("^[0-9a-f]{64}$"))
+  and (.artifacts.sm89.binary_sha256 | test("^[0-9a-f]{64}$"))
 ' "$provenance_path" >/dev/null \
   || { echo "official release provenance has an invalid shape or target mapping" >&2; exit 65; }
 
 source_sha="$(jq -r '.source_sha' "$provenance_path")"
 sm86_expected_sha="$(jq -r '.artifacts.sm86.binary_sha256' "$provenance_path")"
+sm86_expected_archive_sha="$(jq -r '.artifacts.sm86.archive_sha256' "$provenance_path")"
 sm86_actual_sha="$(sha256sum "$sm86_binary" | awk '{print $1}')"
+sm86_actual_archive_sha="$(sha256sum "$sm86_archive" | awk '{print $1}')"
+sm89_expected_sha="$(jq -r '.artifacts.sm89.binary_sha256' "$provenance_path")"
+sm89_expected_archive_sha="$(jq -r '.artifacts.sm89.archive_sha256' "$provenance_path")"
+sm89_actual_sha="$(sha256sum "$sm89_binary" | awk '{print $1}')"
+sm89_actual_archive_sha="$(sha256sum "$sm89_archive" | awk '{print $1}')"
 if [[ "$sm86_actual_sha" != "$sm86_expected_sha" ]]; then
   echo "artifact checksum does not match the exact official release provenance" >&2
   exit 65
 fi
+[[ "$sm86_actual_archive_sha" == "$sm86_expected_archive_sha" ]] \
+  || { echo "sm86 archive checksum does not match official release provenance" >&2; exit 65; }
+[[ "$sm89_actual_sha" == "$sm89_expected_sha" ]] \
+  || { echo "sm89 artifact checksum does not match official release provenance" >&2; exit 65; }
+[[ "$sm89_actual_archive_sha" == "$sm89_expected_archive_sha" ]] \
+  || { echo "sm89 archive checksum does not match official release provenance" >&2; exit 65; }
+[[ "$(checksum_for "mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz")" == "$sm86_expected_archive_sha" ]] \
+  || { echo "sm86 archive provenance disagrees with SHA256SUMS" >&2; exit 65; }
+[[ "$(checksum_for "mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz")" == "$sm89_expected_archive_sha" ]] \
+  || { echo "sm89 archive provenance disagrees with SHA256SUMS" >&2; exit 65; }
+[[ "$(tar -xOzf "$sm86_archive" mold | sha256sum | awk '{print $1}')" == "$sm86_actual_sha" ]] \
+  || { echo "sm86 archive does not contain the exact supplied binary" >&2; exit 65; }
+[[ "$(tar -xOzf "$sm89_archive" mold | sha256sum | awk '{print $1}')" == "$sm89_actual_sha" ]] \
+  || { echo "sm89 archive does not contain the exact supplied binary" >&2; exit 65; }
 
 "$repo_root/scripts/verify-cuda-release-binary.sh" "$sm86_binary" 86 >/dev/null
+"$repo_root/scripts/verify-cuda-release-binary.sh" "$sm89_binary" 89 >/dev/null
 source_short="${source_sha:0:7}"
 sm86_version="$("$sm86_binary" version)"
+sm89_version="$("$sm89_binary" version)"
 grep -Fq "$source_short" <<<"$sm86_version" \
   || { echo "sm86 binary does not identify release source $source_sha" >&2; exit 65; }
+grep -Fq "$source_short" <<<"$sm89_version" \
+  || { echo "sm89 binary does not identify release source $source_sha" >&2; exit 65; }
 
 device_csv="$scratch_dir/devices.csv"
 nvidia-smi \
@@ -154,6 +231,64 @@ mapfile -t device_uuids < <(jq -r '.[].uuid' <<<"$devices_json")
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 hostname_value="$(hostname)"
 
+run_sm89_driver_negative() {
+  local selected_uuid="$1"
+  local probe_path="$evidence_dir/sm89-driver-negative.json"
+  local command_path="$evidence_dir/sm89-driver-negative.command"
+  local rendered_command
+  printf -v rendered_command '%q ' env "CUDA_VISIBLE_DEVICES=$selected_uuid" \
+    "$repo_root/scripts/probe-cuda-embedded-ptx.py" \
+    "$sm89_binary" 89 --expect-incompatible
+  printf '%s\n' "$rendered_command" >"$command_path"
+
+  set +e
+  timeout "$timeout_seconds" env "CUDA_VISIBLE_DEVICES=$selected_uuid" \
+    "$repo_root/scripts/probe-cuda-embedded-ptx.py" \
+    "$sm89_binary" 89 --expect-incompatible >"$probe_path" 2>&1
+  local exit_code=$?
+  set -e
+  local status=failed
+  if [[ "$exit_code" -eq 0 ]] \
+    && jq -e \
+      --arg artifact_sha "$sm89_actual_sha" '
+        .expected_target == "sm_89"
+        and .observed_targets == ["sm_89"]
+        and .artifact_sha256 == $artifact_sha
+        and .expect_incompatible == true
+        and .loaded == false
+        and (.attempts | length) > 0
+        and all(.attempts[];
+          .loaded == false
+          and (.cuda_result == 209 or .cuda_result == 218))
+      ' "$probe_path" >/dev/null; then
+    status=passed
+  fi
+  local probe_sha
+  probe_sha="$(sha256sum "$probe_path" | awk '{print $1}')"
+  local command_sha
+  command_sha="$(sha256sum "$command_path" | awk '{print $1}')"
+  jq -n \
+    --arg status "$status" \
+    --argjson exit_code "$exit_code" \
+    --arg command "$rendered_command" \
+    --arg command_path "$command_path" \
+    --arg command_sha256 "$command_sha" \
+    --arg selected_gpu_uuid "$selected_uuid" \
+    --arg probe_path "$probe_path" \
+    --arg probe_sha256 "$probe_sha" \
+    '{
+      status: $status,
+      exit_code: $exit_code,
+      command: $command,
+      command_path: $command_path,
+      command_sha256: $command_sha256,
+      selected_gpu_uuid: $selected_gpu_uuid,
+      probe_path: $probe_path,
+      probe_sha256: $probe_sha256,
+      expected_incompatibility: true
+    }' >"$scratch_dir/sm89-driver-negative.json"
+}
+
 run_smoke() {
   local label="$1"
   local binary="$2"
@@ -164,11 +299,14 @@ run_smoke() {
   local output="$1"
   shift
   local log="$evidence_dir/${label}.log"
+  local compute_observation="$evidence_dir/${label}-compute-observations.csv"
   local result="$scratch_dir/${label}.json"
   local ptx_probe_path=""
   local ptx_probe_sha256=""
   local ptx_probe_exit=0
   local embedded_ptx_module_loaded=false
+  local generation_root_pid=0
+  local observed_compute_pid=0
   local -a env_args=(
     CUDA_VISIBLE_DEVICES="$selected_uuid"
     MOLD_ATTN=math
@@ -202,21 +340,41 @@ run_smoke() {
   set +e
   timeout "$timeout_seconds" env "${env_args[@]}" "${command[@]}" >"$log" 2>&1 &
   local run_pid=$!
+  generation_root_pid="$run_pid"
   local compute_observed=false
+  printf 'polled_at_utc,generation_root_pid,observed_pid,gpu_uuid\n' \
+    >"$compute_observation"
   while kill -0 "$run_pid" 2>/dev/null; do
     local observed_pids="|${run_pid}|"
     local child_pid
     while IFS= read -r child_pid; do
       [[ -n "$child_pid" ]] && observed_pids="${observed_pids}${child_pid}|"
     done < <(pgrep -P "$run_pid" 2>/dev/null || true)
-    if nvidia-smi \
+    local snapshot
+    snapshot="$(nvidia-smi \
       --query-compute-apps=pid,gpu_uuid \
-      --format=csv,noheader,nounits 2>/dev/null \
-      | awk -F', ' -v pids="$observed_pids" -v uuid="$selected_uuid" '
-          index(pids, "|" $1 "|") && $2 == uuid { found = 1 }
-          END { exit !found }
-        '; then
+      --format=csv,noheader,nounits 2>/dev/null || true)"
+    local polled_at
+    polled_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    while IFS= read -r observation_row; do
+      [[ -n "$observation_row" ]] || continue
+      local observation_pid="${observation_row%%,*}"
+      local observation_uuid="${observation_row#*,}"
+      observation_pid="${observation_pid//[[:space:]]/}"
+      observation_uuid="${observation_uuid#"${observation_uuid%%[![:space:]]*}"}"
+      printf '%s,%s,%s,%s\n' \
+        "$polled_at" "$run_pid" "$observation_pid" "$observation_uuid" \
+        >>"$compute_observation"
+    done <<<"$snapshot"
+    local matched_pid
+    matched_pid="$(
+      awk -F', *' -v pids="$observed_pids" -v uuid="$selected_uuid" '
+        index(pids, "|" $1 "|") && $2 == uuid { print $1; exit }
+      ' <<<"$snapshot"
+    )"
+    if [[ -n "$matched_pid" ]]; then
       compute_observed=true
+      observed_compute_pid="$matched_pid"
     fi
     sleep 0.1
   done
@@ -258,7 +416,9 @@ run_smoke() {
   fi
   if [[ "$media_decoded" == true ]] \
     && { [[ "$media_kind" != image ]] \
-      || { grep -Fq "attention backend selected" "$log" && grep -Eiq "math" "$log"; }; } \
+      || grep -Eq \
+        'mold_inference::attention: attention backend selected backend=Math([[:space:]]|$)' \
+        "$log"; } \
     && { [[ "$probe_embedded_ptx" != true ]] \
       || [[ "$embedded_ptx_module_loaded" == true ]]; }; then
     status=passed
@@ -268,6 +428,8 @@ run_smoke() {
   [[ -s "$output" ]] && output_sha="$(sha256sum "$output" | awk '{print $1}')"
   local log_sha
   log_sha="$(sha256sum "$log" | awk '{print $1}')"
+  local compute_observation_sha
+  compute_observation_sha="$(sha256sum "$compute_observation" | awk '{print $1}')"
   jq -n \
     --arg status "$status" \
     --argjson exit_code "$exit_code" \
@@ -276,7 +438,11 @@ run_smoke() {
     --arg output_sha256 "$output_sha" \
     --arg log_path "$log" \
     --arg log_sha256 "$log_sha" \
+    --arg compute_observation_path "$compute_observation" \
+    --arg compute_observation_sha256 "$compute_observation_sha" \
     --arg selected_gpu_uuid "$selected_uuid" \
+    --argjson generation_root_pid "$generation_root_pid" \
+    --argjson observed_compute_pid "$observed_compute_pid" \
     --argjson cuda_work_observed "$compute_observed" \
     --argjson media_decoded "$media_decoded" \
     --argjson width "$width" \
@@ -293,7 +459,11 @@ run_smoke() {
       output_sha256: $output_sha256,
       log_path: $log_path,
       log_sha256: $log_sha256,
+      compute_observation_path: $compute_observation_path,
+      compute_observation_sha256: $compute_observation_sha256,
       selected_gpu_uuid: $selected_gpu_uuid,
+      generation_root_pid: $generation_root_pid,
+      observed_compute_pid: $observed_compute_pid,
       cuda_work_observed: $cuda_work_observed,
       cuda_work_evidence: "exact generation PID and selected UUID observed together via nvidia-smi, plus Mold CUDA-device log",
       media_decoded: $media_decoded,
@@ -308,6 +478,7 @@ run_smoke() {
 
 uuid0="${device_uuids[0]}"
 uuid1="${device_uuids[1]:-${device_uuids[0]}}"
+run_sm89_driver_negative "$uuid0"
 run_smoke sm86_attention_image_smoke "$sm86_binary" "$uuid0" image false \
   "$evidence_dir/sm86_attention_image_smoke.png" \
   run "$image_model" "mold CUDA qualification calibration frame" \
@@ -338,7 +509,10 @@ tests_json="$(
     }'
 )"
 hardware_qualified="$(
-  jq -r 'all(.[]; .status == "passed")' <<<"$tests_json"
+  jq -nr \
+    --argjson tests "$tests_json" \
+    --slurpfile negative "$scratch_dir/sm89-driver-negative.json" \
+    'all($tests[]; .status == "passed") and $negative[0].status == "passed"'
 )"
 finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -346,21 +520,37 @@ jq -n \
   --arg source_sha "$source_sha" \
   --arg release_tag "$release_tag" \
   --arg provenance_url "$provenance_url" \
+  --arg provenance_path "$provenance_path" \
+  --arg provenance_sha "$provenance_actual_sha" \
+  --arg checksums_url "$checksums_url" \
+  --arg checksums_path "$checksums_path" \
+  --arg checksums_sha "$checksums_sha" \
   --arg started_at "$started_at" \
   --arg finished_at "$finished_at" \
   --arg hostname "$hostname_value" \
   --argjson devices "$devices_json" \
   --arg sm86_path "$sm86_binary" \
+  --arg sm86_archive_path "$sm86_archive" \
   --arg sm86_expected "$sm86_expected_sha" \
   --arg sm86_actual "$sm86_actual_sha" \
+  --arg sm86_expected_archive "$sm86_expected_archive_sha" \
+  --arg sm86_actual_archive "$sm86_actual_archive_sha" \
   --arg sm86_version "$sm86_version" \
+  --arg sm89_path "$sm89_binary" \
+  --arg sm89_archive_path "$sm89_archive" \
+  --arg sm89_expected "$sm89_expected_sha" \
+  --arg sm89_actual "$sm89_actual_sha" \
+  --arg sm89_expected_archive "$sm89_expected_archive_sha" \
+  --arg sm89_actual_archive "$sm89_actual_archive_sha" \
+  --arg sm89_version "$sm89_version" \
   --arg image_model "$image_model" \
   --arg video_model "$video_model" \
   --arg chain_script "$(realpath "$chain_script")" \
   --argjson tests "$tests_json" \
+  --slurpfile sm89_negative "$scratch_dir/sm89-driver-negative.json" \
   --argjson hardware_qualified "$hardware_qualified" \
   '{
-    schema_version: "mold.cuda.sm86.qualification.v4",
+    schema_version: "mold.cuda.sm86.qualification.v5",
     source_sha: $source_sha,
     release_tag: $release_tag,
     started_at: $started_at,
@@ -368,7 +558,12 @@ jq -n \
     hardware_qualified: $hardware_qualified,
     provenance: {
       official_release_manifest_url: $provenance_url,
-      official_release_manifest_verified: true
+      official_release_manifest_path: $provenance_path,
+      official_release_manifest_sha256: $provenance_sha,
+      official_release_manifest_verified: true,
+      checksum_manifest_url: $checksums_url,
+      checksum_manifest_path: $checksums_path,
+      checksum_manifest_sha256: $checksums_sha
     },
     host: {
       hostname: $hostname,
@@ -377,14 +572,31 @@ jq -n \
     artifacts: {
       sm86: {
         path: $sm86_path,
+        archive_path: $sm86_archive_path,
         expected_sha256: $sm86_expected,
         actual_sha256: $sm86_actual,
+        expected_archive_sha256: $sm86_expected_archive,
+        actual_archive_sha256: $sm86_actual_archive,
         cuda_target: "sm_86",
         trusted_checksum_verified: true,
         elf_target_verified: true,
         ptx_target_verified: true,
         source_identity_verified: true,
         version_output: $sm86_version
+      },
+      sm89: {
+        path: $sm89_path,
+        archive_path: $sm89_archive_path,
+        expected_sha256: $sm89_expected,
+        actual_sha256: $sm89_actual,
+        expected_archive_sha256: $sm89_expected_archive,
+        actual_archive_sha256: $sm89_actual_archive,
+        cuda_target: "sm_89",
+        trusted_checksum_verified: true,
+        elf_target_verified: true,
+        ptx_target_verified: true,
+        source_identity_verified: true,
+        version_output: $sm89_version
       }
     },
     workloads: {
@@ -392,7 +604,10 @@ jq -n \
       video_model: $video_model,
       chain_script: $chain_script
     },
-    tests: $tests
+    tests: $tests,
+    compatibility_controls: {
+      sm89_driver_negative: $sm89_negative[0]
+    }
   }' >"$report"
 
 "$repo_root/scripts/validate-cuda-qualification-report.py" "$report" >/dev/null

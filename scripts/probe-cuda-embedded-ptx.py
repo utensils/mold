@@ -26,6 +26,9 @@ INCOMPATIBLE_RESULTS = {
     CUDA_ERROR_INVALID_PTX,
 }
 VERSION_RE = re.compile(rb"\.version[ \t]+[0-9]+(?:\.[0-9]+)?")
+TARGET_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.target[ \t]+([^\r\n]+)")
+TARGET_OPERAND_RE = re.compile(rb"^sm_([0-9]+)$")
+ADDRESS_SIZE_RE = re.compile(rb"(?m)^[ \t]*\.address_size[ \t]+(?:32|64)[ \t]*$")
 
 
 def fail(message: str) -> None:
@@ -45,30 +48,95 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def extract_entry_modules(data: bytes, compute_cap: str) -> list[dict[str, object]]:
-    """Extract self-contained first-entry PTX candidates for an exact target.
+def parse_target_operand(raw_directive: bytes) -> tuple[str | None, str]:
+    """Return a normalized sm target and the printable raw operand."""
+
+    printable = raw_directive.decode("ascii", "replace").strip()
+    operand = raw_directive.split(b",", 1)[0].strip().split(None, 1)[0]
+    match = TARGET_OPERAND_RE.fullmatch(operand)
+    if match is None:
+        return None, printable
+    return f"sm_{match.group(1).decode('ascii')}", printable
+
+
+def extract_entry_modules(data: bytes) -> dict[str, object]:
+    """Inventory self-contained first-entry PTX candidates in an exact artifact.
 
     Rust stores PTX as string data without a guaranteed NUL terminator in the
     final ELF. Starting at each `.version`, retain the header and first complete
     `.entry` body. Most Candle modules are self-contained at that boundary; the
     driver tries candidates in order because an entry may reference a helper
     function that appears later in its original module.
+
+    Target-like text outside a complete `.version`/`.target`/`.address_size`/
+    `.entry` module is ignored. Conversely, a PTX-looking module with a malformed
+    target or missing address/entry is reported so release verification fails
+    closed instead of silently treating it as unrelated static content.
     """
 
-    target_re = re.compile(
-        rb"\.target[ \t]+sm_" + compute_cap.encode("ascii") + rb"(?=[ \t\r\n,])"
-    )
     candidates: list[dict[str, object]] = []
+    malformed_modules: list[dict[str, object]] = []
+    incomplete_modules: list[dict[str, object]] = []
     seen_hashes: set[str] = set()
+    version_matches = list(VERSION_RE.finditer(data))
 
-    for version_match in VERSION_RE.finditer(data):
+    for match_index, version_match in enumerate(version_matches):
         start = version_match.start()
-        search_end = min(len(data), start + 64 * 1024)
+        next_version = (
+            version_matches[match_index + 1].start()
+            if match_index + 1 < len(version_matches)
+            else len(data)
+        )
+        # Generated modules can place large constant tables before their first
+        # kernel entry, so the entry search must cover the complete embedded
+        # module rather than an arbitrary 64 KiB prefix.
+        search_end = min(len(data), next_version, start + 2 * 1024 * 1024)
+        header_search_end = min(search_end, start + 16 * 1024)
+        target_match = TARGET_DIRECTIVE_RE.search(data, start, header_search_end)
+        if target_match is None:
+            continue
+        target, raw_target = parse_target_operand(target_match.group(1))
+        if target is None:
+            malformed_modules.append(
+                {
+                    "offset": start,
+                    "reason": "malformed target directive",
+                    "target_directive": raw_target,
+                }
+            )
+            continue
+
         entry = data.find(b".entry", start, search_end)
-        if entry < 0 or target_re.search(data, start, entry) is None:
+        if entry < 0:
+            incomplete_modules.append(
+                {
+                    "offset": start,
+                    "reason": "missing entry",
+                    "target": target,
+                }
+            )
+            continue
+        if target_match.start() > entry:
+            continue
+        header = data[start:entry]
+        if ADDRESS_SIZE_RE.search(header) is None:
+            incomplete_modules.append(
+                {
+                    "offset": start,
+                    "reason": "missing or invalid address_size",
+                    "target": target,
+                }
+            )
             continue
         opening_brace = data.find(b"{", entry, min(search_end, entry + 16 * 1024))
         if opening_brace < 0:
+            incomplete_modules.append(
+                {
+                    "offset": start,
+                    "reason": "entry has no body",
+                    "target": target,
+                }
+            )
             continue
 
         depth = 0
@@ -84,6 +152,13 @@ def extract_entry_modules(data: bytes, compute_cap: str) -> list[dict[str, objec
                     end = index + 1
                     break
         if end is None:
+            incomplete_modules.append(
+                {
+                    "offset": start,
+                    "reason": "entry body is incomplete",
+                    "target": target,
+                }
+            )
             continue
 
         ptx = data[start:end] + b"\n"
@@ -95,12 +170,20 @@ def extract_entry_modules(data: bytes, compute_cap: str) -> list[dict[str, objec
             {
                 "offset": start,
                 "length": len(ptx),
+                "target": target,
                 "ptx_sha256": ptx_sha256,
                 "_ptx": ptx,
             }
         )
 
-    return candidates
+    return {
+        "candidates": candidates,
+        "malformed_modules": malformed_modules,
+        "incomplete_modules": incomplete_modules,
+        "observed_targets": sorted(
+            {candidate["target"] for candidate in candidates}
+        ),
+    }
 
 
 class CudaDriver:
@@ -203,16 +286,39 @@ def main() -> int:
         fail("--extract-only and --expect-incompatible cannot be combined")
 
     data = args.binary.read_bytes()
-    candidates = extract_entry_modules(data, args.compute_cap)
-    if not candidates:
-        fail(f"no embedded sm_{args.compute_cap} PTX entry modules found")
+    inventory = extract_entry_modules(data)
+    candidates = inventory["candidates"]
+    malformed_modules = inventory["malformed_modules"]
+    incomplete_modules = inventory["incomplete_modules"]
+    observed_targets = inventory["observed_targets"]
+    expected_target = f"sm_{args.compute_cap}"
+    if malformed_modules:
+        fail(f"malformed embedded PTX modules: {malformed_modules}")
+    if incomplete_modules:
+        fail(f"incomplete embedded PTX modules: {incomplete_modules}")
+    if observed_targets != [expected_target]:
+        rendered = ", ".join(observed_targets) if observed_targets else "none"
+        fail(
+            f"complete embedded PTX target set is {{{rendered}}}; "
+            f"required set is {{{expected_target}}}"
+        )
+    expected_candidates = [
+        candidate for candidate in candidates if candidate["target"] == expected_target
+    ]
+    if not expected_candidates:
+        fail(f"no complete embedded {expected_target} PTX entry modules found")
 
     result: dict[str, object] = {
         "artifact_path": str(args.binary.resolve()),
         "artifact_sha256": sha256_file(args.binary),
-        "expected_target": f"sm_{args.compute_cap}",
-        "candidate_count": len(candidates),
-        "candidates": [public_candidate(candidate) for candidate in candidates],
+        "expected_target": expected_target,
+        "observed_targets": observed_targets,
+        "candidate_count": len(expected_candidates),
+        "candidates": [
+            public_candidate(candidate) for candidate in expected_candidates
+        ],
+        "malformed_modules": malformed_modules,
+        "incomplete_modules": incomplete_modules,
         "attempts": [],
         "loaded": False,
         "expect_incompatible": args.expect_incompatible,
@@ -224,7 +330,7 @@ def main() -> int:
     driver = CudaDriver()
     try:
         attempts: list[dict[str, object]] = []
-        for candidate in candidates:
+        for candidate in expected_candidates:
             cuda_result, cuda_error_name = driver.load(candidate["_ptx"])  # type: ignore[arg-type]
             attempt = {
                 **public_candidate(candidate),

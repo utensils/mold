@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/cuda-sm86-qualification-v4.json",
+  "$id": "https://utensils.io/mold/schemas/cuda-sm86-qualification-v5.json",
   "title": "Mold CUDA sm86 distribution qualification report",
   "type": "object",
   "additionalProperties": false,
@@ -15,11 +15,12 @@
     "host",
     "artifacts",
     "workloads",
-    "tests"
+    "tests",
+    "compatibility_controls"
   ],
   "properties": {
     "schema_version": {
-      "const": "mold.cuda.sm86.qualification.v4"
+      "const": "mold.cuda.sm86.qualification.v5"
     },
     "source_sha": {
       "type": "string",
@@ -45,15 +46,38 @@
       "additionalProperties": false,
       "required": [
         "official_release_manifest_url",
-        "official_release_manifest_verified"
+        "official_release_manifest_path",
+        "official_release_manifest_sha256",
+        "official_release_manifest_verified",
+        "checksum_manifest_url",
+        "checksum_manifest_path",
+        "checksum_manifest_sha256"
       ],
       "properties": {
         "official_release_manifest_url": {
           "type": "string",
           "pattern": "^https://github\\.com/utensils/mold/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/mold-release-provenance\\.json$"
         },
+        "official_release_manifest_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "official_release_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "official_release_manifest_verified": {
           "type": "boolean"
+        },
+        "checksum_manifest_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/utensils/mold/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/SHA256SUMS$"
+        },
+        "checksum_manifest_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checksum_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
         }
       }
     },
@@ -97,7 +121,7 @@
     "artifacts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sm86"],
+      "required": ["sm86", "sm89"],
       "properties": {
         "sm86": {
           "allOf": [
@@ -105,6 +129,16 @@
             {
               "properties": {
                 "cuda_target": { "const": "sm_86" }
+              }
+            }
+          ]
+        },
+        "sm89": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "cuda_target": { "const": "sm_89" }
               }
             }
           ]
@@ -159,6 +193,16 @@
           "$ref": "#/$defs/test_result"
         }
       }
+    },
+    "compatibility_controls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sm89_driver_negative"],
+      "properties": {
+        "sm89_driver_negative": {
+          "$ref": "#/$defs/negative_driver_control"
+        }
+      }
     }
   },
   "allOf": [
@@ -191,6 +235,13 @@
                 "properties": { "status": { "const": "passed" } }
               }
             }
+          },
+          "compatibility_controls": {
+            "properties": {
+              "sm89_driver_negative": {
+                "properties": { "status": { "const": "passed" } }
+              }
+            }
           }
         }
       }
@@ -206,8 +257,11 @@
       "additionalProperties": false,
       "required": [
         "path",
+        "archive_path",
         "expected_sha256",
         "actual_sha256",
+        "expected_archive_sha256",
+        "actual_archive_sha256",
         "cuda_target",
         "trusted_checksum_verified",
         "elf_target_verified",
@@ -217,9 +271,12 @@
       ],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
+        "archive_path": { "type": "string", "minLength": 1 },
         "expected_sha256": { "$ref": "#/$defs/sha256" },
         "actual_sha256": { "$ref": "#/$defs/sha256" },
-        "cuda_target": { "const": "sm_86" },
+        "expected_archive_sha256": { "$ref": "#/$defs/sha256" },
+        "actual_archive_sha256": { "$ref": "#/$defs/sha256" },
+        "cuda_target": { "enum": ["sm_86", "sm_89"] },
         "trusted_checksum_verified": { "type": "boolean" },
         "elf_target_verified": { "type": "boolean" },
         "ptx_target_verified": { "type": "boolean" },
@@ -238,7 +295,11 @@
         "output_sha256",
         "log_path",
         "log_sha256",
+        "compute_observation_path",
+        "compute_observation_sha256",
         "selected_gpu_uuid",
+        "generation_root_pid",
+        "observed_compute_pid",
         "cuda_work_observed",
         "cuda_work_evidence",
         "media_decoded",
@@ -263,10 +324,17 @@
           "type": "string",
           "pattern": "^$|^[0-9a-f]{64}$"
         },
+        "compute_observation_path": { "type": "string" },
+        "compute_observation_sha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        },
         "selected_gpu_uuid": {
           "type": "string",
           "pattern": "^GPU-[0-9A-Fa-f-]+$"
         },
+        "generation_root_pid": { "type": "integer", "minimum": 0 },
+        "observed_compute_pid": { "type": "integer", "minimum": 0 },
         "cuda_work_observed": { "type": "boolean" },
         "cuda_work_evidence": { "type": "string", "minLength": 1 },
         "media_decoded": { "type": "boolean" },
@@ -291,11 +359,58 @@
               "exit_code": { "const": 0 },
               "output_sha256": { "$ref": "#/$defs/sha256" },
               "log_sha256": { "$ref": "#/$defs/sha256" },
+              "compute_observation_path": { "type": "string", "minLength": 1 },
+              "compute_observation_sha256": { "$ref": "#/$defs/sha256" },
               "cuda_work_observed": { "const": true },
+              "generation_root_pid": { "minimum": 1 },
+              "observed_compute_pid": { "minimum": 1 },
               "media_decoded": { "const": true },
               "width": { "const": 256 },
               "height": { "const": 256 },
               "frame_count": { "minimum": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "negative_driver_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "exit_code",
+        "command",
+        "command_path",
+        "command_sha256",
+        "selected_gpu_uuid",
+        "probe_path",
+        "probe_sha256",
+        "expected_incompatibility"
+      ],
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "exit_code": { "type": "integer", "minimum": 0 },
+        "command": { "type": "string", "minLength": 1 },
+        "command_path": { "type": "string", "minLength": 1 },
+        "command_sha256": { "$ref": "#/$defs/sha256" },
+        "selected_gpu_uuid": {
+          "type": "string",
+          "pattern": "^GPU-[0-9A-Fa-f-]+$"
+        },
+        "probe_path": { "type": "string", "minLength": 1 },
+        "probe_sha256": { "$ref": "#/$defs/sha256" },
+        "expected_incompatibility": { "const": true }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "passed" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "exit_code": { "const": 0 },
+              "expected_incompatibility": { "const": true }
             }
           }
         }

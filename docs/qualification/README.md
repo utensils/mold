@@ -12,16 +12,23 @@ one video model, and prepare a valid
 scripts/qualify-cuda-sm86.sh \
   --release-tag v0.20.2 \
   --sm86-binary ./mold-sm86 \
+  --sm86-archive ./mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz \
+  --sm89-binary ./mold-sm89 \
+  --sm89-archive ./mold-x86_64-unknown-linux-gnu-cuda-sm89.tar.gz \
   --image-model flux-dev:bf16 \
   --video-model ltx-video:q8 \
   --chain-script ./qualification-chain.toml \
   --report ./cuda-sm86-qualification.json
 ```
 
-The runner downloads `mold-release-provenance.json` from that exact official
-GitHub release. Caller-supplied hashes are deliberately unsupported. It
-requires exact sm86 PTX embedded in the final executable, a release binary
-checksum derived from the published archive, and matching source identity.
+The runner downloads `mold-release-provenance.json` and `SHA256SUMS` from that
+exact official GitHub release. Caller-supplied hashes are deliberately
+unsupported. Release publication first generates artifact checksums, derives
+provenance from that set, then appends the provenance digest to `SHA256SUMS`;
+this one-way ordering binds both files without a circular checksum. The runner
+opens and hashes the supplied sm86 and sm89 archives and binaries, requires each
+archive to contain that exact binary, and binds both through provenance and the
+checksum manifest.
 Mold's Candle/cudarc kernels are driver-JITed from these strings; intermediate
 cubins are not required to survive final linking.
 
@@ -46,19 +53,26 @@ states this directly in the
 Consequently, the old proposed positive “sm89/JIT on RTX 3090” gate is
 physically invalid. Its truthful replacement is two-part:
 
-1. an exact sm89 artifact pinned to the same source/provenance must fail on the
-   sm86 RTX 3090 with a CUDA PTX/kernel incompatibility before producing media;
+1. complete sm89 PTX extracted from an exact sm89 ELF pinned to the same
+   source/provenance must be rejected by the CUDA Driver on the sm86 RTX 3090;
+   this is an exact-ELF negative compatibility control, not runtime generation
+   or hardware qualification;
 2. the exact sm86 replacement artifact must pass the attention image smoke,
    load a hashed PTX module extracted from itself through the CUDA Driver API,
    and complete the second image smoke on that same UUID.
 
-The sm89 result is an expected negative regression, not a successful
-generation or hardware qualification. Keep its binary hash, complete embedded
-PTX target set, UUID-pinned command, nonzero exit, and CUDA error log beside the
-positive sm86 evidence.
+The sm89 result is an expected negative Driver regression, not a successful
+generation or hardware qualification. Keep its binary/archive hashes, complete
+embedded PTX target set, UUID-pinned command, and hashed Driver-probe JSON beside
+the positive sm86 evidence. The probe command itself exits successfully only
+when every exact sm89 candidate is rejected with a recognized incompatibility.
 
-Outputs and logs remain under `<report>.d/`. After the run, validate both the
-JSON Schema and cross-field relationships:
+Outputs, logs, raw PID/GPU observation CSVs, PTX probes, release provenance, and
+the checksum manifest remain under `<report>.d/`. The validator hermetically
+walks the checked-in JSON Schema and fails closed on unsupported schema keyword
+drift. It then opens and hashes every referenced evidence file and validates
+the archive/binary/provenance, process/GPU, attention-log, and Driver-probe
+relationships:
 
 ```bash
 scripts/validate-cuda-qualification-report.py \
@@ -66,6 +80,8 @@ scripts/validate-cuda-qualification-report.py \
 ```
 
 A report with `hardware_qualified: false` is failure evidence, not acceptance.
+The exact sm89 Driver rejection is mandatory for a passing two-part report but
+is never itself called runtime or hardware qualification.
 The schema is
 [`cuda-sm86-report.schema.json`](./cuda-sm86-report.schema.json). This is a
 reproducible evidence workflow, not a cryptographic attestation service.

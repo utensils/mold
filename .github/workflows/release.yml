@@ -743,6 +743,13 @@ jobs:
             "$SOURCE_SHA" \
             artifacts/SHA256SUMS \
             artifacts
+          # Provenance is derived from the artifact-only checksum set above.
+          # Append its digest afterwards so SHA256SUMS binds the exact manifest
+          # without creating a circular provenance/checksum dependency.
+          (
+            cd artifacts
+            sha256sum mold-release-provenance.json >> SHA256SUMS
+          )
           scripts/create-container-digest-manifest.sh \
             artifacts/mold-container-digests.json \
             "ghcr.io/$GITHUB_REPOSITORY" \

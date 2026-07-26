@@ -74,13 +74,15 @@ require_text "scripts/verify-cuda-release-binary.sh" \
 require_text "scripts/verify-cuda-release-binary.sh" \
   'CUDA release binary does not include NVML loader support'
 require_text "scripts/verify-cuda-release-binary.sh" \
-  'strings -a "$binary"'
+  'probe-cuda-embedded-ptx.py'
 require_text "scripts/verify-cuda-release-binary.sh" \
-  'CUDA release binary PTX target set is {$observed_set}; allowed set is {$allowed_ptx_targets}'
+  '--extract-only'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
   'CUDA_ERROR_INVALID_PTX'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
   '--expect-incompatible'
+require_text "scripts/probe-cuda-embedded-ptx.py" \
+  '"observed_targets"'
 if grep -Eq '^[^#]*cuobjdump[[:space:]]+--' "$repo_root/scripts/verify-cuda-release-binary.sh"; then
   fail "final CUDA binary verification must not require dead-stripped cuobjdump sections"
 fi
@@ -122,6 +124,29 @@ require_release_job_text "release-version" \
   'scripts/create-release-provenance.sh'
 require_release_job_text "release-version" \
   'artifacts/mold-release-provenance.json'
+require_release_job_text "release-version" \
+  'sha256sum mold-release-provenance.json >> SHA256SUMS'
+provenance_line="$(grep -n 'scripts/create-release-provenance.sh' "$repo_root/$release" | cut -d: -f1)"
+provenance_checksum_line="$(
+  grep -n 'sha256sum mold-release-provenance.json >> SHA256SUMS' \
+    "$repo_root/$release" | cut -d: -f1
+)"
+[[ "$provenance_checksum_line" -gt "$provenance_line" ]] \
+  || fail "release provenance checksum must be appended after provenance generation"
+
+for phase_g_path in \
+  scripts/verify-cuda-release-binary.sh \
+  scripts/probe-cuda-embedded-ptx.py \
+  scripts/create-release-provenance.sh \
+  scripts/create-container-digest-manifest.sh \
+  scripts/qualify-cuda-sm86.sh \
+  scripts/validate-cuda-qualification-report.py \
+  scripts/verify-png-artifact.py \
+  scripts/tests/cuda-distribution-contract.sh \
+  scripts/tests/install-cuda-arch.sh \
+  scripts/tests/cuda-qualification-contract.sh; do
+  require_text ".github/workflows/ci.yml" "- '${phase_g_path}'"
+done
 
 require_text "flake.nix" 'mold-sm86 = mkMold "86";'
 require_text "flake.nix" 'mold-sm100 = mkMold "100";'
@@ -208,48 +233,127 @@ cat >"$test_root/verified-mold" <<'EOF'
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
 # .target instanceof
-# .target sm_86
-# .target	sm_86
-# .target   sm_86
-[[ "${1:-}" == version ]]
+[[ "${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_86
+.address_size 64
+.visible .entry verified_probe() {
+  ret;
+}
+PTX
 EOF
 cat >"$test_root/native-only-mold" <<'EOF'
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
 [[ "${1:-}" == version ]]
 EOF
-for ptx_target in 85 89 860 86x; do
+for ptx_target in 85 89 860; do
   cat >"$test_root/wrong-ptx-${ptx_target}-mold" <<EOF
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
-# .target sm_${ptx_target}
-[[ "\${1:-}" == version ]]
+[[ "\${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_${ptx_target}
+.address_size 64
+.visible .entry wrong_probe() {
+  ret;
+}
+PTX
 EOF
 done
 cat >"$test_root/mixed-ptx-mold" <<'EOF'
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
-# .target sm_86
-# .target sm_89
-[[ "${1:-}" == version ]]
+[[ "${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_86
+.address_size 64
+.visible .entry sm86_probe() {
+  ret;
+}
+.version 8.0
+.target sm_89
+.address_size 64
+.visible .entry sm89_probe() {
+  ret;
+}
+PTX
 EOF
 cat >"$test_root/malformed-ptx-mold" <<'EOF'
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
-# .target sm_86,
+[[ "${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_86x
+.address_size 64
+.visible .entry malformed_probe() {
+  ret;
+}
+PTX
+EOF
+cat >"$test_root/incomplete-ptx-mold" <<'EOF'
+#!/usr/bin/env bash
+# nvmlDeviceGetCount_v2
+[[ "${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_86
+.address_size 64
+PTX
+EOF
+cat >"$test_root/spa-target-only-mold" <<'EOF'
+#!/usr/bin/env bash
+# nvmlDeviceGetCount_v2
+# Embedded SPA/static text, not PTX:
+# .target sm_86
 [[ "${1:-}" == version ]]
+EOF
+cat >"$test_root/verified-with-spa-noise-mold" <<'EOF'
+#!/usr/bin/env bash
+# nvmlDeviceGetCount_v2
+# Embedded SPA/static target-like text must not affect the PTX target set:
+# .target sm_89
+[[ "${1:-}" == version ]] && exit 0
+exit 1
+: <<'PTX'
+.version 8.0
+.target sm_86
+.address_size 64
+.visible .entry verified_probe() {
+  ret;
+}
+PTX
 EOF
 chmod +x "$test_root/verified-mold" "$test_root/native-only-mold" \
   "$test_root/mixed-ptx-mold" "$test_root/malformed-ptx-mold" \
+  "$test_root/incomplete-ptx-mold" "$test_root/spa-target-only-mold" \
+  "$test_root/verified-with-spa-noise-mold" \
   "$test_root"/wrong-ptx-*-mold
 
 PATH="$verifier_bin:$PATH" \
   scripts/verify-cuda-release-binary.sh "$test_root/verified-mold" 86 >/dev/null
+PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh \
+    "$test_root/verified-with-spa-noise-mold" 86 >/dev/null
 if PATH="$verifier_bin:$PATH" \
   scripts/verify-cuda-release-binary.sh "$test_root/native-only-mold" 86 >/dev/null 2>&1; then
   fail "CUDA verifier accepted a binary without embedded target PTX"
 fi
-for ptx_target in 85 89 860 86x; do
+if PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh \
+    "$test_root/spa-target-only-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted SPA/static .target text as embedded PTX"
+fi
+for ptx_target in 85 89 860; do
   if PATH="$verifier_bin:$PATH" \
     scripts/verify-cuda-release-binary.sh \
       "$test_root/wrong-ptx-${ptx_target}-mold" 86 >/dev/null 2>&1; then
@@ -263,6 +367,10 @@ fi
 if PATH="$verifier_bin:$PATH" \
   scripts/verify-cuda-release-binary.sh "$test_root/malformed-ptx-mold" 86 >/dev/null 2>&1; then
   fail "CUDA verifier accepted a malformed PTX target directive"
+fi
+if PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh "$test_root/incomplete-ptx-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted an incomplete PTX module"
 fi
 
 cat >"$test_root/embedded-ptx-fixture" <<'EOF'
@@ -290,6 +398,21 @@ if scripts/probe-cuda-embedded-ptx.py \
   "$test_root/embedded-ptx-fixture" 89 --extract-only >/dev/null 2>&1; then
   fail "embedded PTX probe accepted a target-mismatched fixture"
 fi
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/mixed-ptx-mold" 86 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe accepted a mixed-target executable"
+fi
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/malformed-ptx-mold" 86 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe accepted a malformed complete module"
+fi
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/incomplete-ptx-mold" 86 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe accepted an incomplete target module"
+fi
+scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/verified-with-spa-noise-mold" 86 --extract-only >/dev/null \
+  || fail "embedded PTX probe treated unrelated SPA text as a PTX module"
 
 if [[ -n "${MOLD_REAL_SM86_BINARY:-}" ]]; then
   PATH="${SYSTEM_PATH:-$PATH}" scripts/verify-cuda-release-binary.sh \
@@ -347,5 +470,16 @@ jq -e '
   and .artifacts.sm86.archive_sha256 != .artifacts.sm89.archive_sha256
   and .artifacts.sm86.binary_sha256 != .artifacts.sm89.binary_sha256
 ' "$test_root/provenance.json" >/dev/null
+cp "$test_root/SHA256SUMS" "$test_root/SHA256SUMS.with-stale-provenance"
+printf '%064d  mold-release-provenance.json\n' 0 \
+  >>"$test_root/SHA256SUMS.with-stale-provenance"
+if scripts/create-release-provenance.sh \
+  "$test_root/should-not-exist.json" \
+  v0.20.2 \
+  0000000000000000000000000000000000000000 \
+  "$test_root/SHA256SUMS.with-stale-provenance" \
+  "$test_root" >/dev/null 2>&1; then
+  fail "release provenance accepted a checksum manifest with stale provenance ordering"
+fi
 
 echo "cuda distribution contract: ok"
