@@ -5,6 +5,8 @@ import {
   friendlySequenceError,
   modelSupportsSequence,
   sequenceDuration,
+  sequenceFrameOptions,
+  sequenceMotionTailFrames,
   sequenceValidation,
   transitionLabel,
   type SequenceStage,
@@ -67,6 +69,28 @@ describe("sequence authoring", () => {
     ]);
   });
 
+  it("uses context overlap only for model families that support handoff", () => {
+    expect(
+      sequenceMotionTailFrames({
+        name: "ltx-video-0.9.8-2b-distilled:bf16",
+        family: "ltx-video",
+      }),
+    ).toBe(0);
+    expect(
+      sequenceMotionTailFrames({
+        name: "ltx-2.3-22b-distilled:fp8",
+        family: "ltx2",
+      }),
+    ).toBe(17);
+  });
+
+  it("offers only clip durations that exceed the active motion tail", () => {
+    expect(sequenceFrameOptions(97, 17)).toEqual([
+      25, 33, 41, 49, 57, 65, 73, 81, 89, 97,
+    ]);
+    expect(sequenceFrameOptions(25, 0)).toEqual([9, 17, 25]);
+  });
+
   it("computes stitched duration using transition overlap", () => {
     const stages: SequenceStage[] = [
       { prompt: "one", frames: 97, transition: "smooth" },
@@ -100,6 +124,7 @@ describe("sequence authoring", () => {
 
   it("uses plain-language transition labels", () => {
     expect(transitionLabel("smooth")).toBe("Continue motion");
+    expect(transitionLabel("smooth", 0)).toBe("Join clips");
     expect(transitionLabel("cut")).toBe("Cut");
     expect(transitionLabel("fade")).toBe("Crossfade");
   });

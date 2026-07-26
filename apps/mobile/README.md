@@ -146,7 +146,8 @@ WebView local storage contains non-secret mobile state:
 - `mold.mobile.selected-host.v1` — selected generation host
 - `mold.mobile.create-mode.v1` — the last Single or Sequence authoring mode
 - `mold.mobile.sequence-job.v1` — non-secret exact-host identity and active
-  durable sequence job ID for relaunch recovery
+  durable sequence job ID for relaunch recovery; a saved instance UUID must
+  exactly match the current host identity before Mold reattaches
 - `mold.mobile.settings.v1` — appearance, color family, and Photos auto-save preference
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
 - `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded

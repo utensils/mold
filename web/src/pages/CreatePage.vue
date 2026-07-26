@@ -1565,6 +1565,7 @@ onBeforeUnmount(() => {
             :width="form.state.value.width"
             :height="form.state.value.height"
             :fps="form.state.value.fps ?? 24"
+            :family="currentFamily"
             @submit="onSubmitScript"
             @expand="(idx: number, p: string) => onExpandStage(idx, p)"
           />

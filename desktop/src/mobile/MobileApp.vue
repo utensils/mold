@@ -1045,7 +1045,7 @@ function recoverMobileSequence(): void {
   if (
     !host ||
     host.baseUrl !== saved.baseUrl ||
-    (!!saved.instanceId && !!host.instanceId && saved.instanceId !== host.instanceId)
+    (saved.instanceId != null && saved.instanceId !== host.instanceId)
   ) {
     clearSequenceRecovery();
     sequenceError.value = "The exact machine for this saved sequence is no longer available.";

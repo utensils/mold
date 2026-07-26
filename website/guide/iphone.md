@@ -235,7 +235,10 @@ appearance settings. Create includes a guided **Sequence** mode for compatible
 installed video models: start with two clips, describe each shot, choose the
 duration, and generate while Mold keeps progress and cancellation attached to
 the exact host. An interrupted sequence can reconnect after relaunch without
-storing the host API key outside the Keychain. Use desktop or the CLI for a
+storing the host API key outside the Keychain; if the saved server identity
+cannot be verified, Mold discards the recovery record instead of attaching to
+an unproven machine. LTX-Video joins independent clips without a motion tail,
+while LTX-2 offers only durations longer than its continuation overlap. Use desktop or the CLI for a
 local engine, the TOML chain editor and full jobs-administration workspace,
 RunPod provisioning, engine configuration, and desktop Stable/Nightly
 self-update controls.

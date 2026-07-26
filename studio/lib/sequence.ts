@@ -23,6 +23,26 @@ export interface SequenceLimits {
 // The server's per-clip cap/recommendation describes a format limit, not a
 // promise that the largest clip fits the active GPU at every resolution.
 export const DEFAULT_SEQUENCE_CLIP_FRAMES = 25;
+export const DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES = 17;
+
+export function sequenceMotionTailFrames(
+  model: Pick<SequenceModel, "name" | "family"> | null | undefined,
+): number {
+  return model?.family.trim().toLowerCase() === "ltx-video"
+    ? 0
+    : DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES;
+}
+
+export function sequenceFrameOptions(
+  framesPerClipCap: number,
+  motionTailFrames: number,
+): number[] {
+  const options: number[] = [];
+  for (let frames = 9; frames <= framesPerClipCap; frames += 8) {
+    if (frames > motionTailFrames) options.push(frames);
+  }
+  return options;
+}
 
 export function modelSupportsSequence(
   model: SequenceModel | null | undefined,
@@ -99,8 +119,13 @@ export function sequenceValidation(
   return [];
 }
 
-export function transitionLabel(transition: SequenceTransition): string {
-  if (transition === "smooth") return "Continue motion";
+export function transitionLabel(
+  transition: SequenceTransition,
+  motionTailFrames = DEFAULT_SEQUENCE_MOTION_TAIL_FRAMES,
+): string {
+  if (transition === "smooth") {
+    return motionTailFrames > 0 ? "Continue motion" : "Join clips";
+  }
   if (transition === "fade") return "Crossfade";
   return "Cut";
 }

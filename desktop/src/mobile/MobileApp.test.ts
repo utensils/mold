@@ -293,6 +293,55 @@ describe("MobileApp sequence generation", () => {
     expect(recovery).not.toContain(target.apiKey);
     expect(wrapper.get("[data-test='mobile-sequence-job']").text()).toContain("queued");
   });
+
+  it("refuses recovery when a saved server identity cannot be verified", async () => {
+    const sequenceModel = {
+      ...model,
+      name: "ltx-video-0.9.8-2b-distilled:bf16",
+      family: "ltx-video",
+    };
+    localStorage.setItem("mold.mobile.create-mode.v1", "sequence");
+    localStorage.setItem(
+      "mold.mobile.sequence-job.v1",
+      JSON.stringify({
+        hostId: "studio-id",
+        baseUrl: target.baseUrl,
+        instanceId: "studio-id",
+        jobId: "saved-sequence",
+      }),
+    );
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") {
+        return Promise.resolve({ ...status, instance_id: undefined });
+      }
+      if (path === "/api/models") return Promise.resolve([sequenceModel]);
+      if (path === "/api/capabilities") return Promise.resolve({});
+      if (path.startsWith("/api/capabilities/chain-limits")) {
+        return Promise.resolve({
+          model: sequenceModel.name,
+          frames_per_clip_cap: 97,
+          frames_per_clip_recommended: 97,
+          max_stages: 8,
+          max_total_frames: 777,
+          fade_frames_max: 32,
+          transition_modes: ["smooth", "cut", "fade"],
+          quantization_family: "q8",
+          supports_audio: true,
+        });
+      }
+      if (path === "/api/gallery") return Promise.resolve([]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+
+    expect(localStorage.getItem("mold.mobile.sequence-job.v1")).toBeNull();
+    expect(wrapper.text()).toContain(
+      "The exact machine for this saved sequence is no longer available.",
+    );
+    expect(apiJsonTo).not.toHaveBeenCalledWith(expect.anything(), "/api/chain-jobs/saved-sequence");
+  });
 });
 
 describe("MobileApp generation queue", () => {

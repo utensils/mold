@@ -4,7 +4,9 @@ import {
   DEFAULT_SEQUENCE_CLIP_FRAMES,
   defaultSequenceStages,
   friendlySequenceError,
+  sequenceFrameOptions,
   sequenceDuration,
+  sequenceMotionTailFrames,
   sequenceValidation,
   transitionLabel,
   type SequenceTransition,
@@ -48,6 +50,9 @@ const selectedModel = computed(
   () => props.models.find((model) => model.name === form.model) ?? null,
 );
 const duration = computed(() => sequenceDuration(form.stages, form.fps, form.motionTailFrames));
+const frameOptions = computed(() =>
+  sequenceFrameOptions(limits.value?.frames_per_clip_cap ?? 97, form.motionTailFrames),
+);
 const validation = computed(() =>
   sequenceValidation(form.stages, {
     maxStages: limits.value?.max_stages ?? 16,
@@ -67,6 +72,7 @@ const settled = computed(
 
 function applyModel(model: ModelEntry) {
   form.model = model.name;
+  form.motionTailFrames = sequenceMotionTailFrames(model);
   form.width = model.default_width;
   form.height = model.default_height;
   form.steps = model.default_steps;
@@ -222,7 +228,7 @@ watch(
               :disabled="active"
               @click="updateTransition(index, transition)"
             >
-              {{ transitionLabel(transition) }}
+              {{ transitionLabel(transition, form.motionTailFrames) }}
             </button>
           </div>
           <textarea
@@ -240,12 +246,7 @@ watch(
             <label class="field">
               <span>Duration</span>
               <select v-model.number="stage.frames" class="control" :disabled="active">
-                <option
-                  v-for="frames in [9, 17, 25, 33, 49, 65, 81, 97]"
-                  :key="frames"
-                  :value="frames"
-                  :disabled="frames > (limits?.frames_per_clip_cap ?? 97)"
-                >
+                <option v-for="frames in frameOptions" :key="frames" :value="frames">
                   {{ frames }} frames · {{ (frames / form.fps).toFixed(1) }}s
                 </option>
               </select>

@@ -58,6 +58,7 @@ describe("MobileSequenceComposer", () => {
         .map((clip) => clip.get("summary small").text()),
     ).toEqual(["25 frames", "25 frames"]);
     expect(wrapper.get("textarea").attributes("placeholder")).toBe("How does the sequence begin?");
+    expect(wrapper.text()).toContain("Join clips");
     expect(
       (wrapper.get("[data-test='mobile-generate-sequence']").element as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -80,6 +81,7 @@ describe("MobileSequenceComposer", () => {
       width: 768,
       height: 512,
       output_format: "mp4",
+      motion_tail_frames: 0,
     });
   });
 
