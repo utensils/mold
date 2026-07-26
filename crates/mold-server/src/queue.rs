@@ -305,7 +305,25 @@ fn write_gallery_bytes_no_replace(
     desired: &str,
     bytes: &[u8],
 ) -> anyhow::Result<(String, std::path::PathBuf)> {
-    let reservation = crate::batch_transaction::reserve_gallery_final_name(dir, desired)?;
+    write_gallery_bytes_no_replace_with_directory_sync(
+        dir,
+        desired,
+        bytes,
+        &crate::batch_transaction::sync_ordinary_gallery_directory,
+    )
+}
+
+fn write_gallery_bytes_no_replace_with_directory_sync(
+    dir: &std::path::Path,
+    desired: &str,
+    bytes: &[u8],
+    sync_directory: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<(String, std::path::PathBuf)> {
+    let reservation = crate::batch_transaction::reserve_gallery_final_name_with_directory_sync(
+        dir,
+        desired,
+        sync_directory,
+    )?;
     let filename = reservation.final_name().to_owned();
     let path = dir.join(&filename);
     let mut file = std::fs::OpenOptions::new()
@@ -317,7 +335,7 @@ fn write_gallery_bytes_no_replace(
         let _ = std::fs::remove_file(&path);
         return Err(error.into());
     }
-    crate::batch_transaction::sync_gallery_directory(dir)?;
+    sync_directory(dir)?;
     drop(reservation);
     Ok((filename, path))
 }
@@ -3084,6 +3102,39 @@ mod tests {
         assert_eq!(filename, "same-1.png");
         assert_eq!(std::fs::read(path).unwrap(), b"ordinary");
         assert!(!tmp.path().join("same.png").exists());
+    }
+
+    #[test]
+    fn ordinary_gallery_save_keeps_output_when_directory_sync_is_unsupported() {
+        let tmp = TempDir::new().unwrap();
+        let sync_attempts = AtomicUsize::new(0);
+        let unsupported_sync = |path: &std::path::Path| {
+            sync_attempts.fetch_add(1, Ordering::SeqCst);
+            crate::batch_transaction::tolerate_unsupported_ordinary_directory_sync(
+                path,
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "injected unsupported directory fsync",
+                )
+                .into()),
+            )
+        };
+
+        let (filename, path) = write_gallery_bytes_no_replace_with_directory_sync(
+            tmp.path(),
+            "ordinary.png",
+            b"generated output",
+            &unsupported_sync,
+        )
+        .unwrap();
+
+        assert_eq!(filename, "ordinary.png");
+        assert_eq!(std::fs::read(path).unwrap(), b"generated output");
+        assert_eq!(
+            sync_attempts.load(Ordering::SeqCst),
+            2,
+            "reservation and gallery directories both use the explicit best-effort policy"
+        );
     }
 
     #[test]

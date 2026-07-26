@@ -133,27 +133,29 @@ impl DurableBatchParent {
             "batch parent snapshot already exists in {}",
             directory.display()
         );
-        let journal_path = directory.join(PARENT_JOURNAL_FILE);
-        let journal = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&journal_path)
-            .with_context(|| {
+        let snapshot = reducer.snapshot();
+        let initial_record = BatchParentJournalRecord {
+            sequence: 0,
+            attempt_generation: snapshot.attempt_generation,
+            from: BatchParentState::Queued,
+            to: BatchParentState::Queued,
+            snapshot: snapshot.clone(),
+        };
+        publish_initial_parent_journal(directory, &initial_record)?;
+        atomic_write_parent_json(&directory.join(PARENT_SNAPSHOT_FILE), &snapshot).with_context(
+            || {
                 format!(
-                    "claiming new batch parent journal {}; existing authority is never overwritten",
-                    journal_path.display()
+                    "publishing initial batch parent snapshot after its recoverable journal in {}",
+                    directory.display()
                 )
-            })?;
-        journal.sync_all()?;
-        sync_parent_dir(directory)?;
-        let mut durable = Self {
+            },
+        )?;
+        Ok(Self {
             reducer,
             directory: directory.to_path_buf(),
-            next_sequence: 0,
+            next_sequence: 1,
             poisoned: false,
-        };
-        durable.persist_transition(BatchParentState::Queued)?;
-        Ok(durable)
+        })
     }
 
     pub fn recover(directory: &Path) -> anyhow::Result<Self> {
@@ -162,10 +164,17 @@ impl DurableBatchParent {
         let snapshot_path = directory.join(PARENT_SNAPSHOT_FILE);
         let disk_snapshot = match std::fs::read(&snapshot_path) {
             Ok(bytes) => match serde_json::from_slice::<BatchParentSnapshot>(&bytes) {
-                Ok(snapshot) => {
-                    validate_parent_snapshot(&snapshot)?;
-                    Some(snapshot)
-                }
+                Ok(snapshot) => match validate_parent_snapshot(&snapshot) {
+                    Ok(()) => Some(snapshot),
+                    Err(error) => {
+                        tracing::warn!(
+                            snapshot = %snapshot_path.display(),
+                            %error,
+                            "ignoring semantically invalid batch parent snapshot in favor of its journal"
+                        );
+                        None
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(
                         snapshot = %snapshot_path.display(),
@@ -275,8 +284,15 @@ impl DurableBatchParent {
             !self.poisoned,
             "batch parent durable authority is poisoned after a persistence failure"
         );
-        let before = self.reducer.snapshot();
-        let result = operation(&mut self.reducer)?;
+        let before_reducer = self.reducer.clone();
+        let before = before_reducer.snapshot();
+        let result = match operation(&mut self.reducer) {
+            Ok(result) => result,
+            Err(error) => {
+                self.reducer = before_reducer;
+                return Err(error);
+            }
+        };
         // Stale attempt- and lease-generation completions are successful
         // commands with cleanup dispositions, but deliberately do not mutate
         // reducer authority. Every other successful command currently changes
@@ -287,6 +303,7 @@ impl DurableBatchParent {
             return Ok(result);
         }
         if let Err(error) = self.persist_transition(before.state) {
+            self.reducer = before_reducer;
             self.poisoned = true;
             return Err(error).context(
                 "persisting batch parent transition; this authority must be retired and recovered",
@@ -320,6 +337,39 @@ impl DurableBatchParent {
             .context("batch parent journal sequence overflow")?;
         Ok(())
     }
+}
+
+fn publish_initial_parent_journal(
+    directory: &Path,
+    record: &BatchParentJournalRecord,
+) -> anyhow::Result<()> {
+    let journal_path = directory.join(PARENT_JOURNAL_FILE);
+    let temporary = directory.join(format!(
+        ".{PARENT_JOURNAL_FILE}.create-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut bytes = serde_json::to_vec(record)?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, &journal_path).with_context(|| {
+            format!(
+                "claiming new batch parent journal {}; existing authority is never overwritten",
+                journal_path.display()
+            )
+        })?;
+        sync_parent_dir(directory)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    if result.is_ok() {
+        sync_parent_dir(directory)?;
+    }
+    result
 }
 
 impl BatchParentReducer {
@@ -1183,6 +1233,69 @@ mod tests {
 
         let recovered = DurableBatchParent::recover(dir.path()).unwrap();
         assert_eq!(recovered.state(), BatchParentState::Running);
+    }
+
+    #[test]
+    fn durable_parent_recovers_from_semantically_invalid_snapshot_using_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let mut invalid = parent.reducer.snapshot();
+        invalid.children.clear();
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &invalid).unwrap();
+
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+
+        assert_eq!(recovered.state(), BatchParentState::Running);
+        let healed: BatchParentSnapshot =
+            serde_json::from_slice(&std::fs::read(dir.path().join(PARENT_SNAPSHOT_FILE)).unwrap())
+                .unwrap();
+        validate_parent_snapshot(&healed).unwrap();
+        assert_eq!(healed, recovered.reducer.snapshot());
+    }
+
+    #[test]
+    fn reducer_error_restores_the_prior_in_memory_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        parent.start().unwrap();
+        let (lease, _) = parent.grant(0).unwrap();
+        let before = parent.reducer.snapshot();
+        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
+        let journal_before = std::fs::read(&journal_path).unwrap();
+
+        let error = parent
+            .mutate(|reducer| -> anyhow::Result<()> {
+                reducer.active.remove(&lease.child_index);
+                reducer.children[lease.child_index] = ChildState::Succeeded;
+                reducer.cancellation_tokens.remove(&lease.child_index);
+                anyhow::bail!("injected partial reducer mutation")
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("injected partial reducer mutation"));
+        assert_eq!(parent.reducer.snapshot(), before);
+        assert!(parent.reducer.cancellation_token(&lease).is_some());
+        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        assert_eq!(recovered.state(), BatchParentState::Fenced);
+    }
+
+    #[test]
+    fn initial_parent_journal_recovers_when_snapshot_was_never_published() {
+        let dir = tempfile::tempdir().unwrap();
+        DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        std::fs::remove_file(dir.path().join(PARENT_SNAPSHOT_FILE)).unwrap();
+
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+
+        assert_eq!(recovered.state(), BatchParentState::Queued);
+        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, 0);
+        assert!(dir.path().join(PARENT_SNAPSHOT_FILE).is_file());
     }
 
     #[test]

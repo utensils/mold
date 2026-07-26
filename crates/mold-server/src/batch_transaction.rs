@@ -244,13 +244,24 @@ impl BatchTransaction {
         fs::create_dir_all(output_dir)
             .with_context(|| format!("creating gallery {}", output_dir.display()))?;
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
-        ensure!(
-            !attempt_dir.exists(),
-            "batch attempt already exists: {parent_id}/{attempt_generation}"
-        );
-        fs::create_dir_all(attempt_dir.join("staging"))?;
-        fs::create_dir_all(reservations_dir(output_dir))?;
-        sync_transaction_hierarchy(output_dir, &attempt_dir)?;
+        let attempts_root = attempt_dir
+            .parent()
+            .context("batch attempt path has no attempts root")?;
+        fs::create_dir_all(attempts_root)?;
+        fs::create_dir(&attempt_dir).with_context(|| {
+            format!(
+                "claiming batch attempt authority {parent_id}/{attempt_generation}; \
+                 an existing attempt is never shared or overwritten"
+            )
+        })?;
+        if let Err(error) = (|| {
+            fs::create_dir(attempt_dir.join("staging"))?;
+            fs::create_dir_all(reservations_dir(output_dir))?;
+            sync_transaction_hierarchy(output_dir, &attempt_dir)
+        })() {
+            let _ = fs::remove_dir_all(&attempt_dir);
+            return Err(error);
+        }
 
         let reservation_owner = ReservationOwner {
             parent_id: parent_id.to_owned(),
@@ -392,6 +403,43 @@ impl BatchTransaction {
             Err(payload) => Err(UnresolvedBatchCommit::committing(
                 anyhow::anyhow!(
                     "atomic batch commit panicked: {}",
+                    panic_payload_message(payload.as_ref())
+                ),
+                guard,
+            )),
+        }
+    }
+
+    /// Resume a committing attempt whose staging files were lost only after
+    /// every reserved final file has been checksum-verified. This is startup
+    /// recovery only: ordinary live commits must still enter through verified
+    /// staging.
+    async fn commit_verified_finals(
+        &mut self,
+        gate: &GalleryPublicationGate,
+        db: Arc<Option<mold_db::MetadataDb>>,
+    ) -> Result<(), UnresolvedBatchCommit> {
+        if let Err(error) = self.ensure_usable().and_then(|()| {
+            ensure!(
+                self.manifest.state == BatchManifestState::Committing,
+                "only a committing batch can recover from verified finals"
+            );
+            Ok(())
+        }) {
+            return Err(UnresolvedBatchCommit::pre_commit(error));
+        }
+        let guard = gate.write().await;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.verify_owned_reservations()?;
+            self.verify_all_committed()?;
+            self.commit_while_locked(&db)
+        }));
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(UnresolvedBatchCommit::committing(error, guard)),
+            Err(payload) => Err(UnresolvedBatchCommit::committing(
+                anyhow::anyhow!(
+                    "atomic batch recovery commit panicked: {}",
                     panic_payload_message(payload.as_ref())
                 ),
                 guard,
@@ -1260,7 +1308,7 @@ pub async fn recover_transactions(
                 report.rolled_back += 1;
             }
             BatchManifestState::Committing => {
-                if let Err(error) = transaction.verify_all_staged() {
+                if let Err(staged_error) = transaction.verify_all_staged() {
                     let any_final_exists = transaction.any_final_exists();
                     let has_durable_publication_evidence =
                         !transaction.journaled_final_children.is_empty();
@@ -1273,27 +1321,52 @@ pub async fn recover_transactions(
                         report.rolled_back += 1;
                         tracing::warn!(
                             attempt = %transaction.attempt_dir.display(),
-                            %error,
+                            error = %staged_error,
                             "rolled back unverifiable committing attempt before any final publication"
                         );
                         continue;
                     }
-                    return Err(error).with_context(|| {
-                        if has_durable_publication_evidence {
-                            format!(
-                                "committing attempt {} has durable publication evidence but neither \
-                                 a verifiable staged copy nor a recoverable final copy; retaining the \
-                                 attempt for operator inspection",
-                                transaction.attempt_dir.display()
-                            )
-                        } else {
-                            format!(
-                                "committing attempt {} has published files but unverifiable staging; \
-                                 inspect the attempt before restarting",
-                                transaction.attempt_dir.display()
-                            )
+
+                    match transaction.verify_all_committed() {
+                        Ok(()) => {
+                            match transaction.commit_verified_finals(gate, db.clone()).await {
+                                Ok(()) => {
+                                    report.rolled_forward += 1;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return Err(error.into_startup_error()).with_context(|| {
+                                        format!(
+                                            "rolling forward batch attempt {} from checksum-verified \
+                                             finals; startup remains fail-closed",
+                                            transaction.attempt_dir.display()
+                                        )
+                                    });
+                                }
+                            }
                         }
-                    });
+                        Err(final_error) => {
+                            return Err(final_error).with_context(|| {
+                                if has_durable_publication_evidence {
+                                    format!(
+                                        "committing attempt {} has durable publication evidence but \
+                                         neither verifiable staging nor a checksum-valid complete set \
+                                         of finals; retaining the attempt for operator inspection \
+                                         (staging error: {staged_error:#})",
+                                        transaction.attempt_dir.display()
+                                    )
+                                } else {
+                                    format!(
+                                        "committing attempt {} has published files but neither \
+                                         verifiable staging nor a checksum-valid complete set of \
+                                         finals; retaining the attempt for operator inspection \
+                                         (staging error: {staged_error:#})",
+                                        transaction.attempt_dir.display()
+                                    )
+                                }
+                            });
+                        }
+                    }
                 }
                 match transaction.commit(gate, db.clone()).await {
                     Ok(()) => report.rolled_forward += 1,
@@ -1530,6 +1603,15 @@ fn reserve_final_name(
     desired: &str,
     owner: &ReservationOwner,
 ) -> anyhow::Result<String> {
+    reserve_final_name_with_directory_sync(output_dir, desired, owner, &sync_dir)
+}
+
+fn reserve_final_name_with_directory_sync(
+    output_dir: &Path,
+    desired: &str,
+    owner: &ReservationOwner,
+    sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
     let path = Path::new(desired);
     let stem = path
         .file_stem()
@@ -1557,7 +1639,7 @@ fn reserve_final_name(
                 let result = (|| {
                     file.write_all(&serde_json::to_vec(owner)?)?;
                     file.sync_all()?;
-                    sync_dir(&reservations_dir(output_dir))
+                    sync_directory(&reservations_dir(output_dir))
                 })();
                 if let Err(error) = result {
                     drop(file);
@@ -1599,16 +1681,18 @@ fn release_reservation(
     Ok(())
 }
 
-pub(crate) fn reserve_gallery_final_name(
+pub(crate) fn reserve_gallery_final_name_with_directory_sync(
     output_dir: &Path,
     desired: &str,
+    sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<GalleryNameReservation> {
     fs::create_dir_all(reservations_dir(output_dir))?;
     let owner = ReservationOwner {
         parent_id: format!("ordinary:{}", uuid::Uuid::new_v4()),
         attempt_generation: 0,
     };
-    let final_name = reserve_final_name(output_dir, desired, &owner)?;
+    let final_name =
+        reserve_final_name_with_directory_sync(output_dir, desired, &owner, sync_directory)?;
     Ok(GalleryNameReservation {
         output_dir: output_dir.to_path_buf(),
         final_name,
@@ -1881,8 +1965,45 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
     result
 }
 
-pub(crate) fn sync_gallery_directory(path: &Path) -> anyhow::Result<()> {
-    sync_dir(path)
+pub(crate) fn sync_ordinary_gallery_directory(path: &Path) -> anyhow::Result<()> {
+    tolerate_unsupported_ordinary_directory_sync(path, sync_dir(path))
+}
+
+pub(crate) fn tolerate_unsupported_ordinary_directory_sync(
+    path: &Path,
+    result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if directory_sync_is_unsupported(&error) => {
+            tracing::warn!(
+                directory = %path.display(),
+                %error,
+                "gallery filesystem does not support directory fsync; ordinary output remains saved with best-effort directory durability"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn directory_sync_is_unsupported(error: &anyhow::Error) -> bool {
+    let Some(io_error) = error.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    if io_error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        io_error.raw_os_error().is_some_and(|code| {
+            code == libc::EINVAL || code == libc::EOPNOTSUPP || code == libc::ENOSYS
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[cfg(unix)]
@@ -1901,6 +2022,7 @@ mod tests {
     use super::*;
     use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
     use mold_db::RecordSource;
+    use std::sync::{Arc as StdArc, Barrier};
 
     fn record(name: &str, seed: u64) -> GenerationRecord {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -1940,6 +2062,56 @@ mod tests {
         load_journal(&transaction.attempt_dir.join(JOURNAL_FILE))
             .unwrap()
             .len() as u64
+    }
+
+    #[tokio::test]
+    async fn concurrent_begin_admits_one_attempt_authority_and_recovers_it() {
+        const CONTENDERS: usize = 64;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = StdArc::new(dir.path().to_path_buf());
+        let barrier = StdArc::new(Barrier::new(CONTENDERS));
+        let handles: Vec<_> = (0..CONTENDERS)
+            .map(|_| {
+                let output_dir = StdArc::clone(&output_dir);
+                let barrier = StdArc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    BatchTransaction::begin(
+                        &output_dir,
+                        "parent",
+                        0,
+                        serde_json::json!({"batch_size": 1}),
+                        vec![record("one.png", 0)],
+                    )
+                    .is_ok()
+                })
+            })
+            .collect();
+        let admitted = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|admitted| *admitted)
+            .count();
+
+        assert_eq!(
+            admitted, 1,
+            "one filesystem authority must own a parent attempt generation"
+        );
+        let attempt = attempt_dir(dir.path(), "parent", 0);
+        let records = load_journal(&attempt.join(JOURNAL_FILE)).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, 0);
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert!(!attempt.exists());
     }
 
     fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
@@ -2217,6 +2389,54 @@ mod tests {
             assert_eq!(loaded.manifest.state, BatchManifestState::Committing);
             assert_eq!(loaded.journaled_final_children, BTreeSet::from([0]));
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_rolls_forward_checksum_valid_finals_when_staging_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({"batch_size": 2}),
+            vec![record("one.png", 0), record("two.png", 1)],
+        )
+        .unwrap();
+        for (child_index, bytes) in [b"one".as_slice(), b"two".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            transaction.stage_bytes(child_index, bytes).unwrap();
+        }
+        transaction.mark_prepared().unwrap();
+        transaction.manifest.state = BatchManifestState::Committing;
+        transaction.persist_manifest().unwrap();
+        for child_index in 0..transaction.manifest.children.len() {
+            let child = &transaction.manifest.children[child_index];
+            let final_path = dir.path().join(&child.final_name);
+            fs::hard_link(transaction.staging_path(child_index).unwrap(), &final_path).unwrap();
+            File::open(&final_path).unwrap().sync_all().unwrap();
+            transaction
+                .append_journal(BatchJournalEvent::FinalPublished { child_index })
+                .unwrap();
+        }
+        fs::remove_dir_all(transaction.attempt_dir.join("staging")).unwrap();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.rolled_forward, 1);
+        assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
+        assert_eq!(fs::read(dir.path().join("two.png")).unwrap(), b"two");
+        assert!(!transaction.attempt_dir.exists());
+        assert!(committed_manifests_dir(dir.path(), "parent")
+            .join("0.json")
+            .is_file());
     }
 
     #[tokio::test]
@@ -2597,6 +2817,52 @@ mod tests {
         assert!(validate_available_space(expected, expected).is_err());
         assert!(validate_available_space(expected * 2 + DISK_SAFETY_FLOOR_BYTES, expected).is_ok());
         assert!(validate_available_space(u64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn ordinary_directory_sync_tolerates_only_unsupported_filesystems() {
+        let dir = tempfile::tempdir().unwrap();
+        let unsupported = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "directory fsync is unsupported",
+        );
+        tolerate_unsupported_ordinary_directory_sync(dir.path(), Err(unsupported.into())).unwrap();
+
+        let denied = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "directory fsync denied",
+        );
+        assert!(
+            tolerate_unsupported_ordinary_directory_sync(dir.path(), Err(denied.into())).is_err()
+        );
+    }
+
+    #[test]
+    fn durable_reservation_still_fails_closed_when_directory_sync_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(reservations_dir(dir.path())).unwrap();
+        let owner = ReservationOwner {
+            parent_id: "parent".into(),
+            attempt_generation: 0,
+        };
+        let unsupported_sync = |_path: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "injected unsupported directory fsync",
+            )
+            .into())
+        };
+
+        let error = reserve_final_name_with_directory_sync(
+            dir.path(),
+            "strict.png",
+            &owner,
+            &unsupported_sync,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported directory fsync"));
+        assert!(!reservation_path(dir.path(), "strict.png").exists());
     }
 
     #[test]
