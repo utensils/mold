@@ -113,6 +113,7 @@ const GalleryGridStub = defineComponent({
   props: {
     entries: { type: Array, required: true },
     loading: Boolean,
+    thumbnailSize: Number,
     selectMode: Boolean,
     selection: { type: Object, default: undefined },
     fresh: { type: Object, default: undefined },
@@ -211,6 +212,25 @@ describe("LibraryPage", () => {
   it("renders every print in the grid by default", async () => {
     const wrapper = await mounted();
     expect(wrapper.find("[data-test='grid-count']").text()).toBe("2");
+  });
+
+  it("restores, applies, and persists the toolbar thumbnail-size slider", async () => {
+    localStorage.setItem("mold.gallery.thumbnailSize.v1", "280");
+    const wrapper = await mounted();
+    const slider = wrapper.get<HTMLInputElement>(
+      'input[aria-label="Thumbnail size"]',
+    );
+
+    expect(slider.element.value).toBe("280");
+    expect(wrapper.getComponent(GalleryGridStub).props("thumbnailSize")).toBe(
+      280,
+    );
+
+    await slider.setValue("320");
+    expect(wrapper.getComponent(GalleryGridStub).props("thumbnailSize")).toBe(
+      320,
+    );
+    expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("320");
   });
 
   it("filters prints by their owning host", async () => {

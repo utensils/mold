@@ -92,6 +92,8 @@ pause, resume, cancel-all, queued-job GPU lanes, rename, and forget actions.
 Library merges prints from connected hosts without falling back across host
 boundaries, restores model-aware settings, and exposes the full recorded
 generation metadata with prompt/seed copy and an Upscale handoff to Create.
+Its Lightroom-style top-bar slider continuously resizes the grid and remembers
+the preferred thumbnail size; desktop Library exposes the same control.
 Create preflights peak VRAM against the selected machine, exposes LTX-2 camera
 motion presets, and reconnects to the last durable sequence after a reload.
 Sequence mode filters the picker to compatible video checkpoints, switches to

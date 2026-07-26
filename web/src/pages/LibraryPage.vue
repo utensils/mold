@@ -14,6 +14,14 @@ import SegmentedControl, {
   type SegmentOption,
 } from "@ui/components/SegmentedControl.vue";
 import EmptyStateBlock from "@ui/components/EmptyStateBlock.vue";
+import ThumbnailSizeSlider from "@ui/components/ThumbnailSizeSlider.vue";
+import {
+  GALLERY_THUMBNAIL_SIZE_MAX,
+  GALLERY_THUMBNAIL_SIZE_MIN,
+  GALLERY_THUMBNAIL_SIZE_STEP,
+  loadGalleryThumbnailSize,
+  saveGalleryThumbnailSize,
+} from "@studio/lib/galleryThumbnailSize";
 import { deleteGalleryImage, fetchModels } from "../api";
 import { blobToBase64 } from "../lib/base64";
 import { fetchGalleryBlob } from "../lib/galleryMedia";
@@ -68,6 +76,7 @@ const filter = ref<FilterKind>("all");
 const search = ref("");
 const view = ref<ViewMode>(loadViewMode());
 const hostFilter = ref("all");
+const thumbnailSize = ref(loadGalleryThumbnailSize());
 
 const form = useGenerateForm();
 const route = useRoute();
@@ -560,6 +569,11 @@ function setView(next: ViewMode) {
   }
 }
 
+function setThumbnailSize(next: number) {
+  thumbnailSize.value = next;
+  saveGalleryThumbnailSize(next);
+}
+
 // ── Tile context menu ───────────────────────────────────────────────────────
 const contextMenu = ref<{
   item: GalleryImage;
@@ -649,6 +663,16 @@ onBeforeUnmount(() => {
         ></span
       >
       <span class="gal__flex"></span>
+
+      <ThumbnailSizeSlider
+        v-if="view === 'grid'"
+        class="gal__thumbnail-size"
+        :model-value="thumbnailSize"
+        :min="GALLERY_THUMBNAIL_SIZE_MIN"
+        :max="GALLERY_THUMBNAIL_SIZE_MAX"
+        :step="GALLERY_THUMBNAIL_SIZE_STEP"
+        @update:model-value="setThumbnailSize"
+      />
 
       <SegmentedControl
         class="gal__filter"
@@ -845,6 +869,7 @@ onBeforeUnmount(() => {
           :entries="filtered"
           :models="models"
           :loading="loading"
+          :thumbnail-size="thumbnailSize"
           :select-mode="selectMode"
           :selection="selection"
           :fresh="fresh"
@@ -1033,6 +1058,9 @@ onBeforeUnmount(() => {
 .gal__filter {
   flex: 0 0 auto;
 }
+.gal__thumbnail-size {
+  flex: 0 0 136px;
+}
 .gal__hosts {
   display: flex;
   gap: 6px;
@@ -1117,6 +1145,12 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+@media (max-width: 639px) {
+  .gal__thumbnail-size {
+    display: none;
+  }
 }
 
 .gal__viewtoggle {

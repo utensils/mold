@@ -50,6 +50,19 @@ describe("GalleryGrid", () => {
     expect(wrapper.findAll(".gg__cell")).toHaveLength(2);
   });
 
+  it("feeds the selected pixel target into the responsive grid", () => {
+    const wrapper = mount(GalleryGrid, {
+      props: {
+        entries: [image],
+        loading: false,
+        thumbnailSize: 300,
+      },
+    });
+    expect(wrapper.get(".gg").attributes("style")).toContain(
+      "--gallery-thumbnail-size: 300px",
+    );
+  });
+
   it("badges only fresh prints as NEW", () => {
     const wrapper = mount(GalleryGrid, {
       props: {

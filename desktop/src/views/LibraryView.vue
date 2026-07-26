@@ -4,6 +4,14 @@ import { useRoute, useRouter } from "vue-router";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
+import ThumbnailSizeSlider from "@ui/components/ThumbnailSizeSlider.vue";
+import {
+  GALLERY_THUMBNAIL_SIZE_MAX,
+  GALLERY_THUMBNAIL_SIZE_MIN,
+  GALLERY_THUMBNAIL_SIZE_STEP,
+  loadGalleryThumbnailSize,
+  saveGalleryThumbnailSize,
+} from "@studio/lib/galleryThumbnailSize";
 import AuthedMedia from "../components/gallery/AuthedMedia.vue";
 import Lightbox from "../components/gallery/Lightbox.vue";
 import HistoryDrawer from "../components/library/HistoryDrawer.vue";
@@ -252,7 +260,8 @@ const scrollEl = ref<HTMLElement | null>(null);
 const containerWidth = ref(0);
 const selected = ref<{ sourceKey: string; filename: string } | null>(null);
 const lightboxOpen = ref(false);
-const rowHeight = ref(180);
+const rowHeight = ref(loadGalleryThumbnailSize());
+watch(rowHeight, (value) => saveGalleryThumbnailSize(value));
 
 // ── Single-print delete: optimistic + undoable (§08 G12) ─────────────────────
 // The tile leaves the grid instantly; a 6 s undo toast holds the print in limbo
@@ -683,6 +692,13 @@ onUnmounted(() => {
       />
 
       <div class="flex-1" />
+
+      <ThumbnailSizeSlider
+        v-model="rowHeight"
+        :min="GALLERY_THUMBNAIL_SIZE_MIN"
+        :max="GALLERY_THUMBNAIL_SIZE_MAX"
+        :step="GALLERY_THUMBNAIL_SIZE_STEP"
+      />
 
       <SegmentedControl
         :model-value="gallery.mediaKind"

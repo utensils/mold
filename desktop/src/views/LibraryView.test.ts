@@ -24,10 +24,10 @@ vi.mock("../lib/gallery/layout", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/gallery/layout")>();
   return {
     ...actual,
-    layoutJustifiedRows: (items: GalleryImage[]) =>
+    layoutJustifiedRows: (items: GalleryImage[], _containerWidth: number, targetHeight: number) =>
       items.map((item) => ({
-        height: 180,
-        items: [{ item, width: 180, height: 180 }],
+        height: targetHeight,
+        items: [{ item, width: targetHeight, height: targetHeight }],
       })),
   };
 });
@@ -54,6 +54,9 @@ import { useGalleryStore } from "../stores/gallery";
 import { useHostsStore } from "../stores/hosts";
 import { useToastStore } from "../stores/toasts";
 import type { GalleryImage } from "../lib/api/types";
+import { installMemoryLocalStorage } from "../lib/testSupport/memoryLocalStorage";
+
+installMemoryLocalStorage();
 
 const prints: GalleryImage[] = [
   {
@@ -150,6 +153,7 @@ async function mountView(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   apiFetchTo.mockResolvedValue(new Response());
 });
 
@@ -331,6 +335,20 @@ describe("LibraryView header + NEW badges", () => {
     const header = wrapper.get("header");
     expect(header.text()).toContain("Library");
     expect(header.text()).toContain("2 prints · all hosts");
+    wrapper.unmount();
+  });
+
+  it("restores, applies, and persists the toolbar thumbnail-size slider", async () => {
+    localStorage.setItem("mold.gallery.thumbnailSize.v1", "280");
+    const { wrapper } = await mountView();
+    const slider = wrapper.get<HTMLInputElement>('input[aria-label="Thumbnail size"]');
+
+    expect(slider.element.value).toBe("280");
+    expect(wrapper.get(".ms-lib-tile").attributes("style")).toContain("height: 280px");
+
+    await slider.setValue("320");
+    expect(wrapper.get(".ms-lib-tile").attributes("style")).toContain("height: 320px");
+    expect(localStorage.getItem("mold.gallery.thumbnailSize.v1")).toBe("320");
     wrapper.unmount();
   });
 
