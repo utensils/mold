@@ -59,7 +59,8 @@ const videoModels = computed<ModelEntry[]>(() =>
   ),
 );
 // LTX-2 needs CUDA; on a Metal Mac the option shows but can't be selected.
-const isCudaOnlyOnThisMachine = (m: ModelEntry) => {
+const isCudaOnlyOnThisMachine = (m?: ModelEntry) => {
+  if (!m) return false;
   if (m.family !== "ltx2" && m.family !== "ltx-2") return false;
   const ownerIds = hostModels.hostsFor(m.name);
   if (ownerIds.some((id) => id !== "local")) return false;
@@ -75,6 +76,7 @@ const selectedRoute = computed(() => {
   const model = videoModels.value.find((entry) => entry.name === form.model);
   return model ? routeForModel(model) : null;
 });
+const selectedModel = computed(() => videoModels.value.find((entry) => entry.name === form.model));
 const watchedHostId = computed(
   () => hosts.all.find((host) => host.baseUrl === chains.target?.baseUrl)?.id ?? null,
 );
@@ -109,6 +111,8 @@ const live = computed(() => chains.live);
 const canRender = computed(
   () =>
     !!form.model &&
+    !!selectedModel.value &&
+    !isCudaOnlyOnThisMachine(selectedModel.value) &&
     !rendering.value &&
     stageErrors.value === 0 &&
     form.stages.length >= 2 &&

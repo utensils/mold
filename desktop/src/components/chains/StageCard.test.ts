@@ -26,7 +26,9 @@ describe("StageCard source image well", () => {
   it("presents a directly editable clip prompt", () => {
     const wrapper = mountCard(newStage(""));
     expect(wrapper.text()).toContain("Opening clip");
+    expect(wrapper.get('[role="img"]').attributes("aria-label")).toContain("Opening clip");
     expect(wrapper.get("textarea").attributes("placeholder")).toBe("How does the sequence begin?");
+    expect(wrapper.get("textarea").attributes("aria-label")).toBe("Opening clip prompt");
   });
 
   it("shows an attach button when the stage has no image and emits pick-image", async () => {

@@ -49,7 +49,7 @@ const framesError = computed(() => frames8n1Error(props.stage.frames));
 // Accessible name for the develop/preview cell — its state is otherwise
 // conveyed only by the grain color (temperature semantics).
 const developAria = computed(() => {
-  const base = `Clip ${props.index + 1}`;
+  const base = props.index === 0 ? "Opening clip" : `Clip ${props.index + 1}`;
   const state = props.jobStage?.state;
   if (state === "completed") return `${base}: completed`;
   if (state === "failed") return `${base}: failed`;
@@ -157,7 +157,7 @@ function snapFramesField() {
       v-model="stage.prompt"
       data-selectable
       rows="3"
-      :aria-label="`Clip ${index + 1} prompt`"
+      :aria-label="index === 0 ? 'Opening clip prompt' : `Clip ${index + 1} prompt`"
       :placeholder="index === 0 ? 'How does the sequence begin?' : 'What happens next?'"
       class="border-edge min-h-16 w-full resize-none rounded-control border bg-bath px-2 py-1.5 text-caption text-ink placeholder:text-ink-3"
     />

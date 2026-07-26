@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { transitionLabel } from "@mold/studio";
 import type { ChainStageForm } from "../../lib/chainForm";
 import { cycleTransition } from "../../lib/chain";
 
@@ -7,9 +8,7 @@ import { cycleTransition } from "../../lib/chain";
 const props = defineProps<{ stage: ChainStageForm; motionTail: number; fadeMax: number }>();
 
 const label = computed(() => {
-  if (props.stage.transition === "smooth") return "Continue motion";
-  if (props.stage.transition === "cut") return "Cut";
-  return "Crossfade";
+  return transitionLabel(props.stage.transition);
 });
 
 function cycle() {

@@ -132,6 +132,27 @@ describe("ChainsView multi-host video generation", () => {
     expect(wrapper.get("select").text()).toContain("ltx-video");
   });
 
+  it("does not enable generation for an imported unavailable model", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+    });
+    await flushPromises();
+
+    const state = wrapper.vm as unknown as {
+      form: { model: string; stages: { prompt: string }[] };
+    };
+    state.form.model = "ltx-2.3-22b-dev:fp8";
+    state.form.stages.forEach((stage, index) => {
+      stage.prompt = `clip ${index + 1}`;
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(
+      (wrapper.get("[data-test='generate-sequence']").element as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
   it("shows a video model installed only on a connected remote host", async () => {
     installRemoteVideoHost();
 
