@@ -649,7 +649,29 @@ pub(crate) async fn estimate_generation_memory(
         }
     };
     let hint = activation_hint_for_request(state, req).await;
-    let estimate = estimate_generation_memory_for_request(req, &paths, hint);
+    // This endpoint is diagnostic, not an admission side channel. Use the
+    // latest resource-sampler facts and report the roomiest current
+    // candidate for an Auto request; never perform a device-0 live query or
+    // substitute total VRAM when no free-memory sample exists.
+    let available = state.resources.latest().and_then(|snapshot| {
+        snapshot
+            .gpus
+            .iter()
+            .map(|gpu| gpu.vram_total.saturating_sub(gpu.vram_used))
+            .max()
+    });
+    let forced_offload = matches!(
+        std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    let estimate = estimate_generation_memory_for_request(
+        req,
+        &paths,
+        hint,
+        available,
+        forced_offload,
+        request_has_effective_lora(req),
+    );
 
     Ok(GenerationMemoryEstimate {
         model: req.model.clone(),

@@ -11,10 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const MIB: u64 = 1024 * 1024;
-const GIB: u64 = 1024 * MIB;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
-const GPU_SAFETY_HEADROOM: u64 = 512 * MIB;
-const GPU_RUNTIME_FLOOR: u64 = GIB;
+const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ComponentRole {
@@ -119,6 +117,7 @@ pub struct ResolvedExecutionPlan {
     pub effective_placement: EffectivePlacement,
     pub components: BTreeMap<ComponentRole, ComponentExecutionPlan>,
     pub attention_backend: AttentionBackend,
+    pub engine_load_strategy: mold_inference::LoadStrategy,
     pub offload_mode: OffloadMode,
     pub predicted_vram_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
@@ -178,6 +177,9 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             supports_text_encoder_cpu: true,
             supports_vae_cpu: false,
             supports_audio_components_cpu: false,
+            // The native runtime consumes MOLD_OFFLOAD as a forced full-
+            // streaming policy even though its factory does not take the
+            // generic FLUX block-offload boolean.
             supports_block_offload: true,
             supports_tiled_vae: true,
             native_batch_sizes: vec![1],
@@ -236,20 +238,20 @@ pub fn resolve_execution_plans(
         ));
     }
     let hard_device = hard_devices.into_iter().next();
+    let context = PlanContext {
+        model: &request.model,
+        family: &family,
+        capabilities: &capabilities,
+        request,
+        paths: &paths,
+        artifacts: &artifacts,
+        effective: &constraints,
+        offload_requested,
+    };
     let candidates = devices
         .iter()
         .filter(|device| hard_device.as_ref().is_none_or(|hard| hard == &device.id))
-        .filter_map(|device| {
-            build_plan(
-                &request.model,
-                &family,
-                &capabilities,
-                &artifacts,
-                &constraints,
-                device,
-                offload_requested,
-            )
-        })
+        .filter_map(|device| build_plan(&context, device))
         .collect::<Result<Vec<_>, _>>()?;
     if candidates.is_empty() {
         return Err(ExecutionPlanError::InsufficientVram);
@@ -475,53 +477,100 @@ fn hard_device_ids(
         .collect()
 }
 
-fn build_plan(
-    model: &str,
-    family: &str,
-    capabilities: &PlacementCapabilities,
-    artifacts: &BTreeMap<ComponentRole, PathBuf>,
-    effective: &EffectivePlacement,
-    device: &DeviceFact,
+struct PlanContext<'a> {
+    model: &'a str,
+    family: &'a str,
+    capabilities: &'a PlacementCapabilities,
+    request: &'a GenerateRequest,
+    paths: &'a ModelPaths,
+    artifacts: &'a BTreeMap<ComponentRole, PathBuf>,
+    effective: &'a EffectivePlacement,
     offload_requested: bool,
+}
+
+fn build_plan(
+    context: &PlanContext<'_>,
+    device: &DeviceFact,
 ) -> Option<Result<ResolvedExecutionPlan, ExecutionPlanError>> {
-    let quantization = infer_quantization(model, artifacts);
-    let dtype = infer_dtype(model);
-    let artifact_bytes = artifacts
-        .iter()
-        .map(|(role, path)| (role.clone(), artifact_size_floor(path)))
+    let quantization = infer_quantization(context.model, context.artifacts);
+    let dtype = infer_dtype(context.model);
+    let hint = Some(crate::memory_preflight::ActivationHint::from_request(
+        context.request,
+        context.family,
+    ));
+    let request_has_lora = crate::model_manager::request_has_effective_lora(context.request);
+    let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
+        context.request,
+        context.paths,
+        hint,
+        Some(device.available_vram_bytes),
+        context.offload_requested,
+        request_has_lora,
+    );
+    // A process-wide offload preference is advisory for concrete formats
+    // which cannot honor it (for example Flux.2 GGUF/NVFP4 or a LoRA merge).
+    // The family capability gate above remains a typed error; this path-level
+    // policy exactly matches what engine construction will consume.
+    let auto_cpu_text =
+        initial_memory.under_memory_pressure && context.capabilities.supports_text_encoder_cpu;
+
+    let placements = context
+        .artifacts
+        .keys()
+        .map(|role| {
+            let constraint = context
+                .effective
+                .components
+                .get(role)
+                .cloned()
+                .unwrap_or(ResolvedComponentConstraint::Auto);
+            let cpu = constraint == ResolvedComponentConstraint::Cpu
+                || (auto_cpu_text && matches!(role, ComponentRole::TextEncoder(_)));
+            (role.clone(), cpu)
+        })
         .collect::<BTreeMap<_, _>>();
-    let static_peak =
-        static_vram_floor(family, quantization).max(artifact_bytes.values().copied().sum::<u64>());
-    let artifact_total = artifact_bytes.values().copied().sum::<u64>().max(1);
-    let pressured = static_peak.saturating_add(GPU_SAFETY_HEADROOM) > device.available_vram_bytes;
-    let auto_cpu_text = pressured && capabilities.supports_text_encoder_cpu;
+    let transformer_on_cpu = placements
+        .iter()
+        .filter(|(role, _)| {
+            matches!(
+                role,
+                ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+            )
+        })
+        .all(|(_, cpu)| *cpu);
+    let gpu_paths = gpu_resident_paths(context.paths, &placements);
+    let memory = crate::memory_preflight::estimate_generation_memory_for_request(
+        context.request,
+        &gpu_paths,
+        hint,
+        Some(device.available_vram_bytes),
+        initial_memory.block_offload && !transformer_on_cpu,
+        request_has_lora,
+    );
+    if memory.fits_available_memory != Some(true) {
+        return None;
+    }
 
     let mut components = BTreeMap::new();
-    let mut cpu_bytes = 0_u64;
-    let mut gpu_artifact_bytes = 0_u64;
-    for (role, path) in artifacts {
-        let constraint = effective
-            .components
-            .get(role)
-            .cloned()
-            .unwrap_or(ResolvedComponentConstraint::Auto);
-        let place_cpu = constraint == ResolvedComponentConstraint::Cpu
-            || (auto_cpu_text && matches!(role, ComponentRole::TextEncoder(_)));
-        let bytes = artifact_bytes.get(role).copied().unwrap_or(0);
-        let component_peak = ((bytes as u128 * static_peak as u128) / artifact_total as u128)
-            .min(u64::MAX as u128) as u64;
+    let mut host_paths = BTreeSet::new();
+    for (role, path) in context.artifacts {
+        let place_cpu = placements.get(role).copied().unwrap_or(false);
+        let bytes = artifact_size(path);
         let (placement, load_strategy, vram, host) = if place_cpu {
-            let host_bytes = bytes.max(component_peak);
-            cpu_bytes = cpu_bytes.saturating_add(host_bytes);
+            host_paths.insert(path.clone());
             (
                 ResolvedComponentPlacement::Cpu,
                 ComponentLoadStrategy::ParkedCpu,
                 0,
-                host_bytes,
+                bytes,
             )
         } else {
-            gpu_artifact_bytes = gpu_artifact_bytes.saturating_add(component_peak);
-            let strategy = if offload_requested && matches!(role, ComponentRole::Transformer) {
+            let strategy = if memory.block_offload
+                && matches!(
+                    role,
+                    ComponentRole::Transformer | ComponentRole::TransformerShard(_)
+                ) {
+                host_paths.insert(path.clone());
                 ComponentLoadStrategy::StreamedBlocks
             } else if matches!(role, ComponentRole::TextEncoder(_)) {
                 ComponentLoadStrategy::DropReload
@@ -531,7 +580,7 @@ fn build_plan(
             (
                 ResolvedComponentPlacement::Device(device.id.clone()),
                 strategy,
-                component_peak,
+                0,
                 0,
             )
         };
@@ -551,35 +600,26 @@ fn build_plan(
         );
     }
 
-    let predicted_vram = if offload_requested {
-        static_peak.min(
-            device
-                .available_vram_bytes
-                .saturating_sub(GPU_SAFETY_HEADROOM),
-        )
-    } else {
-        gpu_artifact_bytes.max(GPU_RUNTIME_FLOOR)
-    };
-    if predicted_vram.saturating_add(GPU_SAFETY_HEADROOM) > device.available_vram_bytes {
-        return None;
-    }
-    let predicted_host = BASE_HOST_TRANSIENT
-        .saturating_add(cpu_bytes)
-        .saturating_add(if offload_requested {
-            static_peak.saturating_sub(predicted_vram)
-        } else {
-            0
-        });
-    let fingerprint =
-        execution_fingerprint(model, device, effective, &components, offload_requested);
+    let predicted_vram = memory.peak_memory_bytes;
+    let predicted_host = host_paths.iter().fold(BASE_HOST_TRANSIENT, |total, path| {
+        total.saturating_add(artifact_size(path))
+    });
+    let fingerprint = execution_fingerprint(
+        context.model,
+        device,
+        context.effective,
+        &components,
+        memory.block_offload,
+    );
     Some(Ok(ResolvedExecutionPlan {
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
-        model_fingerprint: model_fingerprint(model, artifacts),
-        effective_placement: effective.clone(),
+        model_fingerprint: model_fingerprint(context.model, context.artifacts),
+        effective_placement: context.effective.clone(),
         components,
         attention_backend: AttentionBackend::Auto,
-        offload_mode: if offload_requested {
+        engine_load_strategy: memory.load_strategy,
+        offload_mode: if memory.block_offload {
             OffloadMode::Block
         } else {
             OffloadMode::None
@@ -591,28 +631,67 @@ fn build_plan(
     }))
 }
 
-fn static_vram_floor(family: &str, quantization: Option<QuantizationVariant>) -> u64 {
-    let base = match family {
-        "ltx2" | "ltx-2" | "ltx2.3" => 20 * GIB,
-        "flux2" | "flux.2" | "flux2-klein" => 16 * GIB,
-        "flux" => 12 * GIB,
-        "qwen-image" | "qwen-image-edit" | "z-image" | "zimage" => 12 * GIB,
-        "sdxl" | "sd3" | "sd3.5" => 8 * GIB,
-        "sd15" | "sd1.5" => 4 * GIB,
-        _ => 8 * GIB,
-    };
-    match quantization {
-        Some(QuantizationVariant::Q4) => base / 2,
-        Some(QuantizationVariant::Q8 | QuantizationVariant::Fp8) => base * 3 / 4,
-        None => base,
+fn gpu_resident_paths(
+    paths: &ModelPaths,
+    placements: &BTreeMap<ComponentRole, bool>,
+) -> ModelPaths {
+    let mut gpu = paths.clone();
+    let on_cpu = |role: &ComponentRole| placements.get(role).copied().unwrap_or(false);
+
+    if on_cpu(&ComponentRole::Transformer) {
+        gpu.transformer = PathBuf::new();
     }
+    if !gpu.transformer_shards.is_empty() {
+        gpu.transformer_shards = gpu
+            .transformer_shards
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, path)| {
+                (!on_cpu(&ComponentRole::TransformerShard(index as u8))).then_some(path)
+            })
+            .collect();
+    }
+    if on_cpu(&ComponentRole::Vae) {
+        gpu.vae = PathBuf::new();
+    }
+
+    let mut encoder_index = 0_u8;
+    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+        gpu.t5_encoder = None;
+    }
+    if paths.t5_encoder.is_some() {
+        encoder_index = encoder_index.saturating_add(1);
+    }
+    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+        gpu.clip_encoder = None;
+    }
+    if paths.clip_encoder.is_some() {
+        encoder_index = encoder_index.saturating_add(1);
+    }
+    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+        gpu.clip_encoder_2 = None;
+    }
+    if paths.clip_encoder_2.is_some() {
+        encoder_index = encoder_index.saturating_add(1);
+    }
+    gpu.text_encoder_files = paths
+        .text_encoder_files
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, path)| {
+            (!on_cpu(&ComponentRole::TextEncoder(
+                encoder_index.saturating_add(offset as u8),
+            )))
+            .then_some(path.clone())
+        })
+        .collect();
+    gpu
 }
 
-fn artifact_size_floor(path: &Path) -> u64 {
+fn artifact_size(path: &Path) -> u64 {
     std::fs::metadata(path)
         .map(|metadata| metadata.len())
-        .unwrap_or(64 * MIB)
-        .max(64 * MIB)
+        .unwrap_or(UNKNOWN_ARTIFACT_HOST_CHARGE)
 }
 
 fn infer_quantization(
@@ -699,6 +778,13 @@ mod tests {
     use mold_core::{AdvancedPlacement, ModelConfig};
     use tempfile::TempDir;
 
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn sparse_file(path: &Path, bytes: u64) {
+        let file = std::fs::File::create(path).unwrap();
+        file.set_len(bytes).unwrap();
+    }
+
     fn config(root: &Path, family: &str, persisted: Option<DevicePlacement>) -> Config {
         let mut config = Config::default();
         config.models.insert(
@@ -722,6 +808,37 @@ mod tests {
         .unwrap();
         request.placement = placement;
         request
+    }
+
+    fn sized_config(
+        root: &Path,
+        family: &str,
+        transformer_gib: u64,
+        vae_gib: u64,
+        encoder_gib: u64,
+    ) -> (Config, GenerateRequest) {
+        let transformer = root.join(format!("{family}-transformer.safetensors"));
+        let vae = root.join(format!("{family}-vae.safetensors"));
+        let encoder = root.join(format!("{family}-encoder.safetensors"));
+        sparse_file(&transformer, transformer_gib * GIB);
+        sparse_file(&vae, vae_gib * GIB);
+        sparse_file(&encoder, encoder_gib * GIB);
+        let mut config = Config::default();
+        config.models.insert(
+            "case:bf16".to_string(),
+            ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                t5_encoder: Some(encoder.display().to_string()),
+                family: Some(family.to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let request = serde_json::from_str(
+            r#"{"prompt":"x","model":"case:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        (config, request)
     }
 
     fn devices(free: &[u64]) -> Vec<DeviceFact> {
@@ -767,6 +884,7 @@ mod tests {
     #[test]
     fn explicit_cpu_is_charged_to_host_ram() {
         let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("t5.safetensors"), MIB);
         let placement = DevicePlacement {
             text_encoders: DeviceRef::Cpu,
             advanced: None,
@@ -779,11 +897,56 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        assert!(plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 64 * MIB);
+        assert_eq!(
+            plan.predicted_host_increment_bytes,
+            BASE_HOST_TRANSIENT + MIB
+        );
         assert!(plan.components.iter().any(|(role, component)| {
             matches!(role, ComponentRole::TextEncoder(_))
                 && component.placement == ResolvedComponentPlacement::Cpu
         }));
+    }
+
+    #[test]
+    fn hard_cpu_transformer_pin_is_credited_before_the_fit_gate() {
+        let root = TempDir::new().unwrap();
+        let (config, mut request) = sized_config(root.path(), "flux2", 32, 1, 2);
+        request.placement = Some(DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::Cpu,
+                ..AdvancedPlacement::default()
+            }),
+        });
+
+        let plan = resolve_execution_plans(&config, &request, &devices(&[8 * GIB]), false)
+            .expect("the CPU-resident transformer must be removed from GPU admission")
+            .remove(0);
+
+        assert_eq!(
+            plan.components[&ComponentRole::Transformer].placement,
+            ResolvedComponentPlacement::Cpu
+        );
+        assert!(plan.predicted_vram_peak_bytes < 8 * GIB);
+        assert!(
+            plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 32 * GIB,
+            "CPU-resident weights must be reserved against host RAM"
+        );
+    }
+
+    #[test]
+    fn block_offload_reserves_the_streamed_transformer_in_host_ram() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = sized_config(root.path(), "flux", 24, 1, 4);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[12 * GIB]), false)
+            .expect("large FLUX should fit through automatic block offload")
+            .remove(0);
+
+        assert_eq!(plan.offload_mode, OffloadMode::Block);
+        assert!(
+            plan.predicted_host_increment_bytes >= BASE_HOST_TRANSIENT + 24 * GIB,
+            "streamed transformer weights remain resident in host memory"
+        );
     }
 
     #[test]
@@ -810,6 +973,9 @@ mod tests {
     #[test]
     fn auto_cpu_exists_only_under_pressure_for_supported_family() {
         let root = TempDir::new().unwrap();
+        sparse_file(&root.path().join("transformer-q4.gguf"), 4 * GIB);
+        sparse_file(&root.path().join("vae.safetensors"), GIB / 2);
+        sparse_file(&root.path().join("t5.safetensors"), 4 * GIB);
         let flux2_config = config(root.path(), "flux2", None);
         let roomy =
             resolve_execution_plans(&flux2_config, &request(None), &devices(&[24 * GIB]), false)
@@ -820,14 +986,10 @@ mod tests {
             .values()
             .all(|component| component.placement != ResolvedComponentPlacement::Cpu));
 
-        let pressured = resolve_execution_plans(
-            &flux2_config,
-            &request(None),
-            &devices(&[8 * GIB + 480 * MIB]),
-            false,
-        )
-        .unwrap()
-        .remove(0);
+        let pressured =
+            resolve_execution_plans(&flux2_config, &request(None), &devices(&[9 * GIB]), false)
+                .unwrap()
+                .remove(0);
         assert!(pressured.components.iter().any(|(role, component)| {
             matches!(role, ComponentRole::TextEncoder(_))
                 && component.placement == ResolvedComponentPlacement::Cpu
@@ -841,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_offload_is_rejected() {
+    fn unsupported_family_offload_is_rejected_but_supported_runtime_fallbacks_are_plannable() {
         let root = TempDir::new().unwrap();
         assert!(matches!(
             resolve_execution_plans(
@@ -852,6 +1014,26 @@ mod tests {
             ),
             Err(ExecutionPlanError::UnsupportedOffload { .. })
         ));
+        let ltx2 = resolve_execution_plans(
+            &config(root.path(), "ltx2", None),
+            &request(None),
+            &devices(&[24 * GIB]),
+            true,
+        )
+        .expect("LTX-2 honors MOLD_OFFLOAD through its native streaming runtime");
+        assert_eq!(ltx2[0].offload_mode, OffloadMode::Block);
+
+        sparse_file(&root.path().join("transformer-q4.gguf"), 4 * GIB);
+        sparse_file(&root.path().join("vae.safetensors"), GIB);
+        sparse_file(&root.path().join("t5.safetensors"), GIB);
+        let flux2 = resolve_execution_plans(
+            &config(root.path(), "flux2", None),
+            &request(None),
+            &devices(&[24 * GIB]),
+            true,
+        )
+        .expect("a global offload preference must not reject an incompatible quantized path");
+        assert_eq!(flux2[0].offload_mode, OffloadMode::None);
     }
 
     #[test]
@@ -867,6 +1049,86 @@ mod tests {
             resolve_execution_plans(&config, &request(None), &[], false),
             Err(ExecutionPlanError::InsufficientVram)
         );
+    }
+
+    #[test]
+    fn each_candidate_uses_its_own_sampled_free_vram() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = sized_config(root.path(), "flux2", 12, 1, 2);
+        let plans = resolve_execution_plans(
+            &config,
+            &request,
+            &devices(&[12 * GIB, 24 * GIB, 48 * GIB]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.device_ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "a roomy sibling must not make the 12 GiB candidate admissible"
+        );
+        assert!(plans
+            .iter()
+            .all(|plan| plan.predicted_vram_peak_bytes <= 24 * GIB));
+    }
+
+    #[test]
+    fn missing_free_vram_never_falls_back_to_total_capacity() {
+        let root = TempDir::new().unwrap();
+        let (config, request) = sized_config(root.path(), "sd15", 1, 1, 1);
+        assert_eq!(
+            resolve_execution_plans(&config, &request, &devices(&[0]), false),
+            Err(ExecutionPlanError::InsufficientVram)
+        );
+    }
+
+    #[test]
+    fn request_aware_family_regressions_cover_12_24_and_48_gib() {
+        let cases = [
+            ("flux", 20, 1, 4, vec![0, 1, 2]),
+            ("flux2", 12, 1, 2, vec![1, 2]),
+            ("sd15", 2, 1, 1, vec![0, 1, 2]),
+            ("sdxl", 6, 1, 2, vec![0, 1, 2]),
+            ("sd3", 14, 1, 3, vec![1, 2]),
+            ("qwen-image", 34, 1, 6, vec![2]),
+            ("z-image", 14, 1, 3, vec![1, 2]),
+            ("ltx-video", 8, 1, 2, vec![1, 2]),
+            ("ltx2", 40, 1, 10, vec![0, 1, 2]),
+        ];
+        for (family, transformer, vae, encoder, expected_ordinals) in cases {
+            let root = TempDir::new().unwrap();
+            let (config, request) = sized_config(root.path(), family, transformer, vae, encoder);
+            let plans = resolve_execution_plans(
+                &config,
+                &request,
+                &devices(&[12 * GIB, 24 * GIB, 48 * GIB]),
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{family} planning failed: {error}"));
+            assert_eq!(
+                plans
+                    .iter()
+                    .map(|plan| plan.device_ordinal)
+                    .collect::<Vec<_>>(),
+                expected_ordinals,
+                "{family} admission drifted at 12/24/48 GiB"
+            );
+            if family == "ltx2" {
+                assert!(plans.iter().all(|plan| {
+                    plan.engine_load_strategy == mold_inference::LoadStrategy::Eager
+                        && plan.offload_mode == OffloadMode::None
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_artifact_metadata_keeps_a_conservative_host_charge() {
+        let missing = PathBuf::from("/definitely/missing/mold-artifact.safetensors");
+        assert_eq!(artifact_size(&missing), 64 * MIB);
     }
 
     #[test]

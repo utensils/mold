@@ -638,12 +638,12 @@ pub(crate) fn select_server_load_strategy_for_device(
     select_server_load_strategy_for_budget(paths, capped_available, hint)
 }
 
-pub(crate) fn server_offload_enabled_for_paths(
+fn server_offload_enabled_for_paths_with_request(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
     request_has_lora: bool,
+    forced_offload: bool,
 ) -> bool {
-    let forced_offload = std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1");
     let transformer_path = transformer_path_lower(paths);
     let transformer_looks_flux2 = transformer_path_looks_flux2(&transformer_path);
     let transformer_looks_zimage = transformer_path_looks_zimage(&transformer_path);
@@ -686,6 +686,18 @@ pub(crate) fn server_offload_enabled_for_paths(
     forced_offload || large_flux_bf16_should_auto_offload(paths, hint)
 }
 
+pub(crate) fn server_offload_enabled_for_paths(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    request_has_lora: bool,
+) -> bool {
+    let forced_offload = matches!(
+        std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    server_offload_enabled_for_paths_with_request(paths, hint, request_has_lora, forced_offload)
+}
+
 pub(crate) fn request_requires_fresh_engine_for_offload_policy(
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
@@ -701,37 +713,67 @@ pub(crate) struct GenerationMemoryBudget {
     pub(crate) activation_memory_bytes: u64,
     pub(crate) available_memory_bytes: Option<u64>,
     pub(crate) load_strategy: mold_inference::LoadStrategy,
+    pub(crate) block_offload: bool,
+    pub(crate) under_memory_pressure: bool,
     pub(crate) fits_available_memory: Option<bool>,
 }
 
+/// Resolve one generation's memory/load policy against an explicit sampled
+/// free-memory budget.
+///
+/// This is deliberately pure: scheduler candidates pass their own
+/// `DeviceFact::available_vram_bytes`, while legacy diagnostics may pass
+/// `None` when no authoritative sample exists. It never queries device zero
+/// and never substitutes total VRAM for missing free VRAM.
 pub(crate) fn estimate_generation_memory_for_request(
     req: &GenerateRequest,
     paths: &ModelPaths,
     hint: Option<ActivationHint>,
+    available_memory_bytes: Option<u64>,
+    forced_offload: bool,
+    request_has_lora: bool,
 ) -> GenerationMemoryBudget {
     let transformer_path = transformer_path_lower(paths);
     let streaming = hint
         .map(|h| h.family.streaming_transformer())
         .unwrap_or_else(|| transformer_path_looks_ltx2(&transformer_path));
-    let flux_offload = (hint.is_some_and(|h| h.family == ActivationFamily::FluxDit)
-        && std::env::var("MOLD_OFFLOAD").is_ok_and(|v| v == "1"))
-        || large_flux_bf16_should_auto_offload(paths, hint);
+    let block_offload = server_offload_enabled_for_paths_with_request(
+        paths,
+        hint,
+        request_has_lora,
+        forced_offload,
+    );
+    let flux_offload = hint.is_some_and(|h| h.family == ActivationFamily::FluxDit) && block_offload;
     let qwen_quantized = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit)
         && transformer_path_is_gguf(paths);
     let base_peak =
         base_peak_memory_for_paths(paths, hint, streaming, flux_offload, qwen_quantized);
     let activation = request_sensitive_activation_memory(req, hint, qwen_quantized);
     let peak = base_peak.saturating_add(activation);
-    let available = effective_load_available_bytes(0, 0).ok().flatten();
-    let load_strategy = select_server_load_strategy_for_budget(paths, available, hint);
-    let fits = available.map(|available| peak <= available.saturating_mul(9) / 10);
+    let available_memory_bytes = available_memory_bytes.filter(|available| *available > 0);
+    let load_strategy = select_server_load_strategy_for_budget(paths, available_memory_bytes, hint);
+    let eager_peak =
+        mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
+            .saturating_add(activation);
+    let under_memory_pressure = available_memory_bytes
+        .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
+    let qwen_family = hint.is_some_and(|h| h.family == ActivationFamily::QwenImageDit);
+    let fits_available_memory = available_memory_bytes.map(|available| {
+        if qwen_family {
+            peak <= available
+        } else {
+            peak <= available.saturating_mul(9) / 10
+        }
+    });
 
     GenerationMemoryBudget {
         peak_memory_bytes: peak,
         activation_memory_bytes: activation,
-        available_memory_bytes: available,
+        available_memory_bytes,
         load_strategy,
-        fits_available_memory: fits,
+        block_offload,
+        under_memory_pressure,
+        fits_available_memory,
     }
 }
 

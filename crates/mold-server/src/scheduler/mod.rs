@@ -25,6 +25,8 @@ const REPLAN_MAX_DELAY: Duration = Duration::from_secs(5);
 const RECONCILE_INTERVAL: Duration = Duration::from_millis(10);
 const MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_TRANSIENT_HOST_RAM: u64 = 64 * 1024 * 1024;
+const MAX_PLAN_INVALIDATIONS: u8 = 3;
+const PLAN_INVALIDATION_BACKOFF_MS: u64 = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseFence {
@@ -37,10 +39,11 @@ pub struct LeaseFence {
     pub memory_ledger_sequence: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LeaseRejection {
     StaleWorkerGeneration,
     FatalCuda,
+    PlanInvalidated(crate::execution_plan::ExecutionPlanError),
 }
 
 pub enum WorkerEvent {
@@ -199,6 +202,22 @@ struct PendingGeneration {
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
     preparation: PreparationState,
+    retry_not_before_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+enum GenerationPlanFailure {
+    Transient(String),
+    Terminal(crate::execution_plan::ExecutionPlanError),
+}
+
+impl std::fmt::Display for GenerationPlanFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(error) => formatter.write_str(error),
+            Self::Terminal(error) => error.fmt(formatter),
+        }
+    }
 }
 
 struct PendingOwnerWork {
@@ -599,6 +618,7 @@ struct Coordinator {
     last_registry_sequence: u64,
     last_paused: bool,
     last_worker_claims: BTreeMap<String, usize>,
+    plan_invalidations: BTreeMap<String, u8>,
     #[cfg(test)]
     before_grant_hook: Option<BeforeGrantHook>,
 }
@@ -644,6 +664,7 @@ impl Coordinator {
             last_registry_sequence: 0,
             last_paused: false,
             last_worker_claims: BTreeMap::new(),
+            plan_invalidations: BTreeMap::new(),
             #[cfg(test)]
             before_grant_hook: None,
         }
@@ -688,6 +709,7 @@ impl Coordinator {
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
+                retry_not_before_ms: None,
             },
         );
         self.mutate(immediate);
@@ -909,13 +931,50 @@ impl Coordinator {
                 match work {
                     OwnerWork::Generation(job) => {
                         let generation_job = generation_from_gpu_job(*job);
-                        if reason == LeaseRejection::FatalCuda {
+                        if matches!(reason, LeaseRejection::FatalCuda) {
+                            self.plan_invalidations.remove(&generation_job.id);
                             reject_generation(
                                 &self.state,
                                 generation_job,
                                 "CUDA context is fatally poisoned; server restart required"
                                     .to_string(),
                             );
+                        } else if let LeaseRejection::PlanInvalidated(error) = &reason {
+                            let attempts = self
+                                .plan_invalidations
+                                .entry(generation_job.id.clone())
+                                .or_default();
+                            *attempts = attempts.saturating_add(1);
+                            if *attempts >= MAX_PLAN_INVALIDATIONS {
+                                let attempts = *attempts;
+                                self.plan_invalidations.remove(&generation_job.id);
+                                reject_generation(
+                                    &self.state,
+                                    generation_job,
+                                    format!(
+                                        "execution plan was invalidated {attempts} consecutive times; \
+                                         refusing to retry: {error}"
+                                    ),
+                                );
+                            } else {
+                                let backoff_ms = PLAN_INVALIDATION_BACKOFF_MS
+                                    .saturating_mul(1_u64 << u32::from(*attempts - 1));
+                                self.state
+                                    .job_registry
+                                    .requeue_rejected_dispatch(&generation_job.id, previous_target);
+                                self.pending.insert(
+                                    generation_job.id.clone(),
+                                    PendingGeneration {
+                                        job: generation_job,
+                                        bypass_count: 0,
+                                        warm_wait_started_ms: None,
+                                        preparation: PreparationState::Ready,
+                                        retry_not_before_ms: Some(
+                                            monotonic_ms().saturating_add(backoff_ms),
+                                        ),
+                                    },
+                                );
+                            }
                         } else {
                             self.state
                                 .job_registry
@@ -927,12 +986,13 @@ impl Coordinator {
                                     bypass_count: 0,
                                     warm_wait_started_ms: None,
                                     preparation: PreparationState::Ready,
+                                    retry_not_before_ms: None,
                                 },
                             );
                         }
                     }
                     work => {
-                        if reason == LeaseRejection::FatalCuda {
+                        if matches!(reason, LeaseRejection::FatalCuda) {
                             work.reject(
                                 "CUDA context is fatally poisoned; server restart required"
                                     .to_string(),
@@ -984,6 +1044,7 @@ impl Coordinator {
                     }
                     self.memory.release(&lease.work_id);
                     self.memory.collect_now();
+                    self.plan_invalidations.remove(&lease.work_id);
                 }
                 self.mutate(immediate);
             }
@@ -1039,6 +1100,7 @@ impl Coordinator {
             .collect::<Vec<_>>();
         for id in cancelled {
             if let Some(pending) = self.pending.remove(&id) {
+                self.plan_invalidations.remove(&id);
                 self.state.queue.decrement();
                 let _ = pending.job.result_tx.send(Err(format!(
                     "generation job {id} was cancelled while queued"
@@ -1160,12 +1222,12 @@ impl Coordinator {
     fn generation_plans(
         &self,
         pending: &PendingGeneration,
-    ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, String> {
-        let config = self
-            .state
-            .config
-            .try_read()
-            .map_err(|_| "configuration changed while resolving execution plan".to_string())?;
+    ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
+        let config = self.state.config.try_read().map_err(|_| {
+            GenerationPlanFailure::Transient(
+                "configuration changed while resolving execution plan".to_string(),
+            )
+        })?;
         let offload_requested = matches!(
             std::env::var("MOLD_OFFLOAD").ok().as_deref(),
             Some("1") | Some("true") | Some("yes")
@@ -1198,6 +1260,7 @@ impl Coordinator {
                     },
                     components: BTreeMap::new(),
                     attention_backend: crate::execution_plan::AttentionBackend::Auto,
+                    engine_load_strategy: mold_inference::LoadStrategy::Eager,
                     offload_mode: crate::execution_plan::OffloadMode::None,
                     predicted_vram_peak_bytes: estimate,
                     predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
@@ -1207,7 +1270,41 @@ impl Coordinator {
                 })
                 .collect());
         }
-        resolved.map_err(|error| error.to_string())
+        resolved.map_err(|error| {
+            if matches!(
+                error,
+                crate::execution_plan::ExecutionPlanError::InsufficientVram
+            ) {
+                GenerationPlanFailure::Transient(error.to_string())
+            } else {
+                GenerationPlanFailure::Terminal(error)
+            }
+        })
+    }
+
+    fn reject_terminal_generation_plan_errors(&mut self) -> bool {
+        let failures = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
+            .filter_map(|(id, pending)| match self.generation_plans(pending) {
+                Err(GenerationPlanFailure::Terminal(error)) => {
+                    Some((id.clone(), error.to_string()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return false;
+        }
+        for (id, error) in failures {
+            if let Some(pending) = self.pending.remove(&id) {
+                self.plan_invalidations.remove(&id);
+                reject_generation(&self.state, pending.job, error);
+            }
+        }
+        self.state_version = self.state_version.saturating_add(1);
+        true
     }
 
     fn work_snapshots(&self) -> Vec<WorkSnapshot> {
@@ -1217,10 +1314,16 @@ impl Coordinator {
             .enumerate()
             .map(|(rank, id)| (id.as_str(), rank as u64))
             .collect::<BTreeMap<_, _>>();
+        let now_ms = monotonic_ms();
         let mut snapshots: Vec<WorkSnapshot> = self
             .pending
             .iter()
-            .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
+            .filter(|(_, pending)| {
+                pending.preparation == PreparationState::Ready
+                    && pending
+                        .retry_not_before_ms
+                        .is_none_or(|deadline| deadline <= now_ms)
+            })
             .map(|(id, pending)| {
                 let model = pending.job.request.model.as_str();
                 let failed = crate::gpu_pool::failed_ordinals_for_model(model);
@@ -1321,6 +1424,9 @@ impl Coordinator {
     }
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
+        if !self.pending.is_empty() {
+            self.reject_terminal_generation_plan_errors();
+        }
         if self.state.queue_pause.is_paused()
             || (self.pending.is_empty() && self.pending_owner_work.is_empty())
             || self.ready.is_empty()
@@ -1334,6 +1440,12 @@ impl Coordinator {
             return None;
         }
         loop {
+            if self.reject_terminal_generation_plan_errors()
+                && self.pending.is_empty()
+                && self.pending_owner_work.is_empty()
+            {
+                return None;
+            }
             let snapshot = self.planner_snapshot();
             let plan = match self.planner.plan(&snapshot) {
                 Ok(plan) => plan,
@@ -1483,9 +1595,18 @@ impl Coordinator {
                     break;
                 }
                 if let Some(pending) = self.pending.remove(&id) {
-                    let execution_plan = self.generation_plans(&pending).ok().and_then(|plans| {
-                        plans.into_iter().find(|plan| plan.device_id == device_id)
-                    });
+                    let execution_plan = match self.generation_plans(&pending) {
+                        Ok(plans) => plans.into_iter().find(|plan| plan.device_id == device_id),
+                        Err(GenerationPlanFailure::Terminal(error)) => {
+                            worker.release_in_flight();
+                            self.plan_invalidations.remove(&id);
+                            reject_generation(&self.state, pending.job, error.to_string());
+                            self.state_version = self.state_version.saturating_add(1);
+                            grant_failed = true;
+                            break;
+                        }
+                        Err(GenerationPlanFailure::Transient(_)) => None,
+                    };
                     let Some(execution_plan) = execution_plan else {
                         self.pending.insert(id.clone(), pending);
                         worker.release_in_flight();
@@ -1495,6 +1616,7 @@ impl Coordinator {
                     };
                     let bypass_count = pending.bypass_count;
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
+                    let retry_not_before_ms = pending.retry_not_before_ms;
                     let gpu_job = gpu_job_from_generation(
                         &self.state,
                         pending.job,
@@ -1555,6 +1677,7 @@ impl Coordinator {
                                     bypass_count,
                                     warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
+                                    retry_not_before_ms,
                                 },
                             );
                             self.unavailable.insert(device_id.clone());
@@ -1670,6 +1793,7 @@ impl Coordinator {
 
     fn reject_all_unstarted(&mut self, message: &str) {
         let pending = std::mem::take(&mut self.pending);
+        self.plan_invalidations.clear();
         for (_, pending) in pending {
             reject_generation(&self.state, pending.job, message.to_string());
         }
@@ -2998,6 +3122,259 @@ mod tests {
         );
         assert!(coordinator.pending.contains_key("fatal-race"));
         assert!(coordinator.leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deterministic_plan_error_rejects_instead_of_remaining_zero_candidate_work() {
+        let root = tempfile::TempDir::new().unwrap();
+        let transformer = root.path().join("sdxl.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        let encoder = root.path().join("clip.safetensors");
+        for (path, bytes) in [
+            (&transformer, 2_u64 << 30),
+            (&vae, 512_u64 << 20),
+            (&encoder, 512_u64 << 20),
+        ] {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_len(bytes).unwrap();
+        }
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "test-terminal:q4".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                t5_encoder: Some(encoder.display().to_string()),
+                family: Some("sdxl".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(config, queue.clone(), pool, 4);
+        let (mut job, mut result) = fake_generation("terminal-plan-error");
+        job.request.model = "test-terminal:q4".to_string();
+        job.request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: None,
+        });
+        state
+            .job_registry
+            .register("terminal-plan-error", "test-terminal:q4");
+        queue.submit(job, 4).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("terminal-plan-error")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.dispatch_ready().await;
+
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "terminal resolution must not wait for an idle worker"
+        );
+        assert!(!coordinator.pending.contains_key("terminal-plan-error"));
+        assert_eq!(queue.pending(), 0);
+        let error = match result
+            .try_recv()
+            .expect("terminal planning failure must settle the result")
+        {
+            Ok(_) => panic!("unsupported placement must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("pinned to CPU"));
+    }
+
+    #[tokio::test]
+    async fn owner_plan_invalidation_requeues_and_replans_without_double_release() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 4);
+        let (job, mut result) = fake_generation("plan-invalidated");
+        state
+            .job_registry
+            .register("plan-invalidated", "flux-dev:q4");
+        queue.submit(job, 4).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("plan-invalidated")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        let device_id = worker_device_id(&worker);
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+
+        let first_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        let first_plan_version = first_grant.fence.plan_version;
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(coordinator.memory.reservations.len(), 1);
+        assert_eq!(
+            state.job_registry.entry("plan-invalidated").unwrap().state,
+            crate::job_registry::JobLifecycle::Running
+        );
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+                grant: first_grant,
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "artifact changed".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+
+        assert!(coordinator.leases.is_empty());
+        assert!(coordinator.memory.reservations.is_empty());
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            0,
+            "the invalidated claim must be released exactly once"
+        );
+        assert!(coordinator.pending.contains_key("plan-invalidated"));
+        assert_eq!(
+            state.job_registry.entry("plan-invalidated").unwrap().state,
+            crate::job_registry::JobLifecycle::Queued
+        );
+        assert_eq!(queue.pending(), 1);
+        assert!(matches!(
+            result.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            coordinator.plan_invalidations.get("plan-invalidated"),
+            Some(&1)
+        );
+        assert!(
+            coordinator.pending["plan-invalidated"]
+                .retry_not_before_ms
+                .is_some_and(|deadline| deadline > monotonic_ms()),
+            "the invalidated plan must back off before redispatch"
+        );
+        coordinator
+            .pending
+            .get_mut("plan-invalidated")
+            .unwrap()
+            .retry_not_before_ms = Some(0);
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        let second_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        assert_eq!(second_grant.fence.work_id, "plan-invalidated");
+        assert!(second_grant.fence.plan_version > first_plan_version);
+        assert_eq!(second_grant.fence.worker_generation, 1);
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(coordinator.memory.reservations.len(), 1);
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+                grant: second_grant,
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "artifact changed again".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+        coordinator
+            .pending
+            .get_mut("plan-invalidated")
+            .unwrap()
+            .retry_not_before_ms = Some(0);
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        let third_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id,
+                ordinal: 0,
+                worker_generation: 1,
+                grant: third_grant,
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "artifact never stabilized".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+
+        assert!(!coordinator.pending.contains_key("plan-invalidated"));
+        assert!(!coordinator
+            .plan_invalidations
+            .contains_key("plan-invalidated"));
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.pending(), 0);
+        let error = match result
+            .try_recv()
+            .expect("bounded invalidation retries must settle the result")
+        {
+            Ok(_) => panic!("repeated invalidation must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("invalidated 3 consecutive times"));
     }
 
     struct SelectiveBlockingPreparer {

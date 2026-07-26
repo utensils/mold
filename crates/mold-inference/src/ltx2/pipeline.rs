@@ -40,6 +40,7 @@ pub struct Ltx2Engine {
     native_runtime: Option<Ltx2RuntimeSession>,
     on_progress: Option<ProgressCallback>,
     pending_placement: Option<mold_core::types::DevicePlacement>,
+    load_strategy: LoadStrategy,
     /// GPU ordinal this engine is pinned to. Every CUDA device operation must
     /// use this ordinal; hardcoding `0` can target a sibling worker's context.
     gpu_ordinal: usize,
@@ -83,7 +84,7 @@ impl Ltx2Engine {
     pub fn new(
         model_name: String,
         paths: ModelPaths,
-        _load_strategy: LoadStrategy,
+        load_strategy: LoadStrategy,
         gpu_ordinal: usize,
     ) -> Self {
         let text_projection_path = paths
@@ -102,6 +103,7 @@ impl Ltx2Engine {
             native_runtime: None,
             on_progress: None,
             pending_placement: None,
+            load_strategy,
             gpu_ordinal,
             preset_hint: None,
             text_projection_path,
@@ -218,6 +220,7 @@ impl Ltx2Engine {
             native_runtime: Some(runtime),
             on_progress: None,
             pending_placement: None,
+            load_strategy: LoadStrategy::Sequential,
             gpu_ordinal: 0,
             preset_hint: None,
             text_projection_path: None,
@@ -971,6 +974,17 @@ impl InferenceEngine for Ltx2Engine {
         Some(&self.paths)
     }
 
+    fn configured_load_strategy(&self) -> Option<LoadStrategy> {
+        Some(self.load_strategy)
+    }
+
+    fn configured_block_offload(&self) -> Option<bool> {
+        // LTX-2 uses its native adaptive streaming runtime; the generic
+        // request-controlled block-offload flag is not part of its factory
+        // contract.
+        Some(false)
+    }
+
     fn as_chain_renderer(&mut self) -> Option<&mut dyn crate::chain::ChainStageRenderer> {
         Some(self)
     }
@@ -1518,6 +1532,21 @@ mod tests {
             engine.select_pipeline(&req).unwrap(),
             PipelineKind::Distilled
         );
+    }
+
+    #[test]
+    fn constructor_consumes_the_selected_load_mode_explicitly() {
+        let engine = Ltx2Engine::new(
+            "ltx-2:fp8".to_string(),
+            dummy_paths(),
+            LoadStrategy::Sequential,
+            3,
+        );
+        assert_eq!(
+            engine.configured_load_strategy(),
+            Some(LoadStrategy::Sequential)
+        );
+        assert_eq!(engine.configured_block_offload(), Some(false));
     }
 
     #[test]

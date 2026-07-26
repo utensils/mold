@@ -35,6 +35,16 @@ pub trait InferenceEngine: Send + Sync {
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
         None
     }
+    /// Exact load policy supplied when this engine was created, when the
+    /// caller records one. Server scheduler plans use this to avoid silently
+    /// reusing an engine built under a different residency contract.
+    fn configured_load_strategy(&self) -> Option<LoadStrategy> {
+        None
+    }
+    /// Exact request-controlled block-offload flag supplied at creation.
+    fn configured_block_offload(&self) -> Option<bool> {
+        None
+    }
 
     /// Returns a [`ChainStageRenderer`] view of this engine if the family
     /// supports chained video generation. Default is `None` — only LTX-2
