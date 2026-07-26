@@ -1238,6 +1238,7 @@ mod tests {
             _carry: Option<&mold_inference::chain::ChainTail>,
             _motion_tail_frames: u32,
             progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
             let _ = progress(1, 2);
             if stage_req.prompt == "stage one" {

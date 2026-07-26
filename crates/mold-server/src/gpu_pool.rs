@@ -6,10 +6,72 @@ use mold_inference::shared_pool::SharedPool;
 use mold_scheduler::WorkKind;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 const MODEL_CUDA_OOM_COOLDOWN: Duration = Duration::from_secs(60);
+pub(crate) const MAX_OWNER_BYPASSES_FOR_CHAIN: u8 = 3;
+
+static LEGACY_CHAIN_TICKET: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Default)]
+pub(crate) struct LegacyChainWaitQueue {
+    waiters: Mutex<Vec<Weak<LegacyChainWaiter>>>,
+}
+
+#[derive(Debug, Default)]
+struct LegacyChainWaitState {
+    owner_bypasses: u8,
+    claimed: bool,
+    wake_sequence: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct LegacyChainWaiter {
+    ticket: usize,
+    state: Mutex<LegacyChainWaitState>,
+    wake: Condvar,
+}
+
+impl LegacyChainWaiter {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ticket: LEGACY_CHAIN_TICKET.fetch_add(1, Ordering::SeqCst),
+            state: Mutex::new(LegacyChainWaitState::default()),
+            wake: Condvar::new(),
+        })
+    }
+
+    pub(crate) fn wake_sequence(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .wake_sequence
+    }
+
+    pub(crate) fn wait_for_wake(&self, observed_sequence: u64) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.claimed || state.wake_sequence != observed_sequence {
+            return;
+        }
+        let _ = self
+            .wake
+            .wait_timeout(state, Duration::from_millis(100))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+
+    fn notify(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.wake_sequence = state.wake_sequence.saturating_add(1);
+        self.wake.notify_all();
+    }
+}
 
 #[derive(Debug, Default)]
 struct ModelCudaOomState {
@@ -121,6 +183,7 @@ pub struct GpuWorker {
     pub model_load_lock: Arc<Mutex<()>>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
     pub in_flight: AtomicUsize,
+    pub(crate) legacy_chain_waiters: LegacyChainWaitQueue,
     pub consecutive_failures: AtomicUsize,
     /// Fatal CUDA errors poison a process-owned context permanently. A poisoned
     /// worker is quarantined until the server process is restarted.
@@ -353,8 +416,133 @@ impl GpuWorker {
             .is_ok()
     }
 
+    /// Claim this worker for scheduler-owned work while honoring the oldest
+    /// legacy chain stage registered for this device.
+    ///
+    /// The chain waiter's bypass count is shared across every eligible GPU,
+    /// so the bound is global rather than `MAX * worker_count`.
+    pub(crate) fn try_claim_owner_in_flight(&self) -> bool {
+        loop {
+            let mut waiters = self
+                .legacy_chain_waiters
+                .waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            waiters.retain(|waiter| waiter.strong_count() > 0);
+            waiters
+                .sort_by_key(|waiter| waiter.upgrade().map_or(usize::MAX, |waiter| waiter.ticket));
+            let Some(waiter) = waiters.first().and_then(Weak::upgrade) else {
+                return self.try_claim_in_flight();
+            };
+            let mut state = waiter
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.claimed {
+                waiters.remove(0);
+                continue;
+            }
+            if state.owner_bypasses >= MAX_OWNER_BYPASSES_FOR_CHAIN {
+                return false;
+            }
+            if !self.try_claim_in_flight() {
+                return false;
+            }
+            state.owner_bypasses += 1;
+            if state.owner_bypasses == MAX_OWNER_BYPASSES_FOR_CHAIN {
+                state.wake_sequence = state.wake_sequence.saturating_add(1);
+                waiter.wake.notify_all();
+            }
+            return true;
+        }
+    }
+
+    pub(crate) fn register_legacy_chain_waiter(&self, waiter: &Arc<LegacyChainWaiter>) {
+        let mut waiters = self
+            .legacy_chain_waiters
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        waiters.retain(|queued| queued.strong_count() > 0);
+        if waiters
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|queued| Arc::ptr_eq(&queued, waiter))
+        {
+            return;
+        }
+        waiters.push(Arc::downgrade(waiter));
+        waiters.sort_by_key(|queued| queued.upgrade().map_or(usize::MAX, |queued| queued.ticket));
+    }
+
+    pub(crate) fn unregister_legacy_chain_waiter(&self, waiter: &Arc<LegacyChainWaiter>) {
+        self.legacy_chain_waiters
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|queued| {
+                queued
+                    .upgrade()
+                    .is_some_and(|queued| !Arc::ptr_eq(&queued, waiter))
+            });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_chain_waiter_count(&self) -> usize {
+        self.legacy_chain_waiters
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|waiter| waiter.strong_count() > 0)
+            .count()
+    }
+
+    pub(crate) fn try_claim_legacy_chain_in_flight(&self, waiter: &Arc<LegacyChainWaiter>) -> bool {
+        let mut waiters = self
+            .legacy_chain_waiters
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        waiters.retain(|queued| queued.strong_count() > 0);
+        waiters.sort_by_key(|queued| queued.upgrade().map_or(usize::MAX, |queued| queued.ticket));
+        if !waiters
+            .first()
+            .and_then(Weak::upgrade)
+            .is_some_and(|queued| Arc::ptr_eq(&queued, waiter))
+        {
+            return false;
+        }
+        let mut state = waiter
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.claimed || !self.try_claim_in_flight() {
+            return false;
+        }
+        state.claimed = true;
+        true
+    }
+
     pub(crate) fn release_in_flight(&self) {
         self.in_flight.store(0, Ordering::SeqCst);
+        self.notify_legacy_chain_waiters();
+    }
+
+    fn notify_legacy_chain_waiters(&self) {
+        let waiters = {
+            let mut waiters = self
+                .legacy_chain_waiters
+                .waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let live = waiters.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            waiters.retain(|waiter| waiter.strong_count() > 0);
+            live
+        };
+        for waiter in waiters {
+            waiter.notify();
+        }
     }
 
     pub(crate) fn try_send_job(
@@ -414,6 +602,7 @@ impl GpuWorker {
 
     pub(crate) fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::SeqCst);
+        self.notify_legacy_chain_waiters();
         match self.job_tx.try_send(GpuWorkerCommand::Shutdown) {
             Ok(())
             | Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown))
@@ -805,6 +994,7 @@ mod tests {
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
             in_flight: AtomicUsize::new(0),
+            legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),

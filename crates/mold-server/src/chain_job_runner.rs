@@ -130,6 +130,7 @@ pub trait StageExecutor: Send + Sync {
         carry: Option<&ChainTail>,
         motion_tail_frames: u32,
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome>;
 }
 
@@ -1226,22 +1227,26 @@ fn execute_stage(
     let events = deps.events.clone();
     let cancel = deps.cancel.clone();
     let motion_tail_frames = effective.motion_tail_frames;
+    let progress_cancel = cancel.clone();
+    let progress_job_id = job_id.clone();
     let progress: Box<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync> =
         Box::new(move |step, total| {
             events.publish(
-                &job_id,
+                &progress_job_id,
                 ChainJobEvent::DenoiseStep {
                     stage_idx,
                     step,
                     total,
                 },
             );
-            if cancel.is_cancelled(&job_id) {
+            if progress_cancel.is_cancelled(&progress_job_id) {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
         });
+    let cancelled: Box<dyn Fn() -> bool + Send + Sync> =
+        Box::new(move || cancel.is_cancelled(&job_id));
 
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => handle
@@ -1252,6 +1257,7 @@ fn execute_stage(
                     carry_owned.as_ref(),
                     motion_tail_frames,
                     progress.as_ref(),
+                    cancelled.as_ref(),
                 )
             }))
             .map_err(|e| anyhow!("chain stage task failed: {e}"))?,
@@ -1261,6 +1267,7 @@ fn execute_stage(
             carry,
             motion_tail_frames,
             progress.as_ref(),
+            cancelled.as_ref(),
         ),
     }
 }
@@ -1728,9 +1735,17 @@ impl StageExecutor for ProductionStageExecutor {
         carry: Option<&ChainTail>,
         motion_tail_frames: u32,
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome> {
-        let in_flight = claim_worker_for_stage(&self.gpu_pool, model)
-            .ok_or_else(|| anyhow!("no GPU worker available for chain stage model '{model}'"))?;
+        let Some(in_flight) = claim_worker_for_stage(
+            &self.gpu_pool,
+            model,
+            stage_req.placement.as_ref(),
+            cancelled,
+        )?
+        else {
+            return Ok(StageRenderOutcome::Cancelled);
+        };
         let worker = in_flight.worker().clone();
         let _in_flight = in_flight;
         let _active = WorkerActiveGenerationGuard::new(worker.clone(), model, &stage_req.prompt)?;
@@ -2342,29 +2357,91 @@ fn read_audio_sidecar(path: &Path) -> anyhow::Result<NativeAudioTrack> {
     })
 }
 
-fn claim_worker_for_stage(gpu_pool: &GpuPool, model: &str) -> Option<WorkerInFlightGuard> {
-    let est = crate::queue::estimate_model_vram(model);
+fn claim_worker_for_stage(
+    gpu_pool: &GpuPool,
+    model: &str,
+    placement: Option<&mold_core::types::DevicePlacement>,
+    cancelled: &(dyn Fn() -> bool + Send + Sync),
+) -> anyhow::Result<Option<WorkerInFlightGuard>> {
+    if cancelled() {
+        return Ok(None);
+    }
+    let hard_ordinal = gpu_pool
+        .resolve_explicit_placement_gpu(placement)
+        .map_err(anyhow::Error::msg)?;
+    let eligible = if let Some(ordinal) = hard_ordinal {
+        vec![gpu_pool
+            .worker_by_ordinal(ordinal)
+            .ok_or_else(|| anyhow!("gpu:{ordinal} is unavailable for chain stage"))?]
+    } else {
+        gpu_pool.workers.clone()
+    };
+    if eligible.is_empty() {
+        bail!("no GPU worker available for chain stage model '{model}'");
+    }
+
+    let waiter = crate::gpu_pool::LegacyChainWaiter::new();
+    for worker in &eligible {
+        worker.register_legacy_chain_waiter(&waiter);
+    }
+    let registration = LegacyChainWaitRegistration {
+        waiter,
+        workers: eligible,
+    };
+
     loop {
-        let mut skipped = Vec::new();
-        let mut found_eligible = false;
-        while skipped.len() < gpu_pool.worker_count() {
-            let Some(worker) = gpu_pool.select_worker_excluding(model, est, &skipped) else {
-                break;
-            };
-            found_eligible = true;
-            if let Some(claim) = WorkerInFlightGuard::try_claim(worker.clone()) {
-                return Some(claim);
+        if cancelled() {
+            return Ok(None);
+        }
+        let observed_wake = registration.waiter.wake_sequence();
+        let mut found_live = false;
+        let mut ordered = Vec::new();
+        if hard_ordinal.is_some() {
+            ordered.extend(registration.workers.iter().cloned());
+        } else {
+            let est = crate::queue::estimate_model_vram(model);
+            let mut skipped = Vec::new();
+            while skipped.len() < gpu_pool.worker_count() {
+                let Some(worker) = gpu_pool.select_worker_excluding(model, est, &skipped) else {
+                    break;
+                };
+                skipped.push(worker.gpu.ordinal);
+                ordered.push(worker);
             }
-            skipped.push(worker.gpu.ordinal);
         }
-        if !found_eligible {
-            return None;
+        for worker in ordered {
+            if worker.shutdown_requested.load(Ordering::SeqCst)
+                || worker.poisoned.load(Ordering::SeqCst)
+                || worker.fatal_cuda_error.load(Ordering::SeqCst)
+            {
+                continue;
+            }
+            found_live = true;
+            if worker.is_degraded() {
+                continue;
+            }
+            if worker.try_claim_legacy_chain_in_flight(&registration.waiter) {
+                drop(registration);
+                return Ok(Some(WorkerInFlightGuard { worker }));
+            }
         }
-        // This temporary compatibility path is removed when ChainStage becomes
-        // a first-class scheduler work unit. Until then, wait exactly as the
-        // old per-worker model lock did while preserving atomic exclusion from
-        // owner-scheduled work.
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        if !found_live {
+            bail!("no healthy GPU worker available for chain stage model '{model}'");
+        }
+        registration.waiter.wait_for_wake(observed_wake);
+    }
+}
+
+struct LegacyChainWaitRegistration {
+    waiter: Arc<crate::gpu_pool::LegacyChainWaiter>,
+    workers: Vec<Arc<GpuWorker>>,
+}
+
+impl Drop for LegacyChainWaitRegistration {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            worker.unregister_legacy_chain_waiter(&self.waiter);
+        }
     }
 }
 
@@ -2373,10 +2450,6 @@ struct WorkerInFlightGuard {
 }
 
 impl WorkerInFlightGuard {
-    fn try_claim(worker: Arc<GpuWorker>) -> Option<Self> {
-        worker.try_claim_in_flight().then_some(Self { worker })
-    }
-
     fn worker(&self) -> &Arc<GpuWorker> {
         &self.worker
     }
@@ -2437,71 +2510,177 @@ mod tests {
         MetadataDb::open_in_memory().unwrap()
     }
 
-    fn claim_test_pool() -> Arc<GpuPool> {
-        let (job_tx, _job_rx) =
-            std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
-        let worker = Arc::new(GpuWorker {
-            gpu: mold_inference::device::DiscoveredGpu {
-                ordinal: 0,
-                stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
-                raw_cuda_uuid: Some([0; 16]),
-                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
-                identity_error: None,
-                backend: mold_core::types::GpuBackend::Cuda,
-                name: "claim-test-gpu".to_string(),
-                compute_capability: Some((8, 6)),
-                pci_bus_id: None,
-                total_vram_bytes: 24_000_000_000,
-                free_vram_bytes: 24_000_000_000,
-            },
-            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(1))),
-            resident_model: Arc::new(std::sync::RwLock::new(None)),
-            active_generation: Arc::new(std::sync::RwLock::new(None)),
-            model_load_lock: Arc::new(Mutex::new(())),
-            shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
-            in_flight: AtomicUsize::new(0),
-            consecutive_failures: AtomicUsize::new(0),
-            poisoned: AtomicBool::new(false),
-            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
-            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
-            shutdown_requested: AtomicBool::new(false),
-            owner_thread_id: std::sync::OnceLock::new(),
-            degraded_until: std::sync::RwLock::new(None),
-            job_tx,
-        });
-        Arc::new(GpuPool {
-            workers: vec![worker],
-        })
+    fn claim_test_pool(worker_count: usize) -> Arc<GpuPool> {
+        let workers = (0..worker_count)
+            .map(|ordinal| {
+                let (job_tx, _job_rx) =
+                    std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
+                Arc::new(GpuWorker {
+                    gpu: mold_inference::device::DiscoveredGpu {
+                        ordinal,
+                        stable_id: Some(format!("cuda:{ordinal:032x}")),
+                        raw_cuda_uuid: Some((ordinal as u128).to_be_bytes()),
+                        device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                        identity_error: None,
+                        backend: mold_core::types::GpuBackend::Cuda,
+                        name: format!("claim-test-gpu-{ordinal}"),
+                        compute_capability: Some((8, 6)),
+                        pci_bus_id: None,
+                        total_vram_bytes: 24_000_000_000,
+                        free_vram_bytes: 24_000_000_000,
+                    },
+                    model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(1))),
+                    resident_model: Arc::new(std::sync::RwLock::new(None)),
+                    active_generation: Arc::new(std::sync::RwLock::new(None)),
+                    model_load_lock: Arc::new(Mutex::new(())),
+                    shared_pool: Arc::new(Mutex::new(
+                        mold_inference::shared_pool::SharedPool::new(),
+                    )),
+                    in_flight: AtomicUsize::new(0),
+                    legacy_chain_waiters: Default::default(),
+                    consecutive_failures: AtomicUsize::new(0),
+                    poisoned: AtomicBool::new(false),
+                    fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+                    fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+                    shutdown_requested: AtomicBool::new(false),
+                    owner_thread_id: std::sync::OnceLock::new(),
+                    degraded_until: std::sync::RwLock::new(None),
+                    job_tx,
+                })
+            })
+            .collect();
+        Arc::new(GpuPool { workers })
     }
 
     #[test]
     fn waiting_chain_stage_gets_an_opening_within_three_owner_bypasses() {
-        let pool = claim_test_pool();
-        let worker = pool.workers[0].clone();
-        assert!(worker.try_claim_in_flight(), "initial owner claim");
-
-        // This is the exact interleaving permitted by the compatibility loop:
-        // the chain polls just before each completion, then a younger owner
-        // grant reacquires the opening before the chain's next 10 ms poll.
-        let mut bypasses = 0;
-        for _ in 0..4 {
-            assert!(
-                WorkerInFlightGuard::try_claim(worker.clone()).is_none(),
-                "chain poll observes the current owner"
-            );
-            worker.release_in_flight();
-            assert!(
-                worker.try_claim_in_flight(),
-                "younger owner reacquires before the next chain poll"
-            );
-            bypasses += 1;
+        let pool = claim_test_pool(2);
+        for worker in &pool.workers {
+            assert!(worker.try_claim_owner_in_flight(), "initial owner claim");
         }
-        worker.release_in_flight();
+
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+        let chain_pool = pool.clone();
+        let chain = std::thread::spawn(move || {
+            let claim = claim_worker_for_stage(&chain_pool, "ltx2", None, &|| false)
+                .unwrap()
+                .expect("waiting chain eventually claims an eligible worker");
+            claimed_tx.send(claim.worker().gpu.ordinal).unwrap();
+            drop(claim);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while pool
+            .workers
+            .iter()
+            .any(|worker| worker.legacy_chain_waiter_count() == 0)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "chain did not publish its wait intent on every eligible GPU"
+            );
+            std::thread::yield_now();
+        }
+
+        let mut younger_starts = 0;
+        let mut owner_holds_claim = vec![true; pool.workers.len()];
+        let mut chain_claimed = false;
+        while younger_starts < 4 {
+            let worker_idx = younger_starts % pool.workers.len();
+            let worker = &pool.workers[worker_idx];
+            worker.release_in_flight();
+            owner_holds_claim[worker_idx] = false;
+            if claimed_rx.try_recv().is_ok() {
+                chain_claimed = true;
+                break;
+            }
+            if worker.try_claim_owner_in_flight() {
+                younger_starts += 1;
+                owner_holds_claim[worker_idx] = true;
+            } else {
+                break;
+            }
+        }
 
         assert!(
-            bypasses <= 3,
-            "a waiting chain is invisible to scheduler bypass accounting and permitted {bypasses} younger owner claims"
+            younger_starts <= crate::gpu_pool::MAX_OWNER_BYPASSES_FOR_CHAIN.into(),
+            "waiting chain was bypassed by {younger_starts} younger owner starts"
         );
+        for (worker, held) in pool.workers.iter().zip(owner_holds_claim) {
+            if held {
+                worker.release_in_flight();
+            }
+        }
+        if !chain_claimed {
+            claimed_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("chain did not claim the bounded opening");
+        }
+        chain.join().unwrap();
+    }
+
+    #[test]
+    fn cancelled_waiting_chain_unregisters_from_every_eligible_gpu() {
+        let pool = claim_test_pool(2);
+        for worker in &pool.workers {
+            assert!(worker.try_claim_owner_in_flight());
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = cancelled.clone();
+        let chain_pool = pool.clone();
+        let chain = std::thread::spawn(move || {
+            claim_worker_for_stage(&chain_pool, "ltx2", None, &|| {
+                thread_cancelled.load(Ordering::SeqCst)
+            })
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while pool
+            .workers
+            .iter()
+            .any(|worker| worker.legacy_chain_waiter_count() == 0)
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        cancelled.store(true, Ordering::SeqCst);
+
+        assert!(
+            chain.join().unwrap().unwrap().is_none(),
+            "cancelled chain must not claim a worker"
+        );
+        assert!(pool
+            .workers
+            .iter()
+            .all(|worker| worker.legacy_chain_waiter_count() == 0));
+        for worker in &pool.workers {
+            worker.release_in_flight();
+        }
+    }
+
+    #[test]
+    fn shutdown_wakes_waiting_chain_and_cleans_registration() {
+        let pool = claim_test_pool(1);
+        let worker = pool.workers[0].clone();
+        assert!(worker.try_claim_owner_in_flight());
+        let chain_pool = pool.clone();
+        let chain = std::thread::spawn(move || {
+            claim_worker_for_stage(&chain_pool, "ltx2", None, &|| false)
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while worker.legacy_chain_waiter_count() == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        worker.request_shutdown();
+
+        assert!(
+            chain.join().unwrap().is_err(),
+            "shutdown worker must terminate the chain wait"
+        );
+        assert_eq!(worker.legacy_chain_waiter_count(), 0);
+        worker.release_in_flight();
     }
 
     fn stage(prompt: &str, transition: TransitionMode) -> ChainStage {
@@ -2601,6 +2780,7 @@ mod tests {
             _carry: Option<&ChainTail>,
             _motion_tail_frames: u32,
             progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<StageRenderOutcome> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) as u8;
             if self.cancel_on_progress.load(Ordering::SeqCst) && progress(1, 2).is_break() {
@@ -2631,6 +2811,7 @@ mod tests {
             carry: Option<&ChainTail>,
             _motion_tail_frames: u32,
             progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<StageRenderOutcome> {
             let pixel = carry
                 .and_then(|tail| tail.tail_rgb_frames.first())
@@ -2655,6 +2836,7 @@ mod tests {
             _carry: Option<&ChainTail>,
             _motion_tail_frames: u32,
             progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<StageRenderOutcome> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let _ = progress(1, 2);

@@ -529,6 +529,7 @@ mod tests {
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
             in_flight: AtomicUsize::new(0),
+            legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),

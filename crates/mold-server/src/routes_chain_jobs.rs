@@ -675,6 +675,7 @@ mod tests {
             _carry: Option<&ChainTail>,
             _motion_tail_frames: u32,
             _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
         ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
             anyhow::bail!("NoopExecutor should not render during route GC tests")
         }
