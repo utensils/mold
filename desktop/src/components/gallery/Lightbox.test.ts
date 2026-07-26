@@ -194,7 +194,7 @@ describe("Lightbox a11y", () => {
 describe("Lightbox save action", () => {
   it("uses native save language for images and videos", () => {
     expect(mountLightbox().get("[data-test='save-media']").text()).toBe("Save image");
-    const video = { ...item, filename: "print-0001.mp4", format: "mp4" };
+    const video: GalleryImage = { ...item, filename: "print-0001.mp4", format: "mp4" };
     expect(mountLightbox(video, true).get("[data-test='save-media']").text()).toBe("Save video");
   });
 });
