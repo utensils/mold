@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { modelDisplayName } from "@mold/studio";
+import { modelDisplayName, modelSupportsSequence } from "@mold/studio";
 import EmptyState from "../components/shell/EmptyState.vue";
 import ImagePickerModal from "../components/generate/ImagePickerModal.vue";
 import StageCard from "../components/chains/StageCard.vue";
@@ -30,7 +30,6 @@ import {
 } from "../lib/chainForm";
 import { fetchChainLimits } from "../lib/api/chains";
 import { apiJson } from "../lib/api/client";
-import { base64ToDataUrl } from "../lib/image";
 import { randomSeed } from "../stores/generation";
 import type { PickedImage } from "../lib/generateForm";
 import { mergeInstalledModels } from "../lib/generateModels";
@@ -55,10 +54,13 @@ const installedModels = computed(() =>
   mergeInstalledModels(models.installed, hostModels.unionInstalled),
 );
 const videoModels = computed<ModelEntry[]>(() =>
-  installedModels.value.filter((m) => isVideoFamily(m.family)),
+  installedModels.value.filter(
+    (model) => isVideoFamily(model.family) && modelSupportsSequence(model),
+  ),
 );
 // LTX-2 needs CUDA; on a Metal Mac the option shows but can't be selected.
-const isCudaOnlyOnThisMachine = (m: ModelEntry) => {
+const isCudaOnlyOnThisMachine = (m?: ModelEntry) => {
+  if (!m) return false;
   if (m.family !== "ltx2" && m.family !== "ltx-2") return false;
   const ownerIds = hostModels.hostsFor(m.name);
   if (ownerIds.some((id) => id !== "local")) return false;
@@ -74,6 +76,7 @@ const selectedRoute = computed(() => {
   const model = videoModels.value.find((entry) => entry.name === form.model);
   return model ? routeForModel(model) : null;
 });
+const selectedModel = computed(() => videoModels.value.find((entry) => entry.name === form.model));
 const watchedHostId = computed(
   () => hosts.all.find((host) => host.baseUrl === chains.target?.baseUrl)?.id ?? null,
 );
@@ -108,10 +111,12 @@ const live = computed(() => chains.live);
 const canRender = computed(
   () =>
     !!form.model &&
+    !!selectedModel.value &&
+    !isCudaOnlyOnThisMachine(selectedModel.value) &&
     !rendering.value &&
     stageErrors.value === 0 &&
-    form.stages.length > 0 &&
-    !!form.stages[0]!.prompt.trim(),
+    form.stages.length >= 2 &&
+    form.stages.every((stage) => !!stage.prompt.trim()),
 );
 
 function pickModel(name: string) {
@@ -265,127 +270,136 @@ onMounted(() => {
 <template>
   <EmptyState
     v-if="conn.ready && !models.loading && videoModels.length === 0"
-    headline="No video models yet"
-    detail="Chains stitch clips from LTX video models. Pull one to start."
-    action="Browse models"
-    @action="router.push('/models?type=video')"
+    headline="Sequences need a video model"
+    detail="Pull a chain-capable LTX Video or distilled LTX-2 checkpoint, then tell the story one clip at a time."
+    action="Browse video models"
+    @action="router.push('/models?tab=discover&type=video&kind=checkpoint&intent=sequence')"
   />
 
   <div v-else class="flex h-full flex-col overflow-y-auto">
-    <!-- Chain header -->
-    <header class="border-edge flex flex-wrap items-end gap-3 border-b bg-bench px-4 py-3">
-      <div>
-        <label class="edge-code">Model</label>
-        <select
-          :value="form.model"
-          class="border-edge mt-1 block h-8 w-56 rounded-control border bg-bath px-2 text-body text-ink"
-          @change="pickModel(($event.target as HTMLSelectElement).value)"
-        >
-          <option
-            v-for="m in videoModels"
-            :key="m.name"
-            :value="m.name"
-            :disabled="isCudaOnlyOnThisMachine(m)"
+    <header class="border-edge border-b bg-bench px-4 py-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="mb-2 inline-flex rounded-control border border-edge bg-bath p-0.5">
+            <button
+              type="button"
+              class="rounded-control px-3 py-1 text-caption text-ink-2 hover:text-ink"
+              @click="router.push('/create')"
+            >
+              Single
+            </button>
+            <span
+              class="rounded-control bg-safelight px-3 py-1 text-caption font-semibold text-on-accent"
+            >
+              Sequence
+            </span>
+          </div>
+          <h1 class="text-title text-ink">Build a sequence</h1>
+          <p class="text-caption text-ink-3">Tell the story one clip at a time.</p>
+        </div>
+        <div>
+          <label class="edge-code">Model</label>
+          <select
+            :value="form.model"
+            class="border-edge mt-1 block h-8 w-56 rounded-control border bg-bath px-2 text-body text-ink"
+            @change="pickModel(($event.target as HTMLSelectElement).value)"
           >
-            {{ modelDisplayName(m) }}{{ isCudaOnlyOnThisMachine(m) ? " — CUDA only" : "" }}
-          </option>
-        </select>
-      </div>
-      <div>
-        <label class="edge-code">Size</label>
-        <div class="mt-1 flex items-center gap-1">
-          <input
-            v-model.number="form.width"
-            type="number"
-            step="16"
-            class="border-edge data-mono h-8 w-20 rounded-control border bg-bath px-1.5 text-ink"
-          />
-          <span class="text-ink-3">×</span>
-          <input
-            v-model.number="form.height"
-            type="number"
-            step="16"
-            class="border-edge data-mono h-8 w-20 rounded-control border bg-bath px-1.5 text-ink"
-          />
+            <option
+              v-for="m in videoModels"
+              :key="m.name"
+              :value="m.name"
+              :disabled="isCudaOnlyOnThisMachine(m)"
+            >
+              {{ modelDisplayName(m) }}{{ isCudaOnlyOnThisMachine(m) ? " — CUDA only" : "" }}
+            </option>
+          </select>
         </div>
       </div>
-      <div>
-        <label class="edge-code">FPS</label>
-        <input
-          v-model.number="form.fps"
-          type="number"
-          min="1"
-          max="60"
-          class="border-edge data-mono mt-1 block h-8 w-16 rounded-control border bg-bath px-1.5 text-ink"
-        />
-      </div>
-      <div>
-        <label class="edge-code">Seed</label>
-        <div class="mt-1 flex items-center gap-1">
-          <input
-            v-model="form.seed"
-            data-selectable
-            type="text"
-            inputmode="numeric"
-            placeholder="Random"
-            class="border-edge data-mono h-8 w-28 rounded-control border bg-bath px-1.5 text-ink placeholder:text-ink-3"
-          />
-          <button
-            type="button"
-            class="text-ink-3 hover:text-ink"
-            title="Randomize"
-            aria-label="Randomize seed"
-            @click="randomizeSeed"
-          >
-            ⟳
-          </button>
-        </div>
-      </div>
-      <div>
-        <label class="edge-code">Start image</label>
-        <div class="mt-1 flex items-center gap-1">
-          <button
-            v-if="form.startImage"
-            type="button"
-            data-test="chain-start-thumb"
-            class="border-edge block h-8 w-8 overflow-hidden rounded-media border hover:brightness-110"
-            title="Replace the chain's starting image"
-            aria-label="Replace start image"
-            @click="pickerFor = 'start'"
-          >
-            <img
-              :src="base64ToDataUrl(form.startImage)"
-              alt=""
-              class="h-full w-full object-cover"
+      <details class="mt-3 rounded-control border border-edge bg-bath/60 px-3 py-2">
+        <summary class="cursor-pointer text-caption font-medium text-ink-2">Sequence tools</summary>
+        <div class="mt-3 flex flex-wrap items-end gap-4">
+          <div>
+            <label class="edge-code">Size</label>
+            <div class="mt-1 flex items-center gap-1">
+              <input
+                v-model.number="form.width"
+                type="number"
+                step="16"
+                class="border-edge data-mono h-8 w-20 rounded-control border bg-bench px-1.5 text-ink"
+              />
+              <span class="text-ink-3">×</span>
+              <input
+                v-model.number="form.height"
+                type="number"
+                step="16"
+                class="border-edge data-mono h-8 w-20 rounded-control border bg-bench px-1.5 text-ink"
+              />
+            </div>
+          </div>
+          <div>
+            <label class="edge-code">FPS</label>
+            <input
+              v-model.number="form.fps"
+              type="number"
+              min="1"
+              max="60"
+              class="border-edge data-mono mt-1 block h-8 w-16 rounded-control border bg-bench px-1.5 text-ink"
             />
-          </button>
-          <button
-            v-else
-            type="button"
-            data-test="chain-start-attach"
-            class="border-edge h-8 rounded-control border border-dashed px-2 text-caption text-ink-3 hover:text-ink"
-            title="Seed the film from a still — it conditions stage 1"
-            @click="pickerFor = 'start'"
+          </div>
+          <div>
+            <label class="edge-code">Seed</label>
+            <div class="mt-1 flex items-center gap-1">
+              <input
+                v-model="form.seed"
+                data-selectable
+                type="text"
+                inputmode="numeric"
+                placeholder="Random"
+                class="border-edge data-mono h-8 w-28 rounded-control border bg-bench px-1.5 text-ink placeholder:text-ink-3"
+              />
+              <button
+                type="button"
+                class="text-ink-3 hover:text-ink"
+                title="Randomize"
+                aria-label="Randomize seed"
+                @click="randomizeSeed"
+              >
+                ⟳
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="edge-code">Opening image</label>
+            <div class="mt-1 flex items-center gap-1">
+              <button
+                type="button"
+                data-test="chain-start-attach"
+                class="border-edge h-8 rounded-control border border-dashed px-2 text-caption text-ink-3 hover:text-ink"
+                @click="pickerFor = 'start'"
+              >
+                {{ form.startImage ? "Replace…" : "Attach…" }}
+              </button>
+              <button
+                v-if="form.startImage"
+                type="button"
+                data-test="chain-start-clear"
+                class="text-ink-3 hover:text-stop"
+                aria-label="Remove start image"
+                @click="form.startImage = null"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          <label
+            v-if="limits?.supports_audio"
+            class="flex h-8 items-center gap-1 text-caption text-ink-2"
           >
-            Attach…
-          </button>
-          <button
-            v-if="form.startImage"
-            type="button"
-            data-test="chain-start-clear"
-            class="text-ink-3 hover:text-stop"
-            title="Remove start image"
-            aria-label="Remove start image"
-            @click="form.startImage = null"
-          >
-            ✕
-          </button>
+            <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
+            Generate audio
+          </label>
         </div>
-      </div>
-      <label v-if="limits?.supports_audio" class="flex items-center gap-1 text-caption text-ink-2">
-        <input v-model="form.enableAudio" type="checkbox" class="accent-[var(--safelight)]" />
-        Audio
-      </label>
+      </details>
 
       <p
         v-if="
@@ -431,7 +445,7 @@ onMounted(() => {
         :disabled="form.stages.length >= MAX_CHAIN_STAGES"
         @click="addStage"
       >
-        + Add stage
+        + Add clip
       </button>
     </div>
 
@@ -446,34 +460,46 @@ onMounted(() => {
           class="hidden"
           @change="onTomlFile"
         />
+        <details class="relative">
+          <summary
+            class="border-edge flex h-8 cursor-pointer items-center rounded-control border px-3 text-body text-ink-2 hover:text-ink"
+          >
+            File tools
+          </summary>
+          <div
+            class="absolute right-0 bottom-10 z-10 flex w-40 flex-col gap-1 rounded-control border border-edge bg-bath p-2 shadow-xl"
+          >
+            <button
+              type="button"
+              class="h-8 text-left text-caption text-ink-2 hover:text-ink"
+              @click="openToml"
+            >
+              Open .toml…
+            </button>
+            <button
+              type="button"
+              class="h-8 text-left text-caption text-ink-2 hover:text-ink"
+              @click="showToml = !showToml"
+            >
+              {{ showToml ? "Hide TOML" : "View as TOML" }}
+            </button>
+            <button
+              type="button"
+              class="h-8 text-left text-caption text-ink-2 hover:text-ink"
+              @click="exportToml"
+            >
+              Export .toml
+            </button>
+          </div>
+        </details>
         <button
           type="button"
-          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
-          @click="openToml"
-        >
-          Open .toml…
-        </button>
-        <button
-          type="button"
-          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
-          @click="showToml = !showToml"
-        >
-          {{ showToml ? "Hide TOML" : "Edit as TOML" }}
-        </button>
-        <button
-          type="button"
-          class="border-edge h-8 rounded-control border px-3 text-body text-ink-2 hover:text-ink"
-          @click="exportToml"
-        >
-          Export .toml
-        </button>
-        <button
-          type="button"
+          data-test="generate-sequence"
           class="h-8 rounded-chrome bg-safelight px-4 text-body font-semibold text-on-accent hover:brightness-105 disabled:opacity-50"
           :disabled="!canRender"
           @click="render"
         >
-          Render chain
+          {{ rendering ? "Starting…" : "Generate sequence" }}
         </button>
       </div>
     </div>

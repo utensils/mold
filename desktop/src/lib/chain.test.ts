@@ -102,6 +102,14 @@ describe("cycleTransition", () => {
   });
 });
 
+describe("newChainForm", () => {
+  it("starts a guided sequence with two blank clips", () => {
+    const form = newChainForm();
+    expect(form.stages).toHaveLength(2);
+    expect(form.stages.map((stage) => stage.prompt)).toEqual(["", ""]);
+  });
+});
+
 describe("chainToToml", () => {
   it("emits mold.chain.v1 with a [chain] table and one [[stage]] per stage", () => {
     const form = newChainForm();

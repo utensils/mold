@@ -104,6 +104,55 @@ beforeEach(() => {
 });
 
 describe("ChainsView multi-host video generation", () => {
+  it("starts with two guided clips and requires every prompt", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+    });
+    await flushPromises();
+
+    expect(wrapper.findAllComponents({ name: "StageCard" })).toHaveLength(2);
+    expect(wrapper.get("[data-test='generate-sequence']").text()).toBe("Generate sequence");
+    expect(
+      (wrapper.get("[data-test='generate-sequence']").element as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("hides known non-chain LTX development checkpoints", async () => {
+    installRemoteVideoHost();
+    useHostModelsStore().byHost["hal9000-7680"]!.entries = [
+      { ...videoModel, name: "ltx-2.3-22b-dev:fp8", family: "ltx2" },
+      videoModel,
+    ];
+
+    const wrapper = mount(ChainsView, { shallow: true });
+    await flushPromises();
+
+    expect(wrapper.get("select").text()).not.toContain("22b-dev");
+    expect(wrapper.get("select").text()).toContain("ltx-video");
+  });
+
+  it("does not enable generation for an imported unavailable model", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, {
+      global: { stubs: { DevelopCanvas: true } },
+    });
+    await flushPromises();
+
+    const state = wrapper.vm as unknown as {
+      form: { model: string; stages: { prompt: string }[] };
+    };
+    state.form.model = "ltx-2.3-22b-dev:fp8";
+    state.form.stages.forEach((stage, index) => {
+      stage.prompt = `clip ${index + 1}`;
+    });
+    await wrapper.vm.$nextTick();
+
+    expect(
+      (wrapper.get("[data-test='generate-sequence']").element as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
   it("shows a video model installed only on a connected remote host", async () => {
     installRemoteVideoHost();
 

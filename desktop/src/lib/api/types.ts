@@ -114,6 +114,8 @@ export interface ModelEntry {
   nsfw?: boolean | null;
   /** Model-specific LTX-2 audio output support; absent on older servers. */
   supports_audio?: boolean | null;
+  /** Explicit durable sequence eligibility; absent on older servers. */
+  supports_sequence?: boolean | null;
 }
 
 // ── Generation ───────────────────────────────────────────────────────────

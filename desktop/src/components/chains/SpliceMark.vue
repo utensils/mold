@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { transitionLabel } from "@mold/studio";
 import type { ChainStageForm } from "../../lib/chainForm";
 import { cycleTransition } from "../../lib/chain";
 
@@ -7,9 +8,7 @@ import { cycleTransition } from "../../lib/chain";
 const props = defineProps<{ stage: ChainStageForm; motionTail: number; fadeMax: number }>();
 
 const label = computed(() => {
-  if (props.stage.transition === "smooth") return `${props.motionTail}f tail`;
-  if (props.stage.transition === "cut") return "cut";
-  return "fade";
+  return transitionLabel(props.stage.transition);
 });
 
 function cycle() {
@@ -25,8 +24,8 @@ function stepFade(delta: number) {
     <button
       type="button"
       class="flex h-16 w-8 items-center justify-center rounded-control transition-colors duration-100 hover:bg-bench active:translate-y-px"
-      :title="`Transition: ${stage.transition} — click to cycle`"
-      :aria-label="`Transition: ${stage.transition}. Click to cycle.`"
+      :title="`${label} — click to change transition`"
+      :aria-label="`${label}. Click to change transition.`"
       @click="cycle"
     >
       <!-- smooth: unbroken strip · cut: hard diagonal · fade: gradient wedge -->
