@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use mold_scheduler::{
     Backend, BlockedReason, CandidatePlacement, DeviceActivity, DeviceAdminState, DeviceHealth,
-    DeviceId, DeviceSnapshot, ExecutionFingerprint, HostMemorySnapshot, Plan, Planner,
-    PlannerSnapshot, WorkId, WorkSnapshot,
+    DeviceId, DeviceSnapshot, ExecutionFingerprint, GrantValidationSnapshot, HostMemorySnapshot,
+    Plan, Planner, PlannerSnapshot, WorkId, WorkSnapshot,
 };
 
 use crate::gpu_pool::{GpuJob, GpuWorker};
@@ -701,7 +701,17 @@ impl Coordinator {
         }
         loop {
             let snapshot = self.planner_snapshot();
-            let plan = self.planner.plan(&snapshot);
+            let plan = match self.planner.plan(&snapshot) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    tracing::error!(
+                        state_version = snapshot.state_version,
+                        error = %error,
+                        "scheduler rejected its runtime snapshot; refusing to grant work"
+                    );
+                    return;
+                }
+            };
             self.plan_version = plan.plan_version;
             if plan.immediate_leases.is_empty() {
                 log_typed_blocks(&plan);
@@ -743,6 +753,53 @@ impl Coordinator {
                 || plan.reservation.sample_generation != self.memory.sample_generation
                 || plan.reservation.ledger_sequence != self.memory.sequence
             {
+                self.state_version = self.state_version.saturating_add(1);
+                continue;
+            }
+
+            // Validate every proposed lease against the same actor-owned
+            // reducer turn before reserving the matching. No await occurs
+            // between this validation, the all-or-nothing reservation, and
+            // the worker grants.
+            let current_devices = self
+                .device_snapshots()
+                .into_iter()
+                .map(|device| (device.id.clone(), device))
+                .collect::<BTreeMap<_, _>>();
+            let grants_valid = plan.immediate_leases.iter().all(|lease| {
+                let device_id = lease.device_id.to_string();
+                let Ok(ready) = validate_worker_grant(
+                    &self.ready,
+                    &self.leases,
+                    &device_id,
+                    lease.worker_generation,
+                ) else {
+                    return false;
+                };
+                let Some(device) = current_devices.get(&lease.device_id) else {
+                    return false;
+                };
+                let work_id = lease.work_id.to_string();
+                plan.validate_lease_for_grant(
+                    lease,
+                    &GrantValidationSnapshot {
+                        work_id: WorkId::new(work_id.clone()),
+                        device_id: DeviceId::new(device_id),
+                        state_version: self.state_version,
+                        plan_version: self.plan_version,
+                        sample_generation: self.memory.sample_generation,
+                        ledger_sequence: self.memory.sequence,
+                        work_ready: self.pending.contains_key(&work_id),
+                        work_cancelled: false,
+                        worker_generation: ready.generation,
+                        worker_ready: true,
+                        device_admin_state: device.admin_state,
+                        device_health: device.health,
+                    },
+                )
+                .is_ok()
+            });
+            if !grants_valid {
                 self.state_version = self.state_version.saturating_add(1);
                 continue;
             }
@@ -1115,7 +1172,7 @@ mod tests {
             )],
         );
         snapshot.host_memory = ledger.snapshot();
-        let plan = planner.plan(&snapshot);
+        let plan = planner.plan(&snapshot).unwrap();
         ledger.sample_generation += 1;
         assert_eq!(
             ledger.try_reserve(&plan, 3, 9),
@@ -1174,7 +1231,7 @@ mod tests {
             ],
         );
         snapshot.host_memory = ledger.snapshot();
-        let plan = planner.plan(&snapshot);
+        let plan = planner.plan(&snapshot).unwrap();
         assert_eq!(plan.immediate_leases.len(), 1);
         ledger.try_reserve(&plan, 1, 1).unwrap();
         assert_eq!(ledger.reservations.len(), 1);
@@ -1230,8 +1287,9 @@ mod tests {
                     )
                 })
                 .collect();
-            let plan =
-                Planner::default().plan(&PlannerSnapshot::new(1, 1, 0, u64::MAX, devices, work));
+            let plan = Planner::default()
+                .plan(&PlannerSnapshot::new(1, 1, 0, u64::MAX, devices, work))
+                .unwrap();
             assert_eq!(plan.immediate_leases.len(), count);
             let leased_devices = plan
                 .immediate_leases
@@ -1244,18 +1302,20 @@ mod tests {
 
     #[test]
     fn no_schedulable_device_is_a_typed_block() {
-        let plan = Planner::default().plan(&PlannerSnapshot::new(
-            1,
-            1,
-            0,
-            1024,
-            vec![DeviceSnapshot::idle("gpu", 1024).with_health(DeviceHealth::Degraded)],
-            vec![WorkSnapshot::new(
-                "work",
+        let plan = Planner::default()
+            .plan(&PlannerSnapshot::new(
+                1,
+                1,
                 0,
-                vec![CandidatePlacement::new("gpu", "model", 0)],
-            )],
-        ));
+                1024,
+                vec![DeviceSnapshot::idle("gpu", 1024).with_health(DeviceHealth::Degraded)],
+                vec![WorkSnapshot::new(
+                    "work",
+                    0,
+                    vec![CandidatePlacement::new("gpu", "model", 0)],
+                )],
+            ))
+            .unwrap();
         assert_eq!(
             plan.blocked_reason(&WorkId::new("work")),
             Some(&BlockedReason::NoSchedulableDevice)
