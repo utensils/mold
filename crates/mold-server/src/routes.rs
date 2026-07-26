@@ -521,6 +521,7 @@ async fn prepare_generation(
     // (classic TOCTOU).  The submit call in `generate`/`generate_stream` will
     // return `SubmitError::Full`, which is mapped to `ApiError::queue_full()`.
     apply_default_metadata_setting(state, request).await;
+    normalize_generation_placement(state, request).await;
 
     let preferred_gpu = validate_multi_gpu_placement(state, request.placement.as_ref())?;
 
@@ -573,6 +574,18 @@ async fn prepare_generation(
     };
 
     Ok((output_dir, dim_warning, preferred_gpu))
+}
+
+async fn normalize_generation_placement(
+    state: &AppState,
+    request: &mut mold_core::GenerateRequest,
+) {
+    let effective = state
+        .config
+        .read()
+        .await
+        .effective_placement(&request.model, request.placement.as_ref());
+    request.placement = Some(effective);
 }
 
 /// Record an accepted generation prompt into prompt history (best-effort;
@@ -4084,6 +4097,66 @@ mod tests {
 
         assert!(unloaded.load(Ordering::SeqCst));
         assert!(state.upscaler_cache.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn generation_placement_normalization_honors_request_over_persisted_defaults() {
+        let mut config = mold_core::Config::default();
+        config.set_model_placement(
+            "flux-dev:q4",
+            Some(mold_core::types::DevicePlacement {
+                text_encoders: mold_core::types::DeviceRef::Cpu,
+                advanced: None,
+            }),
+        );
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(queue_tx),
+            AppState::empty_gpu_pool_for_test(),
+            1,
+        );
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "a cat",
+            "model": "flux-dev:q4",
+            "width": 512,
+            "height": 512,
+            "steps": 4,
+            "guidance": 1.0,
+            "batch_size": 1,
+            "strength": 0.75
+        }))
+        .unwrap();
+
+        normalize_generation_placement(&state, &mut request).await;
+        assert_eq!(
+            request
+                .placement
+                .as_ref()
+                .expect("persisted placement applied")
+                .text_encoders,
+            mold_core::types::DeviceRef::Cpu
+        );
+
+        request.placement = Some(mold_core::types::DevicePlacement {
+            text_encoders: mold_core::types::DeviceRef::Auto,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::types::DeviceRef::device(
+                    "cuda:0123456789abcdef0123456789abcdef",
+                ),
+                ..Default::default()
+            }),
+        });
+        normalize_generation_placement(&state, &mut request).await;
+        let effective = request.placement.expect("request placement retained");
+        assert_eq!(effective.text_encoders, mold_core::types::DeviceRef::Auto);
+        assert!(matches!(
+            effective
+                .advanced
+                .expect("request advanced placement")
+                .transformer,
+            mold_core::types::DeviceRef::Device { .. }
+        ));
     }
 
     #[test]

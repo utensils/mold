@@ -946,6 +946,9 @@ const MEMORY_BUDGET_HEADROOM: u64 = 2_000_000_000; // 2GB
 /// - `Some(Gpu { ordinal })` — try CUDA first, then Metal. Each backend is
 ///   gated by its candle feature flag so a CPU-only build returns a clear
 ///   error message instead of a build failure.
+/// - `Some(Device { id })` — open the ordinal already bound to the owner
+///   thread. Stable-ID eligibility must have been validated by the scheduler;
+///   inference never searches for or silently substitutes another device.
 pub fn resolve_device<F>(
     req: Option<mold_core::types::DeviceRef>,
     auto: F,
@@ -958,6 +961,14 @@ where
         None | Some(DeviceRef::Auto) => auto(),
         Some(DeviceRef::Cpu) => Ok(candle_core::Device::Cpu),
         Some(DeviceRef::Gpu { ordinal }) => resolve_gpu_ordinal(ordinal),
+        Some(DeviceRef::Device { id }) => {
+            let ordinal = thread_gpu_ordinal().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "stable device placement '{id}' requires a scheduler-bound GPU owner thread"
+                )
+            })?;
+            resolve_gpu_ordinal(ordinal)
+        }
     }
 }
 
@@ -1009,11 +1020,11 @@ pub fn effective_device_ref(
             return r;
         }
         if fallback_is_component_auto {
-            return placement.text_encoders;
+            return placement.text_encoders.clone();
         }
         DeviceRef::Auto
     } else {
-        placement.text_encoders
+        placement.text_encoders.clone()
     }
 }
 

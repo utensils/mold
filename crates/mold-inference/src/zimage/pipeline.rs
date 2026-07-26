@@ -846,7 +846,7 @@ impl ZImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -898,8 +898,11 @@ impl ZImageEngine {
         // needs enough room for VAE weights at load time. Decode workspace is
         // allocated later after the large transformer has been released.
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_WEIGHT_LOAD_VRAM_THRESHOLD);
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -960,7 +963,11 @@ impl ZImageEngine {
             .progress
             .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-        let qwen3_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen3_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_te_device = if te_on_gpu {
             device.clone()
         } else {
@@ -1067,7 +1074,7 @@ impl ZImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1128,8 +1135,11 @@ impl ZImageEngine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", qwen3_resolve_start.elapsed());
 
-            let qwen3_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+            let qwen3_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen.clone(),
+                true,
+            );
             let auto_te_device = if te_on_gpu {
                 device.clone()
             } else {
@@ -1447,8 +1457,11 @@ impl ZImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()

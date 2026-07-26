@@ -1222,6 +1222,24 @@ impl Config {
         placement
     }
 
+    /// Normalize placement at the request boundary.
+    ///
+    /// An explicit request placement is a complete user decision, including
+    /// any `Auto` fields it contains, and therefore wins wholly over
+    /// environment and persisted defaults. Without a request override,
+    /// `resolved_placement` applies environment over persisted values. The
+    /// final fallback is an all-`Auto` placement.
+    pub fn effective_placement(
+        &self,
+        model_name: &str,
+        request: Option<&crate::types::DevicePlacement>,
+    ) -> crate::types::DevicePlacement {
+        request
+            .cloned()
+            .or_else(|| self.resolved_placement(model_name))
+            .unwrap_or_default()
+    }
+
     /// Persist a placement for `model_name`, creating the model entry if
     /// missing. `None` clears the placement (and leaves the rest of the
     /// entry intact).
@@ -1440,28 +1458,54 @@ fn resolved_manifest_paths_exist(
     })
 }
 
-/// Parse a device-placement string (`auto`, `cpu`, `gpu`, `gpu:N`) into a
-/// `DeviceRef`. Case-insensitive, whitespace-trimmed. Used by env-var and CLI
-/// parsers alike so all three surfaces (TOML, env, CLI flag) accept the same
-/// forms.
+/// Parse a device-placement string into a `DeviceRef`.
+///
+/// Keywords and the legacy `gpu:N` prefix are case-insensitive. Durable IDs
+/// preserve their spelling and accept `device:<id>` plus direct `cuda:` and
+/// `metal:` forms. Raw NVIDIA `GPU-`/`MIG-` selectors belong to startup GPU
+/// selection; component placement uses the exact opaque ID advertised by
+/// `/api/devices`.
 pub fn parse_device_ref_str(raw: &str) -> Result<crate::types::DeviceRef, String> {
     use crate::types::DeviceRef;
-    let raw = raw.trim().to_lowercase();
-    if raw == "auto" {
+    let raw = raw.trim();
+    let normalized = raw.to_ascii_lowercase();
+    if normalized == "auto" {
         Ok(DeviceRef::Auto)
-    } else if raw == "cpu" {
+    } else if normalized == "cpu" {
         Ok(DeviceRef::Cpu)
-    } else if raw == "gpu" {
+    } else if normalized == "gpu" {
         Ok(DeviceRef::gpu(0))
-    } else if let Some(rest) = raw.strip_prefix("gpu:") {
+    } else if let Some(rest) = normalized.strip_prefix("gpu:") {
         rest.parse::<usize>()
             .map(DeviceRef::gpu)
-            .map_err(|_| format!("invalid device '{raw}' (expected auto|cpu|gpu[:N])"))
+            .map_err(|_| invalid_device_ref(raw))
+    } else if normalized.starts_with("device:") {
+        parse_stable_device_id(&raw["device:".len()..])
+    } else if is_stable_device_id(raw) {
+        Ok(DeviceRef::device(raw))
     } else {
-        Err(format!(
-            "invalid device '{raw}' (expected auto|cpu|gpu[:N])"
-        ))
+        Err(invalid_device_ref(raw))
     }
+}
+
+fn parse_stable_device_id(raw: &str) -> Result<crate::types::DeviceRef, String> {
+    if is_stable_device_id(raw) {
+        Ok(crate::types::DeviceRef::device(raw))
+    } else {
+        Err(invalid_device_ref(raw))
+    }
+}
+
+fn is_stable_device_id(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    (lower.starts_with("cuda:") && raw.len() > "cuda:".len())
+        || (lower.starts_with("metal:") && raw.len() > "metal:".len())
+}
+
+fn invalid_device_ref(raw: &str) -> String {
+    format!(
+        "invalid device '{raw}' (expected auto|cpu|gpu[:N]|device:<stable-id>|cuda:<id>|metal:<id>)"
+    )
 }
 
 fn parse_device_ref_env(key: &str) -> Option<crate::types::DeviceRef> {

@@ -598,7 +598,7 @@ impl SDXLEngine {
         let tier1 = self
             .pending_placement
             .as_ref()
-            .map(|p| p.text_encoders)
+            .map(|p| p.text_encoders.clone())
             .unwrap_or_default();
         let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 
@@ -1250,7 +1250,7 @@ impl SDXLEngine {
             let tier1 = self
                 .pending_placement
                 .as_ref()
-                .map(|p| p.text_encoders)
+                .map(|p| p.text_encoders.clone())
                 .unwrap_or_default();
             let clip_device = crate::device::resolve_device(Some(tier1), || Ok(device.clone()))?;
 

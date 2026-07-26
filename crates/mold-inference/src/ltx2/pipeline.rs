@@ -479,9 +479,13 @@ impl Ltx2Engine {
         // Honor Tier 1 `text_encoders` override for the Gemma prompt encoder.
         // Auto falls back to whatever `native_device_for_backend(backend)` picks
         // (CUDA when available, else CPU). Explicit Cpu/Gpu skips that auto path.
-        let tier1 = self.pending_placement.as_ref().map(|p| p.text_encoders);
-        let device =
-            crate::device::resolve_device(tier1, || self.native_device_for_backend(backend))?;
+        let tier1 = self
+            .pending_placement
+            .as_ref()
+            .map(|p| p.text_encoders.clone());
+        let device = crate::device::resolve_device(tier1.clone(), || {
+            self.native_device_for_backend(backend)
+        })?;
         if device.is_cuda() {
             configure_native_ltx2_cuda_device(&device)?;
         }

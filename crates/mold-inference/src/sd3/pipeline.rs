@@ -611,7 +611,7 @@ impl SD3Engine {
         let tier1 = self
             .pending_placement
             .as_ref()
-            .map(|p| p.text_encoders)
+            .map(|p| p.text_encoders.clone())
             .unwrap_or_default();
         let auto_encoder_device = if t5_on_gpu {
             device.clone()
@@ -756,7 +756,7 @@ impl SD3Engine {
             let tier1 = self
                 .pending_placement
                 .as_ref()
-                .map(|p| p.text_encoders)
+                .map(|p| p.text_encoders.clone())
                 .unwrap_or_default();
             let auto_encoder_device = if t5_on_gpu {
                 device.clone()

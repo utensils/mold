@@ -362,8 +362,11 @@ impl Flux2Engine {
         device: &Device,
         gpu_dtype: DType,
     ) -> Result<(Flux2AutoEncoder, DType)> {
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -858,7 +861,7 @@ impl Flux2Engine {
         let cpu = Device::Cpu;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -878,8 +881,11 @@ impl Flux2Engine {
             .stage_done(xformer_label, xformer_stage.elapsed());
 
         // --- Load VAE on GPU ---
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -927,7 +933,11 @@ impl Flux2Engine {
             .progress
             .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-        let qwen3_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen3_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_enc_device = if on_gpu { device.clone() } else { cpu.clone() };
         let enc_device_owned =
             crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;
@@ -1000,7 +1010,7 @@ impl Flux2Engine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1058,8 +1068,11 @@ impl Flux2Engine {
                 .progress
                 .stage_done("Selecting Qwen3 encoder", resolve_start.elapsed());
 
-            let qwen3_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+            let qwen3_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.qwen.clone(),
+                true,
+            );
             let auto_enc_device = if on_gpu { device.clone() } else { Device::Cpu };
             let enc_device_owned =
                 crate::device::resolve_device(Some(qwen3_ref), || Ok(auto_enc_device.clone()))?;

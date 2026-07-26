@@ -1300,7 +1300,7 @@ impl FluxEngine {
         let cpu = Device::Cpu;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1391,8 +1391,11 @@ impl FluxEngine {
 
         // Load VAE on GPU (small, ~300MB)
         // Tier 2: honor `advanced.vae` override.
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || Ok(device.clone()))?;
         self.base.progress.stage_start("Loading VAE (GPU)");
         let vae_stage = Instant::now();
@@ -1446,7 +1449,8 @@ impl FluxEngine {
             .progress
             .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
         // Tier 2 (if `advanced.t5` populated) overrides Tier 1 text_encoders group knob.
-        let t5_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5, true);
+        let t5_ref =
+            effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5.clone(), true);
         let auto_t5_device = if t5_on_gpu {
             device.clone()
         } else {
@@ -1494,8 +1498,11 @@ impl FluxEngine {
             free_after_t5,
             CLIP_VRAM_THRESHOLD,
         );
-        let clip_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| adv.clip_l, true);
+        let clip_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.clip_l.clone(),
+            true,
+        );
         let auto_clip_device = if clip_on_gpu {
             device.clone()
         } else {
@@ -1575,7 +1582,7 @@ impl FluxEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1658,7 +1665,8 @@ impl FluxEngine {
                 .progress
                 .stage_done("Selecting T5 encoder", t5_resolve_start.elapsed());
 
-            let t5_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5, true);
+            let t5_ref =
+                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.t5.clone(), true);
             let auto_t5_device = if t5_on_gpu {
                 device.clone()
             } else {
@@ -1732,8 +1740,11 @@ impl FluxEngine {
                 free_for_clip,
                 CLIP_VRAM_THRESHOLD,
             );
-            let clip_ref =
-                effective_device_ref(self.pending_placement.as_ref(), |adv| adv.clip_l, true);
+            let clip_ref = effective_device_ref(
+                self.pending_placement.as_ref(),
+                |adv| adv.clip_l.clone(),
+                true,
+            );
             let auto_clip_device = if clip_on_gpu {
                 device.clone()
             } else {

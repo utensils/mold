@@ -37,6 +37,22 @@ fn resolve_device_cpu_bypasses_auto() {
 }
 
 #[test]
+fn resolve_stable_device_requires_scheduler_owner_thread() {
+    mold_inference::device::clear_thread_gpu_ordinal();
+    let error = resolve_device(
+        Some(DeviceRef::device("cuda:0123456789abcdef0123456789abcdef")),
+        cpu_auto,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("scheduler-bound GPU owner thread"),
+        "{error}"
+    );
+}
+
+#[test]
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 fn resolve_device_gpu_on_cpu_only_host_errors_clearly() {
     let err = resolve_device(Some(DeviceRef::gpu(0)), cpu_auto).unwrap_err();

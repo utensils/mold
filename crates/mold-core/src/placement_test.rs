@@ -33,6 +33,34 @@ fn device_ref_gpu_round_trip() {
 }
 
 #[test]
+fn device_ref_stable_device_id_round_trip() {
+    let pin = DeviceRef::device("cuda:0123456789abcdef0123456789abcdef");
+    let json = serde_json::to_string(&pin).unwrap();
+    assert_eq!(
+        json,
+        r#"{"kind":"device","id":"cuda:0123456789abcdef0123456789abcdef"}"#
+    );
+    let back: DeviceRef = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, pin);
+}
+
+#[test]
+fn placement_parser_accepts_stable_device_ids_without_lowercasing_identity() {
+    use crate::config::parse_device_ref_str;
+
+    assert_eq!(
+        parse_device_ref_str(" device:cuda:ABCDEF0123456789 ").unwrap(),
+        DeviceRef::device("cuda:ABCDEF0123456789")
+    );
+    assert_eq!(
+        parse_device_ref_str("metal:default").unwrap(),
+        DeviceRef::device("metal:default")
+    );
+    assert!(parse_device_ref_str("GPU-44f80ce5-23fc-a5dd-ac4e-133142952997").is_err());
+    assert!(parse_device_ref_str("MIG-GPU-deadbeef/1/2").is_err());
+}
+
+#[test]
 fn device_placement_defaults_to_all_auto() {
     let dp = DevicePlacement::default();
     assert_eq!(dp.text_encoders, DeviceRef::Auto);
@@ -215,6 +243,35 @@ fn env_override_transformer_gpu_ordinal() {
         .expect("gpu env override should populate advanced");
     assert_eq!(adv.transformer, DeviceRef::gpu(1));
     std::env::remove_var("MOLD_PLACE_TRANSFORMER");
+}
+
+#[test]
+fn request_placement_wins_wholly_over_resolved_environment_and_persisted_defaults() {
+    let mut cfg = crate::config::Config::default();
+    cfg.set_model_placement(
+        "flux-dev:q4",
+        Some(DevicePlacement {
+            text_encoders: DeviceRef::Cpu,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::gpu(1),
+                vae: DeviceRef::Cpu,
+                ..Default::default()
+            }),
+        }),
+    );
+    let request = DevicePlacement {
+        text_encoders: DeviceRef::Auto,
+        advanced: Some(AdvancedPlacement {
+            transformer: DeviceRef::device("cuda:0123456789abcdef0123456789abcdef"),
+            vae: DeviceRef::Auto,
+            ..Default::default()
+        }),
+    };
+
+    assert_eq!(
+        cfg.effective_placement("flux-dev:q4", Some(&request)),
+        request
+    );
 }
 
 #[test]

@@ -313,22 +313,19 @@ impl GpuPool {
 
     /// Validate a request/config placement against the active worker pool.
     ///
-    /// In multi-GPU worker mode a request may explicitly pin components to at
-    /// most one GPU ordinal. Cross-GPU component placement would bypass the
-    /// worker-affinity model entirely, so reject it here instead of letting the
-    /// engines silently allocate on a sibling GPU.
+    /// Every legacy ordinal and durable device-ID pin is resolved to one
+    /// active worker. Cross-GPU component placement would bypass worker
+    /// affinity, so reject it here instead of letting an engine silently open
+    /// a sibling context.
     pub fn resolve_explicit_placement_gpu(
         &self,
         placement: Option<&DevicePlacement>,
     ) -> Result<Option<usize>, String> {
-        if self.workers.is_empty() {
-            return Ok(None);
-        }
         let Some(placement) = placement else {
             return Ok(None);
         };
 
-        let ordinals = placement_gpu_ordinals(placement);
+        let ordinals = self.placement_worker_ordinals(placement)?;
         if ordinals.is_empty() {
             return Ok(None);
         }
@@ -356,6 +353,67 @@ impl GpuPool {
             ));
         }
         Ok(Some(ordinal))
+    }
+
+    fn placement_worker_ordinals(
+        &self,
+        placement: &DevicePlacement,
+    ) -> Result<BTreeSet<usize>, String> {
+        let mut ordinals = BTreeSet::new();
+        self.collect_placement_worker(&placement.text_encoders, &mut ordinals)?;
+        if let Some(adv) = placement.advanced.as_ref() {
+            self.collect_placement_worker(&adv.transformer, &mut ordinals)?;
+            self.collect_placement_worker(&adv.vae, &mut ordinals)?;
+            for device in [
+                adv.clip_l.as_ref(),
+                adv.clip_g.as_ref(),
+                adv.t5.as_ref(),
+                adv.qwen.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.collect_placement_worker(device, &mut ordinals)?;
+            }
+        }
+        Ok(ordinals)
+    }
+
+    fn collect_placement_worker(
+        &self,
+        device: &DeviceRef,
+        out: &mut BTreeSet<usize>,
+    ) -> Result<(), String> {
+        let worker = match device {
+            DeviceRef::Auto | DeviceRef::Cpu => return Ok(()),
+            DeviceRef::Gpu { ordinal } => self.worker_by_ordinal(*ordinal).ok_or_else(|| {
+                let available = self
+                    .workers
+                    .iter()
+                    .map(|worker| worker.gpu.ordinal.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("gpu:{ordinal} is not available in this server's worker pool [{available}]")
+            })?,
+            DeviceRef::Device { id } => self
+                .workers
+                .iter()
+                .find(|worker| worker.gpu.stable_id.as_deref() == Some(id.as_str()))
+                .cloned()
+                .ok_or_else(|| {
+                    let available = self
+                        .workers
+                        .iter()
+                        .filter_map(|worker| worker.gpu.stable_id.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "device '{id}' is not available in this server's worker pool [{available}]"
+                    )
+                })?,
+        };
+        out.insert(worker.gpu.ordinal);
+        Ok(())
     }
 
     /// Find a non-degraded worker that already has this model loaded on GPU.
@@ -511,34 +569,6 @@ impl GpuPool {
     /// Number of GPU workers in the pool.
     pub fn worker_count(&self) -> usize {
         self.workers.len()
-    }
-}
-
-fn placement_gpu_ordinals(placement: &DevicePlacement) -> BTreeSet<usize> {
-    let mut ordinals = BTreeSet::new();
-    collect_gpu_ordinal(placement.text_encoders, &mut ordinals);
-    if let Some(adv) = placement.advanced.as_ref() {
-        collect_gpu_ordinal(adv.transformer, &mut ordinals);
-        collect_gpu_ordinal(adv.vae, &mut ordinals);
-        if let Some(device) = adv.clip_l {
-            collect_gpu_ordinal(device, &mut ordinals);
-        }
-        if let Some(device) = adv.clip_g {
-            collect_gpu_ordinal(device, &mut ordinals);
-        }
-        if let Some(device) = adv.t5 {
-            collect_gpu_ordinal(device, &mut ordinals);
-        }
-        if let Some(device) = adv.qwen {
-            collect_gpu_ordinal(device, &mut ordinals);
-        }
-    }
-    ordinals
-}
-
-fn collect_gpu_ordinal(device: DeviceRef, out: &mut BTreeSet<usize>) {
-    if let DeviceRef::Gpu { ordinal } = device {
-        out.insert(ordinal);
     }
 }
 
@@ -786,6 +816,67 @@ mod tests {
             pool.resolve_explicit_placement_gpu(Some(&placement))
                 .unwrap(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_placement_gpu_accepts_durable_device_id() {
+        let (worker, _rx) = test_worker(3, 24_000_000_000);
+        let stable_id = worker.gpu.stable_id.clone().expect("test stable id");
+        let pool = GpuPool {
+            workers: vec![worker],
+        };
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::device(stable_id),
+                ..AdvancedPlacement::default()
+            }),
+        };
+
+        assert_eq!(
+            pool.resolve_explicit_placement_gpu(Some(&placement))
+                .unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn resolve_explicit_placement_gpu_rejects_unavailable_durable_device_id() {
+        let (worker, _rx) = test_worker(0, 24_000_000_000);
+        let pool = GpuPool {
+            workers: vec![worker],
+        };
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::device("cuda:ffffffffffffffffffffffffffffffff"),
+            advanced: None,
+        };
+
+        let error = pool
+            .resolve_explicit_placement_gpu(Some(&placement))
+            .unwrap_err();
+        assert!(error.contains("is not available"), "{error}");
+    }
+
+    #[test]
+    fn stable_and_legacy_pins_to_same_worker_do_not_conflict() {
+        let (worker, _rx) = test_worker(2, 24_000_000_000);
+        let stable_id = worker.gpu.stable_id.clone().expect("test stable id");
+        let pool = GpuPool {
+            workers: vec![worker],
+        };
+        let placement = DevicePlacement {
+            text_encoders: DeviceRef::gpu(2),
+            advanced: Some(AdvancedPlacement {
+                transformer: DeviceRef::device(stable_id),
+                ..AdvancedPlacement::default()
+            }),
+        };
+
+        assert_eq!(
+            pool.resolve_explicit_placement_gpu(Some(&placement))
+                .unwrap(),
+            Some(2)
         );
     }
 

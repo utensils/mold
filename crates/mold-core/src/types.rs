@@ -1348,13 +1348,15 @@ pub enum GpuWorkerState {
 ///
 /// - `Auto` preserves the existing VRAM-aware auto-placement logic.
 /// - `Cpu` pins the component to CPU regardless of available VRAM.
-/// - `Gpu { ordinal }` pins to GPU ordinal `n` (CUDA-specific ordinal,
-///   or `0` on Metal/unified memory).
+/// - `Gpu { ordinal }` is the legacy process-local CUDA ordinal pin.
+/// - `Device { id }` pins to an exact durable device-registry ID such as
+///   `cuda:<uuid>` or `metal:default`.
 ///
 /// Serialized as an externally-tagged enum: `{"kind":"auto"}`,
-/// `{"kind":"cpu"}`, or `{"kind":"gpu","ordinal":1}`. A missing `DeviceRef`
-/// field deserializes to `Auto`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
+/// `{"kind":"cpu"}`, `{"kind":"gpu","ordinal":1}`, or
+/// `{"kind":"device","id":"cuda:..."}`. A missing `DeviceRef` field
+/// deserializes to `Auto`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeviceRef {
     #[default]
@@ -1363,12 +1365,19 @@ pub enum DeviceRef {
     Gpu {
         ordinal: usize,
     },
+    Device {
+        id: String,
+    },
 }
 
 impl DeviceRef {
     /// Helper constructor mirroring the compact `Gpu(n)` form used in tests.
     pub const fn gpu(ordinal: usize) -> Self {
         DeviceRef::Gpu { ordinal }
+    }
+
+    pub fn device(id: impl Into<String>) -> Self {
+        DeviceRef::Device { id: id.into() }
     }
 }
 

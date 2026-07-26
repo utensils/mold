@@ -58,8 +58,8 @@ come from stdin.
 | `--qwen2-text-encoder-mode <MODE>`                                                           | `auto`, `gpu`, `cpu-stage`, or `cpu`                                                               |
 | `--scheduler <SCHED>`                                                                        | `ddim`, `euler-ancestral`, or `uni-pc`                                                             |
 | `--cfg-plus`                                                                                 | Enable CFG++ on supported SD-family paths                                                          |
-| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu`, or `gpu:N`                                        |
-| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides                                                                |
+| `--device-text-encoders <DEV>`                                                               | Place all text encoders on `auto`, `cpu`, `gpu:N`, or an exact `/api/devices` ID                   |
+| `--device-transformer <DEV>`, `--device-vae <DEV>`                                           | Advanced family placement overrides; accepts the same device forms                                 |
 | `--device-t5 <DEV>`, `--device-clip-l <DEV>`, `--device-clip-g <DEV>`, `--device-qwen <DEV>` | Per-encoder placement overrides                                                                    |
 
 ### Qwen Family Encoder Controls
@@ -134,7 +134,7 @@ mold serve [--port N] [--bind ADDR] [--models-dir PATH] [--gpus SPEC] [--queue-s
 | `--port <N>`          | Port, defaults to `7680` or `MOLD_PORT`                                                       |
 | `--bind <ADDR>`       | Bind address, defaults to `0.0.0.0`                                                           |
 | `--models-dir <PATH>` | Override the models directory                                                                 |
-| `--gpus <SPEC>`       | `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs; defaults to `all`       |
+| `--gpus <SPEC>`       | `all`, `none`, ordinals, or stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs; defaults to `all`      |
 | `--queue-size <N>`    | Max queued jobs; overflow returns HTTP 503 + `Retry-After`                                    |
 | `--log-format <FMT>`  | `json` or `text`                                                                              |
 | `--log-file`          | Enable rotated logs under `~/.mold/logs/`                                                     |

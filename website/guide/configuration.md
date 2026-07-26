@@ -195,26 +195,26 @@ Environment variables take precedence over config file values.
 
 ### Server
 
-| Variable                      | Default             | Description                                                                                                                                                                              |
-| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Variable                      | Default             | Description                                                                                                                                                                                              |
+| ----------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MOLD_GPUS`                   | `all`               | `all`, `none` (maintenance), or comma-separated ordinals/stable `cuda:`/`metal:`/`GPU-`/`MIG-` IDs. Prefer IDs from `/api/devices` in persistent config. See [Multi-GPU](/guide/cli-reference#multi-gpu) |
-| `MOLD_QUEUE_SIZE`             | `200`               | Max queued generation jobs; overflow returns HTTP 503 with `Retry-After`                                                                                                                 |
-| `MOLD_OUTPUT_DIR`             | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                                            |
-| `MOLD_THUMBNAIL_WARMUP`       | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                                                 |
-| `MOLD_WEB_DIR`                | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins                        |
-| `MOLD_DB_PATH`                | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                                         |
-| `MOLD_DB_DISABLE`             | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                                            |
-| `MOLD_CORS_ORIGIN`            | —                   | Restrict CORS to specific origin                                                                                                                                                         |
-| `MOLD_API_KEY`                | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                                        |
-| `MOLD_RATE_LIMIT`             | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                                         |
-| `MOLD_RATE_LIMIT_BURST`       | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                                            |
-| `MOLD_MAX_CACHED_MODELS`      | `3`                 | LRU model-cache capacity (range `1..=16`). At most one entry stays GPU-resident; the rest are parked in CPU RAM. Out-of-range values warn and fall back to default.                      |
-| `MOLD_CACHE_IDLE_TTL_SECS`    | `1800` (30 min)     | Idle timeout for parked cache entries (range `60..=86400`). Untouched entries are evicted past this TTL.                                                                                 |
-| `MOLD_QUEUE_LOOKAHEAD_BUFFER` | `8`                 | Server queue lookahead size (range `1..=64`). The dispatcher peeks this many jobs ahead to honour locality.                                                                              |
-| `MOLD_QUEUE_MAX_DEFERRALS`    | `3`                 | Per-job starvation budget (range `0..=32`). A job can be deferred this many times before forced pickup.                                                                                  |
-| `MOLD_MALLOC_TRIM`            | `1` (Linux/glibc)   | `0` disables the post-generation `malloc_trim(0)` call. Cheap (~ms) but Linux-only; reclaims arena pages after large GGUF+LoRA rebuilds.                                                 |
-| `MOLD_FLUX_DELTA_CACHE`       | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                            |
-| `MOLD_FLUX_KEEP_TRANSFORMER`  | `0`                 | `1` keeps the FLUX transformer GPU-resident across same-LoRA generations (saves a full GGUF+LoRA rebuild). Server force-drops it if VAE decode headroom is too tight at that resolution. |
+| `MOLD_QUEUE_SIZE`             | `200`               | Max queued generation jobs; overflow returns HTTP 503 with `Retry-After`                                                                                                                                 |
+| `MOLD_OUTPUT_DIR`             | `~/.mold/output`    | Image output directory (set empty to disable)                                                                                                                                                            |
+| `MOLD_THUMBNAIL_WARMUP`       | —                   | `1` to prebuild gallery thumbnails at server startup (default: disabled)                                                                                                                                 |
+| `MOLD_WEB_DIR`                | —                   | Override the web gallery SPA bundle location. First resolved path among this, `$XDG_DATA_HOME/mold/web`, `~/.mold/web`, `<binary dir>/web`, and `./web/dist` wins                                        |
+| `MOLD_DB_PATH`                | `MOLD_HOME/mold.db` | Override the SQLite gallery metadata DB location                                                                                                                                                         |
+| `MOLD_DB_DISABLE`             | —                   | `1` to disable the SQLite metadata DB entirely — server and CLI fall back to filesystem walks                                                                                                            |
+| `MOLD_CORS_ORIGIN`            | —                   | Restrict CORS to specific origin                                                                                                                                                                         |
+| `MOLD_API_KEY`                | —                   | API key for authentication (single key, comma-separated, or `@/path/to/keys.txt`)                                                                                                                        |
+| `MOLD_RATE_LIMIT`             | —                   | Per-IP rate limit for generation endpoints (e.g., `10/min`, `5/sec`, `100/hour`)                                                                                                                         |
+| `MOLD_RATE_LIMIT_BURST`       | —                   | Burst allowance override (defaults to 2x rate, capped at 100)                                                                                                                                            |
+| `MOLD_MAX_CACHED_MODELS`      | `3`                 | LRU model-cache capacity (range `1..=16`). At most one entry stays GPU-resident; the rest are parked in CPU RAM. Out-of-range values warn and fall back to default.                                      |
+| `MOLD_CACHE_IDLE_TTL_SECS`    | `1800` (30 min)     | Idle timeout for parked cache entries (range `60..=86400`). Untouched entries are evicted past this TTL.                                                                                                 |
+| `MOLD_QUEUE_LOOKAHEAD_BUFFER` | `8`                 | Server queue lookahead size (range `1..=64`). The dispatcher peeks this many jobs ahead to honour locality.                                                                                              |
+| `MOLD_QUEUE_MAX_DEFERRALS`    | `3`                 | Per-job starvation budget (range `0..=32`). A job can be deferred this many times before forced pickup.                                                                                                  |
+| `MOLD_MALLOC_TRIM`            | `1` (Linux/glibc)   | `0` disables the post-generation `malloc_trim(0)` call. Cheap (~ms) but Linux-only; reclaims arena pages after large GGUF+LoRA rebuilds.                                                                 |
+| `MOLD_FLUX_DELTA_CACHE`       | `1`                 | `0` disables the CPU-side FLUX LoRA delta cache (~25 GB host RAM on typical FLUX LoRAs). Disabling forces a sub-second `B@A·scale` recompute on each rebuild.                                            |
+| `MOLD_FLUX_KEEP_TRANSFORMER`  | `0`                 | `1` keeps the FLUX transformer GPU-resident across same-LoRA generations (saves a full GGUF+LoRA rebuild). Server force-drops it if VAE decode headroom is too tight at that resolution.                 |
 
 ### Upscaling
 
@@ -308,9 +308,13 @@ testing alternative weight files without editing `config.toml`.
 ### Per-component device placement
 
 Override which device (CPU or a specific GPU) runs each part of the diffusion
-pipeline. All variables accept the same four forms: `auto` (preserve the
-engine's VRAM-aware default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N` for a
-specific ordinal.
+pipeline. All variables accept `auto` (preserve the engine's VRAM-aware
+default), `cpu`, `gpu` (= `gpu:0`), or `gpu:N` for a process-local ordinal.
+They also accept the exact opaque ID reported by `GET /api/devices`, such as
+`cuda:0123…` or `metal:default`, either directly or as
+`device:cuda:0123…`. Durable IDs survive ordinal reordering; raw NVIDIA
+`GPU-`/`MIG-` UUID selectors are reserved for `--gpus` / `MOLD_GPUS` startup
+selection.
 
 | Variable                   | Applies to                        | Notes                                                                                                                                               |
 | -------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -322,8 +326,13 @@ specific ordinal.
 | `MOLD_PLACE_CLIP_G`        | SDXL and others that use CLIP-G   | Per-encoder override.                                                                                                                               |
 | `MOLD_PLACE_QWEN`          | Flux.2, Z-Image, Qwen-Image       | Per-encoder override for the Qwen text encoder.                                                                                                     |
 
-Precedence (highest wins): CLI flag (`--device-text-encoders`, `--device-vae`, …)
-→ env var → `[models."name:tag".placement]` TOML block → engine auto.
+For local CLI generation, precedence (highest wins) is CLI flag
+(`--device-text-encoders`, `--device-vae`, …) → environment variable →
+`[models."name:tag".placement]` TOML block → engine auto. For server requests,
+an explicit request placement is the complete placement decision; otherwise
+environment values override the persisted per-model placement and unspecified
+components remain `auto`. The server normalizes this once before admission, so
+validation, scheduling, and inference consume the same placement.
 
 The web UI's **Placement** panel, the desktop app's **Settings → Advanced**
 placement editor, the `GET`/`PUT`/`DELETE /api/config/model/:name/placement`

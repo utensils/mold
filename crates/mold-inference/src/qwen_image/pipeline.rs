@@ -1754,7 +1754,7 @@ impl QwenImageEngine {
         let text_tokenizer_path = self.validate_paths()?;
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -1805,8 +1805,11 @@ impl QwenImageEngine {
         }
 
         let vae_on_gpu = should_use_gpu(is_cuda, is_metal, free, VAE_DECODE_VRAM_THRESHOLD);
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
@@ -1834,7 +1837,11 @@ impl QwenImageEngine {
             self.resolve_text_encoder_source(&device, free, Qwen2TextEncoderUsage::Resident)?;
         let (te_plan, te_auto_device_label) =
             self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-        let qwen_ref = effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+        let qwen_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| adv.qwen.clone(),
+            true,
+        );
         let auto_te_device = if te_plan.use_gpu {
             device.clone()
         } else {
@@ -1936,7 +1943,7 @@ impl QwenImageEngine {
 
         let transformer_ref = effective_device_ref(
             self.pending_placement.as_ref(),
-            |adv| Some(adv.transformer),
+            |adv| Some(adv.transformer.clone()),
             false,
         );
         let device = crate::device::resolve_device(Some(transformer_ref), || {
@@ -2008,8 +2015,11 @@ impl QwenImageEngine {
             } else {
                 let (te_plan, te_auto_device_label) =
                     self.resolve_text_encoder_plan(&device, &resolved_text_encoder, free);
-                let qwen_ref =
-                    effective_device_ref(self.pending_placement.as_ref(), |adv| adv.qwen, true);
+                let qwen_ref = effective_device_ref(
+                    self.pending_placement.as_ref(),
+                    |adv| adv.qwen.clone(),
+                    true,
+                );
                 let auto_te_device = if te_plan.use_gpu {
                     device.clone()
                 } else {
@@ -2451,8 +2461,11 @@ impl QwenImageEngine {
             free_for_vae,
             VAE_DECODE_VRAM_THRESHOLD,
         );
-        let vae_ref =
-            effective_device_ref(self.pending_placement.as_ref(), |adv| Some(adv.vae), false);
+        let vae_ref = effective_device_ref(
+            self.pending_placement.as_ref(),
+            |adv| Some(adv.vae.clone()),
+            false,
+        );
         let vae_device = crate::device::resolve_device(Some(vae_ref), || {
             Ok(if vae_on_gpu {
                 device.clone()
