@@ -200,6 +200,9 @@ pub struct AppState {
     pub pull_lock: Arc<Mutex<()>>,
     /// Generation request queue.
     pub queue: QueueHandle,
+    /// Scheduler-owned ingress for GPU-consuming utility and administrative
+    /// work. In GPU-worker mode this is the only route to an owner thread.
+    pub scheduled_work: crate::scheduler::ScheduledWorkHandle,
     /// Authoritative registry of in-flight jobs (queued + running). Powers
     /// `GET /api/queue` so the SPA can reconcile persisted "running" cards
     /// against server reality and dead-letter zombies whose SSE stream
@@ -450,6 +453,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
             scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
@@ -490,6 +494,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
             scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
@@ -559,6 +564,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
             scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
@@ -601,6 +607,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
             scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
@@ -643,6 +650,7 @@ impl AppState {
             model_load_lock: Arc::new(Mutex::new(())),
             pull_lock: Arc::new(Mutex::new(())),
             queue,
+            scheduled_work: crate::scheduler::ScheduledWorkHandle::default(),
             job_registry: JobRegistry::with_events(events.clone()),
             scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),

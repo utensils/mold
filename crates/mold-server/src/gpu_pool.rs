@@ -3,6 +3,7 @@ use mold_core::types::{DevicePlacement, DeviceRef, GpuWorkerState, GpuWorkerStat
 use mold_db::MetadataDb;
 use mold_inference::device::DiscoveredGpu;
 use mold_inference::shared_pool::SharedPool;
+use mold_scheduler::WorkKind;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -131,6 +132,8 @@ pub struct GpuWorker {
     /// Explicit owner-thread shutdown. The command wakes an idle blocking
     /// receiver; the flag also fences a grant that was already transported.
     pub shutdown_requested: AtomicBool,
+    /// Exact OS thread authorized to create/use/drop device-backed objects.
+    pub owner_thread_id: std::sync::OnceLock<std::thread::ThreadId>,
     pub degraded_until: RwLock<Option<Instant>>,
     pub job_tx: std::sync::mpsc::SyncSender<GpuWorkerCommand>,
 }
@@ -177,24 +180,176 @@ pub struct GpuJob {
     pub lease: Option<crate::scheduler::LeaseFence>,
 }
 
+pub struct PromptExpansionJob {
+    pub id: String,
+    pub config: mold_core::Config,
+    pub settings: mold_core::ExpandSettings,
+    pub prompt: String,
+    pub expand_config: mold_core::ExpandConfig,
+    pub result_tx: tokio::sync::oneshot::Sender<Result<mold_core::ExpandResult, String>>,
+}
+
+pub struct StandaloneUpscaleJob {
+    pub id: String,
+    pub model: String,
+    pub weights_path: std::path::PathBuf,
+    pub request: mold_core::UpscaleRequest,
+    pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
+    pub result_tx: tokio::sync::oneshot::Sender<Result<mold_core::UpscaleResponse, String>>,
+}
+
+pub struct PostGenerationUpscaleJob {
+    pub id: String,
+    pub generation: Box<GpuJob>,
+    pub response: mold_core::GenerateResponse,
+    pub image: mold_core::ImageData,
+}
+
+impl PostGenerationUpscaleJob {
+    fn reject(self, error: String) {
+        if let Some(progress) = &self.generation.progress_tx {
+            let _ = progress.send(crate::state::SseMessage::Error(mold_core::SseErrorEvent {
+                message: error.clone(),
+            }));
+        }
+        let generation_id = self.generation.id.clone();
+        let _ = self.generation.result_tx.send(Err(error));
+        self.generation.queue.decrement();
+        self.generation.registry.remove(&generation_id);
+    }
+}
+
+pub struct AdminModelLoadJob {
+    pub id: String,
+    pub model: String,
+    pub config: mold_core::Config,
+    pub result_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+pub struct AdminModelUnloadJob {
+    pub id: String,
+    pub model: Option<String>,
+    /// Remove the cached engine entirely instead of merely parking the active
+    /// model. Used before deleting model files from disk.
+    pub evict_cached: bool,
+    pub result_tx: tokio::sync::oneshot::Sender<Result<Option<String>, String>>,
+}
+
+pub enum OwnerWork {
+    Generation(Box<GpuJob>),
+    PromptExpansion(Box<PromptExpansionJob>),
+    PostUpscale(Box<PostGenerationUpscaleJob>),
+    StandaloneUpscale(Box<StandaloneUpscaleJob>),
+    AdminModelLoad(Box<AdminModelLoadJob>),
+    AdminModelUnload(Box<AdminModelUnloadJob>),
+    #[cfg(test)]
+    Probe {
+        id: String,
+        kind: WorkKind,
+        run: Box<dyn FnOnce() + Send>,
+    },
+}
+
+impl OwnerWork {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Generation(job) => &job.id,
+            Self::PromptExpansion(job) => &job.id,
+            Self::PostUpscale(job) => &job.id,
+            Self::StandaloneUpscale(job) => &job.id,
+            Self::AdminModelLoad(job) => &job.id,
+            Self::AdminModelUnload(job) => &job.id,
+            #[cfg(test)]
+            Self::Probe { id, .. } => id,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> WorkKind {
+        match self {
+            Self::Generation(_) => WorkKind::Generation,
+            Self::PromptExpansion(_) => WorkKind::PromptExpansion,
+            Self::PostUpscale(_) => WorkKind::PostUpscale,
+            Self::StandaloneUpscale(_) => WorkKind::StandaloneUpscale,
+            Self::AdminModelLoad(_) => WorkKind::AdminModelLoad,
+            Self::AdminModelUnload(_) => WorkKind::AdminModelUnload,
+            #[cfg(test)]
+            Self::Probe { kind, .. } => *kind,
+        }
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Generation(job) => job.result_tx.is_closed(),
+            Self::PromptExpansion(job) => job.result_tx.is_closed(),
+            Self::PostUpscale(job) => job.generation.result_tx.is_closed(),
+            Self::StandaloneUpscale(job) => job.result_tx.is_closed(),
+            Self::AdminModelLoad(job) => job.result_tx.is_closed(),
+            Self::AdminModelUnload(job) => job.result_tx.is_closed(),
+            #[cfg(test)]
+            Self::Probe { .. } => false,
+        }
+    }
+
+    pub(crate) fn reject(self, error: String) {
+        match self {
+            Self::Generation(job) => {
+                let _ = job.result_tx.send(Err(error));
+            }
+            Self::PromptExpansion(job) => {
+                let _ = job.result_tx.send(Err(error));
+            }
+            Self::PostUpscale(job) => {
+                job.reject(error);
+            }
+            Self::StandaloneUpscale(job) => {
+                let _ = job.result_tx.send(Err(error));
+            }
+            Self::AdminModelLoad(job) => {
+                let _ = job.result_tx.send(Err(error));
+            }
+            Self::AdminModelUnload(job) => {
+                let _ = job.result_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::Probe { .. } => {}
+        }
+    }
+}
+
+pub struct LeaseGrant {
+    pub fence: crate::scheduler::LeaseFence,
+    pub work: OwnerWork,
+    pub retry: Option<OwnerWorkRetry>,
+}
+
+#[derive(Clone)]
+pub struct OwnerWorkRetry {
+    pub model_fingerprint: String,
+    pub estimated_vram_bytes: u64,
+    pub estimated_host_ram_bytes: u64,
+    pub hard_ordinal: Option<usize>,
+    pub priority: mold_scheduler::PriorityClass,
+    pub queue_rank: u64,
+}
+
 pub enum GpuWorkerCommand {
-    Grant(Box<GpuJob>),
+    Grant(Box<LeaseGrant>),
     Shutdown,
 }
 
 impl GpuWorker {
     pub(crate) fn try_send_job(
         &self,
-        job: Box<GpuJob>,
-    ) -> Result<(), std::sync::mpsc::TrySendError<Box<GpuJob>>> {
+        grant: Box<LeaseGrant>,
+    ) -> Result<(), std::sync::mpsc::TrySendError<Box<LeaseGrant>>> {
         self.job_tx
-            .try_send(GpuWorkerCommand::Grant(job))
+            .try_send(GpuWorkerCommand::Grant(grant))
             .map_err(|error| match error {
-                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Grant(job)) => {
-                    std::sync::mpsc::TrySendError::Full(job)
+                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Grant(grant)) => {
+                    std::sync::mpsc::TrySendError::Full(grant)
                 }
-                std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(job)) => {
-                    std::sync::mpsc::TrySendError::Disconnected(job)
+                std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(grant)) => {
+                    std::sync::mpsc::TrySendError::Disconnected(grant)
                 }
                 std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown)
                 | std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Shutdown) => {
@@ -207,11 +362,33 @@ impl GpuWorker {
     pub(crate) fn send_job(
         &self,
         job: GpuJob,
-    ) -> Result<(), std::sync::mpsc::SendError<Box<GpuJob>>> {
+    ) -> Result<(), std::sync::mpsc::SendError<Box<LeaseGrant>>> {
+        let fence = job.lease.clone().unwrap_or(crate::scheduler::LeaseFence {
+            work_id: job.id.clone(),
+            device_id: crate::scheduler::worker_device_id(self),
+            state_version: 0,
+            plan_version: 0,
+            worker_generation: 1,
+            memory_sample_generation: 0,
+            memory_ledger_sequence: 0,
+        });
+        let grant = LeaseGrant {
+            fence,
+            work: OwnerWork::Generation(Box::new(job)),
+            retry: None,
+        };
+        self.send_grant(grant)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_grant(
+        &self,
+        grant: LeaseGrant,
+    ) -> Result<(), std::sync::mpsc::SendError<Box<LeaseGrant>>> {
         self.job_tx
-            .send(GpuWorkerCommand::Grant(Box::new(job)))
+            .send(GpuWorkerCommand::Grant(Box::new(grant)))
             .map_err(|error| match error.0 {
-                GpuWorkerCommand::Grant(job) => std::sync::mpsc::SendError(job),
+                GpuWorkerCommand::Grant(grant) => std::sync::mpsc::SendError(grant),
                 GpuWorkerCommand::Shutdown => unreachable!("send_job only transports Grant"),
             })
     }
@@ -614,6 +791,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });

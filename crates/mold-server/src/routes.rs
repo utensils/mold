@@ -15,9 +15,7 @@ use mold_core::{
     SseProgressEvent,
 };
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use tokio_stream::StreamExt as _;
 use utoipa::OpenApi;
 
@@ -669,42 +667,91 @@ fn validate_multi_gpu_placement(
         .map_err(ApiError::validation)
 }
 
-fn select_aux_worker(
-    state: &AppState,
-) -> Result<std::sync::Arc<crate::gpu_pool::GpuWorker>, ApiError> {
-    let mut workers: Vec<_> = state
-        .gpu_pool
-        .workers
-        .iter()
-        .filter(|w| !w.is_degraded())
-        .cloned()
-        .collect();
-    workers.sort_by_key(|w| {
-        (
-            w.in_flight.load(Ordering::SeqCst),
-            Reverse(w.gpu.total_vram_bytes),
-        )
-    });
-    workers
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::internal("no GPU worker available for auxiliary workload"))
+fn clear_global_upscaler_cache(state: &AppState) {
+    if state.gpu_pool.worker_count() > 0 {
+        // GPU-worker mode never populates the legacy global cache. All
+        // upscaler engines are created and dropped inside an owner command.
+        return;
+    }
+    if let Ok(mut cache) = state.upscaler_cache.try_lock() {
+        if let Some(mut engine) = cache.take() {
+            engine.unload();
+            tracing::info!("upscaler cache cleared");
+        }
+    }
 }
 
-async fn clear_global_upscaler_cache(state: &AppState) {
-    let cache = state.upscaler_cache.clone();
-    if let Err(error) = tokio::task::spawn_blocking(move || {
-        if let Ok(mut cache) = cache.try_lock() {
-            if let Some(mut engine) = cache.take() {
-                engine.unload();
-                tracing::info!("upscaler cache cleared");
-            }
-        }
-    })
-    .await
-    {
-        tracing::warn!(%error, "upscaler cache teardown task panicked");
-    }
+async fn schedule_standalone_upscale(
+    state: &AppState,
+    model: String,
+    weights_path: std::path::PathBuf,
+    request: mold_core::UpscaleRequest,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) -> Result<mold_core::UpscaleResponse, ApiError> {
+    let id = format!("standalone-upscale-{}", uuid::Uuid::new_v4());
+    let estimated_vram_bytes = std::fs::metadata(&weights_path)
+        .map(|metadata| metadata.len().saturating_add(2 << 30))
+        .unwrap_or(2 << 30);
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let job = crate::gpu_pool::StandaloneUpscaleJob {
+        id: id.clone(),
+        model: model.clone(),
+        weights_path,
+        request,
+        progress_tx,
+        result_tx,
+    };
+    let work = crate::gpu_pool::OwnerWork::StandaloneUpscale(Box::new(job));
+    state
+        .scheduled_work
+        .submit(crate::scheduler::ScheduledOwnerWork::new(
+            id,
+            model,
+            estimated_vram_bytes,
+            work,
+        ))
+        .await
+        .map_err(ApiError::generation_unavailable)?;
+    result_rx
+        .await
+        .map_err(|_| ApiError::internal("upscale owner worker dropped its result"))?
+        .map_err(|error| ApiError::internal(format!("upscale failed: {error}")))
+}
+
+async fn schedule_local_expansion(
+    state: &AppState,
+    config: mold_core::Config,
+    settings: mold_core::ExpandSettings,
+    prompt: String,
+    expand_config: mold_core::ExpandConfig,
+    preferred_gpu: Option<usize>,
+) -> Result<mold_core::ExpandResult, ApiError> {
+    let id = format!("prompt-expansion-{}", uuid::Uuid::new_v4());
+    let estimated_vram_bytes = 6_000_000_000;
+    let model = settings.model.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let work = crate::gpu_pool::OwnerWork::PromptExpansion(Box::new(
+        crate::gpu_pool::PromptExpansionJob {
+            id: id.clone(),
+            config,
+            settings,
+            prompt,
+            expand_config,
+            result_tx,
+        },
+    ));
+    state
+        .scheduled_work
+        .submit(
+            crate::scheduler::ScheduledOwnerWork::new(id, model, estimated_vram_bytes, work)
+                .with_hard_ordinal(preferred_gpu),
+        )
+        .await
+        .map_err(ApiError::generation_unavailable)?;
+    result_rx
+        .await
+        .map_err(|_| ApiError::internal("prompt expansion owner worker dropped its result"))?
+        .map_err(|error| ApiError::internal(format!("prompt expansion failed: {error}")))
 }
 
 // ── /api/generate ─────────────────────────────────────────────────────────────
@@ -921,6 +968,13 @@ async fn maybe_expand_prompt(
     let config = state.config.read().await;
     let config_snapshot = config.clone();
     let expand_settings = config.expand.clone().with_env_overrides();
+    if state.gpu_pool.worker_count() > 0 && expand_settings.is_local() {
+        // The scheduler owns local expansion as a PromptExpansion dependency
+        // stage. Leaving the request untouched lets the parent enter the
+        // queue immediately; the coordinator freezes the expanded prompt
+        // before making Generation ready.
+        return Ok(());
+    }
 
     // Resolve model family for prompt style
     let model_family = config
@@ -1041,6 +1095,22 @@ async fn expand_prompt(
     let config_snapshot = config.clone();
     drop(config);
 
+    if state.gpu_pool.worker_count() > 0 && expand_settings.is_local() {
+        let result = schedule_local_expansion(
+            &state,
+            config_snapshot,
+            expand_settings,
+            prompt,
+            expand_config,
+            None,
+        )
+        .await?;
+        return Ok(Json(mold_core::ExpandResponse {
+            original: req.prompt,
+            expanded: result.expanded,
+        }));
+    }
+
     let expander = create_server_expander(
         &config_snapshot,
         &expand_settings,
@@ -1108,40 +1178,7 @@ async fn upscale(
     drop(config);
 
     let resp = if state.gpu_pool.worker_count() > 0 {
-        let worker = select_aux_worker(&state)?;
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
-        let worker_clone = worker.clone();
-        let joined =
-            tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
-                struct ThreadGpuGuard;
-                impl Drop for ThreadGpuGuard {
-                    fn drop(&mut self) {
-                        mold_inference::device::clear_thread_gpu_ordinal();
-                    }
-                }
-
-                mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
-                let _thread_gpu = ThreadGpuGuard;
-                let _load_lock = worker_clone.model_load_lock.lock().unwrap();
-                crate::gpu_worker::ensure_worker_not_poisoned(&worker_clone, &model_name_owned)?;
-                let engine = mold_inference::create_upscale_engine(
-                    model_name_owned,
-                    weights_path,
-                    mold_inference::LoadStrategy::Eager,
-                    worker_clone.gpu.ordinal,
-                )?;
-                crate::gpu_worker::run_upscale_engine_safely(&worker_clone, engine, &req)
-            })
-            .await;
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-        let result =
-            joined.map_err(|e| ApiError::internal(format!("upscale task panicked: {e}")))?;
-        if let Err(error) = &result {
-            if !worker.poisoned.load(Ordering::SeqCst) {
-                crate::gpu_worker::quarantine_if_fatal_cuda_error(&worker, error);
-            }
-        }
-        result.map_err(|e| ApiError::internal(format!("upscale failed: {e}")))?
+        schedule_standalone_upscale(&state, model_name_owned, weights_path, req, None).await?
     } else {
         let upscaler_cache = state.upscaler_cache.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<mold_core::UpscaleResponse> {
@@ -1312,112 +1349,41 @@ async fn upscale_stream(
             return;
         };
 
-        let result = if state_clone.gpu_pool.worker_count() > 0 {
-            match select_aux_worker(&state_clone) {
-                Ok(worker) => {
-                    worker.in_flight.fetch_add(1, Ordering::SeqCst);
-                    let worker_clone = worker.clone();
-                    let tx_for_worker = tx.clone();
-                    let model_name_for_worker = model_name_owned.clone();
-                    let weights_path_for_worker = weights_path.clone();
-                    let req_for_worker = req.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        struct ThreadGpuGuard;
-                        impl Drop for ThreadGpuGuard {
-                            fn drop(&mut self) {
-                                mold_inference::device::clear_thread_gpu_ordinal();
-                            }
-                        }
-
-                        mold_inference::device::init_thread_gpu_ordinal(worker_clone.gpu.ordinal);
-                        let _thread_gpu = ThreadGpuGuard;
-                        let _load_lock = worker_clone.model_load_lock.lock().unwrap();
-                        if let Err(error) = crate::gpu_worker::ensure_worker_not_poisoned(
-                            &worker_clone,
-                            &model_name_for_worker,
-                        ) {
-                            let _ =
-                                tx_for_worker.send(SseMessage::Error(mold_core::SseErrorEvent {
-                                    message: error.to_string(),
-                                }));
-                            return;
-                        }
-                        let _ = tx_for_worker.send(SseMessage::Progress(
-                            mold_core::SseProgressEvent::StageStart {
-                                name: format!(
-                                    "Loading upscaler model on GPU {}",
-                                    worker_clone.gpu.ordinal
-                                ),
-                            },
-                        ));
-                        let mut engine = match mold_inference::create_upscale_engine(
-                            model_name_for_worker,
-                            weights_path_for_worker,
-                            mold_inference::LoadStrategy::Eager,
-                            worker_clone.gpu.ordinal,
-                        ) {
-                            Ok(engine) => engine,
-                            Err(e) => {
-                                crate::gpu_worker::quarantine_if_fatal_cuda_error(
-                                    &worker_clone,
-                                    &e,
-                                );
-                                let _ = tx_for_worker.send(SseMessage::Error(
-                                    mold_core::SseErrorEvent {
-                                        message: format!("failed to load upscaler: {e}"),
-                                    },
-                                ));
-                                return;
-                            }
-                        };
-
-                        let tx_progress = tx_for_worker.clone();
-                        engine.set_on_progress(Box::new(move |event| {
-                            let sse_event: mold_core::SseProgressEvent = event.into();
-                            let _ = tx_progress.send(SseMessage::Progress(sse_event));
-                        }));
-
-                        match crate::gpu_worker::run_upscale_engine_safely(
-                            &worker_clone,
-                            engine,
-                            &req_for_worker,
-                        ) {
-                            Ok(resp) => {
-                                let image_b64 = base64::engine::general_purpose::STANDARD
-                                    .encode(&resp.image.data);
-                                let _ = tx_for_worker.send(SseMessage::UpscaleComplete(
-                                    mold_core::SseUpscaleCompleteEvent {
-                                        image: image_b64,
-                                        format: resp.image.format,
-                                        model: resp.model,
-                                        scale_factor: resp.scale_factor,
-                                        original_width: resp.original_width,
-                                        original_height: resp.original_height,
-                                        upscale_time_ms: resp.upscale_time_ms,
-                                    },
-                                ));
-                            }
-                            Err(e) => {
-                                let _ = tx_for_worker.send(SseMessage::Error(
-                                    mold_core::SseErrorEvent {
-                                        message: format!("upscale failed: {e}"),
-                                    },
-                                ));
-                            }
-                        }
-                    })
-                    .await;
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
-                    result
+        if state_clone.gpu_pool.worker_count() > 0 {
+            match schedule_standalone_upscale(
+                &state_clone,
+                model_name_owned,
+                weights_path,
+                req,
+                Some(tx.clone()),
+            )
+            .await
+            {
+                Ok(resp) => {
+                    let image_b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&resp.image.data);
+                    let _ = tx.send(SseMessage::UpscaleComplete(
+                        mold_core::SseUpscaleCompleteEvent {
+                            image: image_b64,
+                            format: resp.image.format,
+                            model: resp.model,
+                            scale_factor: resp.scale_factor,
+                            original_width: resp.original_width,
+                            original_height: resp.original_height,
+                            upscale_time_ms: resp.upscale_time_ms,
+                        },
+                    ));
                 }
-                Err(e) => {
+                Err(error) => {
                     let _ = tx.send(SseMessage::Error(mold_core::SseErrorEvent {
-                        message: e.error,
+                        message: error.error,
                     }));
-                    return;
                 }
             }
-        } else {
+            return;
+        }
+
+        let result = {
             let model_name_for_cache = model_name_owned.clone();
             let weights_path_for_cache = weights_path.clone();
             let req_for_cache = req.clone();
@@ -1732,42 +1698,47 @@ async fn load_model(
 
     // Multi-GPU path: route through the pool.
     if state.gpu_pool.worker_count() > 0 {
-        let worker = match body.gpu {
-            Some(ordinal) => state
-                .gpu_pool
-                .workers
-                .iter()
-                .find(|w| w.gpu.ordinal == ordinal)
-                .cloned()
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("no GPU worker with ordinal {ordinal}"))
-                })?,
-            None => {
-                let est = crate::queue::estimate_model_vram(&body.model);
-                state
-                    .gpu_pool
-                    .select_worker(&body.model, est)
-                    .ok_or_else(|| {
-                        ApiError::internal(format!(
-                            "no GPU available to load model '{}'",
-                            body.model
-                        ))
-                    })?
+        if let Some(ordinal) = body.gpu {
+            if state.gpu_pool.worker_by_ordinal(ordinal).is_none() {
+                return Err(ApiError::not_found(format!(
+                    "no GPU worker with ordinal {ordinal}"
+                )));
             }
-        };
+        }
         let config_snapshot = state.config.read().await.clone();
         let model_name = body.model.clone();
-        let worker_clone = worker.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::gpu_worker::load_blocking(&worker_clone, &model_name, &config_snapshot)
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("model load task failed: {e}")))?
-        .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
+        let id = format!("admin-model-load-{}", uuid::Uuid::new_v4());
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work = crate::gpu_pool::OwnerWork::AdminModelLoad(Box::new(
+            crate::gpu_pool::AdminModelLoadJob {
+                id: id.clone(),
+                model: model_name.clone(),
+                config: config_snapshot,
+                result_tx,
+            },
+        ));
+        state
+            .scheduled_work
+            .submit(
+                crate::scheduler::ScheduledOwnerWork::new(
+                    id,
+                    model_name,
+                    crate::queue::estimate_model_vram(&body.model),
+                    work,
+                )
+                .with_hard_ordinal(body.gpu)
+                .with_priority(mold_scheduler::PriorityClass::Admin),
+            )
+            .await
+            .map_err(ApiError::generation_unavailable)?;
+        result_rx
+            .await
+            .map_err(|_| ApiError::internal("model-load owner worker dropped its result"))?
+            .map_err(|e| ApiError::internal(format!("model load error: {e}")))?;
 
         tracing::info!(
             model = %body.model,
-            gpu = worker.gpu.ordinal,
+            gpu = ?body.gpu,
             "model loaded via API"
         );
         return Ok(StatusCode::OK);
@@ -2040,11 +2011,11 @@ async fn unload_model(
                 .workers
                 .iter()
                 .filter(|w| {
-                    let cache = w.model_cache.lock().unwrap();
-                    cache
-                        .get(model)
-                        .map(|e| e.residency == crate::model_cache::ModelResidency::Gpu)
-                        .unwrap_or(false)
+                    w.resident_model
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_deref()
+                        == Some(model)
                 })
                 .cloned()
                 .collect(),
@@ -2057,13 +2028,36 @@ async fn unload_model(
 
         let mut unloaded_pairs: Vec<(usize, String)> = Vec::new();
         for worker in targets {
-            let worker_clone = worker.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                crate::gpu_worker::unload_blocking(&worker_clone)
-            })
-            .await
-            .map_err(|e| ApiError::internal(format!("unload task failed: {e}")))?
-            .map_err(|e| ApiError::internal(format!("unload failed: {e}")))?;
+            let id = format!("admin-model-unload-{}", uuid::Uuid::new_v4());
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let work = crate::gpu_pool::OwnerWork::AdminModelUnload(Box::new(
+                crate::gpu_pool::AdminModelUnloadJob {
+                    id: id.clone(),
+                    model: req.model.clone(),
+                    evict_cached: false,
+                    result_tx,
+                },
+            ));
+            state
+                .scheduled_work
+                .submit(
+                    crate::scheduler::ScheduledOwnerWork::new(
+                        id,
+                        req.model
+                            .clone()
+                            .unwrap_or_else(|| "admin-unload".to_string()),
+                        0,
+                        work,
+                    )
+                    .with_hard_ordinal(Some(worker.gpu.ordinal))
+                    .with_priority(mold_scheduler::PriorityClass::Admin),
+                )
+                .await
+                .map_err(ApiError::generation_unavailable)?;
+            let result = result_rx
+                .await
+                .map_err(|_| ApiError::internal("model-unload owner worker dropped its result"))?
+                .map_err(|error| ApiError::internal(format!("unload failed: {error}")))?;
             if let Some(name) = result {
                 unloaded_pairs.push((worker.gpu.ordinal, name));
             }
@@ -2082,7 +2076,7 @@ async fn unload_model(
     }
 
     // Legacy single-GPU path.
-    clear_global_upscaler_cache(&state).await;
+    clear_global_upscaler_cache(&state);
     Ok((StatusCode::OK, model_manager::unload_model(&state).await))
 }
 
@@ -2199,18 +2193,29 @@ async fn delete_model(
         let _ = cache.remove(&canonical);
     }
     for worker in &state.gpu_pool.workers {
-        if let Ok(mut cache) = worker.model_cache.lock() {
-            let _ = cache.remove(&canonical);
-        }
-        if worker
-            .resident_model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_deref()
-            == Some(canonical.as_str())
-        {
-            worker.set_resident_model(None);
-        }
+        let id = format!("admin-model-evict-{}", uuid::Uuid::new_v4());
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work = crate::gpu_pool::OwnerWork::AdminModelUnload(Box::new(
+            crate::gpu_pool::AdminModelUnloadJob {
+                id: id.clone(),
+                model: Some(canonical.clone()),
+                evict_cached: true,
+                result_tx,
+            },
+        ));
+        state
+            .scheduled_work
+            .submit(
+                crate::scheduler::ScheduledOwnerWork::new(id, canonical.clone(), 0, work)
+                    .with_hard_ordinal(Some(worker.gpu.ordinal))
+                    .with_priority(mold_scheduler::PriorityClass::Admin),
+            )
+            .await
+            .map_err(ApiError::generation_unavailable)?;
+        result_rx
+            .await
+            .map_err(|_| ApiError::internal("model-eviction owner worker dropped its result"))?
+            .map_err(|error| ApiError::internal(format!("model eviction failed: {error}")))?;
     }
 
     let kept = plan
@@ -4035,6 +4040,7 @@ fn server_event_to_sse(ev: &mold_core::ServerEvent) -> SseEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     struct TrackingUpscaler {
         unloaded: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -4092,7 +4098,7 @@ mod tests {
             unloaded_on: unloaded_on.clone(),
         }));
 
-        clear_global_upscaler_cache(&state).await;
+        clear_global_upscaler_cache(&state);
 
         assert!(unloaded.load(Ordering::SeqCst));
         assert_ne!(

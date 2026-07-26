@@ -186,7 +186,7 @@ impl CandidatePlacement {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WorkKind {
     #[default]
     Generation,
@@ -196,6 +196,7 @@ pub enum WorkKind {
     StandaloneUpscale,
     PromptExpansion,
     AdminModelLoad,
+    AdminModelUnload,
     BatchChild,
 }
 

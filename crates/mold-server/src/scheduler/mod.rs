@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 use mold_scheduler::{
     Backend, BlockedReason, CandidatePlacement, DeviceActivity, DeviceAdminState, DeviceHealth,
     DeviceId, DeviceSnapshot, ExecutionFingerprint, GrantValidationSnapshot, HostMemorySnapshot,
-    Plan, Planner, PlannerSnapshot, WorkId, WorkSnapshot,
+    Plan, Planner, PlannerSnapshot, PriorityClass, WorkId, WorkSnapshot,
 };
 
-use crate::gpu_pool::{GpuJob, GpuWorker};
+use crate::gpu_pool::{GpuJob, GpuWorker, LeaseGrant, OwnerWork};
 use crate::state::{AppState, GenerationJob, SseMessage};
 
 const REPLAN_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -61,11 +61,14 @@ pub enum WorkerEvent {
         work_id: String,
         worker_generation: u64,
     },
+    FollowupReady {
+        work: Box<ScheduledOwnerWork>,
+    },
     Rejected {
         device_id: String,
         ordinal: usize,
         worker_generation: u64,
-        job: Box<GpuJob>,
+        grant: Box<LeaseGrant>,
         reason: LeaseRejection,
     },
     Completed {
@@ -73,6 +76,65 @@ pub enum WorkerEvent {
         ordinal: usize,
         worker_generation: u64,
     },
+}
+
+pub struct ScheduledOwnerWork {
+    pub id: String,
+    pub model_fingerprint: String,
+    pub estimated_vram_bytes: u64,
+    pub estimated_host_ram_bytes: u64,
+    pub hard_ordinal: Option<usize>,
+    pub priority: PriorityClass,
+    pub work: OwnerWork,
+}
+
+impl ScheduledOwnerWork {
+    pub fn new(
+        id: impl Into<String>,
+        model_fingerprint: impl Into<String>,
+        estimated_vram_bytes: u64,
+        work: OwnerWork,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            model_fingerprint: model_fingerprint.into(),
+            estimated_vram_bytes,
+            estimated_host_ram_bytes: MIN_TRANSIENT_HOST_RAM,
+            hard_ordinal: None,
+            priority: PriorityClass::User,
+            work,
+        }
+    }
+
+    pub fn with_hard_ordinal(mut self, ordinal: Option<usize>) -> Self {
+        self.hard_ordinal = ordinal;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: PriorityClass) -> Self {
+        self.priority = priority;
+        self
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ScheduledWorkHandle {
+    tx: Option<tokio::sync::mpsc::Sender<ScheduledOwnerWork>>,
+}
+
+impl ScheduledWorkHandle {
+    pub fn new(tx: tokio::sync::mpsc::Sender<ScheduledOwnerWork>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    pub async fn submit(&self, work: ScheduledOwnerWork) -> Result<(), String> {
+        let Some(tx) = &self.tx else {
+            return Err("GPU scheduler is unavailable".to_string());
+        };
+        tx.send(work)
+            .await
+            .map_err(|_| "GPU scheduler is shutting down".to_string())
+    }
 }
 
 pub fn worker_device_id(worker: &GpuWorker) -> String {
@@ -108,6 +170,16 @@ struct PendingGeneration {
     preparation: PreparationState,
 }
 
+struct PendingOwnerWork {
+    model_fingerprint: String,
+    estimated_vram_bytes: u64,
+    estimated_host_ram_bytes: u64,
+    hard_ordinal: Option<usize>,
+    priority: PriorityClass,
+    queue_rank: u64,
+    work: OwnerWork,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreparationState {
     Needed,
@@ -116,16 +188,23 @@ enum PreparationState {
 }
 
 enum PreparationEvent {
-    Ready { work_id: String },
-    Failed { work_id: String, error: String },
+    Ready {
+        work_id: String,
+        expanded_prompt: Option<String>,
+    },
+    Failed {
+        work_id: String,
+        error: String,
+    },
 }
 
-type PreparationFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+type PreparationFuture = Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send>>;
 
 trait DependencyPreparer: Send + Sync {
     fn prepare(
         &self,
         state: AppState,
+        work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     ) -> PreparationFuture;
@@ -137,12 +216,70 @@ impl DependencyPreparer for PostUpscalePreparer {
     fn prepare(
         &self,
         state: AppState,
+        work_id: String,
         request: mold_core::GenerateRequest,
         progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
     ) -> PreparationFuture {
         Box::pin(async move {
             crate::queue::ensure_post_upscale_model_downloaded(&state, &request, progress.as_ref())
-                .await
+                .await?;
+            if request.expand != Some(true) {
+                return Ok(None);
+            }
+            let config = state.config.read().await.clone();
+            let settings = config.expand.clone().with_env_overrides();
+            if !settings.is_local() {
+                // API-backed expansion remains CPU/network work and is
+                // resolved before queue admission by the route.
+                return Ok(None);
+            }
+            let family = config
+                .resolved_model_config(&request.model)
+                .family
+                .or_else(|| {
+                    mold_core::manifest::find_manifest(&request.model)
+                        .map(|manifest| manifest.family.clone())
+                })
+                .unwrap_or_else(|| "flux".to_string());
+            let expand_config = settings.to_expand_config(&family, 1);
+            let preferred_gpu = state
+                .gpu_pool
+                .resolve_explicit_placement_gpu(request.placement.as_ref())?;
+            let utility_id = format!("{work_id}::prompt-expansion");
+            let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+            let utility = ScheduledOwnerWork::new(
+                utility_id.clone(),
+                settings.model.clone(),
+                6_000_000_000,
+                OwnerWork::PromptExpansion(Box::new(crate::gpu_pool::PromptExpansionJob {
+                    id: utility_id,
+                    config,
+                    settings,
+                    prompt: request.prompt.clone(),
+                    expand_config,
+                    result_tx,
+                })),
+            )
+            .with_hard_ordinal(preferred_gpu);
+            state.scheduled_work.submit(utility).await?;
+
+            let registry_notify = state.job_registry.mutation_notifier();
+            let result = loop {
+                tokio::select! {
+                    result = &mut result_rx => {
+                        break result
+                            .map_err(|_| "prompt expansion owner worker dropped its result".to_string())?;
+                    }
+                    _ = registry_notify.notified() => {
+                        if state.job_registry.entry(&work_id).is_none() {
+                            return Err(format!(
+                                "generation job {work_id} was cancelled during prompt expansion"
+                            ));
+                        }
+                    }
+                }
+            }?;
+            Ok(result.expanded.first().cloned())
         })
     }
 }
@@ -414,6 +551,7 @@ struct Coordinator {
     state: AppState,
     planner: Planner,
     pending: BTreeMap<String, PendingGeneration>,
+    pending_owner_work: BTreeMap<String, PendingOwnerWork>,
     ready: BTreeMap<String, ReadyWorker>,
     leases: BTreeMap<String, ActiveLease>,
     unavailable: BTreeSet<String>,
@@ -457,6 +595,7 @@ impl Coordinator {
             state,
             planner: Planner::default(),
             pending: BTreeMap::new(),
+            pending_owner_work: BTreeMap::new(),
             ready: BTreeMap::new(),
             leases: BTreeMap::new(),
             unavailable: BTreeSet::new(),
@@ -521,6 +660,47 @@ impl Coordinator {
         self.mutate(immediate);
     }
 
+    fn enqueue_owner_work(&mut self, submission: ScheduledOwnerWork, immediate: &mut bool) {
+        if submission.id != submission.work.id() {
+            let payload_id = submission.work.id().to_string();
+            submission.work.reject(format!(
+                "scheduled work id '{}' did not match payload id '{}'",
+                submission.id, payload_id
+            ));
+            return;
+        }
+        if submission.work.is_cancelled() {
+            return;
+        }
+        if self.pending.contains_key(&submission.id)
+            || self.pending_owner_work.contains_key(&submission.id)
+            || self
+                .leases
+                .values()
+                .any(|lease| lease.work_id == submission.id)
+        {
+            submission
+                .work
+                .reject(format!("duplicate scheduled work id {}", submission.id));
+            return;
+        }
+        let queue_rank = self.synthetic_id;
+        self.synthetic_id = self.synthetic_id.saturating_add(1);
+        self.pending_owner_work.insert(
+            submission.id,
+            PendingOwnerWork {
+                model_fingerprint: submission.model_fingerprint,
+                estimated_vram_bytes: submission.estimated_vram_bytes,
+                estimated_host_ram_bytes: submission.estimated_host_ram_bytes,
+                hard_ordinal: submission.hard_ordinal,
+                priority: submission.priority,
+                queue_rank,
+                work: submission.work,
+            },
+        );
+        self.mutate(immediate);
+    }
+
     fn start_needed_preparations(&mut self) {
         let ids = self
             .pending
@@ -539,8 +719,11 @@ impl Coordinator {
             let preparer = self.preparer.clone();
             let tx = self.preparation_tx.clone();
             self.preparation_tasks.spawn(async move {
-                let event = match preparer.prepare(state, request, progress).await {
-                    Ok(()) => PreparationEvent::Ready { work_id: id },
+                let event = match preparer.prepare(state, id.clone(), request, progress).await {
+                    Ok(expanded_prompt) => PreparationEvent::Ready {
+                        work_id: id,
+                        expanded_prompt,
+                    },
                     Err(error) => PreparationEvent::Failed { work_id: id, error },
                 };
                 let _ = tx.send(event);
@@ -550,12 +733,19 @@ impl Coordinator {
 
     fn handle_preparation_event(&mut self, event: PreparationEvent, immediate: &mut bool) {
         match event {
-            PreparationEvent::Ready { work_id } => {
+            PreparationEvent::Ready {
+                work_id,
+                expanded_prompt,
+            } => {
                 let Some(pending) = self.pending.get_mut(&work_id) else {
                     return;
                 };
                 if pending.preparation != PreparationState::Preparing {
                     return;
+                }
+                if let Some(expanded_prompt) = expanded_prompt {
+                    pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
+                    pending.job.request.prompt = expanded_prompt;
                 }
                 pending.preparation = PreparationState::Ready;
                 self.mutate(immediate);
@@ -655,11 +845,14 @@ impl Coordinator {
                     );
                 }
             }
+            WorkerEvent::FollowupReady { work } => {
+                self.enqueue_owner_work(*work, immediate);
+            }
             WorkerEvent::Rejected {
                 device_id,
                 ordinal,
                 worker_generation,
-                job,
+                grant,
                 reason,
             } => {
                 tracing::warn!(
@@ -673,31 +866,71 @@ impl Coordinator {
                     .leases
                     .remove(&device_id)
                     .and_then(|lease| lease.previous_target);
-                self.memory.release(&job.id);
+                let work_id = grant.work.id().to_string();
+                self.memory.release(&work_id);
                 self.memory.collect_now();
                 if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
                     worker.in_flight.store(0, Ordering::SeqCst);
                 }
-                let generation_job = generation_from_gpu_job(*job);
-                if reason == LeaseRejection::FatalCuda {
-                    reject_generation(
-                        &self.state,
-                        generation_job,
-                        "CUDA context is fatally poisoned; server restart required".to_string(),
-                    );
-                } else {
-                    self.state
-                        .job_registry
-                        .requeue_rejected_dispatch(&generation_job.id, previous_target);
-                    self.pending.insert(
-                        generation_job.id.clone(),
-                        PendingGeneration {
-                            job: generation_job,
-                            bypass_count: 0,
-                            warm_wait_started_ms: None,
-                            preparation: PreparationState::Ready,
-                        },
-                    );
+                let LeaseGrant { work, retry, .. } = *grant;
+                match work {
+                    OwnerWork::Generation(job) => {
+                        let generation_job = generation_from_gpu_job(*job);
+                        if reason == LeaseRejection::FatalCuda {
+                            reject_generation(
+                                &self.state,
+                                generation_job,
+                                "CUDA context is fatally poisoned; server restart required"
+                                    .to_string(),
+                            );
+                        } else {
+                            self.state
+                                .job_registry
+                                .requeue_rejected_dispatch(&generation_job.id, previous_target);
+                            self.pending.insert(
+                                generation_job.id.clone(),
+                                PendingGeneration {
+                                    job: generation_job,
+                                    bypass_count: 0,
+                                    warm_wait_started_ms: None,
+                                    preparation: PreparationState::Ready,
+                                },
+                            );
+                        }
+                    }
+                    work => {
+                        if reason == LeaseRejection::FatalCuda {
+                            work.reject(
+                                "CUDA context is fatally poisoned; server restart required"
+                                    .to_string(),
+                            );
+                        } else {
+                            // A stale worker generation means this payload was
+                            // never touched. Put it back into the authoritative
+                            // ready set for the next plan.
+                            let retry = retry.unwrap_or(crate::gpu_pool::OwnerWorkRetry {
+                                model_fingerprint: format!("{:?}", work.kind()),
+                                estimated_vram_bytes: 0,
+                                estimated_host_ram_bytes: MIN_TRANSIENT_HOST_RAM,
+                                hard_ordinal: None,
+                                priority: PriorityClass::User,
+                                queue_rank: self.synthetic_id,
+                            });
+                            self.pending_owner_work.insert(
+                                work_id,
+                                PendingOwnerWork {
+                                    model_fingerprint: retry.model_fingerprint,
+                                    estimated_vram_bytes: retry.estimated_vram_bytes,
+                                    estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
+                                    hard_ordinal: retry.hard_ordinal,
+                                    priority: retry.priority,
+                                    queue_rank: retry.queue_rank,
+                                    work,
+                                },
+                            );
+                            self.synthetic_id = self.synthetic_id.saturating_add(1);
+                        }
+                    }
                 }
                 self.mutate(immediate);
             }
@@ -763,6 +996,20 @@ impl Coordinator {
                 self.mutate(immediate);
             }
         }
+        let cancelled_owner_work = self
+            .pending_owner_work
+            .iter()
+            .filter(|(_, pending)| pending.work.is_cancelled())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in cancelled_owner_work {
+            if let Some(pending) = self.pending_owner_work.remove(&id) {
+                pending.work.reject(format!(
+                    "scheduled GPU work {id} was cancelled while queued"
+                ));
+                self.mutate(immediate);
+            }
+        }
     }
 
     fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
@@ -822,7 +1069,8 @@ impl Coordinator {
             .enumerate()
             .map(|(rank, id)| (id.as_str(), rank as u64))
             .collect::<BTreeMap<_, _>>();
-        self.pending
+        let mut snapshots: Vec<WorkSnapshot> = self
+            .pending
             .iter()
             .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
             .map(|(id, pending)| {
@@ -859,18 +1107,14 @@ impl Coordinator {
                 if let Some(started) = pending.warm_wait_started_ms {
                     work = work.with_warm_wait_started_at(started);
                 }
-                let explicit = self
+                let request_pin = self
                     .state
-                    .job_registry
-                    .target_gpu(id)
-                    .flatten()
-                    .or_else(|| {
-                        self.state
-                            .gpu_pool
-                            .resolve_explicit_placement_gpu(pending.job.request.placement.as_ref())
-                            .ok()
-                            .flatten()
-                    });
+                    .gpu_pool
+                    .resolve_explicit_placement_gpu(pending.job.request.placement.as_ref())
+                    .ok()
+                    .flatten();
+                let explicit =
+                    request_pin.or_else(|| self.state.job_registry.target_gpu(id).flatten());
                 if let Some(ordinal) = explicit {
                     if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
                         work = work.with_hard_device(DeviceId::new(worker_device_id(&worker)));
@@ -881,7 +1125,44 @@ impl Coordinator {
                 }
                 work
             })
-            .collect()
+            .collect();
+        snapshots.extend(self.pending_owner_work.iter().map(|(id, pending)| {
+            let candidates = self
+                .state
+                .gpu_pool
+                .workers
+                .iter()
+                .map(|worker| {
+                    CandidatePlacement::new(
+                        DeviceId::new(worker_device_id(worker)),
+                        ExecutionFingerprint::new(pending.model_fingerprint.clone()),
+                        pending.estimated_host_ram_bytes,
+                    )
+                    .with_vram(
+                        pending
+                            .estimated_vram_bytes
+                            .min(worker.gpu.total_vram_bytes),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut work = WorkSnapshot::new(
+                WorkId::new(id.clone()),
+                (u64::MAX / 2).saturating_add(pending.queue_rank),
+                candidates,
+            )
+            .with_priority(pending.priority);
+            work.kind = pending.work.kind();
+            if let Some(ordinal) = pending.hard_ordinal {
+                if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
+                    work = work.with_hard_device(DeviceId::new(worker_device_id(&worker)));
+                } else {
+                    work =
+                        work.with_hard_device(DeviceId::new(format!("unavailable:gpu:{ordinal}")));
+                }
+            }
+            work
+        }));
+        snapshots
     }
 
     fn planner_snapshot(&self) -> PlannerSnapshot {
@@ -898,7 +1179,7 @@ impl Coordinator {
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
         if self.state.queue_pause.is_paused()
-            || self.pending.is_empty()
+            || (self.pending.is_empty() && self.pending_owner_work.is_empty())
             || self.ready.is_empty()
             || self
                 .state
@@ -960,49 +1241,51 @@ impl Coordinator {
                 .into_iter()
                 .map(|device| (device.id.clone(), device))
                 .collect::<BTreeMap<_, _>>();
-            let grants_valid =
-                plan.immediate_leases.iter().all(|lease| {
-                    let device_id = lease.device_id.to_string();
-                    let Ok(ready) = validate_worker_grant(
-                        &self.ready,
-                        &self.leases,
-                        &device_id,
-                        lease.worker_generation,
-                    ) else {
-                        return false;
-                    };
-                    let Some(device) = current_devices.get(&lease.device_id) else {
-                        return false;
-                    };
-                    let work_id = lease.work_id.to_string();
-                    let registry_entry = self.state.job_registry.entry(&work_id);
-                    let work_cancelled = registry_entry.as_ref().is_none_or(|entry| {
+            let grants_valid = plan.immediate_leases.iter().all(|lease| {
+                let device_id = lease.device_id.to_string();
+                let Ok(ready) = validate_worker_grant(
+                    &self.ready,
+                    &self.leases,
+                    &device_id,
+                    lease.worker_generation,
+                ) else {
+                    return false;
+                };
+                let Some(device) = current_devices.get(&lease.device_id) else {
+                    return false;
+                };
+                let work_id = lease.work_id.to_string();
+                let generation = self.pending.get(&work_id);
+                let utility = self.pending_owner_work.get(&work_id);
+                let work_ready = generation
+                    .is_some_and(|pending| pending.preparation == PreparationState::Ready)
+                    || utility.is_some();
+                let work_cancelled = if let Some(pending) = generation {
+                    self.state.job_registry.entry(&work_id).is_none_or(|entry| {
                         entry.state != crate::job_registry::JobLifecycle::Queued
-                    }) || self
-                        .pending
-                        .get(&work_id)
-                        .is_none_or(|pending| pending.job.result_tx.is_closed());
-                    plan.validate_lease_for_grant(
-                        lease,
-                        &GrantValidationSnapshot {
-                            work_id: WorkId::new(work_id.clone()),
-                            device_id: DeviceId::new(device_id),
-                            state_version: self.state_version,
-                            plan_version: self.plan_version,
-                            sample_generation: self.memory.snapshot().sample_generation,
-                            ledger_sequence: self.memory.sequence,
-                            work_ready: self.pending.get(&work_id).is_some_and(|pending| {
-                                pending.preparation == PreparationState::Ready
-                            }),
-                            work_cancelled,
-                            worker_generation: ready.generation,
-                            worker_ready: true,
-                            device_admin_state: device.admin_state,
-                            device_health: device.health,
-                        },
-                    )
-                    .is_ok()
-                });
+                    }) || pending.job.result_tx.is_closed()
+                } else {
+                    utility.is_none_or(|pending| pending.work.is_cancelled())
+                };
+                plan.validate_lease_for_grant(
+                    lease,
+                    &GrantValidationSnapshot {
+                        work_id: WorkId::new(work_id.clone()),
+                        device_id: DeviceId::new(device_id),
+                        state_version: self.state_version,
+                        plan_version: self.plan_version,
+                        sample_generation: self.memory.snapshot().sample_generation,
+                        ledger_sequence: self.memory.sequence,
+                        work_ready,
+                        work_cancelled,
+                        worker_generation: ready.generation,
+                        worker_ready: true,
+                        device_admin_state: device.admin_state,
+                        device_health: device.health,
+                    },
+                )
+                .is_ok()
+            });
             if !grants_valid
                 || self
                     .memory
@@ -1043,81 +1326,144 @@ impl Coordinator {
                     break;
                 };
                 let id = lease.work_id.to_string();
-                let Some(pending) = self.pending.remove(&id) else {
+                let fence = LeaseFence {
+                    work_id: id.clone(),
+                    device_id: device_id.clone(),
+                    state_version: plan.state_version,
+                    plan_version: plan.plan_version,
+                    worker_generation: ready.generation,
+                    memory_sample_generation: plan.reservation.sample_generation,
+                    memory_ledger_sequence: plan.reservation.ledger_sequence,
+                };
+                worker.in_flight.store(1, Ordering::SeqCst);
+                if let Some(pending) = self.pending.remove(&id) {
+                    let bypass_count = pending.bypass_count;
+                    let warm_wait_started_ms = pending.warm_wait_started_ms;
+                    let gpu_job = gpu_job_from_generation(&self.state, pending.job, fence.clone());
+                    let grant = Box::new(LeaseGrant {
+                        fence,
+                        work: OwnerWork::Generation(Box::new(gpu_job)),
+                        retry: None,
+                    });
+                    let dispatch = self.state.job_registry.dispatch_if_queued(
+                        &id,
+                        ready.ordinal,
+                        grant,
+                        |grant| {
+                            worker.try_send_job(grant).map_err(|error| match error {
+                                std::sync::mpsc::TrySendError::Full(grant)
+                                | std::sync::mpsc::TrySendError::Disconnected(grant) => grant,
+                            })
+                        },
+                    );
+                    match dispatch {
+                        Ok(previous_target) => {
+                            self.ready.remove(&device_id);
+                            self.leases.insert(
+                                device_id.clone(),
+                                ActiveLease {
+                                    work_id: id.clone(),
+                                    plan_version: plan.plan_version,
+                                    worker_generation: ready.generation,
+                                    accepted: false,
+                                    previous_target,
+                                },
+                            );
+                            granted.push(id);
+                        }
+                        Err(crate::job_registry::DispatchAttemptError::Claim(error, returned)) => {
+                            worker.in_flight.store(0, Ordering::SeqCst);
+                            let generation = generation_from_owner_grant(*returned);
+                            reject_generation(
+                                &self.state,
+                                generation,
+                                format!(
+                                    "generation job {id} lost its queued dispatch claim: {error:?}"
+                                ),
+                            );
+                            grant_failed = true;
+                            break;
+                        }
+                        Err(crate::job_registry::DispatchAttemptError::Transport(returned)) => {
+                            worker.in_flight.store(0, Ordering::SeqCst);
+                            let generation = generation_from_owner_grant(*returned);
+                            self.pending.insert(
+                                generation.id.clone(),
+                                PendingGeneration {
+                                    job: generation,
+                                    bypass_count,
+                                    warm_wait_started_ms,
+                                    preparation: PreparationState::Ready,
+                                },
+                            );
+                            self.unavailable.insert(device_id.clone());
+                            grant_failed = true;
+                            break;
+                        }
+                    }
+                } else if let Some(pending) = self.pending_owner_work.remove(&id) {
+                    let metadata = (
+                        pending.model_fingerprint,
+                        pending.estimated_vram_bytes,
+                        pending.estimated_host_ram_bytes,
+                        pending.hard_ordinal,
+                        pending.priority,
+                        pending.queue_rank,
+                    );
+                    let grant = Box::new(LeaseGrant {
+                        fence,
+                        work: pending.work,
+                        retry: Some(crate::gpu_pool::OwnerWorkRetry {
+                            model_fingerprint: metadata.0.clone(),
+                            estimated_vram_bytes: metadata.1,
+                            estimated_host_ram_bytes: metadata.2,
+                            hard_ordinal: metadata.3,
+                            priority: metadata.4,
+                            queue_rank: metadata.5,
+                        }),
+                    });
+                    match worker.try_send_job(grant) {
+                        Ok(()) => {
+                            self.ready.remove(&device_id);
+                            self.leases.insert(
+                                device_id.clone(),
+                                ActiveLease {
+                                    work_id: id.clone(),
+                                    plan_version: plan.plan_version,
+                                    worker_generation: ready.generation,
+                                    accepted: false,
+                                    previous_target: None,
+                                },
+                            );
+                            granted.push(id);
+                        }
+                        Err(error) => {
+                            worker.in_flight.store(0, Ordering::SeqCst);
+                            let returned = match error {
+                                std::sync::mpsc::TrySendError::Full(grant)
+                                | std::sync::mpsc::TrySendError::Disconnected(grant) => grant,
+                            };
+                            self.pending_owner_work.insert(
+                                id,
+                                PendingOwnerWork {
+                                    model_fingerprint: metadata.0,
+                                    estimated_vram_bytes: metadata.1,
+                                    estimated_host_ram_bytes: metadata.2,
+                                    hard_ordinal: metadata.3,
+                                    priority: metadata.4,
+                                    queue_rank: metadata.5,
+                                    work: returned.work,
+                                },
+                            );
+                            self.unavailable.insert(device_id.clone());
+                            grant_failed = true;
+                            break;
+                        }
+                    }
+                } else {
+                    worker.in_flight.store(0, Ordering::SeqCst);
                     grant_failed = true;
                     break;
-                };
-                let bypass_count = pending.bypass_count;
-                let warm_wait_started_ms = pending.warm_wait_started_ms;
-                let gpu_job = gpu_job_from_generation(
-                    &self.state,
-                    pending.job,
-                    LeaseFence {
-                        work_id: id.clone(),
-                        device_id: device_id.clone(),
-                        state_version: plan.state_version,
-                        plan_version: plan.plan_version,
-                        worker_generation: ready.generation,
-                        memory_sample_generation: plan.reservation.sample_generation,
-                        memory_ledger_sequence: plan.reservation.ledger_sequence,
-                    },
-                );
-                worker.in_flight.store(1, Ordering::SeqCst);
-                let dispatch = self.state.job_registry.dispatch_if_queued(
-                    &id,
-                    ready.ordinal,
-                    Box::new(gpu_job),
-                    |job| {
-                        worker.try_send_job(job).map_err(|error| match error {
-                            std::sync::mpsc::TrySendError::Full(job)
-                            | std::sync::mpsc::TrySendError::Disconnected(job) => job,
-                        })
-                    },
-                );
-                match dispatch {
-                    Ok(previous_target) => {
-                        self.ready.remove(&device_id);
-                        self.leases.insert(
-                            device_id.clone(),
-                            ActiveLease {
-                                work_id: id.clone(),
-                                plan_version: plan.plan_version,
-                                worker_generation: ready.generation,
-                                accepted: false,
-                                previous_target,
-                            },
-                        );
-                        granted.push(id);
-                    }
-                    Err(crate::job_registry::DispatchAttemptError::Claim(error, returned)) => {
-                        worker.in_flight.store(0, Ordering::SeqCst);
-                        let generation = generation_from_gpu_job(*returned);
-                        reject_generation(
-                            &self.state,
-                            generation,
-                            format!(
-                                "generation job {id} lost its queued dispatch claim: {error:?}"
-                            ),
-                        );
-                        grant_failed = true;
-                        break;
-                    }
-                    Err(crate::job_registry::DispatchAttemptError::Transport(returned)) => {
-                        worker.in_flight.store(0, Ordering::SeqCst);
-                        let generation = generation_from_gpu_job(*returned);
-                        self.pending.insert(
-                            generation.id.clone(),
-                            PendingGeneration {
-                                job: generation,
-                                bypass_count,
-                                warm_wait_started_ms,
-                                preparation: PreparationState::Ready,
-                            },
-                        );
-                        self.unavailable.insert(device_id.clone());
-                        grant_failed = true;
-                        break;
-                    }
                 }
             }
 
@@ -1166,11 +1512,16 @@ impl Coordinator {
         for (_, pending) in pending {
             reject_generation(&self.state, pending.job, message.to_string());
         }
+        let pending_owner_work = std::mem::take(&mut self.pending_owner_work);
+        for (_, pending) in pending_owner_work {
+            pending.work.reject(message.to_string());
+        }
     }
 }
 
 pub async fn run_scheduler_coordinator(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    mut owner_work_rx: tokio::sync::mpsc::Receiver<ScheduledOwnerWork>,
     mut worker_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>,
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
@@ -1186,11 +1537,14 @@ pub async fn run_scheduler_coordinator(
     let mut memory_ticker = tokio::time::interval(MEMORY_SAMPLE_INTERVAL);
     memory_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut fatal = false;
+    let mut generation_ingress_open = true;
+    let mut owner_ingress_open = true;
     loop {
         let mut immediate = false;
         tokio::select! {
             _ = shutdown.cancelled() => {
                 job_rx.close();
+                owner_work_rx.close();
                 while let Ok(job) = job_rx.try_recv() {
                     reject_generation(
                         &coordinator.state,
@@ -1198,14 +1552,23 @@ pub async fn run_scheduler_coordinator(
                         "generation scheduler is shutting down".to_string(),
                     );
                 }
+                while let Ok(work) = owner_work_rx.try_recv() {
+                    work.work
+                        .reject("generation scheduler is shutting down".to_string());
+                }
                 coordinator.reject_all_unstarted("generation scheduler is shutting down");
                 break;
             }
-            job = job_rx.recv() => {
+            job = job_rx.recv(), if generation_ingress_open => {
                 match job {
                     Some(job) => coordinator.enqueue(job, &mut immediate),
-                    None if coordinator.pending.is_empty() && coordinator.leases.is_empty() => break,
-                    None => {}
+                    None => generation_ingress_open = false,
+                }
+            }
+            work = owner_work_rx.recv(), if owner_ingress_open => {
+                match work {
+                    Some(work) => coordinator.enqueue_owner_work(work, &mut immediate),
+                    None => owner_ingress_open = false,
                 }
             }
             event = worker_rx.recv() => {
@@ -1229,6 +1592,14 @@ pub async fn run_scheduler_coordinator(
                 coordinator.mutate(&mut immediate);
             }
         }
+        if !generation_ingress_open
+            && !owner_ingress_open
+            && coordinator.pending.is_empty()
+            && coordinator.pending_owner_work.is_empty()
+            && coordinator.leases.is_empty()
+        {
+            break;
+        }
         coordinator.start_needed_preparations();
         while coordinator.preparation_tasks.try_join_next().is_some() {}
         if coordinator
@@ -1239,10 +1610,16 @@ pub async fn run_scheduler_coordinator(
             .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
         {
             job_rx.close();
+            owner_work_rx.close();
             while let Ok(job) = job_rx.try_recv() {
                 reject_generation(
                     &coordinator.state,
                     job,
+                    "CUDA context is fatally poisoned; server restart required".to_string(),
+                );
+            }
+            while let Ok(work) = owner_work_rx.try_recv() {
+                work.work.reject(
                     "CUDA context is fatally poisoned; server restart required".to_string(),
                 );
             }
@@ -1295,6 +1672,16 @@ fn generation_from_gpu_job(job: GpuJob) -> GenerationJob {
         progress_tx: job.progress_tx,
         result_tx: job.result_tx,
         output_dir: job.output_dir,
+    }
+}
+
+fn generation_from_owner_grant(grant: LeaseGrant) -> GenerationJob {
+    match grant.work {
+        OwnerWork::Generation(job) => generation_from_gpu_job(*job),
+        work => panic!(
+            "generation dispatch returned non-generation owner work {:?}",
+            work.kind()
+        ),
     }
 }
 
@@ -1364,10 +1751,11 @@ mod tests {
         fn prepare(
             &self,
             _state: AppState,
+            _work_id: String,
             _request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         ) -> PreparationFuture {
-            Box::pin(async { Ok(()) })
+            Box::pin(async { Ok(None) })
         }
     }
 
@@ -1403,6 +1791,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -1414,7 +1803,10 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("worker grant")
         {
-            crate::gpu_pool::GpuWorkerCommand::Grant(job) => *job,
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => match grant.work {
+                OwnerWork::Generation(job) => *job,
+                work => panic!("expected generation grant, got {:?}", work.kind()),
+            },
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown command"),
         }
     }
@@ -1460,6 +1852,52 @@ mod tests {
         );
         window.clear_through(3);
         assert!(window.deadline().is_none());
+    }
+
+    #[test]
+    fn completed_prompt_expansion_freezes_original_and_replaces_generation_prompt() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let (mut generation, _result) = fake_generation("expanded");
+        generation.request.prompt = "source prompt".to_string();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(generation, &mut immediate);
+        coordinator
+            .pending
+            .get_mut("expanded")
+            .expect("pending generation")
+            .preparation = PreparationState::Preparing;
+
+        coordinator.handle_preparation_event(
+            PreparationEvent::Ready {
+                work_id: "expanded".to_string(),
+                expanded_prompt: Some("expanded prompt".to_string()),
+            },
+            &mut immediate,
+        );
+
+        let request = &coordinator
+            .pending
+            .get("expanded")
+            .expect("generation remains queued")
+            .job
+            .request;
+        assert_eq!(request.original_prompt.as_deref(), Some("source prompt"));
+        assert_eq!(request.prompt, "expanded prompt");
     }
 
     #[test]
@@ -1734,6 +2172,285 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_gpu_pin_wins_over_mutable_queue_target() {
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let (mut job, _result) = fake_generation("request-pinned");
+        job.request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Auto,
+            advanced: Some(mold_core::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::gpu(1),
+                ..mold_core::AdvancedPlacement::default()
+            }),
+        });
+        state.job_registry.register("request-pinned", "flux-dev:q4");
+        state
+            .job_registry
+            .set_target_gpu("request-pinned", Some(0))
+            .expect("mutable queue target accepted while queued");
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(job, &mut immediate);
+        coordinator
+            .pending
+            .get_mut("request-pinned")
+            .expect("pending generation")
+            .preparation = PreparationState::Ready;
+        for (ordinal, worker) in [(0, worker_a), (1, worker_b)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(&worker),
+                    ordinal,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+
+        coordinator.dispatch_ready().await;
+
+        assert_eq!(recv_grant(&worker_b_rx).id, "request-pinned");
+        assert!(matches!(
+            worker_a_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn generation_and_owner_utility_work_share_the_same_multi_worker_lease_set() {
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()],
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 4);
+        let (job, _result) = fake_generation("generation");
+        state.job_registry.register("generation", "flux-dev:q4");
+        queue.submit(job, 4).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("generation")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "upscale",
+                "real-esrgan-x4plus:fp16",
+                2 << 30,
+                OwnerWork::Probe {
+                    id: "upscale".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        for (worker, ordinal) in [(&worker_a, 0), (&worker_b, 1)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(worker),
+                    ordinal,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+        coordinator.dispatch_ready().await;
+
+        let grants = [worker_a_rx.recv().unwrap(), worker_b_rx.recv().unwrap()];
+        let kinds = grants
+            .into_iter()
+            .map(|command| match command {
+                crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.kind(),
+                crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(kinds.contains(&mold_scheduler::WorkKind::Generation));
+        assert!(kinds.contains(&mold_scheduler::WorkKind::StandaloneUpscale));
+        assert_eq!(coordinator.leases.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_owner_work_is_removed_before_any_worker_grant() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        drop(result_rx);
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "cancelled-admin",
+                "admin-unload",
+                0,
+                OwnerWork::AdminModelUnload(Box::new(crate::gpu_pool::AdminModelUnloadJob {
+                    id: "cancelled-admin".to_string(),
+                    model: None,
+                    evict_cached: false,
+                    result_tx,
+                })),
+            )
+            .with_priority(PriorityClass::Admin),
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.reconcile_external_mutations(&mut immediate);
+        coordinator.dispatch_ready().await;
+
+        assert!(coordinator.pending_owner_work.is_empty());
+        assert!(worker_rx.try_recv().is_err());
+        assert!(coordinator.leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_upscale_followup_waits_for_a_distinct_lease_after_generation_completion() {
+        let (worker, worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let (generation, _result) = fake_generation("parent");
+        let parent_fence = LeaseFence {
+            work_id: "parent".to_string(),
+            device_id: device_id.clone(),
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone());
+        let child_id = "parent::post-upscale".to_string();
+        let followup = ScheduledOwnerWork::new(
+            child_id.clone(),
+            "real-esrgan-x4plus:fp16",
+            2 << 30,
+            OwnerWork::PostUpscale(Box::new(crate::gpu_pool::PostGenerationUpscaleJob {
+                id: child_id.clone(),
+                generation: Box::new(gpu_job),
+                response: mold_core::GenerateResponse {
+                    images: Vec::new(),
+                    video: None,
+                    generation_time_ms: 1,
+                    model: "flux-dev:q4".to_string(),
+                    seed_used: 1,
+                    gpu: Some(0),
+                },
+                image: mold_core::ImageData {
+                    data: vec![1],
+                    format: mold_core::OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                },
+            })),
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: "parent".to_string(),
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+            },
+        );
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::FollowupReady {
+                work: Box::new(followup),
+            },
+            &mut immediate,
+        );
+        assert!(coordinator.pending_owner_work.contains_key(&child_id));
+        assert!(worker_rx.try_recv().is_err());
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                worker_generation: 2,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+
+        match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                assert_eq!(grant.fence.work_id, child_id);
+                assert_eq!(grant.work.kind(), mold_scheduler::WorkKind::PostUpscale);
+                assert_eq!(grant.fence.worker_generation, 2);
+            }
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        }
+    }
+
+    #[tokio::test]
     async fn cancellation_after_plan_before_grant_is_acknowledged_and_never_transported() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
@@ -1862,6 +2579,7 @@ mod tests {
         fn prepare(
             &self,
             _state: AppState,
+            _work_id: String,
             request: mold_core::GenerateRequest,
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         ) -> PreparationFuture {
@@ -1870,7 +2588,7 @@ mod tests {
                 if request.prompt == "blocked-preparation" {
                     release.notified().await;
                 }
-                Ok(())
+                Ok(None)
             })
         }
     }
@@ -1911,7 +2629,7 @@ mod tests {
             .expect("preparation event");
         assert!(matches!(
             &event,
-            PreparationEvent::Ready { work_id } if work_id == "ready"
+            PreparationEvent::Ready { work_id, .. } if work_id == "ready"
         ));
         coordinator.handle_preparation_event(event, &mut immediate);
         coordinator.handle_worker_event(

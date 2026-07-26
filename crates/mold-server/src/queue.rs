@@ -1606,7 +1606,21 @@ async fn run_queue_dispatcher_with_tuning(
                     .job_registry
                     .set_target_gpu(&job_id, Some(worker.gpu.ordinal));
             }
-            match worker.try_send_job(Box::new(pending)) {
+            let lease = crate::scheduler::LeaseFence {
+                work_id: pending.id.clone(),
+                device_id: crate::scheduler::worker_device_id(&worker),
+                state_version: 0,
+                plan_version: 0,
+                worker_generation: 1,
+                memory_sample_generation: 0,
+                memory_ledger_sequence: 0,
+            };
+            let grant = crate::gpu_pool::LeaseGrant {
+                fence: lease,
+                work: crate::gpu_pool::OwnerWork::Generation(Box::new(pending)),
+                retry: None,
+            };
+            match worker.try_send_job(Box::new(grant)) {
                 Ok(()) => {
                     dispatched = true;
                 }
@@ -1615,7 +1629,7 @@ async fn run_queue_dispatcher_with_tuning(
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
-                    gpu_job = Some(*j);
+                    gpu_job = Some(generation_from_test_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                         if skip.len() >= state.gpu_pool.worker_count().max(1) {
@@ -1635,7 +1649,7 @@ async fn run_queue_dispatcher_with_tuning(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
                     );
-                    gpu_job = Some(*j);
+                    gpu_job = Some(generation_from_test_grant(*j));
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
@@ -1661,6 +1675,14 @@ async fn run_queue_dispatcher_with_tuning(
         crate::metrics::record_queue_depth(state.queue.pending());
     }
     tracing::info!("multi-GPU queue dispatcher shutting down");
+}
+
+#[cfg(test)]
+fn generation_from_test_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
+    match grant.work {
+        crate::gpu_pool::OwnerWork::Generation(job) => *job,
+        work => panic!("legacy test dispatcher received {:?}", work.kind()),
+    }
 }
 
 /// Rough VRAM estimate for a model (used for placement decisions).
@@ -1831,6 +1853,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -1842,7 +1865,9 @@ mod tests {
         timeout: std::time::Duration,
     ) -> Result<crate::gpu_pool::GpuJob, std::sync::mpsc::RecvTimeoutError> {
         match rx.recv_timeout(timeout)? {
-            crate::gpu_pool::GpuWorkerCommand::Grant(job) => Ok(*job),
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                Ok(generation_from_test_grant(*grant))
+            }
             crate::gpu_pool::GpuWorkerCommand::Shutdown => {
                 panic!("unexpected worker shutdown command")
             }

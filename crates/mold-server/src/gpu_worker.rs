@@ -1,4 +1,7 @@
-use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker, GpuWorkerCommand};
+use crate::gpu_pool::{
+    ActiveGeneration, AdminModelUnloadJob, GpuJob, GpuWorker, GpuWorkerCommand, LeaseGrant,
+    OwnerWork, PostGenerationUpscaleJob, PromptExpansionJob, StandaloneUpscaleJob,
+};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
     apply_upscale_response_to_image_generation, build_sse_completion_message, clean_error_message,
@@ -43,6 +46,20 @@ fn run_gpu_owner(
     cache_idle_ttl: Duration,
     idle_poll: Duration,
 ) {
+    if worker
+        .owner_thread_id
+        .set(std::thread::current().id())
+        .is_err()
+    {
+        worker.poisoned.store(true, Ordering::SeqCst);
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+        worker.fatal_cuda_shutdown.notify_waiters();
+        tracing::error!(
+            gpu = worker.gpu.ordinal,
+            "GPU worker owner thread was initialized more than once"
+        );
+        return;
+    }
     // Bind this thread to its GPU ordinal so device operations can
     // debug-assert callers don't drift onto a sibling GPU's context.
     mold_inference::device::init_thread_gpu_ordinal(worker.gpu.ordinal);
@@ -85,8 +102,8 @@ fn run_gpu_owner(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'owner,
             }
         };
-        let job = match command {
-            GpuWorkerCommand::Grant(job) => job,
+        let grant = match command {
+            GpuWorkerCommand::Grant(grant) => grant,
             GpuWorkerCommand::Shutdown => break,
         };
         if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst)
@@ -95,7 +112,7 @@ fn run_gpu_owner(
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
                 worker_generation: generation,
-                job,
+                grant,
                 reason: crate::scheduler::LeaseRejection::FatalCuda,
             });
             break;
@@ -105,33 +122,33 @@ fn run_gpu_owner(
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
                 worker_generation: generation,
-                job,
+                grant,
                 reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
             });
             break;
         }
-        if let Some(fence) = job.lease.as_ref() {
-            if fence.device_id != device_id || fence.worker_generation != generation {
-                let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
-                    device_id: device_id.clone(),
-                    ordinal: worker.gpu.ordinal,
-                    worker_generation: generation,
-                    job,
-                    reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
-                });
-                continue;
-            }
-            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
+        let fence = &grant.fence;
+        if fence.device_id != device_id || fence.worker_generation != generation {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                 device_id: device_id.clone(),
                 ordinal: worker.gpu.ordinal,
                 worker_generation: generation,
-                work_id: fence.work_id.clone(),
-                plan_version: fence.plan_version,
+                grant,
+                reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
             });
+            continue;
         }
+        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
+            device_id: device_id.clone(),
+            ordinal: worker.gpu.ordinal,
+            worker_generation: generation,
+            work_id: fence.work_id.clone(),
+            plan_version: fence.plan_version,
+        });
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_job(worker, *job, &scheduler_tx);
+            process_owner_work(worker, *grant, &scheduler_tx);
         }));
+        worker.in_flight.store(0, Ordering::SeqCst);
         if outcome.is_err() {
             // A panic may have crossed arbitrary Candle/cudarc state.
             // Treat the owner context as fatal and let supervision
@@ -158,7 +175,224 @@ fn run_gpu_owner(
         }
         generation = generation.saturating_add(1);
     }
+    let cached = worker
+        .model_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        // Destructors may call CUDA. A poisoned primary context is never
+        // touched again; process teardown reclaims these.
+        contain_poisoned_cuda(cached);
+    } else {
+        drop(cached);
+    }
     tracing::info!(gpu = worker.gpu.ordinal, "GPU worker thread exiting");
+}
+
+fn process_owner_work(
+    worker: &GpuWorker,
+    grant: LeaseGrant,
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+) {
+    if let Err(error) = ensure_owner_thread(worker) {
+        grant.work.reject(error.to_string());
+        return;
+    }
+    match grant.work {
+        OwnerWork::Generation(mut job) => {
+            job.lease = Some(grant.fence);
+            process_job(worker, *job, scheduler_tx);
+        }
+        OwnerWork::PromptExpansion(job) => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            process_prompt_expansion(worker, *job);
+        }
+        OwnerWork::PostUpscale(job) => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            process_post_generation_upscale(worker, *job);
+        }
+        OwnerWork::StandaloneUpscale(job) => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            process_standalone_upscale(worker, *job);
+        }
+        OwnerWork::AdminModelLoad(job) => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
+            let _ = job.result_tx.send(result);
+        }
+        OwnerWork::AdminModelUnload(job) => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            process_admin_unload(worker, *job);
+        }
+        #[cfg(test)]
+        OwnerWork::Probe { run, .. } => {
+            commit_utility_allocation(scheduler_tx, &grant.fence);
+            run();
+        }
+    }
+}
+
+fn commit_utility_allocation(
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+    fence: &crate::scheduler::LeaseFence,
+) {
+    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
+        device_id: fence.device_id.clone(),
+        work_id: fence.work_id.clone(),
+        worker_generation: fence.worker_generation,
+    });
+}
+
+fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
+    let result = (|| -> anyhow::Result<mold_core::ExpandResult> {
+        ensure_worker_not_poisoned(worker, &job.settings.model)?;
+        #[cfg(feature = "expand")]
+        {
+            use mold_core::PromptExpander;
+            let selector = worker.gpu.stable_id.as_ref().map_or_else(
+                || mold_core::GpuSelector::Ordinal(worker.gpu.ordinal),
+                |id| mold_core::GpuSelector::Identifier(id.clone()),
+            );
+            let expander = mold_inference::expand::LocalExpander::from_config(
+                &job.config,
+                Some(&job.settings.model),
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!("local expand model not found — run: mold pull qwen3-expand")
+            })?
+            .with_gpu_selection(mold_core::GpuSelection::Specific(vec![selector]))
+            .with_preferred_gpu(Some(worker.gpu.ordinal));
+            return expander.expand(&job.prompt, &job.expand_config);
+        }
+        #[cfg(not(feature = "expand"))]
+        {
+            anyhow::bail!("local prompt expansion not available — built without expand feature")
+        }
+    })();
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| quarantine_if_fatal_cuda_error(worker, error))
+    {
+        tracing::error!(
+            gpu = worker.gpu.ordinal,
+            "prompt expansion fatally poisoned its owner context"
+        );
+    }
+    let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+}
+
+fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
+    let result = (|| -> anyhow::Result<mold_core::UpscaleResponse> {
+        ensure_worker_not_poisoned(worker, &job.model)?;
+        let mut engine = mold_inference::create_upscale_engine(
+            job.model.clone(),
+            job.weights_path,
+            mold_inference::LoadStrategy::Eager,
+            worker.gpu.ordinal,
+        )?;
+        if let Some(progress_tx) = job.progress_tx {
+            engine.set_on_progress(Box::new(move |event| {
+                let _ = progress_tx.send(SseMessage::Progress(event.into()));
+            }));
+        }
+        let result = engine.upscale(&job.request);
+        engine.clear_on_progress();
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| quarantine_if_fatal_cuda_error(worker, error))
+        {
+            // A destructor may call into the poisoned CUDA context. Process
+            // teardown owns recovery; deliberately leak this one engine.
+            std::mem::forget(engine);
+            return result;
+        }
+        engine.unload();
+        drop(engine);
+        result
+    })();
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| quarantine_if_fatal_cuda_error(worker, error))
+    {
+        tracing::error!(
+            gpu = worker.gpu.ordinal,
+            "standalone upscale fatally poisoned its owner context"
+        );
+    }
+    let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+}
+
+fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) {
+    let cleanup = GenerationCleanup::new(&job.generation);
+    let upscale_model = job
+        .generation
+        .request
+        .upscale_model
+        .clone()
+        .unwrap_or_default();
+    let result = upscale_generated_image_on_worker(
+        worker,
+        &job.generation,
+        &upscale_model,
+        job.image.clone(),
+        &mut job.response,
+    );
+    if result
+        .as_ref()
+        .is_err_and(|error| has_fatal_cuda_error(error))
+        && !worker.poisoned.load(Ordering::SeqCst)
+    {
+        quarantine_poisoned_worker(worker);
+    }
+    let (image, original, error) = settle_post_generation_upscale(job.image, result);
+    if let Some(error) = error {
+        tracing::warn!(
+            gpu = worker.gpu.ordinal,
+            %error,
+            "post-generation upscale failed; keeping original image"
+        );
+    }
+    finish_generation_success(*job.generation, job.response, image, original);
+    drop(cleanup);
+}
+
+fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) {
+    if let Err(error) =
+        ensure_worker_not_poisoned(worker, job.model.as_deref().unwrap_or("active model"))
+    {
+        let _ = job.result_tx.send(Err(error.to_string()));
+        return;
+    }
+    if job.evict_cached {
+        let Some(model) = job.model.as_deref() else {
+            let _ = job
+                .result_tx
+                .send(Err("cached eviction requires a model name".to_string()));
+            return;
+        };
+        let _ = job
+            .result_tx
+            .send(evict_cached_model_blocking(worker, model).map_err(|error| error.to_string()));
+        return;
+    }
+    if let Some(expected) = job.model.as_deref() {
+        let resident = worker
+            .resident_model
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if resident.as_deref() != Some(expected) {
+            let _ = job.result_tx.send(Ok(None));
+            return;
+        }
+    }
+    let _ = job
+        .result_tx
+        .send(unload_blocking(worker).map_err(|error| error.to_string()));
 }
 
 /// Evict parked engines on the worker thread that owns their device context.
@@ -167,6 +401,14 @@ fn run_gpu_owner(
 /// workspaces, so returning the boxes to an async maintenance task is not safe.
 fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Err(error) = ensure_owner_thread(worker) {
+        tracing::error!(
+            gpu = worker.gpu.ordinal,
+            %error,
+            "refusing to evict GPU resources off the owner thread"
+        );
         return;
     }
     let _load_guard = worker
@@ -585,6 +827,29 @@ fn cuda_oom_user_message(
     (base, true)
 }
 
+struct GenerationCleanup {
+    queue: crate::state::QueueHandle,
+    registry: crate::job_registry::SharedJobRegistry,
+    id: String,
+}
+
+impl GenerationCleanup {
+    fn new(job: &GpuJob) -> Self {
+        Self {
+            queue: job.queue.clone(),
+            registry: job.registry.clone(),
+            id: job.id.clone(),
+        }
+    }
+}
+
+impl Drop for GenerationCleanup {
+    fn drop(&mut self) {
+        self.queue.decrement();
+        self.registry.remove(&self.id);
+    }
+}
+
 fn process_job(
     worker: &GpuWorker,
     job: GpuJob,
@@ -599,22 +864,7 @@ fn process_job(
     // decrements when it *fails* to dispatch — once we own the GpuJob, we
     // own both pieces of cleanup. Combining them in one drop guard keeps
     // the two counters from drifting on early-return paths.
-    struct CleanupGuard {
-        queue: crate::state::QueueHandle,
-        registry: crate::job_registry::SharedJobRegistry,
-        id: String,
-    }
-    impl Drop for CleanupGuard {
-        fn drop(&mut self) {
-            self.queue.decrement();
-            self.registry.remove(&self.id);
-        }
-    }
-    let _cleanup = CleanupGuard {
-        queue: job.queue.clone(),
-        registry: job.registry.clone(),
-        id: job_id.clone(),
-    };
+    let cleanup = GenerationCleanup::new(&job);
 
     // Jobs may already be buffered in this worker's channel when a preceding
     // job kills the context. Fail them without touching CUDA, including jobs
@@ -929,7 +1179,7 @@ fn process_job(
             }
 
             // Extract the primary image (or video thumbnail).
-            let mut img = if !response.images.is_empty() {
+            let img = if !response.images.is_empty() {
                 response.images.remove(0)
             } else if let Some(ref video) = response.video {
                 ImageData {
@@ -942,8 +1192,6 @@ fn process_job(
             } else {
                 unreachable!("checked above");
             };
-            let mut original_img = None;
-
             if response.video.is_none() {
                 if let Some(upscale_model) = job
                     .request
@@ -952,111 +1200,50 @@ fn process_job(
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                 {
-                    if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
-                        let err_msg = error.to_string();
-                        if let Some(ref tx) = job.progress_tx {
-                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
-                                message: err_msg.clone(),
-                            }));
+                    let resolved = mold_core::manifest::resolve_model_name(upscale_model);
+                    let estimated_vram_bytes = {
+                        let config = job.config.blocking_read();
+                        config
+                            .models
+                            .get(&resolved)
+                            .and_then(|model| model.transformer.as_ref())
+                            .and_then(|path| std::fs::metadata(path).ok())
+                            .map(|metadata| metadata.len().saturating_add(2 << 30))
+                            .unwrap_or(2 << 30)
+                    };
+                    let followup_id = format!("{}::post-upscale", job.id);
+                    let work = crate::scheduler::ScheduledOwnerWork::new(
+                        followup_id.clone(),
+                        resolved,
+                        estimated_vram_bytes,
+                        OwnerWork::PostUpscale(Box::new(PostGenerationUpscaleJob {
+                            id: followup_id,
+                            generation: Box::new(job),
+                            response,
+                            image: img,
+                        })),
+                    );
+                    match scheduler_tx.send(crate::scheduler::WorkerEvent::FollowupReady {
+                        work: Box::new(work),
+                    }) {
+                        Ok(()) => {
+                            std::mem::forget(cleanup);
                         }
-                        let _ = job.result_tx.send(Err(err_msg));
-                        return;
+                        Err(error) => {
+                            if let crate::scheduler::WorkerEvent::FollowupReady { work } = error.0 {
+                                work.work.reject(
+                                    "scheduler stopped before post-generation upscale".to_string(),
+                                );
+                                std::mem::forget(cleanup);
+                            }
+                        }
                     }
-                    let upscale_result = upscale_generated_image_on_worker(
-                        worker,
-                        &job,
-                        upscale_model,
-                        img.clone(),
-                        &mut response,
-                    );
-                    if upscale_result
-                        .as_ref()
-                        .is_err_and(|error| has_fatal_cuda_error(error))
-                        && !worker.poisoned.load(Ordering::SeqCst)
-                    {
-                        quarantine_poisoned_worker(worker);
-                    }
-                    let (output, preserved_original, upscale_error) =
-                        settle_post_generation_upscale(img, upscale_result);
-                    img = output;
-                    original_img = preserved_original;
-                    if let Some(error) = upscale_error {
-                        tracing::warn!(
-                            gpu = ordinal,
-                            %error,
-                            "post-generation upscale failed; keeping original image"
-                        );
-                    }
+                    return;
                 }
             }
 
-            // Save to output directory if configured. Routes through the
-            // shared queue helpers so the metadata-DB upsert (and embedded
-            // chunks, hostname/backend tagging) cannot drift between the
-            // single-GPU and multi-GPU paths — historically this branch
-            // skipped the DB write, which left freshly-generated files
-            // invisible to /api/gallery until the next reconcile on
-            // server restart.
-            let metadata = OutputMetadata::from_generate_request(
-                &job.request,
-                response.seed_used,
-                None,
-                mold_core::build_info::version_string(),
-            );
-            let mut saved_names = crate::queue::SavedOutputNames::default();
-            if let Some(ref dir) = job.output_dir {
-                let generation_time_ms = response.generation_time_ms as i64;
-                let db = job.metadata_db.as_ref().as_ref();
-                let events = Some(job.events.as_ref());
-                if let Some(ref video) = response.video {
-                    saved_names.output = save_video_to_dir(
-                        dir,
-                        &video.data,
-                        &video.gif_preview,
-                        video.format,
-                        &job.model,
-                        &metadata,
-                        Some(generation_time_ms),
-                        db,
-                        events,
-                    );
-                } else {
-                    saved_names = save_generated_image_outputs(
-                        dir,
-                        original_img.as_ref(),
-                        &img,
-                        &job.model,
-                        job.request.batch_size,
-                        &metadata,
-                        Some(generation_time_ms),
-                        db,
-                        events,
-                    );
-                }
-            }
-
-            // Send SSE complete event. Video responses carry the actual MP4 /
-            // GIF bytes plus frames / fps / thumbnail / audio metadata so the
-            // SSE client can reconstruct a `VideoData` — without this the
-            // Discord bot silently degraded every LTX-Video / LTX-2 response
-            // into an image attachment (the synthesized thumbnail PNG).
-            if let Some(ref tx) = job.progress_tx {
-                let message = build_sse_completion_message(
-                    &response,
-                    &img,
-                    original_img.as_ref(),
-                    Some(&metadata),
-                    &saved_names,
-                    job.completion_payload,
-                );
-                let _ = tx.send(message);
-            }
-
-            // Send result through oneshot.
-            let _ = job.result_tx.send(Ok(GenerationJobResult {
-                image: img,
-                response,
-            }));
+            finish_generation_success(job, response, img, None);
+            drop(cleanup);
         }
         Ok(Err(e)) => {
             tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
@@ -1100,7 +1287,9 @@ fn process_job(
                 .map(|s| s.as_str())
                 .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
-            let err_msg = format!("inference panicked: {msg}");
+            let err_msg = format!(
+                "inference panicked on GPU {ordinal}: {msg}; CUDA owner was quarantined and the server must restart"
+            );
             if let Some(ref tx) = job.progress_tx {
                 let _ = tx.send(SseMessage::Error(SseErrorEvent {
                     message: err_msg.clone(),
@@ -1109,6 +1298,66 @@ fn process_job(
             let _ = job.result_tx.send(Err(err_msg));
         }
     }
+}
+
+fn finish_generation_success(
+    job: GpuJob,
+    response: mold_core::GenerateResponse,
+    image: ImageData,
+    original_image: Option<ImageData>,
+) {
+    let metadata = OutputMetadata::from_generate_request(
+        &job.request,
+        response.seed_used,
+        None,
+        mold_core::build_info::version_string(),
+    );
+    let mut saved_names = crate::queue::SavedOutputNames::default();
+    if let Some(ref dir) = job.output_dir {
+        let generation_time_ms = response.generation_time_ms as i64;
+        let db = job.metadata_db.as_ref().as_ref();
+        let events = Some(job.events.as_ref());
+        if let Some(ref video) = response.video {
+            saved_names.output = save_video_to_dir(
+                dir,
+                &video.data,
+                &video.gif_preview,
+                video.format,
+                &job.model,
+                &metadata,
+                Some(generation_time_ms),
+                db,
+                events,
+            );
+        } else {
+            saved_names = save_generated_image_outputs(
+                dir,
+                original_image.as_ref(),
+                &image,
+                &job.model,
+                job.request.batch_size,
+                &metadata,
+                Some(generation_time_ms),
+                db,
+                events,
+            );
+        }
+    }
+
+    if let Some(ref tx) = job.progress_tx {
+        let message = build_sse_completion_message(
+            &response,
+            &image,
+            original_image.as_ref(),
+            Some(&metadata),
+            &saved_names,
+            job.completion_payload,
+        );
+        let _ = tx.send(message);
+    }
+    let _ = job
+        .result_tx
+        .send(Ok(GenerationJobResult { image, response }));
 }
 
 /// Preflight memory check with evict-to-fit recovery.
@@ -1507,13 +1756,14 @@ fn ensure_model_ready_sync_inner(
 /// Synchronously load a model on this GPU worker for the admin API.
 ///
 /// Acquires the per-GPU load lock, then delegates to `ensure_model_ready_sync`.
-/// Intended to be called inside `tokio::task::spawn_blocking`. Uses the
-/// size-only peak (no resolution context) for the preflight — admin loads
-/// don't carry a request shape.
+/// This function may only be called by the worker's dedicated owner OS thread.
+/// Uses the size-only peak (no resolution context) for the preflight — admin
+/// loads don't carry a request shape.
 pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> anyhow::Result<()> {
     if worker.poisoned.load(Ordering::SeqCst) {
         anyhow::bail!(fatal_cuda_user_message(model_name));
     }
+    ensure_owner_thread(worker)?;
     let _lock = worker.model_load_lock.lock().unwrap();
     if worker.poisoned.load(Ordering::SeqCst) {
         anyhow::bail!(fatal_cuda_user_message(model_name));
@@ -1528,8 +1778,10 @@ pub fn load_blocking(worker: &GpuWorker, model_name: &str, config: &Config) -> a
 /// Synchronously unload the currently active model on this GPU worker.
 ///
 /// Returns the name of the model that was unloaded, or `None` if the GPU was
-/// already idle.
+/// already idle. This function may only be called by the worker's dedicated
+/// owner OS thread.
 pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
+    ensure_owner_thread(worker)?;
     ensure_worker_not_poisoned(worker, "admin unload")?;
     let _lock = worker
         .model_load_lock
@@ -1566,6 +1818,74 @@ pub fn unload_blocking(worker: &GpuWorker) -> anyhow::Result<Option<String>> {
         }
     }
     Ok(unloaded)
+}
+
+fn evict_cached_model_blocking(
+    worker: &GpuWorker,
+    model_name: &str,
+) -> anyhow::Result<Option<String>> {
+    ensure_owner_thread(worker)?;
+    ensure_worker_not_poisoned(worker, model_name)?;
+    let _lock = worker
+        .model_load_lock
+        .lock()
+        .map_err(|error| anyhow::anyhow!("worker.model_load_lock poisoned: {error}"))?;
+    ensure_worker_not_poisoned(worker, model_name)?;
+    let removed = {
+        let mut cache = worker
+            .model_cache
+            .lock()
+            .map_err(|error| anyhow::anyhow!("worker.model_cache poisoned: {error}"))?;
+        ensure_worker_not_poisoned(worker, model_name)?;
+        cache.remove(model_name)
+    };
+    let Some(engine) = removed else {
+        return Ok(None);
+    };
+    if worker
+        .resident_model
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_deref()
+        == Some(model_name)
+    {
+        worker.set_resident_model(None);
+    }
+    ensure_worker_not_poisoned(worker, model_name)?;
+    drop(engine);
+    ensure_worker_not_poisoned(worker, model_name)?;
+    match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
+        Ok(free_after_drop) => tracing::info!(
+            gpu = worker.gpu.ordinal,
+            model = model_name,
+            free_vram_bytes = free_after_drop,
+            "cached model evicted on GPU owner thread"
+        ),
+        Err(error) if error.is_fatal_cuda() => {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            return Err(anyhow::anyhow!(error));
+        }
+        Err(error) => tracing::warn!(
+            gpu = worker.gpu.ordinal,
+            model = model_name,
+            %error,
+            "cached model evicted but post-drop VRAM sample was unavailable"
+        ),
+    }
+    Ok(Some(model_name.to_string()))
+}
+
+fn ensure_owner_thread(worker: &GpuWorker) -> anyhow::Result<()> {
+    let current = std::thread::current().id();
+    match worker.owner_thread_id.get() {
+        Some(owner) if *owner == current => Ok(()),
+        Some(owner) => anyhow::bail!(
+            "GPU {} resources are owned by thread {owner:?}, not caller {current:?}",
+            worker.gpu.ordinal
+        ),
+        None => anyhow::bail!("GPU {} owner thread is not initialized", worker.gpu.ordinal),
+    }
 }
 
 fn record_failure(worker: &GpuWorker) {
@@ -1943,6 +2263,69 @@ mod tests {
         }
     }
 
+    struct LifecycleRecordingEngine {
+        name: String,
+        loaded: bool,
+        operations: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl LifecycleRecordingEngine {
+        fn record(&self, operation: &str) {
+            self.operations.lock().unwrap().push((
+                operation.to_string(),
+                std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .to_string(),
+            ));
+        }
+    }
+
+    impl Drop for LifecycleRecordingEngine {
+        fn drop(&mut self) {
+            self.record("drop");
+        }
+    }
+
+    impl InferenceEngine for LifecycleRecordingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            self.record("generate");
+            Ok(GenerateResponse {
+                images: vec![ImageData {
+                    data: vec![1, 2, 3],
+                    format: OutputFormat::Png,
+                    width: 64,
+                    height: 64,
+                    index: 0,
+                }],
+                video: None,
+                generation_time_ms: 1,
+                model: self.name.clone(),
+                seed_used: 1,
+                gpu: None,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            self.loaded
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            self.record("load");
+            self.loaded = true;
+            Ok(())
+        }
+
+        fn unload(&mut self) {
+            self.record("unload");
+            self.loaded = false;
+        }
+    }
+
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
         let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(2);
         let mut cache = ModelCache::new(3);
@@ -1974,6 +2357,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         })
@@ -2044,6 +2428,7 @@ mod tests {
             fatal_cuda_error,
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -2078,6 +2463,7 @@ mod tests {
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
             shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -2125,9 +2511,12 @@ mod tests {
             .unwrap();
 
         let returned = match event_rx.blocking_recv().expect("stale rejection") {
-            crate::scheduler::WorkerEvent::Rejected { job, .. } => {
-                assert_eq!(job.id, "stale");
-                *job
+            crate::scheduler::WorkerEvent::Rejected { grant, .. } => {
+                assert_eq!(grant.work.id(), "stale");
+                match grant.work {
+                    OwnerWork::Generation(job) => *job,
+                    _ => panic!("expected generation grant"),
+                }
             }
             _ => panic!("worker must reject the stale grant"),
         };
@@ -2168,7 +2557,13 @@ mod tests {
         let worker_for_thread = worker.clone();
         std::thread::Builder::new()
             .name("gpu-worker-test".to_string())
-            .spawn(move || evict_idle_on_worker(&worker_for_thread, Duration::ZERO))
+            .spawn(move || {
+                worker_for_thread
+                    .owner_thread_id
+                    .set(std::thread::current().id())
+                    .expect("test owner initialized once");
+                evict_idle_on_worker(&worker_for_thread, Duration::ZERO);
+            })
             .unwrap()
             .join()
             .unwrap();
@@ -2210,9 +2605,9 @@ mod tests {
         match event_rx.blocking_recv().expect("fatal rejection") {
             crate::scheduler::WorkerEvent::Rejected {
                 reason: crate::scheduler::LeaseRejection::FatalCuda,
-                job,
+                grant,
                 ..
-            } => assert_eq!(job.id, "buffered-after-sibling-fatal"),
+            } => assert_eq!(grant.work.id(), "buffered-after-sibling-fatal"),
             crate::scheduler::WorkerEvent::Accepted { .. } => {
                 panic!("fatal-fenced worker must not accept a transported grant")
             }
@@ -2353,6 +2748,281 @@ mod tests {
         );
         assert!(dropped_on.lock().unwrap().is_none());
         assert_eq!(worker.model_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn direct_admin_gpu_operation_is_rejected_off_owner_thread() {
+        let (worker, _job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        worker
+            .owner_thread_id
+            .set(std::thread::current().id())
+            .expect("test owner initialized once");
+        let worker_for_thread = worker.clone();
+        let error = std::thread::spawn(move || {
+            unload_blocking(&worker_for_thread).expect_err("off-owner unload must be rejected")
+        })
+        .join()
+        .expect("caller thread joins");
+
+        assert!(
+            error.to_string().contains("resources are owned by thread"),
+            "unexpected owner-thread rejection: {error:#}"
+        );
+    }
+
+    #[test]
+    fn every_migrated_work_kind_runs_on_the_dedicated_owner_thread() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        let kinds = [
+            mold_scheduler::WorkKind::PromptExpansion,
+            mold_scheduler::WorkKind::PostUpscale,
+            mold_scheduler::WorkKind::StandaloneUpscale,
+            mold_scheduler::WorkKind::AdminModelLoad,
+            mold_scheduler::WorkKind::AdminModelUnload,
+        ];
+
+        for (index, kind) in kinds.into_iter().enumerate() {
+            let generation = (index + 1) as u64;
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Ready {
+                    worker_generation,
+                    ..
+                }) if worker_generation == generation
+            ));
+            let (thread_tx, thread_rx) = std::sync::mpsc::sync_channel(1);
+            let id = format!("owner-probe-{index}");
+            worker
+                .send_grant(LeaseGrant {
+                    fence: crate::scheduler::LeaseFence {
+                        work_id: id.clone(),
+                        device_id: device_id.clone(),
+                        state_version: generation,
+                        plan_version: generation,
+                        worker_generation: generation,
+                        memory_sample_generation: generation,
+                        memory_ledger_sequence: generation,
+                    },
+                    work: OwnerWork::Probe {
+                        id: id.clone(),
+                        kind,
+                        run: Box::new(move || {
+                            thread_tx
+                                .send(std::thread::current().name().map(str::to_string))
+                                .unwrap();
+                        }),
+                    },
+                    retry: None,
+                })
+                .unwrap();
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Accepted { work_id, .. })
+                    if work_id == id
+            ));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. })
+                    if work_id == id
+            ));
+            assert_eq!(
+                thread_rx.recv().unwrap().as_deref(),
+                Some("gpu-worker-0"),
+                "{kind:?} escaped the dedicated owner OS thread"
+            );
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Completed {
+                    worker_generation,
+                    ..
+                }) if worker_generation == generation
+            ));
+        }
+
+        worker.request_shutdown();
+        handle.join().expect("owner joins after typed work probes");
+    }
+
+    #[test]
+    fn engine_create_load_generate_unload_and_drop_stay_on_one_owner_thread() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        let device_id = crate::scheduler::worker_device_id(&worker);
+
+        let next_ready =
+            |event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent>,
+             generation| {
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Ready {
+                        worker_generation,
+                        ..
+                    }) if worker_generation == generation
+                ));
+            };
+        let drain_lease =
+            |event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::WorkerEvent>,
+             id: &str| {
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Accepted { work_id, .. })
+                        if work_id == id
+                ));
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::AllocationCommitted { work_id, .. })
+                        if work_id == id
+                ));
+                assert!(matches!(
+                    event_rx.blocking_recv(),
+                    Some(crate::scheduler::WorkerEvent::Completed { .. })
+                ));
+            };
+        let fence = |id: &str, generation| crate::scheduler::LeaseFence {
+            work_id: id.to_string(),
+            device_id: device_id.clone(),
+            state_version: generation,
+            plan_version: generation,
+            worker_generation: generation,
+            memory_sample_generation: generation,
+            memory_ledger_sequence: generation,
+        };
+
+        next_ready(&mut event_rx, 1);
+        let create_worker = worker.clone();
+        let create_operations = operations.clone();
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("create", 1),
+                work: OwnerWork::Probe {
+                    id: "create".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(move || {
+                        create_operations.lock().unwrap().push((
+                            "create".to_string(),
+                            std::thread::current().name().unwrap().to_string(),
+                        ));
+                        create_worker.model_cache.lock().unwrap().insert(
+                            Box::new(LifecycleRecordingEngine {
+                                name: "lifecycle".to_string(),
+                                loaded: false,
+                                operations: create_operations,
+                            }),
+                            0,
+                        );
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        drain_lease(&mut event_rx, "create");
+
+        next_ready(&mut event_rx, 2);
+        let (load_tx, load_rx) = tokio::sync::oneshot::channel();
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("load", 2),
+                work: OwnerWork::AdminModelLoad(Box::new(crate::gpu_pool::AdminModelLoadJob {
+                    id: "load".to_string(),
+                    model: "lifecycle".to_string(),
+                    config: Config::default(),
+                    result_tx: load_tx,
+                })),
+                retry: None,
+            })
+            .unwrap();
+        drain_lease(&mut event_rx, "load");
+        assert!(load_rx.blocking_recv().unwrap().is_ok());
+
+        next_ready(&mut event_rx, 3);
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"owner","model":"lifecycle","width":64,"height":64,"steps":1,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+        let (queue_tx, mut queue_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(queue_tx);
+        let (placeholder_tx, _placeholder_rx) = tokio::sync::oneshot::channel();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(queue.submit(
+                GenerationJob {
+                    id: "generate".to_string(),
+                    request: request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: placeholder_tx,
+                    output_dir: None,
+                },
+                1,
+            ))
+            .unwrap();
+        let _ = queue_rx.try_recv().unwrap();
+        let registry = JobRegistry::new();
+        registry.register("generate", "lifecycle");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        worker
+            .send_job(GpuJob {
+                id: "generate".to_string(),
+                model: "lifecycle".to_string(),
+                request,
+                completion_payload: SseCompletionPayload::Full,
+                progress_tx: None,
+                result_tx,
+                output_dir: None,
+                config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+                metadata_db: Arc::new(None),
+                queue,
+                registry,
+                events: crate::events::EventBroadcaster::new(),
+                lease: Some(fence("generate", 3)),
+            })
+            .unwrap();
+        drain_lease(&mut event_rx, "generate");
+        assert!(result_rx.blocking_recv().unwrap().is_ok());
+
+        next_ready(&mut event_rx, 4);
+        let (unload_tx, unload_rx) = tokio::sync::oneshot::channel();
+        worker
+            .send_grant(LeaseGrant {
+                fence: fence("unload", 4),
+                work: OwnerWork::AdminModelUnload(Box::new(AdminModelUnloadJob {
+                    id: "unload".to_string(),
+                    model: Some("lifecycle".to_string()),
+                    evict_cached: false,
+                    result_tx: unload_tx,
+                })),
+                retry: None,
+            })
+            .unwrap();
+        drain_lease(&mut event_rx, "unload");
+        assert_eq!(
+            unload_rx.blocking_recv().unwrap().unwrap().as_deref(),
+            Some("lifecycle")
+        );
+
+        next_ready(&mut event_rx, 5);
+        worker.request_shutdown();
+        handle.join().expect("owner joins after lifecycle test");
+
+        let operations = operations.lock().unwrap().clone();
+        let names = operations
+            .iter()
+            .map(|(operation, _)| operation.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["create", "load", "generate", "unload", "drop"]);
+        assert!(
+            operations
+                .iter()
+                .all(|(_, thread)| thread == "gpu-worker-0"),
+            "CUDA lifecycle escaped owner thread: {operations:?}"
+        );
     }
 
     #[test]

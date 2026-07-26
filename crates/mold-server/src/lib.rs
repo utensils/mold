@@ -193,6 +193,7 @@ pub async fn run_server(
                 fatal_cuda_error: fatal_cuda_error.clone(),
                 fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
                 shutdown_requested: AtomicBool::new(false),
+                owner_thread_id: std::sync::OnceLock::new(),
                 degraded_until: std::sync::RwLock::new(None),
                 job_tx,
             });
@@ -251,6 +252,7 @@ pub async fn run_server(
     // ── Create generation queue ────────────────────────────────────────────
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
     let queue_handle = QueueHandle::new(job_tx);
+    let (scheduled_work_tx, scheduled_work_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
 
     // ── Create AppState ────────────────────────────────────────────────────
     let mut state = if startup.start_gpu_workers {
@@ -362,6 +364,7 @@ pub async fn run_server(
         state.set_generation_unavailable(reason);
         state
     };
+    state.scheduled_work = scheduler::ScheduledWorkHandle::new(scheduled_work_tx);
 
     // Open the gallery metadata DB (best-effort — server still runs without it).
     match mold_db::open_default() {
@@ -494,16 +497,19 @@ pub async fn run_server(
     let generation_worker_handle = match startup.mode {
         StartupMode::GpuWorkers => Some(tokio::spawn(scheduler::run_scheduler_coordinator(
             job_rx,
+            scheduled_work_rx,
             scheduler_worker_rx,
             worker_state,
             scheduler_shutdown.clone(),
         ))),
         StartupMode::CpuFallback => {
+            drop(scheduled_work_rx);
             drop(scheduler_worker_rx);
             Some(tokio::spawn(queue::run_queue_worker(job_rx, worker_state)))
         }
         StartupMode::Maintenance => {
             drop(job_rx);
+            drop(scheduled_work_rx);
             drop(scheduler_worker_rx);
             None
         }
