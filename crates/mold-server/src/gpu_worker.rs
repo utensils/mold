@@ -3138,7 +3138,11 @@ mod tests {
             progress_rx.recv().await,
             Some(SseMessage::Error(_))
         ));
-        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            1,
+            "process_job no longer mutates dispatch ownership; the owner loop settles in_flight"
+        );
         assert_eq!(queue.pending(), 0);
         assert!(registry.snapshot().entries.is_empty());
         assert!(worker.model_cache.lock().unwrap().contains("flux-dev:q4"));
