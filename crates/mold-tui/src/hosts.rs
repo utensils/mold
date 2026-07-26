@@ -350,6 +350,10 @@ pub(crate) struct MachinesState {
     pub devices: HashMap<String, DeviceState>,
     /// Capability gate paired with each device inventory.
     pub capabilities: HashMap<String, ServerCapabilities>,
+    /// Last accepted lifecycle mutation, keyed by machine row id. This is
+    /// intentionally non-error feedback and survives the authoritative poll
+    /// that immediately follows the mutation response.
+    pub device_feedback: HashMap<String, String>,
     /// Selected device in the detail pane. `g` cycles this independently of
     /// the queue-row selection, preserving the existing Up/Down queue keys.
     pub device_selected: usize,
@@ -473,7 +477,9 @@ impl MachinesState {
             Some(device) => device,
             None => return false,
         };
-        if device.admin_state == mold_core::DeviceAdminState::StartupExcluded {
+        if device.admin_state == mold_core::DeviceAdminState::StartupExcluded
+            || device.restart_required
+        {
             return false;
         }
         let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
@@ -487,12 +493,20 @@ impl MachinesState {
         let Some(device) = self.selected_device() else {
             return false;
         };
+        if device.desired_enabled || device.restart_required {
+            return false;
+        }
         let Some(capabilities) = self.capabilities.get(&self.selected_machine_id()) else {
             return false;
         };
-        !device.desired_enabled
-            && !capabilities.devices.lifecycle
-            && capabilities.devices.restart_enable
+        let live_lifecycle =
+            capabilities.devices.lifecycle && capabilities.dispatch.v2_authoritative;
+        !live_lifecycle && capabilities.devices.restart_enable
+    }
+
+    pub fn selected_device_restart_required(&self) -> bool {
+        self.selected_device()
+            .is_some_and(|device| device.restart_required)
     }
 
     pub fn select_next_device(&mut self) {
@@ -519,6 +533,29 @@ impl MachinesState {
                 self.devices.remove(&host_id);
             }
         }
+    }
+
+    pub fn apply_device_mutation(&mut self, host_id: String, device: DeviceInfo) {
+        let feedback = if device.restart_required {
+            format!("{} enabled on restart", device.name)
+        } else if device.desired_enabled {
+            format!("{} enabled", device.name)
+        } else if device.admin_state == mold_core::DeviceAdminState::Draining {
+            format!("{} will be disabled after current work", device.name)
+        } else {
+            format!("{} disabled", device.name)
+        };
+        let state = self.devices.entry(host_id.clone()).or_default();
+        if let Some(existing) = state
+            .devices
+            .iter_mut()
+            .find(|existing| existing.id == device.id)
+        {
+            *existing = device;
+        } else {
+            state.devices.push(device);
+        }
+        self.device_feedback.insert(host_id, feedback);
     }
 
     pub fn apply_capabilities(
@@ -834,10 +871,18 @@ pub(crate) async fn set_host_device_enabled(
 ) {
     let client = client_for_host(&entry);
     let result = client.set_device_enabled(&device_id, enabled).await;
-    if let Err(error) = result {
-        let _ = tx.send(BackgroundEvent::Error(format!(
-            "GPU lifecycle update failed: {error:#}"
-        )));
+    match result {
+        Ok(device) => {
+            let _ = tx.send(BackgroundEvent::HostDeviceMutationApplied {
+                host_id: entry.id.clone(),
+                device: Box::new(device),
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "GPU lifecycle update failed: {error:#}"
+            )));
+        }
     }
     let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
         host_id: entry.id,
@@ -854,10 +899,18 @@ pub(crate) async fn set_local_device_enabled(
     let api_key = std::env::var("MOLD_API_KEY").ok();
     let client = client_for(&url, api_key.as_deref());
     let result = client.set_device_enabled(&device_id, enabled).await;
-    if let Err(error) = result {
-        let _ = tx.send(BackgroundEvent::Error(format!(
-            "GPU lifecycle update failed: {error:#}"
-        )));
+    match result {
+        Ok(device) => {
+            let _ = tx.send(BackgroundEvent::HostDeviceMutationApplied {
+                host_id: LOCAL_HOST_ID.to_string(),
+                device: Box::new(device),
+            });
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "GPU lifecycle update failed: {error:#}"
+            )));
+        }
     }
     let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
         host_id: LOCAL_HOST_ID.to_string(),
@@ -1183,13 +1236,149 @@ mod tests {
         assert!(st.can_mutate_selected_device());
         assert!(st.selected_device_uses_restart_enable());
 
+        let capabilities = st.capabilities.get_mut(LOCAL_HOST_ID).unwrap();
+        capabilities.devices.lifecycle = true;
+        capabilities.dispatch.v2_authoritative = false;
+        assert!(st.can_mutate_selected_device());
+        assert!(
+            st.selected_device_uses_restart_enable(),
+            "restart recovery is still the only supported action without authoritative dispatch"
+        );
+
+        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].restart_required = true;
+        assert!(
+            !st.can_mutate_selected_device(),
+            "a pending restart is not another actionable enable request"
+        );
+        assert!(st.selected_device_restart_required());
+        assert!(!st.selected_device_uses_restart_enable());
+
         let mut v2 = mold_core::ServerCapabilities::default();
         v2.devices.lifecycle = true;
         v2.dispatch.v2_authoritative = true;
         st.apply_capabilities(LOCAL_HOST_ID.to_string(), Some(v2));
-        st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0].desired_enabled = true;
+        let selected = &mut st.devices.get_mut(LOCAL_HOST_ID).unwrap().devices[0];
+        selected.desired_enabled = true;
+        selected.restart_required = false;
         assert!(st.can_mutate_selected_device());
         assert!(!st.selected_device_uses_restart_enable());
+    }
+
+    #[tokio::test]
+    async fn device_mutation_emits_accepted_state_before_authoritative_poll() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let accepted = mold_core::DeviceInfo {
+            id: "cuda:00000000000000000000000000000000".into(),
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: Some(0),
+            device_kind: mold_core::DeviceKind::FullGpu,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            name: "GPU 0".into(),
+            pci_bus_id: None,
+            compute_capability: Some("8.6".into()),
+            memory: mold_core::DeviceMemoryInfo {
+                total_bytes: Some(24 * 1024_u64.pow(3)),
+                used_bytes: Some(0),
+                mold_used_bytes: None,
+                other_used_bytes: None,
+            },
+            telemetry: mold_core::DeviceTelemetry {
+                utilization_percent: Some(0),
+                temperature_c: None,
+                power_w: None,
+            },
+            desired_enabled: true,
+            restart_required: true,
+            admin_state: mold_core::DeviceAdminState::Disabled,
+            health: mold_core::DeviceHealth::Unavailable,
+            activity: mold_core::DeviceActivity::Idle,
+            schedulable: false,
+            unschedulable_reason: Some("restart required".into()),
+            loaded_models: Vec::new(),
+            active_work_id: None,
+            planned_work_ids: Vec::new(),
+        };
+        let polled = mold_core::DeviceState {
+            devices: vec![accepted.clone()],
+            plan_version: 7,
+        };
+        let responses = vec![
+            (
+                "202 Accepted",
+                serde_json::to_string(&accepted).expect("serialize accepted device"),
+            ),
+            (
+                "200 OK",
+                serde_json::to_string(&polled).expect("serialize device poll"),
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 8192];
+                let _ = socket.read(&mut request).await.expect("read request");
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let entry = HostEntry {
+            id: "test-host".into(),
+            url: format!("http://{address}"),
+            name: Some("Test host".into()),
+            instance_id: None,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        set_host_device_enabled(entry, accepted.id.clone(), true, tx).await;
+
+        let first = rx.recv().await.expect("accepted response event");
+        match first {
+            BackgroundEvent::HostDeviceMutationApplied { host_id, device } => {
+                assert_eq!(host_id, "test-host");
+                assert!(device.restart_required);
+                let mut machines = MachinesState::default();
+                machines.apply_device_mutation(LOCAL_HOST_ID.to_string(), *device);
+                assert!(machines.selected_device_restart_required());
+                assert_eq!(
+                    machines
+                        .device_feedback
+                        .get(LOCAL_HOST_ID)
+                        .map(String::as_str),
+                    Some("GPU 0 enabled on restart")
+                );
+                machines.apply_devices(LOCAL_HOST_ID.to_string(), Some(polled.clone()));
+                assert!(
+                    machines.selected_device_restart_required(),
+                    "the authoritative poll preserves the accepted pending-restart presentation"
+                );
+            }
+            _ => panic!("expected accepted mutation event"),
+        }
+        let second = rx.recv().await.expect("poll event");
+        match second {
+            BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
+                assert_eq!(host_id, "test-host");
+                assert_eq!(devices.expect("polled devices"), polled);
+            }
+            _ => panic!("expected authoritative poll event"),
+        }
+        assert!(rx.try_recv().is_err());
+        server.await.expect("test server task");
     }
 
     #[test]

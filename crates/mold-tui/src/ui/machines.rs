@@ -451,9 +451,11 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         let state = device_state_label(device);
         let style = if selected {
             app.theme.list_selected()
-        } else if device.admin_state == mold_core::DeviceAdminState::Draining {
+        } else if device.restart_required
+            || device.admin_state == mold_core::DeviceAdminState::Draining
+        {
             app.theme.warning()
-        } else if device.health != mold_core::DeviceHealth::Healthy {
+        } else if device_uses_error_style(device) {
             app.theme.error()
         } else {
             Style::default().fg(app.theme.text)
@@ -493,23 +495,25 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             }
         }
     }
-    let action = if app.machines.can_mutate_selected_device() {
-        if app.machines.selected_device_uses_restart_enable() {
-            "e Enable on restart"
-        } else {
-            "e Enable/disable"
-        }
-    } else {
-        "Live controls require Scheduler V2"
-    };
+    let action = device_action_label(
+        app.machines.selected_device_restart_required(),
+        app.machines.can_mutate_selected_device(),
+        app.machines.selected_device_uses_restart_enable(),
+    );
     lines.push(Line::from(Span::styled(
         format!("g Next GPU · {action}"),
         app.theme.dim(),
     )));
+    if let Some(feedback) = app.machines.device_feedback.get(host_id) {
+        lines.push(Line::from(Span::styled(feedback.clone(), app.theme.dim())));
+    }
 }
 
 fn device_state_label(device: &mold_core::DeviceInfo) -> &'static str {
     use mold_core::{DeviceAdminState, DeviceHealth};
+    if device.restart_required {
+        return "Restart required";
+    }
     match device.admin_state {
         DeviceAdminState::StartupExcluded => "startup excluded",
         DeviceAdminState::Starting => "starting",
@@ -521,6 +525,26 @@ fn device_state_label(device: &mold_core::DeviceInfo) -> &'static str {
             DeviceHealth::Unavailable => "unavailable",
             DeviceHealth::Poisoned => "poisoned",
         },
+    }
+}
+
+fn device_uses_error_style(device: &mold_core::DeviceInfo) -> bool {
+    !device.restart_required && device.health != mold_core::DeviceHealth::Healthy
+}
+
+fn device_action_label(
+    restart_required: bool,
+    can_mutate: bool,
+    uses_restart_enable: bool,
+) -> &'static str {
+    if restart_required {
+        "Enabled on restart"
+    } else if can_mutate && uses_restart_enable {
+        "e Enable on restart"
+    } else if can_mutate {
+        "e Enable/disable"
+    } else {
+        "Live controls require Scheduler V2"
     }
 }
 
@@ -863,6 +887,65 @@ mod tests {
             "localhost:9999"
         );
         assert_eq!(local_server_label(None, false), "in-process");
+    }
+
+    #[test]
+    fn restart_required_precedes_admin_and_health_state() {
+        let device = mold_core::DeviceInfo {
+            id: "cuda:00000000000000000000000000000000".into(),
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: Some(0),
+            device_kind: mold_core::DeviceKind::FullGpu,
+            nvml_uuid: None,
+            physical_uuid: None,
+            mig_uuid: None,
+            mig_parent_uuid: None,
+            mig_profile: None,
+            name: "GPU 0".into(),
+            pci_bus_id: None,
+            compute_capability: Some("8.6".into()),
+            memory: mold_core::DeviceMemoryInfo {
+                total_bytes: Some(24 * 1024_u64.pow(3)),
+                used_bytes: Some(0),
+                mold_used_bytes: None,
+                other_used_bytes: None,
+            },
+            telemetry: mold_core::DeviceTelemetry {
+                utilization_percent: Some(0),
+                temperature_c: None,
+                power_w: None,
+            },
+            desired_enabled: true,
+            restart_required: true,
+            admin_state: mold_core::DeviceAdminState::Disabled,
+            health: mold_core::DeviceHealth::Unavailable,
+            activity: mold_core::DeviceActivity::Idle,
+            schedulable: false,
+            unschedulable_reason: Some("restart required".into()),
+            loaded_models: Vec::new(),
+            active_work_id: None,
+            planned_work_ids: Vec::new(),
+        };
+
+        assert_eq!(device_state_label(&device), "Restart required");
+        assert!(
+            !device_uses_error_style(&device),
+            "restart-required is an accepted pending state, not a device failure"
+        );
+        assert_eq!(
+            device_action_label(true, false, false),
+            "Enabled on restart",
+            "pending restart must not fall through to the V2 capability warning"
+        );
+        assert_eq!(
+            device_action_label(false, true, true),
+            "e Enable on restart"
+        );
+        assert_eq!(device_action_label(false, true, false), "e Enable/disable");
+        assert_eq!(
+            device_action_label(false, false, false),
+            "Live controls require Scheduler V2"
+        );
     }
 
     // ── lane labels ─────────────────────────────────────────────

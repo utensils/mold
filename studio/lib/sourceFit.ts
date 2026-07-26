@@ -86,8 +86,12 @@ export function resolveSourceFitTransform(
   const drawHeight = Math.round(source.height * scale);
   const availableX = outputWidth - drawWidth;
   const availableY = outputHeight - drawHeight;
-  let offsetX = crop ? -alignOffset(-availableX, fit.alignX) : Math.round(availableX / 2);
-  let offsetY = crop ? -alignOffset(-availableY, fit.alignY) : Math.round(availableY / 2);
+  let offsetX = crop
+    ? -alignOffset(-availableX, fit.alignX)
+    : Math.round(availableX / 2);
+  let offsetY = crop
+    ? -alignOffset(-availableY, fit.alignY)
+    : Math.round(availableY / 2);
   if (Object.is(offsetX, -0)) offsetX = 0;
   if (Object.is(offsetY, -0)) offsetY = 0;
 
@@ -140,12 +144,17 @@ export function maskPaddingRectangles(t: SourceFitTransform): Rect[] {
  * repaint, so it becomes a centered crop-fill (which always fills the target).
  * Applied both when entering such a family and defensively on submit.
  */
-export function coerceSourceFitForMaskless(policy: SourceFitPolicy): SourceFitPolicy {
+export function coerceSourceFitForMaskless(
+  policy: SourceFitPolicy,
+): SourceFitPolicy {
   if (policy.mode === "pad-repaint") {
     return { mode: "crop-fill", alignX: "center", alignY: "center" };
   }
   if (policy.mode === "upscale-then-fit" && policy.fit.mode === "pad-repaint") {
-    return { ...policy, fit: { mode: "crop-fill", alignX: "center", alignY: "center" } };
+    return {
+      ...policy,
+      fit: { mode: "crop-fill", alignX: "center", alignY: "center" },
+    };
   }
   return policy;
 }

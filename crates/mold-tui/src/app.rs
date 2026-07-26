@@ -95,6 +95,12 @@ pub enum BackgroundEvent {
         host_id: String,
         devices: Option<mold_core::DeviceState>,
     },
+    /// Accepted device mutation response. Applied immediately before the
+    /// follow-up inventory poll so restart-only success is never discarded.
+    HostDeviceMutationApplied {
+        host_id: String,
+        device: Box<mold_core::DeviceInfo>,
+    },
     HostCapabilitiesUpdate {
         host_id: String,
         capabilities: Option<mold_core::ServerCapabilities>,
@@ -3570,6 +3576,9 @@ impl App {
                         Some("This GPU was excluded at startup and requires a restart".to_string());
                     return;
                 }
+                if device.restart_required {
+                    return;
+                }
                 if !self.machines.can_mutate_selected_device() {
                     self.generate.error_message = Some(
                         "Live GPU controls require Scheduler V2; only a disabled GPU can be enabled for the next restart"
@@ -6085,6 +6094,9 @@ impl App {
                 }
                 BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
                     self.machines.apply_devices(host_id, devices);
+                }
+                BackgroundEvent::HostDeviceMutationApplied { host_id, device } => {
+                    self.machines.apply_device_mutation(host_id, *device);
                 }
                 BackgroundEvent::HostCapabilitiesUpdate {
                     host_id,

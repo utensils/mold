@@ -24,6 +24,7 @@ export function installStudioPlatform(platform: StudioPlatform): void {
 }
 
 export function studioPlatform(): StudioPlatform {
-  if (!activePlatform) throw new Error("Studio platform adapter is not installed");
+  if (!activePlatform)
+    throw new Error("Studio platform adapter is not installed");
   return activePlatform;
 }

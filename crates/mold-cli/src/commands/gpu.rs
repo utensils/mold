@@ -172,6 +172,17 @@ mod tests {
         assert!(ensure_supported(&legacy, &enabled, true).is_err());
 
         legacy.devices.lifecycle = true;
+        legacy.dispatch.v2_authoritative = false;
+        assert!(
+            ensure_supported(&legacy, &disabled, true).is_ok(),
+            "restart recovery remains available when lifecycle is advertised without authoritative dispatch"
+        );
+        assert!(
+            ensure_supported(&legacy, &enabled, false).is_err(),
+            "live mutation requires both lifecycle and authoritative dispatch"
+        );
+
+        legacy.devices.lifecycle = true;
         legacy.dispatch.v2_authoritative = true;
         assert!(ensure_supported(&legacy, &enabled, false).is_ok());
     }
