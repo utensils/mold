@@ -64,9 +64,10 @@ function depth(host: RoutableHost): number {
 }
 
 /**
- * Auto routing: the ready host with the shallowest queue wins. Predictions
- * refine equal-depth hosts only when both are known, so a planless current,
- * legacy, or observe-mode host is never starved by rollout asymmetry.
+ * Auto routing: the ready host with the shallowest queue wins. At equal
+ * depth, a known prediction sorts ahead of an unknown one and two known
+ * predictions sort by finish time. Planless hosts remain eligible and use
+ * the normal origin/id tie-break when all tied predictions are unknown.
  */
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],

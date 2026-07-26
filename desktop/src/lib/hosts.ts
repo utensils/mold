@@ -133,9 +133,10 @@ export interface RoutableHost {
 }
 
 /**
- * Auto routing: queue depth is the rollout-safe primary signal. Predicted
- * completion refines ties only when both hosts have a projection; planless
- * current, legacy, and observe-mode hosts remain eligible.
+ * Auto routing: queue depth is the rollout-safe primary signal. At equal
+ * depth, a known projected completion sorts ahead of an unknown one and two
+ * known projections sort by finish time. Planless current, legacy, and
+ * observe-mode hosts remain eligible.
  */
 export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
   const ready = hosts.filter((h) => h.status === "ready");

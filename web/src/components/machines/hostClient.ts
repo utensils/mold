@@ -10,7 +10,14 @@
  * current additive fields (`instance_id`, `models_disk`, `queue_paused`, queue
  * capabilities).
  */
-import { isRef, onBeforeUnmount, ref, watch, type Ref } from "vue";
+import {
+  getCurrentInstance,
+  isRef,
+  onBeforeUnmount,
+  ref,
+  watch,
+  type Ref,
+} from "vue";
 import type {
   DownloadsListingWire,
   ModelInfoExtended,
@@ -245,8 +252,9 @@ export interface HostPollOptions {
 
 /**
  * Abortable status poll for one host. Sets `online` from the last status read
- * and stamps `lastSeen` on success. Offline hosts keep their last-good data so
- * the UI can dim it rather than blank out (spec §08 G4).
+ * and stamps `lastSeen` on success. A same-target failure keeps last-good data
+ * so the UI can dim it (spec §08 G4); changing id, URL, or key starts a clean
+ * target session immediately so one machine can never display another's data.
  */
 export function useHostPoll(
   host: HostEntry | Readonly<Ref<HostEntry | null>>,
@@ -274,6 +282,16 @@ export function useHostPoll(
       current.apiKey === target.apiKey
     );
   };
+  const clearTargetState = () => {
+    status.value = null;
+    devices.value = null;
+    deviceState.value = null;
+    resources.value = null;
+    online.value = false;
+    lastSeen.value = null;
+    error.value = null;
+    loading.value = true;
+  };
 
   async function refresh(): Promise<void> {
     controller?.abort();
@@ -281,7 +299,7 @@ export function useHostPoll(
     const signal = controller.signal;
     const target = currentHost();
     if (!target) {
-      online.value = false;
+      clearTargetState();
       loading.value = false;
       return;
     }
@@ -297,8 +315,7 @@ export function useHostPoll(
       status.value = nextStatus;
       deviceState.value = nextDevices;
       devices.value = nextDevices?.devices ?? null;
-      if (options.withResources && nextResources)
-        resources.value = nextResources;
+      if (options.withResources) resources.value = nextResources;
       online.value = true;
       lastSeen.value = Date.now();
       error.value = null;
@@ -327,17 +344,22 @@ export function useHostPoll(
 
   if (isRef(host)) {
     watch(
-      host,
+      () => {
+        const target = currentHost();
+        return target
+          ? `${target.id}\u0000${target.url}\u0000${target.apiKey ?? ""}`
+          : null;
+      },
       () => {
         controller?.abort();
-        loading.value = true;
+        clearTargetState();
         void refresh();
       },
       { flush: "sync" },
     );
   }
   void tick();
-  onBeforeUnmount(stop);
+  if (getCurrentInstance()) onBeforeUnmount(stop);
 
   return {
     status,

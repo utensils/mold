@@ -284,6 +284,38 @@ describe("HostDetailPage — telemetry", () => {
     expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
   });
 
+  it("threads the active session signal through interval and SSE reloads", async () => {
+    vi.useFakeTimers();
+    try {
+      wrapper = mount(HostDetailPage);
+      await nextTick();
+      await Promise.resolve();
+      const sessionSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+      const refresh = subscribeToDeviceSnapshots.mock
+        .calls[0]![2] as () => void;
+
+      hostQueueCall.mockClear();
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+
+      hostQueueCall.mockClear();
+      refresh();
+      await Promise.resolve();
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+      expect(sessionSignal.aborted).toBe(false);
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels and rebinds capabilities, queue polling, and SSE on route changes", async () => {
     const first = getHost(routeHolder.id)!;
     updateHost(first.id, { apiKey: "first-key" });

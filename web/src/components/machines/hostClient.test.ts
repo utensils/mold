@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick, ref } from "vue";
 import {
   cancelQueueJob,
   hostCapabilities,
@@ -10,6 +11,7 @@ import {
   resumeHostQueue,
   cancelAllHostQueue,
   setQueueJobLane,
+  useHostPoll,
 } from "./hostClient";
 import type { HostEntry } from "../../lib/hostRegistry";
 
@@ -130,5 +132,122 @@ describe("hostClient auth + requests", () => {
     const listing = await hostDownloads(remote);
     expect(listing.active).toBeNull();
     expect(listing.queued).toEqual([]);
+  });
+});
+
+describe("useHostPoll target sessions", () => {
+  it("clears host A immediately when rebinding to a stalled host B", async () => {
+    const target = ref<HostEntry>({ ...remote });
+    fetchMock.mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith(remote.url)) {
+          if (url.endsWith("/api/status"))
+            return Promise.resolve(ok(currentStatus));
+          if (url.endsWith("/api/resources"))
+            return Promise.resolve(ok({ hostname: "studio-a", gpus: [] }));
+          if (url.endsWith("/api/devices"))
+            return Promise.resolve(ok({ devices: [], plan_version: 1 }));
+        }
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    );
+
+    const poll = useHostPoll(target, {
+      withResources: true,
+      intervalMs: 60_000,
+    });
+    await vi.waitFor(() => expect(poll.online.value).toBe(true));
+    expect(poll.resources.value).not.toBeNull();
+
+    target.value = {
+      id: "host-b",
+      name: "Stalled B",
+      url: "http://stalled-b:7680",
+      apiKey: "b-key",
+    };
+    await nextTick();
+
+    expect(poll.status.value).toBeNull();
+    expect(poll.devices.value).toBeNull();
+    expect(poll.deviceState.value).toBeNull();
+    expect(poll.resources.value).toBeNull();
+    expect(poll.online.value).toBe(false);
+    expect(poll.lastSeen.value).toBeNull();
+    expect(poll.error.value).toBeNull();
+    expect(poll.loading.value).toBe(true);
+    poll.stop();
+  });
+
+  it("clears stale resources when the rebound host succeeds without them", async () => {
+    const target = ref<HostEntry>({ ...remote });
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith(remote.url)) {
+        if (url.endsWith("/api/status"))
+          return Promise.resolve(ok(currentStatus));
+        if (url.endsWith("/api/resources"))
+          return Promise.resolve(ok({ hostname: "studio-a", gpus: [] }));
+        return Promise.resolve(ok({ devices: [], plan_version: 1 }));
+      }
+      if (url.endsWith("/api/status"))
+        return Promise.resolve(
+          ok({
+            ...currentStatus,
+            instance_id: "instance-b",
+            hostname: "studio-b",
+          }),
+        );
+      if (url.endsWith("/api/resources"))
+        return Promise.reject(new Error("resources unsupported"));
+      return Promise.resolve(ok({ devices: [], plan_version: 2 }));
+    });
+
+    const poll = useHostPoll(target, {
+      withResources: true,
+      intervalMs: 60_000,
+    });
+    await vi.waitFor(() => expect(poll.resources.value).not.toBeNull());
+
+    target.value = {
+      id: "host-b",
+      name: "Studio B",
+      url: "http://studio-b:7680",
+    };
+    await vi.waitFor(() =>
+      expect(poll.status.value?.instance_id).toBe("instance-b"),
+    );
+
+    expect(poll.online.value).toBe(true);
+    expect(poll.resources.value).toBeNull();
+    poll.stop();
+  });
+
+  it("rebinds when a reactive host keeps its id but rotates URL and key", async () => {
+    const target = ref<HostEntry>({ ...remote });
+    fetchMock.mockResolvedValue(ok(currentStatus));
+    const poll = useHostPoll(target, { intervalMs: 60_000 });
+    await vi.waitFor(() => expect(poll.online.value).toBe(true));
+    fetchMock.mockClear();
+
+    target.value = {
+      ...target.value,
+      url: "http://rotated:7680",
+      apiKey: "rotated-key",
+    };
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("http://rotated:7680/api/status");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-api-key": "rotated-key",
+    });
+    poll.stop();
   });
 });

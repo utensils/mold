@@ -36,6 +36,7 @@ import { deriveTelemetry } from "../components/machines/machineTelemetry";
 import {
   ORIGIN_HOST_ID,
   HOSTS_CHANGED_EVENT,
+  HOSTS_STORAGE_KEY,
   getGenerateTargetId,
   getHost,
   removeHost,
@@ -409,18 +410,23 @@ function startHostSession() {
     deviceEventsAbort.signal,
     () => {
       void poll.refresh();
-      void reloadQueue(entry, epoch);
+      void reloadAll(entry, epoch, signal);
     },
   );
-  timer = setInterval(() => void reloadAll(entry, epoch), 4000);
+  timer = setInterval(() => void reloadAll(entry, epoch, signal), 4000);
 }
 
 function onHostsChanged() {
   registryRevision.value += 1;
 }
 
+function onHostStorage(event: StorageEvent) {
+  if (event.key === HOSTS_STORAGE_KEY) onHostsChanged();
+}
+
 onMounted(() => {
   window.addEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.addEventListener("storage", onHostStorage);
 });
 
 watch(
@@ -436,6 +442,7 @@ watch(
 
 onBeforeUnmount(() => {
   window.removeEventListener(HOSTS_CHANGED_EVENT, onHostsChanged);
+  window.removeEventListener("storage", onHostStorage);
   stopHostSession();
 });
 </script>

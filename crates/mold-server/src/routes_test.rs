@@ -1519,21 +1519,16 @@ mod tests {
                 "{label} must not report a live worker disabled"
             );
             assert_eq!(
-                inventory["devices"][0]["schedulable"], true,
-                "{label} still dispatches through the live worker"
+                inventory["devices"][0]["desired_enabled"], false,
+                "{label} keeps the persisted preference visible"
             );
-
-            let legacy_status = app
-                .clone()
-                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(legacy_status.status(), StatusCode::OK, "{label}");
-            let legacy_status = json_body(legacy_status).await;
             assert_eq!(
-                legacy_status["gpus"].as_array().map(Vec::len),
-                Some(1),
-                "{label} must not hide a worker it still dispatches through"
+                inventory["devices"][0]["schedulable"], false,
+                "{label} must not rewrite registry routing eligibility"
+            );
+            assert_eq!(
+                inventory["devices"][0]["unschedulable_reason"], "device_disabled",
+                "{label} must not clear the registry reason"
             );
 
             let patch = app
@@ -1552,6 +1547,71 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_device_projection_preserves_degraded_health_and_routing_exclusion() {
+        let worker = gpu_worker_stub(0);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() =
+            Some(std::time::Instant::now() + Duration::from_secs(60));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Legacy,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "degraded");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_device_projection_preserves_transient_unavailability() {
+        let worker = gpu_worker_stub(0);
+        let id = worker.gpu.stable_id.clone().unwrap();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker],
+        });
+        install_worker_registry(&mut state);
+        assert!(state.device_registry.mark_unavailable(&id));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+            false,
+            true,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "unavailable");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_unavailable"
+        );
     }
 
     #[tokio::test]

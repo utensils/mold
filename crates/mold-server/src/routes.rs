@@ -2444,14 +2444,11 @@ pub(crate) fn current_device_state(state: &AppState) -> DeviceState {
             let live_worker = device
                 .ordinal
                 .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal));
-            if let Some(worker) = live_worker {
-                let healthy = !worker.poisoned.load(std::sync::atomic::Ordering::Acquire)
-                    && !worker
-                        .fatal_cuda_error
-                        .load(std::sync::atomic::Ordering::Acquire);
+            if live_worker.is_some() {
+                // Only administrative ownership rolls back outside
+                // authoritative V2. Health, cooldowns, routing eligibility,
+                // and their reason remain the registry's authority.
                 device.admin_state = mold_core::DeviceAdminState::Enabled;
-                device.schedulable = healthy;
-                device.unschedulable_reason = (!healthy).then(|| "device_unavailable".into());
             }
         }
     }

@@ -7,13 +7,19 @@
  * With no remotes the origin card plus the add card stand in for an empty
  * state (G4).
  */
-import { ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import CardSurface from "@ui/components/CardSurface.vue";
 import Icon from "@ui/components/Icon.vue";
 import HostCard from "../components/machines/HostCard.vue";
 import ConnectModal from "../components/machines/ConnectModal.vue";
-import { ORIGIN_HOST_ID, listHosts, type HostEntry } from "../lib/hostRegistry";
+import {
+  HOSTS_CHANGED_EVENT,
+  HOSTS_STORAGE_KEY,
+  ORIGIN_HOST_ID,
+  listHosts,
+  type HostEntry,
+} from "../lib/hostRegistry";
 import { toast } from "../lib/toasts";
 
 const router = useRouter();
@@ -31,6 +37,20 @@ watch(
 function refreshHosts() {
   hosts.value = listHosts();
 }
+
+function onStorage(event: StorageEvent) {
+  if (event.key === HOSTS_STORAGE_KEY) refreshHosts();
+}
+
+onMounted(() => {
+  window.addEventListener(HOSTS_CHANGED_EVENT, refreshHosts);
+  window.addEventListener("storage", onStorage);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener(HOSTS_CHANGED_EVENT, refreshHosts);
+  window.removeEventListener("storage", onStorage);
+});
 
 function openDetail(id: string) {
   void router.push(`/machines/${id}`);
