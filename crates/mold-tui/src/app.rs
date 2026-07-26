@@ -7453,7 +7453,7 @@ mod tests {
         let (kind, text) = activity_line(&app);
         assert_eq!(kind, ActivityKind::Idle);
         let expected = "idle · Juggernaut XL - Ragnarok";
-        assert!(text.starts_with(&expected), "{text}");
+        assert!(text.starts_with(expected), "{text}");
         assert!(!text.contains("cv:1759168"), "{text}");
         assert!(
             !text.contains("queue"),
