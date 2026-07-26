@@ -293,6 +293,7 @@ pub async fn run_server(
                 active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
                 model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
                 shared_pool: shared_pool.clone(),
+                legacy_pending: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
                 legacy_chain_waiters: Default::default(),
                 consecutive_failures: AtomicUsize::new(0),
@@ -480,8 +481,12 @@ pub async fn run_server(
         state.set_generation_unavailable(reason);
         state
     };
-    state.scheduled_work =
-        scheduler::ScheduledWorkHandle::for_mode(scheduled_work_tx, dispatch_mode);
+    state.scheduled_work = scheduler::ScheduledWorkHandle::for_runtime(
+        scheduled_work_tx,
+        dispatch_mode,
+        startup.start_v2_coordinator,
+        startup.observe_v2_decisions,
+    );
 
     // Open the gallery metadata DB (best-effort — server still runs without it).
     match mold_db::open_default() {
@@ -610,7 +615,8 @@ pub async fn run_server(
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
     let scheduler_shutdown = tokio_util::sync::CancellationToken::new();
-    let uses_gpu_scheduler = startup.start_v2_coordinator;
+    let uses_cooperative_gpu_dispatch =
+        startup.start_v2_coordinator || startup.start_legacy_dispatcher;
     let generation_worker_handle = if startup.start_v2_coordinator {
         drop(legacy_owner_event_rx);
         Some(tokio::spawn(scheduler::run_scheduler_coordinator(
@@ -622,13 +628,20 @@ pub async fn run_server(
         )))
     } else if startup.start_legacy_dispatcher {
         drop(scheduler_worker_rx);
+        let generation_shutdown = scheduler_shutdown.clone();
+        let utility_shutdown = scheduler_shutdown.clone();
         Some(tokio::spawn(async move {
             tokio::join!(
-                queue::run_queue_dispatcher(job_rx, worker_state.clone()),
+                queue::run_queue_dispatcher_until_cancelled(
+                    job_rx,
+                    worker_state.clone(),
+                    generation_shutdown,
+                ),
                 queue::run_legacy_scheduled_work_dispatcher(
                     scheduled_work_rx,
                     legacy_owner_event_rx,
                     worker_state,
+                    utility_shutdown,
                 ),
             );
         }))
@@ -926,7 +939,7 @@ pub async fn run_server(
     resources_aggregator.abort();
     scheduler_shutdown.cancel();
     if let Some(generation_worker_handle) = generation_worker_handle {
-        if !uses_gpu_scheduler {
+        if !uses_cooperative_gpu_dispatch {
             // The CPU/legacy worker predates the coordinator cancellation
             // protocol. Abort and await it explicitly so in-process restart never
             // inherits a detached queue task.
@@ -1198,6 +1211,7 @@ mod tests {
                 active_generation: Arc::new(RwLock::new(None)),
                 model_load_lock: Arc::new(Mutex::new(())),
                 shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+                legacy_pending: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
                 legacy_chain_waiters: Default::default(),
                 consecutive_failures: AtomicUsize::new(0),

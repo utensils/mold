@@ -2837,22 +2837,22 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             available: true,
             lifecycle: false,
         },
-        dispatch: dispatch_capabilities(state.scheduled_work.dispatch_mode()),
+        dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
 }
 
 fn dispatch_capabilities(
-    mode: crate::dispatch_mode::DispatchMode,
+    handle: &crate::scheduler::ScheduledWorkHandle,
 ) -> mold_core::DispatchCapabilities {
     mold_core::DispatchCapabilities {
         modes: ["legacy", "observe", "v2"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-        active_mode: Some(mode.as_str().to_string()),
-        v2_authoritative: mode.owns_v2_workers(),
-        observes_v2_decisions: mode.records_v2_observations(),
+        active_mode: Some(handle.dispatch_mode().as_str().to_string()),
+        v2_authoritative: handle.v2_authoritative(),
+        observes_v2_decisions: handle.observes_v2_decisions(),
     }
 }
 
@@ -4249,21 +4249,48 @@ mod tests {
 
     #[test]
     fn dispatch_capability_reports_authority_without_implying_live_cutover() {
-        let legacy = dispatch_capabilities(crate::dispatch_mode::DispatchMode::Legacy);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let legacy_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Legacy,
+        );
+        let legacy = dispatch_capabilities(&legacy_handle);
         assert_eq!(legacy.active_mode.as_deref(), Some("legacy"));
         assert!(!legacy.v2_authoritative);
         assert!(!legacy.observes_v2_decisions);
 
-        let observe = dispatch_capabilities(crate::dispatch_mode::DispatchMode::Observe);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let observe_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        let observe = dispatch_capabilities(&observe_handle);
         assert_eq!(observe.active_mode.as_deref(), Some("observe"));
         assert!(!observe.v2_authoritative);
         assert!(observe.observes_v2_decisions);
 
-        let v2 = dispatch_capabilities(crate::dispatch_mode::DispatchMode::V2);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let v2_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let v2 = dispatch_capabilities(&v2_handle);
         assert_eq!(v2.active_mode.as_deref(), Some("v2"));
         assert!(v2.v2_authoritative);
         assert!(!v2.observes_v2_decisions);
         assert_eq!(v2.modes, ["legacy", "observe", "v2"]);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let maintenance = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            false,
+            false,
+        );
+        let maintenance = dispatch_capabilities(&maintenance);
+        assert_eq!(maintenance.active_mode.as_deref(), Some("v2"));
+        assert!(!maintenance.v2_authoritative);
+        assert!(!maintenance.observes_v2_decisions);
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

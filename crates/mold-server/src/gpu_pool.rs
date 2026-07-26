@@ -17,6 +17,12 @@ static LEGACY_CHAIN_TICKET: AtomicUsize = AtomicUsize::new(0);
 #[derive(Default)]
 pub(crate) struct LegacyChainWaitQueue {
     waiters: Mutex<Vec<Weak<LegacyChainWaiter>>>,
+    execution_wake_sequence: Mutex<u64>,
+    execution_wake: Condvar,
+    #[cfg(test)]
+    owner_claim_waiters: AtomicUsize,
+    #[cfg(test)]
+    owner_claim_wait: Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -182,6 +188,10 @@ pub struct GpuWorker {
     pub active_generation: Arc<RwLock<Option<ActiveGeneration>>>,
     pub model_load_lock: Arc<Mutex<()>>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
+    /// Rollback-mode commands accepted by the depth-two transport. This is
+    /// deliberately separate from `in_flight`, which remains the binary
+    /// execution exclusion fence in every dispatch mode.
+    pub legacy_pending: AtomicUsize,
     pub in_flight: AtomicUsize,
     pub(crate) legacy_chain_waiters: LegacyChainWaitQueue,
     pub consecutive_failures: AtomicUsize,
@@ -359,7 +369,16 @@ impl OwnerWork {
     pub(crate) fn reject(self, error: String) {
         match self {
             Self::Generation(job) => {
+                if let Some(progress) = &job.progress_tx {
+                    let _ =
+                        progress.send(crate::state::SseMessage::Error(mold_core::SseErrorEvent {
+                            message: error.clone(),
+                        }));
+                }
+                let job_id = job.id.clone();
                 let _ = job.result_tx.send(Err(error));
+                job.queue.decrement();
+                job.registry.remove(&job_id);
             }
             Self::PromptExpansion(job) => {
                 let _ = job.result_tx.send(Err(error));
@@ -404,6 +423,24 @@ pub enum GpuWorkerCommand {
 }
 
 impl GpuWorker {
+    pub(crate) fn reserve_legacy_transport(&self) {
+        self.legacy_pending.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn settle_legacy_transport(&self) {
+        self.legacy_pending
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            })
+            .expect("legacy owner completed work without a transport reservation");
+    }
+
+    pub(crate) fn pending_or_executing(&self) -> usize {
+        self.legacy_pending
+            .load(Ordering::SeqCst)
+            .saturating_add(self.in_flight.load(Ordering::SeqCst))
+    }
+
     /// Atomically claim this device for one owner-scheduled or legacy-isolated
     /// GPU operation.
     ///
@@ -457,6 +494,67 @@ impl GpuWorker {
         }
     }
 
+    /// Wait until rollback owner work can acquire the same binary execution
+    /// claim used by V2 grants and legacy chain stages.
+    ///
+    /// The sequence lock closes the check-then-sleep race: a release cannot
+    /// publish its wake until this waiter is parked on the condition variable.
+    pub(crate) fn wait_claim_owner_in_flight(&self) -> bool {
+        loop {
+            let wake_sequence = self
+                .legacy_chain_waiters
+                .execution_wake_sequence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.shutdown_requested.load(Ordering::SeqCst)
+                || self.poisoned.load(Ordering::SeqCst)
+                || self.fatal_cuda_error.load(Ordering::SeqCst)
+            {
+                return false;
+            }
+            if self.try_claim_owner_in_flight() {
+                return true;
+            }
+            #[cfg(test)]
+            {
+                self.legacy_chain_waiters
+                    .owner_claim_waiters
+                    .fetch_add(1, Ordering::SeqCst);
+                self.legacy_chain_waiters.owner_claim_wait.notify_all();
+            }
+            let _wake_sequence = self
+                .legacy_chain_waiters
+                .execution_wake
+                .wait(wake_sequence)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            #[cfg(test)]
+            self.legacy_chain_waiters
+                .owner_claim_waiters
+                .fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_until_owner_claim_blocked(&self) {
+        let mut wake_sequence = self
+            .legacy_chain_waiters
+            .execution_wake_sequence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while self
+            .legacy_chain_waiters
+            .owner_claim_waiters
+            .load(Ordering::SeqCst)
+            == 0
+        {
+            wake_sequence = self
+                .legacy_chain_waiters
+                .owner_claim_wait
+                .wait(wake_sequence)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
     pub(crate) fn register_legacy_chain_waiter(&self, waiter: &Arc<LegacyChainWaiter>) {
         let mut waiters = self
             .legacy_chain_waiters
@@ -476,15 +574,21 @@ impl GpuWorker {
     }
 
     pub(crate) fn unregister_legacy_chain_waiter(&self, waiter: &Arc<LegacyChainWaiter>) {
-        self.legacy_chain_waiters
-            .waiters
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|queued| {
-                queued
-                    .upgrade()
-                    .is_some_and(|queued| !Arc::ptr_eq(&queued, waiter))
-            });
+        {
+            self.legacy_chain_waiters
+                .waiters
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|queued| {
+                    queued
+                        .upgrade()
+                        .is_some_and(|queued| !Arc::ptr_eq(&queued, waiter))
+                });
+        }
+        // A rollback owner can be parked solely because this waiter exhausted
+        // the global bypass allowance. Cancellation/removal must reopen that
+        // owner even though no execution claim was released.
+        self.notify_execution_waiters();
     }
 
     #[cfg(test)]
@@ -527,6 +631,17 @@ impl GpuWorker {
     pub(crate) fn release_in_flight(&self) {
         self.in_flight.store(0, Ordering::SeqCst);
         self.notify_legacy_chain_waiters();
+        self.notify_execution_waiters();
+    }
+
+    pub(crate) fn notify_execution_waiters(&self) {
+        let mut sequence = self
+            .legacy_chain_waiters
+            .execution_wake_sequence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *sequence = sequence.saturating_add(1);
+        self.legacy_chain_waiters.execution_wake.notify_all();
     }
 
     fn notify_legacy_chain_waiters(&self) {
@@ -603,6 +718,7 @@ impl GpuWorker {
     pub(crate) fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::SeqCst);
         self.notify_legacy_chain_waiters();
+        self.notify_execution_waiters();
         match self.job_tx.try_send(GpuWorkerCommand::Shutdown) {
             Ok(())
             | Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown))
@@ -823,7 +939,7 @@ impl GpuPool {
             })
             .collect();
 
-        candidates.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
+        candidates.sort_by_key(|w| w.pending_or_executing());
         candidates.into_iter().next().cloned()
     }
 
@@ -876,7 +992,7 @@ impl GpuPool {
                     active_model.is_some() || cache.active_model().is_some(),
                 )
             };
-            let in_flight = w.in_flight.load(Ordering::SeqCst);
+            let in_flight = w.pending_or_executing();
             // During an in-flight generation the worker thread calls
             // `cache.take()`, which removes the entry entirely — so
             // `cache.active_model()` and `cache.get(model).residency == Gpu`
@@ -903,7 +1019,7 @@ impl GpuPool {
 
         // 1. Loaded and idle — least in-flight first (should all be 0).
         if !loaded_idle.is_empty() {
-            loaded_idle.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
+            loaded_idle.sort_by_key(|w| w.pending_or_executing());
             return loaded_idle.first().map(|w| (*w).clone());
         }
 
@@ -924,7 +1040,7 @@ impl GpuPool {
         //    idle GPU can hold the model: waiting for the warm card beats
         //    cold-loading onto a card that would have to offload.
         if !loaded_busy.is_empty() {
-            loaded_busy.sort_by_key(|w| w.in_flight.load(Ordering::SeqCst));
+            loaded_busy.sort_by_key(|w| w.pending_or_executing());
             return loaded_busy.first().map(|w| (*w).clone());
         }
 
@@ -993,6 +1109,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
@@ -1019,6 +1136,33 @@ mod tests {
         assert!(worker.try_claim_in_flight());
         worker.release_in_flight();
         assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancelled_chain_waiter_wakes_owner_after_global_bypass_limit() {
+        let (worker, _job_rx) = test_worker(0, 24_000_000_000);
+        let waiter = LegacyChainWaiter::new();
+        worker.register_legacy_chain_waiter(&waiter);
+        for _ in 0..MAX_OWNER_BYPASSES_FOR_CHAIN {
+            assert!(worker.try_claim_owner_in_flight());
+            worker.release_in_flight();
+        }
+
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::channel();
+        let waiting_worker = worker.clone();
+        let owner = std::thread::spawn(move || {
+            claimed_tx
+                .send(waiting_worker.wait_claim_owner_in_flight())
+                .unwrap();
+        });
+        worker.wait_until_owner_claim_blocked();
+        worker.unregister_legacy_chain_waiter(&waiter);
+
+        assert!(claimed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("waiter removal must wake the rollback owner"));
+        owner.join().unwrap();
+        worker.release_in_flight();
     }
 
     #[test]

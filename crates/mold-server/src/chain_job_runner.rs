@@ -2536,6 +2536,7 @@ mod tests {
                     shared_pool: Arc::new(Mutex::new(
                         mold_inference::shared_pool::SharedPool::new(),
                     )),
+                    legacy_pending: AtomicUsize::new(0),
                     in_flight: AtomicUsize::new(0),
                     legacy_chain_waiters: Default::default(),
                     consecutive_failures: AtomicUsize::new(0),

@@ -377,49 +377,63 @@ fn run_legacy_gpu_owner_loop(
         "legacy GPU worker thread started"
     );
     loop {
-        if worker.shutdown_requested.load(Ordering::SeqCst)
-            || worker.poisoned.load(Ordering::SeqCst)
-            || worker.fatal_cuda_error.load(Ordering::SeqCst)
-        {
-            break;
-        }
         let command = match job_rx.recv_timeout(idle_poll) {
             Ok(command) => command,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if worker.shutdown_requested.load(Ordering::SeqCst)
-                    || worker.poisoned.load(Ordering::SeqCst)
-                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
-                {
+                if worker.shutdown_requested.load(Ordering::SeqCst) {
                     break;
                 }
-                evict_idle_on_worker(worker, cache_idle_ttl);
+                if !worker.poisoned.load(Ordering::SeqCst)
+                    && !worker.fatal_cuda_error.load(Ordering::SeqCst)
+                {
+                    evict_idle_on_worker(worker, cache_idle_ttl);
+                }
+                // A fatal owner deliberately remains alive as a rejection
+                // drain until server teardown first cancels/joins rollback
+                // dispatchers and then requests owner shutdown. Exiting here
+                // would leave a live sender able to accept unowned work.
                 continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let grant = match command {
             GpuWorkerCommand::Grant(grant) => grant,
-            GpuWorkerCommand::Shutdown => break,
+            GpuWorkerCommand::Shutdown => {
+                reject_buffered_legacy_grants(worker, &job_rx);
+                break;
+            }
         };
         if worker.poisoned.load(Ordering::SeqCst)
             || worker.fatal_cuda_error.load(Ordering::SeqCst)
             || worker.shutdown_requested.load(Ordering::SeqCst)
         {
-            grant
-                .work
-                .reject(fatal_cuda_user_message("queued GPU work"));
-            settle_legacy_in_flight(worker);
-            break;
+            grant.work.reject(legacy_rejection_message(worker));
+            worker.settle_legacy_transport();
+            if worker.shutdown_requested.load(Ordering::SeqCst) {
+                reject_buffered_legacy_grants(worker, &job_rx);
+                break;
+            }
+            continue;
+        }
+        if !worker.wait_claim_owner_in_flight() {
+            grant.work.reject(legacy_rejection_message(worker));
+            worker.settle_legacy_transport();
+            if worker.shutdown_requested.load(Ordering::SeqCst) {
+                reject_buffered_legacy_grants(worker, &job_rx);
+                break;
+            }
+            continue;
         }
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_legacy_owner_work(worker, *grant, &owner_event_tx);
         }));
-        settle_legacy_in_flight(worker);
+        worker.release_in_flight();
+        worker.settle_legacy_transport();
         if outcome.is_err() {
             quarantine_poisoned_worker(worker);
-            break;
         }
     }
+    reject_buffered_legacy_grants(worker, &job_rx);
     if !worker.poisoned.load(Ordering::SeqCst) && !worker.fatal_cuda_error.load(Ordering::SeqCst) {
         let cached = worker
             .model_cache
@@ -439,13 +453,24 @@ fn run_legacy_gpu_owner_loop(
     tracing::info!(gpu = worker.gpu.ordinal, "legacy GPU worker thread exiting");
 }
 
-fn settle_legacy_in_flight(worker: &GpuWorker) {
-    worker
-        .in_flight
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            current.checked_sub(1)
-        })
-        .expect("legacy owner completed work without a dispatch claim");
+fn legacy_rejection_message(worker: &GpuWorker) -> String {
+    if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
+        fatal_cuda_user_message("queued GPU work")
+    } else {
+        "GPU work was not started because the server is shutting down".to_string()
+    }
+}
+
+fn reject_buffered_legacy_grants(
+    worker: &GpuWorker,
+    job_rx: &std::sync::mpsc::Receiver<GpuWorkerCommand>,
+) {
+    while let Ok(command) = job_rx.try_recv() {
+        if let GpuWorkerCommand::Grant(grant) = command {
+            grant.work.reject(legacy_rejection_message(worker));
+            worker.settle_legacy_transport();
+        }
+    }
 }
 
 fn validate_grant_before_acceptance(
@@ -814,6 +839,7 @@ fn quarantine_poisoned_worker(worker: &GpuWorker) {
     // closed too.
     worker.poisoned.store(true, Ordering::SeqCst);
     worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+    worker.notify_execution_waiters();
     worker.fatal_cuda_shutdown.notify_one();
     worker.consecutive_failures.store(3, Ordering::SeqCst);
     worker.set_resident_model(None);
@@ -2906,6 +2932,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
@@ -2959,7 +2986,15 @@ mod tests {
         ordinal: usize,
         fatal_cuda_error: Arc<AtomicBool>,
     ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
-        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        protocol_worker_with_capacity(ordinal, fatal_cuda_error, 1)
+    }
+
+    fn protocol_worker_with_capacity(
+        ordinal: usize,
+        fatal_cuda_error: Arc<AtomicBool>,
+        capacity: usize,
+    ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(capacity);
         let worker = Arc::new(GpuWorker {
             gpu: DiscoveredGpu {
                 ordinal,
@@ -2979,6 +3014,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
@@ -2991,6 +3027,37 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    fn legacy_admin_grant(
+        worker: &GpuWorker,
+        id: &str,
+    ) -> (
+        Box<LeaseGrant>,
+        tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        (
+            Box::new(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: id.to_string(),
+                    device_id: crate::scheduler::worker_device_id(worker),
+                    state_version: 0,
+                    plan_version: 0,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                },
+                work: OwnerWork::AdminModelLoad(Box::new(crate::gpu_pool::AdminModelLoadJob {
+                    id: id.to_string(),
+                    model: "never-load".to_string(),
+                    config: mold_core::Config::default(),
+                    result_tx,
+                })),
+                retry: None,
+            }),
+            result_rx,
+        )
     }
 
     #[test]
@@ -3015,6 +3082,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(1),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
@@ -3238,7 +3306,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let (ran_tx, ran_rx) = std::sync::mpsc::channel();
-        worker.in_flight.store(1, Ordering::SeqCst);
+        worker.reserve_legacy_transport();
         worker
             .try_send_job(Box::new(LeaseGrant {
                 fence: crate::scheduler::LeaseFence {
@@ -3262,23 +3330,178 @@ mod tests {
         ran_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("legacy owner should execute transported work");
-        for _ in 0..100 {
-            if worker.in_flight.load(Ordering::SeqCst) == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
         assert!(matches!(
             owner_event_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
         worker.request_shutdown();
         handle.join().expect("legacy owner should join cleanly");
+        assert_eq!(worker.pending_or_executing(), 0);
         assert!(matches!(
             owner_event_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn legacy_transport_never_executes_across_an_existing_binary_claim() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(worker.try_claim_in_flight(), "synthetic chain claim");
+        let handle = spawn_legacy_gpu_thread(
+            worker.clone(),
+            job_rx,
+            owner_event_tx,
+            Duration::from_secs(60),
+        );
+        let (ran_tx, ran_rx) = std::sync::mpsc::channel();
+        worker.reserve_legacy_transport();
+        worker
+            .try_send_job(Box::new(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "legacy-behind-chain".to_string(),
+                    device_id: crate::scheduler::worker_device_id(&worker),
+                    state_version: 0,
+                    plan_version: 0,
+                    worker_generation: 0,
+                    memory_sample_generation: 0,
+                    memory_ledger_sequence: 0,
+                },
+                work: OwnerWork::Probe {
+                    id: "legacy-behind-chain".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(move || ran_tx.send(()).unwrap()),
+                },
+                retry: None,
+            }))
+            .unwrap();
+
+        worker.wait_until_owner_claim_blocked();
+        assert!(matches!(
+            ran_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(worker.legacy_pending.load(Ordering::SeqCst), 1);
+
+        worker.release_in_flight();
+        ran_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("legacy work should run after the chain releases");
+        worker.request_shutdown();
+        handle.join().unwrap();
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn fatal_legacy_owner_rejects_dequeued_and_depth_two_buffered_work_exactly_once() {
+        let fatal = Arc::new(AtomicBool::new(false));
+        let (worker, job_rx) = protocol_worker_with_capacity(0, fatal.clone(), 2);
+        let cache_operations = Arc::new(Mutex::new(Vec::new()));
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(LifecycleRecordingEngine {
+                name: "fatal-cache-sentinel".to_string(),
+                loaded: false,
+                operations: cache_operations.clone(),
+            }),
+            0,
+        );
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(worker.try_claim_in_flight(), "synthetic chain claim");
+        let handle = spawn_legacy_gpu_thread(
+            worker.clone(),
+            job_rx,
+            owner_event_tx,
+            Duration::from_secs(60),
+        );
+
+        let (first, first_result) = legacy_admin_grant(&worker, "fatal-dequeued");
+        worker.reserve_legacy_transport();
+        worker.try_send_job(first).unwrap();
+        worker.wait_until_owner_claim_blocked();
+
+        let mut results = vec![first_result];
+        for id in ["fatal-buffered-1", "fatal-buffered-2"] {
+            let (grant, result) = legacy_admin_grant(&worker, id);
+            worker.reserve_legacy_transport();
+            worker.try_send_job(grant).unwrap();
+            results.push(result);
+        }
+        assert_eq!(worker.legacy_pending.load(Ordering::SeqCst), 3);
+
+        worker.poisoned.store(true, Ordering::SeqCst);
+        fatal.store(true, Ordering::SeqCst);
+        worker.notify_execution_waiters();
+        for result in results {
+            let error = result
+                .blocking_recv()
+                .expect("every accepted work item must settle")
+                .expect_err("fatal work must be rejected");
+            assert!(error.contains("Restart the mold server"));
+        }
+        assert!(
+            !handle.is_finished(),
+            "fatal owner remains a rejection drain until dispatchers stop and request shutdown"
+        );
+        worker.request_shutdown();
+        handle.join().expect("fatal owner should drain and join");
+        assert_eq!(worker.legacy_pending.load(Ordering::SeqCst), 0);
+        assert_eq!(worker.model_cache.lock().unwrap().len(), 1);
+        assert!(
+            cache_operations.lock().unwrap().is_empty(),
+            "fatal shutdown must retain poisoned cache without unload or drop"
+        );
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            1,
+            "owner must not release a chain claim it never acquired"
+        );
+        worker.release_in_flight();
+    }
+
+    #[test]
+    fn graceful_legacy_owner_rejects_dequeued_and_depth_two_buffered_work_exactly_once() {
+        let (worker, job_rx) =
+            protocol_worker_with_capacity(0, Arc::new(AtomicBool::new(false)), 2);
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(worker.try_claim_in_flight(), "synthetic chain claim");
+        let handle = spawn_legacy_gpu_thread(
+            worker.clone(),
+            job_rx,
+            owner_event_tx,
+            Duration::from_secs(60),
+        );
+
+        let (first, first_result) = legacy_admin_grant(&worker, "shutdown-dequeued");
+        worker.reserve_legacy_transport();
+        worker.try_send_job(first).unwrap();
+        worker.wait_until_owner_claim_blocked();
+
+        let mut results = vec![first_result];
+        for id in ["shutdown-buffered-1", "shutdown-buffered-2"] {
+            let (grant, result) = legacy_admin_grant(&worker, id);
+            worker.reserve_legacy_transport();
+            worker.try_send_job(grant).unwrap();
+            results.push(result);
+        }
+        worker.request_shutdown();
+        for result in results {
+            let error = result
+                .blocking_recv()
+                .expect("every accepted work item must settle")
+                .expect_err("unstarted shutdown work must be rejected");
+            assert!(error.contains("shutting down"));
+        }
+        handle.join().expect("shutdown owner should drain and join");
+        assert_eq!(worker.legacy_pending.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            worker.in_flight.load(Ordering::SeqCst),
+            1,
+            "owner must not release a chain claim it never acquired"
+        );
+        worker.release_in_flight();
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -3575,6 +3798,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),

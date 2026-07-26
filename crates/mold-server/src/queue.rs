@@ -7,6 +7,8 @@ use mold_core::{
 };
 use mold_db::{MetadataDb, RecordSource};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
@@ -712,6 +714,10 @@ pub struct QueuePause {
     /// `notify_waiters()` so *all* loops (single- and multi-GPU) proceed, not
     /// just one.
     notify: Notify,
+    #[cfg(test)]
+    waiters: AtomicUsize,
+    #[cfg(test)]
+    waiter_notify: Notify,
 }
 
 impl QueuePause {
@@ -719,6 +725,10 @@ impl QueuePause {
         Arc::new(Self {
             paused: AtomicBool::new(false),
             notify: Notify::new(),
+            #[cfg(test)]
+            waiters: AtomicUsize::new(0),
+            #[cfg(test)]
+            waiter_notify: Notify::new(),
         })
     }
 
@@ -754,6 +764,26 @@ impl QueuePause {
             tokio::pin!(notified);
             notified.as_mut().enable();
             if !self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+            #[cfg(test)]
+            {
+                self.waiters.fetch_add(1, Ordering::SeqCst);
+                self.waiter_notify.notify_waiters();
+            }
+            notified.await;
+            #[cfg(test)]
+            self.waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn wait_until_blocked(&self) {
+        while self.waiters.load(Ordering::SeqCst) == 0 {
+            let notified = self.waiter_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.waiters.load(Ordering::SeqCst) > 0 {
                 break;
             }
             notified.await;
@@ -1389,24 +1419,39 @@ pub async fn run_queue_dispatcher(
     job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
 ) {
+    run_queue_dispatcher_until_cancelled(job_rx, state, tokio_util::sync::CancellationToken::new())
+        .await;
+}
+
+pub async fn run_queue_dispatcher_until_cancelled(
+    job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
     tracing::debug!("multi-GPU queue dispatcher started");
     let buffer_size = resolve_lookahead_buffer();
     let max_deferrals = resolve_max_deferrals();
-    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals).await;
+    run_queue_dispatcher_with_tuning(job_rx, state, buffer_size, max_deferrals, shutdown).await;
 }
 
 pub async fn run_legacy_scheduled_work_dispatcher(
     mut scheduled_work_rx: tokio::sync::mpsc::Receiver<crate::scheduler::ScheduledOwnerWork>,
     mut owner_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::gpu_worker::LegacyOwnerEvent>,
     state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut scheduled_closed = false;
     let mut followups_closed = false;
     loop {
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
         if scheduled_closed && followups_closed {
             break;
         }
         let work = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
             work = scheduled_work_rx.recv(), if !scheduled_closed => {
                 match work {
                     Some(work) => Some(work),
@@ -1429,7 +1474,18 @@ pub async fn run_legacy_scheduled_work_dispatcher(
         let Some(work) = work else {
             continue;
         };
-        dispatch_legacy_scheduled_work(&state, work).await;
+        if !dispatch_legacy_scheduled_work(&state, work, &shutdown).await {
+            break;
+        }
+    }
+    scheduled_work_rx.close();
+    while let Some(work) = scheduled_work_rx.recv().await {
+        work.work.reject(legacy_dispatch_stop_message(&state));
+    }
+    while let Ok(crate::gpu_worker::LegacyOwnerEvent::FollowupReady(work)) =
+        owner_event_rx.try_recv()
+    {
+        work.work.reject(legacy_dispatch_stop_message(&state));
     }
     tracing::info!("legacy GPU utility dispatcher shutting down");
 }
@@ -1437,15 +1493,24 @@ pub async fn run_legacy_scheduled_work_dispatcher(
 async fn dispatch_legacy_scheduled_work(
     state: &AppState,
     work: crate::scheduler::ScheduledOwnerWork,
-) {
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
     let mut pending = Some(work);
     let mut skip = Vec::new();
     loop {
+        if !wait_for_legacy_dispatch(state, shutdown).await {
+            pending
+                .take()
+                .expect("legacy scheduled work remains pending")
+                .work
+                .reject(legacy_dispatch_stop_message(state));
+            return false;
+        }
         let Some(current) = pending.as_ref() else {
-            return;
+            return true;
         };
         if current.work.is_cancelled() {
-            return;
+            return true;
         }
         if state
             .gpu_pool
@@ -1458,7 +1523,7 @@ async fn dispatch_legacy_scheduled_work(
                 .expect("legacy scheduled work remains pending")
                 .work
                 .reject("fatal CUDA error requires server restart".to_string());
-            return;
+            return false;
         }
         let worker = if let Some(ordinal) = current.hard_ordinal {
             state.gpu_pool.worker_by_ordinal(ordinal)
@@ -1476,7 +1541,7 @@ async fn dispatch_legacy_scheduled_work(
                     .expect("legacy scheduled work remains pending")
                     .work
                     .reject("requested GPU is unavailable".to_string());
-                return;
+                return true;
             }
             skip.clear();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1485,11 +1550,15 @@ async fn dispatch_legacy_scheduled_work(
 
         let observation = build_observed_dispatch(
             state,
-            &current.id,
-            current.work.kind(),
-            &current.model_fingerprint,
-            current.estimated_vram_bytes,
-            current.hard_ordinal,
+            ObservedDispatchInput {
+                work_id: &current.id,
+                work_kind: current.work.kind(),
+                model_fingerprint: &current.model_fingerprint,
+                estimated_vram_bytes: current.estimated_vram_bytes,
+                estimated_host_ram_bytes: current.estimated_host_ram_bytes,
+                request: None,
+                hard_ordinal: current.hard_ordinal,
+            },
             &worker,
         );
         let current = pending.take().expect("legacy scheduled work is present");
@@ -1510,7 +1579,7 @@ async fn dispatch_legacy_scheduled_work(
             memory_sample_generation: 0,
             memory_ledger_sequence: 0,
         };
-        worker.in_flight.fetch_add(1, Ordering::SeqCst);
+        worker.reserve_legacy_transport();
         let grant = Box::new(crate::gpu_pool::LeaseGrant {
             fence,
             work: current.work,
@@ -1521,10 +1590,10 @@ async fn dispatch_legacy_scheduled_work(
                 if let Some(observation) = observation {
                     state.scheduled_work.observations().record(observation);
                 }
-                return;
+                return true;
             }
             Err(error) => {
-                worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                worker.settle_legacy_transport();
                 let grant = match error {
                     std::sync::mpsc::TrySendError::Full(grant)
                     | std::sync::mpsc::TrySendError::Disconnected(grant) => *grant,
@@ -1556,19 +1625,72 @@ async fn dispatch_legacy_scheduled_work(
     }
 }
 
+async fn wait_for_legacy_dispatch(
+    state: &AppState,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> bool {
+    if shutdown.is_cancelled()
+        || state
+            .gpu_pool
+            .workers
+            .iter()
+            .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+    {
+        return false;
+    }
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => false,
+        _ = state.queue_pause.wait_if_paused() => {
+            !state.gpu_pool.workers.iter().any(|worker| {
+                worker.fatal_cuda_error.load(Ordering::SeqCst)
+            })
+        }
+    }
+}
+
+fn legacy_dispatch_stop_message(state: &AppState) -> String {
+    if state
+        .gpu_pool
+        .workers
+        .iter()
+        .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+    {
+        "fatal CUDA error requires server restart".to_string()
+    } else {
+        "GPU work was not started because the server is shutting down".to_string()
+    }
+}
+
 async fn run_queue_dispatcher_with_tuning(
     mut job_rx: tokio::sync::mpsc::Receiver<GenerationJob>,
     state: AppState,
     buffer_size: usize,
     max_deferrals: usize,
+    shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut buffer: VecDeque<BufferedJob> = VecDeque::with_capacity(buffer_size);
 
-    loop {
+    'dispatcher: loop {
+        if shutdown.is_cancelled()
+            || state
+                .gpu_pool
+                .workers
+                .iter()
+                .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+        {
+            break;
+        }
         // Hold new-job dispatch while paused; in-flight worker jobs continue.
-        state.queue_pause.wait_if_paused().await;
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
         if buffer.is_empty() {
-            match job_rx.recv().await {
+            match tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => None,
+                job = job_rx.recv() => job,
+            } {
                 Some(j) => buffer.push_back(BufferedJob::new(j)),
                 None => break,
             }
@@ -1577,7 +1699,9 @@ async fn run_queue_dispatcher_with_tuning(
         // Re-check after the recv: a pause that landed while this loop was
         // parked waiting for work must hold the job that woke it, not leak
         // it into dispatch.
-        state.queue_pause.wait_if_paused().await;
+        if !wait_for_legacy_dispatch(&state, &shutdown).await {
+            break;
+        }
 
         // Honor user reorders (`PATCH /api/queue/:id {position}`) before the
         // model-swap picker runs — the registry is the single source of truth
@@ -1704,6 +1828,19 @@ async fn run_queue_dispatcher_with_tuning(
         let mut dispatched = false;
 
         while !dispatched {
+            if shutdown.is_cancelled()
+                || state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .any(|worker| worker.fatal_cuda_error.load(Ordering::SeqCst))
+            {
+                if let Some(job) = gpu_job.take() {
+                    crate::gpu_pool::OwnerWork::Generation(Box::new(job))
+                        .reject(legacy_dispatch_stop_message(&state));
+                }
+                break 'dispatcher;
+            }
             if gpu_job
                 .as_ref()
                 .is_some_and(|pending| pending.result_tx.is_closed())
@@ -1758,16 +1895,21 @@ async fn run_queue_dispatcher_with_tuning(
 
             let observed_dispatch = build_observed_dispatch(
                 &state,
-                &job_id,
-                mold_scheduler::WorkKind::Generation,
-                &model_name,
-                estimated_vram,
-                preferred_gpu,
+                ObservedDispatchInput {
+                    work_id: &job_id,
+                    work_kind: mold_scheduler::WorkKind::Generation,
+                    model_fingerprint: &model_name,
+                    estimated_vram_bytes: estimated_vram,
+                    estimated_host_ram_bytes: 0,
+                    request: gpu_job.as_ref().map(|job| &job.request),
+                    hard_ordinal: preferred_gpu,
+                },
                 &worker,
             );
 
-            // Increment in-flight BEFORE sending to reserve the slot.
-            worker.in_flight.fetch_add(1, Ordering::SeqCst);
+            // Reserve rollback transport capacity before sending. Execution
+            // ownership remains the owner's binary claim after dequeue.
+            worker.reserve_legacy_transport();
             let pending = gpu_job.take().expect("gpu_job present in retry loop");
             if preferred_gpu.is_none() {
                 let _ = state
@@ -1796,7 +1938,7 @@ async fn run_queue_dispatcher_with_tuning(
                     dispatched = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(j)) => {
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    worker.settle_legacy_transport();
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
@@ -1812,7 +1954,7 @@ async fn run_queue_dispatcher_with_tuning(
                     }
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(j)) => {
-                    worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    worker.settle_legacy_transport();
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
@@ -1845,7 +1987,26 @@ async fn run_queue_dispatcher_with_tuning(
         #[cfg(feature = "metrics")]
         crate::metrics::record_queue_depth(state.queue.pending());
     }
+    for buffered in buffer {
+        reject_generation_job(&state, buffered.job, legacy_dispatch_stop_message(&state));
+    }
+    job_rx.close();
+    while let Some(job) = job_rx.recv().await {
+        reject_generation_job(&state, job, legacy_dispatch_stop_message(&state));
+    }
     tracing::info!("multi-GPU queue dispatcher shutting down");
+}
+
+fn reject_generation_job(state: &AppState, job: GenerationJob, message: String) {
+    if let Some(progress) = &job.progress_tx {
+        let _ = progress.send(SseMessage::Error(SseErrorEvent {
+            message: message.clone(),
+        }));
+    }
+    let job_id = job.id.clone();
+    let _ = job.result_tx.send(Err(message));
+    state.queue.decrement();
+    state.job_registry.remove(&job_id);
 }
 
 fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
@@ -1855,30 +2016,41 @@ fn generation_from_legacy_grant(grant: crate::gpu_pool::LeaseGrant) -> GpuJob {
     }
 }
 
+pub(crate) struct ObservedDispatchInput<'a> {
+    pub work_id: &'a str,
+    pub work_kind: mold_scheduler::WorkKind,
+    pub model_fingerprint: &'a str,
+    pub estimated_vram_bytes: u64,
+    pub estimated_host_ram_bytes: u64,
+    pub request: Option<&'a mold_core::GenerateRequest>,
+    pub hard_ordinal: Option<usize>,
+}
+
 pub(crate) fn build_observed_dispatch(
     state: &AppState,
-    work_id: &str,
-    work_kind: mold_scheduler::WorkKind,
-    model_fingerprint: &str,
-    estimated_vram_bytes: u64,
-    hard_ordinal: Option<usize>,
+    input: ObservedDispatchInput<'_>,
     legacy_worker: &crate::gpu_pool::GpuWorker,
 ) -> Option<crate::dispatch_mode::DispatchObservation> {
-    if !state
-        .scheduled_work
-        .dispatch_mode()
-        .records_v2_observations()
-    {
+    let ObservedDispatchInput {
+        work_id,
+        work_kind,
+        model_fingerprint,
+        estimated_vram_bytes,
+        estimated_host_ram_bytes,
+        request,
+        hard_ordinal,
+    } = input;
+    if !state.scheduled_work.observes_v2_decisions() {
         return None;
     }
 
-    let sampled_free = state
-        .resources
-        .latest()
+    let resource_snapshot = state.resources.latest();
+    let sampled_free = resource_snapshot
+        .as_ref()
         .map(|snapshot| {
             snapshot
                 .gpus
-                .into_iter()
+                .iter()
                 .map(|gpu| {
                     (
                         (gpu.backend, gpu.ordinal),
@@ -1888,17 +2060,24 @@ pub(crate) fn build_observed_dispatch(
                 .collect::<std::collections::BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    let mut eligible_idle_device_ids = Vec::new();
     let devices = state
         .gpu_pool
         .workers
         .iter()
         .map(|worker| {
             let device_id = crate::scheduler::worker_device_id(worker);
+            let sampled_available_vram = sampled_free
+                .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                .copied();
             let health = if worker.poisoned.load(Ordering::SeqCst)
                 || worker.fatal_cuda_error.load(Ordering::SeqCst)
             {
                 mold_scheduler::DeviceHealth::Poisoned
+            } else if sampled_available_vram.is_none() {
+                // Observe mode has no reservation ledger of its own, so a
+                // missing current sample is unavailable comparison data, not
+                // permission to substitute discovery-time free memory.
+                mold_scheduler::DeviceHealth::Degraded
             } else if worker.consecutive_failures.load(Ordering::SeqCst) >= 3
                 && worker
                     .degraded_until
@@ -1915,17 +2094,12 @@ pub(crate) fn build_observed_dispatch(
             } else {
                 mold_scheduler::DeviceActivity::Busy
             };
-            let available_vram_bytes = sampled_free
-                .get(&(worker.gpu.backend, worker.gpu.ordinal))
-                .copied()
-                .unwrap_or(worker.gpu.free_vram_bytes);
-            if health == mold_scheduler::DeviceHealth::Healthy
-                && activity == mold_scheduler::DeviceActivity::Idle
-                && available_vram_bytes >= estimated_vram_bytes
-                && hard_ordinal.is_none_or(|ordinal| ordinal == worker.gpu.ordinal)
-            {
-                eligible_idle_device_ids.push(device_id.clone());
-            }
+            let available_vram_bytes = sampled_available_vram
+                // Observe comparisons are post-startup telemetry. Unlike the
+                // authoritative coordinator's explicitly documented bootstrap
+                // allowance, they must not turn a stale discovery sample into
+                // a claimed current placement.
+                .unwrap_or(0);
             let warm = worker
                 .resident_model
                 .read()
@@ -1952,22 +2126,83 @@ pub(crate) fn build_observed_dispatch(
             }
         })
         .collect::<Vec<_>>();
-    eligible_idle_device_ids.sort();
 
-    let candidates = state
-        .gpu_pool
-        .workers
-        .iter()
-        .map(|worker| {
-            mold_scheduler::CandidatePlacement::new(
-                crate::scheduler::worker_device_id(worker),
-                model_fingerprint,
-                0,
-            )
-            .with_vram(estimated_vram_bytes)
-            .with_timing(1_000, 0, 1_000)
-        })
-        .collect::<Vec<_>>();
+    let candidates = if let Some(request) = request {
+        let device_facts = devices
+            .iter()
+            .filter(|device| device.is_schedulable())
+            .filter_map(|device| {
+                let worker = state.gpu_pool.workers.iter().find(|worker| {
+                    crate::scheduler::worker_device_id(worker) == device.id.as_str()
+                })?;
+                Some(crate::execution_plan::DeviceFact {
+                    id: device.id.to_string(),
+                    ordinal: worker.gpu.ordinal,
+                    available_vram_bytes: device.available_vram_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let config = match state.config.try_read() {
+            Ok(config) => config,
+            Err(_) => {
+                tracing::debug!(
+                    work_id,
+                    "configuration changed while computing read-only V2 observation"
+                );
+                return None;
+            }
+        };
+        let offload_requested = matches!(
+            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        match crate::execution_plan::resolve_execution_plans(
+            &config,
+            request,
+            &device_facts,
+            offload_requested,
+        ) {
+            Ok(plans) => {
+                let failed = crate::gpu_pool::failed_ordinals_for_model(model_fingerprint);
+                plans
+                    .into_iter()
+                    .filter(|plan| !failed.contains(&plan.device_ordinal))
+                    .map(|plan| {
+                        mold_scheduler::CandidatePlacement::new(
+                            plan.device_id,
+                            plan.execution_fingerprint,
+                            plan.predicted_host_increment_bytes,
+                        )
+                        .with_vram(plan.predicted_vram_peak_bytes)
+                        .with_timing(1_000, 0, 1_000)
+                    })
+                    .collect()
+            }
+            Err(error) => {
+                tracing::debug!(
+                    work_id,
+                    error = %error,
+                    "generation has no valid read-only V2 execution plan"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        state
+            .gpu_pool
+            .workers
+            .iter()
+            .map(|worker| {
+                mold_scheduler::CandidatePlacement::new(
+                    crate::scheduler::worker_device_id(worker),
+                    model_fingerprint,
+                    estimated_host_ram_bytes,
+                )
+                .with_vram(estimated_vram_bytes)
+                .with_timing(1_000, 0, 1_000)
+            })
+            .collect::<Vec<_>>()
+    };
     let mut work = mold_scheduler::WorkSnapshot::new(work_id, 0, candidates);
     work.kind = work_kind;
     if let Some(ordinal) = hard_ordinal {
@@ -1979,11 +2214,37 @@ pub(crate) fn build_observed_dispatch(
         work = work.with_hard_device(hard_device_id);
     }
     let work_id = mold_scheduler::WorkId::new(work_id);
+    let host_memory_headroom = resource_snapshot.as_ref().map_or(0, |snapshot| {
+        let available = snapshot
+            .system_ram
+            .total
+            .saturating_sub(snapshot.system_ram.used);
+        let safety_floor = (snapshot.system_ram.total.saturating_mul(15) / 100).max(8 << 30);
+        available.saturating_sub(safety_floor)
+    });
+    let mut eligible_idle_device_ids =
+        work.candidate_placements
+            .iter()
+            .filter(|candidate| candidate.incremental_host_ram_bytes <= host_memory_headroom)
+            .filter_map(|candidate| {
+                let device = devices
+                    .iter()
+                    .find(|device| device.id == candidate.device_id)?;
+                let worker = state.gpu_pool.workers.iter().find(|worker| {
+                    crate::scheduler::worker_device_id(worker) == device.id.as_str()
+                })?;
+                (device.is_idle()
+                    && candidate.predicted_vram_bytes <= device.available_vram_bytes
+                    && hard_ordinal.is_none_or(|ordinal| ordinal == worker.gpu.ordinal))
+                .then(|| device.id.to_string())
+            })
+            .collect::<Vec<_>>();
+    eligible_idle_device_ids.sort();
     let plan = match mold_scheduler::Planner::default().plan(&mold_scheduler::PlannerSnapshot::new(
         1,
         1,
         0,
-        u64::MAX,
+        host_memory_headroom,
         devices,
         vec![work],
     )) {
@@ -2202,6 +2463,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
@@ -2228,14 +2490,39 @@ mod tests {
             scheduled_tx,
             crate::dispatch_mode::DispatchMode::Observe,
         );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
 
         let observation = build_observed_dispatch(
             &state,
-            "observe-read-only",
-            mold_scheduler::WorkKind::Generation,
-            "flux-dev:q4",
-            6_000_000_000,
-            None,
+            ObservedDispatchInput {
+                work_id: "observe-read-only",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "flux-dev:q4",
+                estimated_vram_bytes: 6_000_000_000,
+                estimated_host_ram_bytes: 1 << 30,
+                request: None,
+                hard_ordinal: None,
+            },
             &worker,
         )
         .expect("observe mode should compute a comparison");
@@ -2258,6 +2545,139 @@ mod tests {
     }
 
     #[test]
+    fn observe_generation_never_fabricates_a_candidate_without_an_execution_plan() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+        let request = fake_request("missing-model-with-no-artifacts");
+
+        let observation = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "missing-plan",
+                work_kind: mold_scheduler::WorkKind::Generation,
+                model_fingerprint: &request.model,
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: Some(&request),
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("invalid placement should still produce blocked telemetry");
+
+        assert_eq!(observation.v2_device_id, None);
+        assert!(observation.blocked_reason.is_some());
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn observe_utility_requires_current_telemetry_and_never_truncates_vram_demand() {
+        let (worker, worker_rx) = test_worker(0, 1);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+
+        let without_sample = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "no-current-sample",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "utility",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("missing telemetry should produce blocked comparison data");
+        assert_eq!(without_sample.v2_device_id, None);
+        assert!(without_sample.blocked_reason.is_some());
+
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 << 30,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+        let oversized = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "oversized-utility",
+                work_kind: mold_scheduler::WorkKind::AdminModelLoad,
+                model_fingerprint: "utility",
+                estimated_vram_bytes: 30 << 30,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &worker,
+        )
+        .expect("oversized work should produce blocked comparison data");
+        assert_eq!(oversized.v2_device_id, None);
+        assert!(oversized.blocked_reason.is_some());
+        assert_eq!(worker.pending_or_executing(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn legacy_and_v2_modes_never_run_the_observe_hook() {
         for mode in [
             crate::dispatch_mode::DispatchMode::Legacy,
@@ -2274,11 +2694,15 @@ mod tests {
 
             assert!(build_observed_dispatch(
                 &state,
-                "disabled-observer",
-                mold_scheduler::WorkKind::Generation,
-                "flux-dev:q4",
-                6_000_000_000,
-                None,
+                ObservedDispatchInput {
+                    work_id: "disabled-observer",
+                    work_kind: mold_scheduler::WorkKind::Generation,
+                    model_fingerprint: "flux-dev:q4",
+                    estimated_vram_bytes: 6_000_000_000,
+                    estimated_host_ram_bytes: 0,
+                    request: None,
+                    hard_ordinal: None,
+                },
                 &worker,
             )
             .is_none());
@@ -2302,8 +2726,29 @@ mod tests {
             scheduled_tx,
             crate::dispatch_mode::DispatchMode::Observe,
         );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24_000_000_000,
+                vram_used: 0,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(0),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
 
-        worker.in_flight.store(1, Ordering::SeqCst);
+        worker.reserve_legacy_transport();
         worker
             .try_send_job(Box::new(crate::gpu_pool::LeaseGrant {
                 fence: crate::scheduler::LeaseFence {
@@ -2335,10 +2780,14 @@ mod tests {
             },
         );
         let dispatch_state = state.clone();
-        let dispatch =
-            tokio::spawn(
-                async move { dispatch_legacy_scheduled_work(&dispatch_state, work).await },
-            );
+        let dispatch = tokio::spawn(async move {
+            dispatch_legacy_scheduled_work(
+                &dispatch_state,
+                work,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         assert_eq!(
             state.scheduled_work.observations().snapshot().total,
@@ -2348,7 +2797,7 @@ mod tests {
 
         let filler = worker_rx.recv().expect("remove full-channel filler");
         drop(filler);
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        worker.settle_legacy_transport();
         let accepted = tokio::task::spawn_blocking(move || {
             worker_rx.recv_timeout(std::time::Duration::from_secs(1))
         })
@@ -2364,7 +2813,62 @@ mod tests {
         let snapshot = state.scheduled_work.observations().snapshot();
         assert_eq!(snapshot.total, 1);
         assert_eq!(snapshot.matched, 1);
-        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
+        worker.settle_legacy_transport();
+    }
+
+    #[tokio::test]
+    async fn legacy_scheduled_dispatch_honors_the_shared_pause_gate() {
+        let (worker, worker_rx) = test_worker(0, 2);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (scheduled_tx, scheduled_rx) = tokio::sync::mpsc::channel(2);
+        let (owner_event_tx, owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.queue_pause.pause();
+        scheduled_tx
+            .send(crate::scheduler::ScheduledOwnerWork::new(
+                "paused-utility",
+                "utility",
+                1,
+                crate::gpu_pool::OwnerWork::Probe {
+                    id: "paused-utility".to_string(),
+                    kind: mold_scheduler::WorkKind::AdminModelLoad,
+                    run: Box::new(|| {}),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(run_legacy_scheduled_work_dispatcher(
+            scheduled_rx,
+            owner_event_rx,
+            state.clone(),
+            shutdown.clone(),
+        ));
+        state.queue_pause.wait_until_blocked().await;
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        state.queue_pause.resume();
+        let command = tokio::task::spawn_blocking(move || {
+            worker_rx.recv_timeout(std::time::Duration::from_secs(1))
+        })
+        .await
+        .unwrap()
+        .expect("utility should dispatch only after resume");
+        assert!(matches!(
+            command,
+            crate::gpu_pool::GpuWorkerCommand::Grant(_)
+        ));
+        worker.settle_legacy_transport();
+        shutdown.cancel();
+        drop(scheduled_tx);
+        drop(owner_event_tx);
+        task.await.unwrap();
     }
 
     fn recv_worker_job(
@@ -3247,6 +3751,7 @@ mod tests {
             state.clone(),
             8,
             DEFAULT_MAX_DEFERRALS,
+            tokio_util::sync::CancellationToken::new(),
         ));
 
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
@@ -4110,6 +4615,68 @@ mod tests {
 
         drop(job_tx);
         dispatcher.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_legacy_dispatcher_rejects_all_accepted_generation_work() {
+        let (worker, worker_rx) = test_worker(0, 2);
+        let (job_tx, job_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(job_tx);
+        let state = crate::state::AppState::empty(
+            mold_core::Config::default(),
+            queue.clone(),
+            Arc::new(GpuPool {
+                workers: vec![worker],
+            }),
+            8,
+        );
+        state.queue_pause.pause();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
+            job_rx,
+            state.clone(),
+            8,
+            DEFAULT_MAX_DEFERRALS,
+            shutdown.clone(),
+        ));
+
+        let mut results = Vec::new();
+        for id in ["shutdown-queued-1", "shutdown-queued-2"] {
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            state.job_registry.register(id, "flux-dev:q4");
+            queue
+                .submit(
+                    crate::state::GenerationJob {
+                        id: id.to_string(),
+                        request: fake_request("flux-dev:q4"),
+                        completion_payload: SseCompletionPayload::Full,
+                        progress_tx: None,
+                        result_tx,
+                        output_dir: None,
+                    },
+                    8,
+                )
+                .await
+                .unwrap();
+            results.push(result_rx);
+        }
+        state.queue_pause.wait_until_blocked().await;
+        shutdown.cancel();
+        dispatcher.await.unwrap();
+
+        for result in results {
+            let error = match result.await.expect("accepted generation must settle") {
+                Ok(_) => panic!("unstarted generation must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.contains("shutting down"));
+        }
+        assert_eq!(queue.pending(), 0);
+        assert_eq!(state.job_registry.len(), 0);
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

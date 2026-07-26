@@ -124,6 +124,8 @@ impl ScheduledOwnerWork {
 pub struct ScheduledWorkHandle {
     tx: Option<tokio::sync::mpsc::Sender<ScheduledOwnerWork>>,
     dispatch_mode: crate::dispatch_mode::DispatchMode,
+    v2_authoritative: bool,
+    observes_v2_decisions: bool,
     observations: Arc<crate::dispatch_mode::DispatchObservationRecorder>,
 }
 
@@ -132,6 +134,8 @@ impl Default for ScheduledWorkHandle {
         Self {
             tx: None,
             dispatch_mode: crate::dispatch_mode::DispatchMode::V2,
+            v2_authoritative: false,
+            observes_v2_decisions: false,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
         }
     }
@@ -146,15 +150,39 @@ impl ScheduledWorkHandle {
         tx: tokio::sync::mpsc::Sender<ScheduledOwnerWork>,
         dispatch_mode: crate::dispatch_mode::DispatchMode,
     ) -> Self {
+        Self::for_runtime(
+            tx,
+            dispatch_mode,
+            dispatch_mode.owns_v2_workers(),
+            dispatch_mode.records_v2_observations(),
+        )
+    }
+
+    pub fn for_runtime(
+        tx: tokio::sync::mpsc::Sender<ScheduledOwnerWork>,
+        dispatch_mode: crate::dispatch_mode::DispatchMode,
+        v2_authoritative: bool,
+        observes_v2_decisions: bool,
+    ) -> Self {
         Self {
             tx: Some(tx),
             dispatch_mode,
+            v2_authoritative,
+            observes_v2_decisions,
             observations: Arc::new(crate::dispatch_mode::DispatchObservationRecorder::default()),
         }
     }
 
     pub const fn dispatch_mode(&self) -> crate::dispatch_mode::DispatchMode {
         self.dispatch_mode
+    }
+
+    pub const fn v2_authoritative(&self) -> bool {
+        self.v2_authoritative
+    }
+
+    pub const fn observes_v2_decisions(&self) -> bool {
+        self.observes_v2_decisions
     }
 
     pub fn observations(&self) -> &crate::dispatch_mode::DispatchObservationRecorder {
@@ -2079,6 +2107,7 @@ mod tests {
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            legacy_pending: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             legacy_chain_waiters: Default::default(),
             consecutive_failures: AtomicUsize::new(0),
