@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import DevicePanel from "@studio/components/DevicePanel.vue";
 import {
   canMutateDevice,
   deviceActionLabel,
@@ -15,6 +17,7 @@ import type { Theme, ThemeFamily } from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import type { MobileSettings } from "./settings";
 import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
+import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 
 const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
@@ -52,22 +55,28 @@ function openPrivacyPolicy(): void {
 const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
+const plan = ref<QueuePlan | null>(null);
 const deviceError = ref("");
 let deviceEventsAbort: AbortController | null = null;
 
 async function loadDevices(): Promise<void> {
   if (!props.host) {
     devices.value = null;
+    plan.value = null;
     return;
   }
   try {
     const target = mobileHostTarget(props.host);
-    const value = await apiJsonTo<unknown>(target, "/api/devices");
-    const capabilities = await apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(
-      () => null,
-    );
-    devices.value = parseDeviceListResponse(value).devices;
-    deviceCapabilities.value = capabilities;
+    const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
+      apiJsonTo<unknown>(target, "/api/devices"),
+      fetchServerCapabilities(target),
+      listQueue(target),
+    ]);
+    if (deviceResult.status !== "fulfilled") throw deviceResult.reason;
+    devices.value = parseDeviceListResponse(deviceResult.value).devices;
+    deviceCapabilities.value =
+      capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+    plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
     deviceError.value = "";
   } catch {
     // Older hosts do not expose runtime lifecycle controls.
@@ -89,6 +98,22 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
     const next = new Set(deviceMutations.value);
     next.delete(device.id);
     deviceMutations.value = next;
+  }
+}
+
+async function toggleDeviceById(deviceId: string, enabled: boolean): Promise<void> {
+  const device = devices.value?.find((candidate) => candidate.id === deviceId);
+  if (!device || enabled === device.desired_enabled) return;
+  await toggleDevice(device);
+}
+
+async function unpinWork(workId: string): Promise<void> {
+  if (!props.host) return;
+  try {
+    await setQueueDevicePin(mobileHostTarget(props.host), workId, null);
+    await loadDevices();
+  } catch (error) {
+    deviceError.value = describeTransportError(error, props.host.name);
   }
 }
 
@@ -236,6 +261,17 @@ onBeforeUnmount(() => deviceEventsAbort?.abort());
         <h2 id="mobile-settings-devices-title">GPU devices</h2>
         <p>{{ deviceLifecycleMessage(deviceCapabilities) }}</p>
       </div>
+      <DevicePanel
+        :devices="devices"
+        :plan="plan"
+        :mutable="
+          deviceCapabilities?.devices?.lifecycle === true &&
+          deviceCapabilities?.dispatch?.v2_authoritative === true
+        "
+        :busy-device-id="[...deviceMutations][0] ?? null"
+        @unpin="unpinWork"
+        @toggle="toggleDeviceById"
+      />
       <p v-if="deviceError" class="status-line error-text" role="alert">{{ deviceError }}</p>
       <ul class="mobile-data-list">
         <li v-for="device in devices" :key="device.id" data-test="device-row">

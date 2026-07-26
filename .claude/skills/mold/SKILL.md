@@ -27,6 +27,9 @@ mold run qwen-image:q2 "a poster" --qwen2-variant q6    # Qwen-Image quantized t
 mold run flux-dev:bf16 "portrait" --lora style.safetensors --lora-scale 0.8  # LoRA adapter
 mold mcp --host http://localhost:7680                # Stdio MCP bridge for LM Studio
 mold lambda deploy --instance-type gpu_1x_a10 --region us-west-1  # Private Lambda Cloud web UI
+mold gpu list                                       # Stable GPU/MIG inventory
+mold gpu disable cuda:<stable-id>                   # Drain, then disable
+mold gpu enable cuda:<stable-id>                    # Re-enable runtime scheduling
 ```
 
 `mold mcp` exposes synchronous image generation, async generation with status
@@ -37,7 +40,7 @@ polling, gallery search/fetch, model and LoRA listing, and server status tools.
 Parse `$ARGUMENTS` to determine the action:
 
 - If arguments look like a **prompt** (natural language), run `mold run "<prompt>"` with sensible defaults
-- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`), run that subcommand
+- If arguments start with a **subcommand** (`pull`, `list`, `default`, `config`, `serve`, `server`, `mcp`, `info`, `ps`, `rm`, `unload`, `update`, `stats`, `clean`, `tui`, `completions`, `version`, `runpod`, `lambda`, `jobs`, `gpu`), run that subcommand
 - If arguments include **flags** (`--model`, `--image`, `--steps`, etc.), pass them through
 
 ## Generating Images

@@ -25,12 +25,17 @@ vi.mock("../lib/ipc", () => ({
 
 const apiJsonTo = vi.fn();
 const listDevices = vi.fn();
+const listQueue = vi.fn();
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJsonTo: (...a: unknown[]) => apiJsonTo(...a),
 }));
 vi.mock("@studio/api/devices", () => ({
   listDevices: (...a: unknown[]) => listDevices(...a),
+}));
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  listQueue: (...a: unknown[]) => listQueue(...a),
 }));
 
 import { useAppPrefsStore } from "./appPrefs";
@@ -161,6 +166,7 @@ beforeEach(() => {
   installSettings(settings());
   apiJsonTo.mockResolvedValue({ queue_depth: 0, queue_capacity: 8, version: null });
   listDevices.mockRejectedValue(new Error("legacy server"));
+  listQueue.mockRejectedValue(new Error("legacy server"));
   const conn = useConnectionStore();
   conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "k" };
   conn.status = "ready";
@@ -742,6 +748,52 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
     expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
     expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
+  });
+
+  it("always refreshes predicted completion so Auto can refine equal-depth hosts", async () => {
+    const now = Date.now();
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    apiJsonTo.mockResolvedValue({
+      queue_depth: 2,
+      queue_capacity: 8,
+      version: "0.20.2",
+    });
+    listQueue.mockImplementation((target: { baseUrl: string }) =>
+      Promise.resolve({
+        entries: [],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "queued",
+              parent_id: "queued",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "high",
+              estimated_finish_unix_ms: target.baseUrl.includes("hal9000")
+                ? now + 10_000
+                : now + 20_000,
+            },
+          ],
+        },
+      }),
+    );
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+
+    await hosts.refresh();
+
+    expect(listQueue).toHaveBeenCalledWith({
+      baseUrl: "http://hal9000:7680",
+      apiKey: null,
+    });
+    expect(hosts.resolveRoute(null)?.hostId).toBe("hal9000-7680");
   });
 
   it("connect() dedupes a server already connected under another address by instance id", async () => {

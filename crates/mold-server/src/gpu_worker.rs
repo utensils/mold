@@ -13,9 +13,32 @@ use mold_core::{
 };
 use mold_inference::device;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    /// Activation time accumulated by model-ready calls on one GPU owner
+    /// thread during the current lease.
+    static LEASE_LOAD_MS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn reset_lease_load_ms() {
+    LEASE_LOAD_MS.set(0);
+}
+
+fn add_lease_load_ms(elapsed: Duration) {
+    let millis = u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    LEASE_LOAD_MS.set(LEASE_LOAD_MS.get().saturating_add(millis));
+}
+
+fn take_lease_load_ms() -> Option<u64> {
+    let millis = LEASE_LOAD_MS.replace(0);
+    (millis > 0).then_some(millis)
+}
 
 pub enum LegacyOwnerEvent {
     FollowupReady(Box<crate::scheduler::ScheduledOwnerWork>),
@@ -405,11 +428,13 @@ fn run_gpu_owner_loop(
             work_id: fence.work_id.clone(),
             plan_version: fence.plan_version,
         });
+        reset_lease_load_ms();
         #[cfg(test)]
         pause_after_acceptance_for_test(&fence.work_id);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_owner_work(worker, *grant, &scheduler_tx)
         }));
+        let load_ms = take_lease_load_ms();
         worker.release_in_flight();
         if outcome.is_err() {
             // A panic may have crossed arbitrary Candle/cudarc state.
@@ -425,6 +450,7 @@ fn run_gpu_owner_loop(
             successful: matches!(&outcome, Ok(true))
                 && !worker.poisoned.load(Ordering::SeqCst)
                 && !worker.fatal_cuda_error.load(Ordering::SeqCst),
+            load_ms,
         });
         if outcome.is_err()
             || worker.shutdown_requested.load(Ordering::SeqCst)
@@ -2083,6 +2109,7 @@ fn ensure_model_ready_sync_inner_guarded(
     request_has_lora: bool,
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<()> {
+    let started = Instant::now();
     let result = ensure_model_ready_sync_inner(
         worker,
         model_name,
@@ -2091,6 +2118,7 @@ fn ensure_model_ready_sync_inner_guarded(
         request_has_lora,
         planned_load,
     );
+    add_lease_load_ms(started.elapsed());
     if result.is_ok() {
         worker.set_resident_model(Some(model_name));
     } else if result.as_ref().is_err_and(is_fatal_cuda_error) {
@@ -5031,6 +5059,7 @@ mod tests {
                         owner_epoch: 0,
                         worker_generation: 0,
                         successful: false,
+                        load_ms: None,
                     })
             ),
             None => panic!("owner event channel closed"),

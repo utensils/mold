@@ -1168,8 +1168,6 @@ pub struct QueueWorkItem {
     pub queue_rank: u64,
     pub bypass_count: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hard_pinned_device_id: Option<String>,
@@ -1187,12 +1185,6 @@ pub struct QueueWorkItem {
     pub estimate_confidence: QueueEstimateConfidence,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_stage: Option<usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub batch_partitions: Vec<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity_phase: Option<String>,
 }
 
 /// Versioned scheduler plan appended to `GET /api/queue`.
@@ -1744,6 +1736,15 @@ pub struct RamSnapshot {
 pub enum GpuBackend {
     Cuda,
     Metal,
+}
+
+impl GpuBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3947,6 +3948,18 @@ pub struct DeviceMutationRequest {
     pub enabled: bool,
 }
 
+impl DeviceAdminState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupExcluded => "startup_excluded",
+            Self::Starting => "starting",
+            Self::Enabled => "enabled",
+            Self::Draining => "draining",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
 /// Transient device health. Health is never persisted as a user preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -3955,6 +3968,17 @@ pub enum DeviceHealth {
     Degraded,
     Unavailable,
     Poisoned,
+}
+
+impl DeviceHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Poisoned => "poisoned",
+        }
+    }
 }
 
 /// Current worker activity, orthogonal to administrative and health state.

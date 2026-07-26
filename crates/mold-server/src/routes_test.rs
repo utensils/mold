@@ -1446,6 +1446,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_patch_leaves_semantic_event_publication_to_the_coordinator() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()],
+        });
+        install_worker_registry(&mut state);
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let mut events = state.events.subscribe();
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
+    }
+
+    #[tokio::test]
     async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
         let worker = gpu_worker_stub(0);
         let cache = worker.model_cache.clone();

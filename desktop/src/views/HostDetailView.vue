@@ -28,6 +28,7 @@ import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
@@ -116,6 +117,7 @@ function startResourceStream(reset = false) {
 // ── Live queue (this host's server queue via the jobs store) ──────────────
 
 let queueTimer: ReturnType<typeof setInterval> | null = null;
+let deviceEventsAbort: AbortController | null = null;
 
 function tickQueue() {
   const current = host.value;
@@ -127,6 +129,15 @@ function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
   tickQueue();
   queueTimer = setInterval(tickQueue, 5_000);
+}
+
+function startDeviceEvents() {
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
+  const target = hostTarget();
+  if (!target) return;
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(target, deviceEventsAbort.signal, tickQueue);
 }
 
 let statusAbort: AbortController | null = null;
@@ -190,6 +201,7 @@ watch(
       recentlyUnloaded.value.clear();
     }
     startResourceStream(hostChanged);
+    startDeviceEvents();
     void fetchStatus(hostChanged);
     startQueuePolling();
     startReadyServices();
@@ -214,6 +226,8 @@ watch(
 onUnmounted(() => {
   resourceAbort?.abort();
   resourceAbort = null;
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
   statusAbort?.abort();
   statusAbort = null;
   if (queueTimer) clearInterval(queueTimer);
@@ -727,7 +741,10 @@ async function forget() {
               <DevicePanel
                 :devices="queueSnapshot?.devices ?? []"
                 :plan="queueSnapshot?.plan ?? null"
-                :mutable="queueSnapshot?.devices !== null"
+                :mutable="
+                  queueSnapshot?.devices !== null &&
+                  hosts.capabilities[hostId]?.devices?.lifecycle === true
+                "
                 :busy-device-id="mutatingDeviceId"
                 @unpin="unpinWork"
                 @toggle="toggleDevice"

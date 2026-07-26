@@ -13,6 +13,7 @@ import { useConnectionStore } from "../../stores/connection";
 import { schemaFor } from "../../lib/settingsSchema";
 import type { ConfigRow } from "../../lib/api/types";
 import { subscribeToDeviceSnapshots } from "../../lib/api/deviceEvents";
+import { fetchServerCapabilities } from "../../lib/api/serverCapabilities";
 
 defineProps<{ filter?: ((row: ConfigRow) => boolean) | undefined }>();
 
@@ -22,6 +23,7 @@ const connection = useConnectionStore();
 const devices = ref<DeviceInfo[]>([]);
 const plan = ref<QueuePlan | null>(null);
 const mutatingDeviceId = ref<string | null>(null);
+const lifecycleMutable = ref(false);
 let deviceEventsAbort: AbortController | null = null;
 
 function target() {
@@ -33,14 +35,18 @@ async function loadDevices() {
   if (!apiTarget) {
     devices.value = [];
     plan.value = null;
+    lifecycleMutable.value = false;
     return;
   }
-  const [deviceResult, queueResult] = await Promise.allSettled([
+  const [deviceResult, queueResult, capabilityResult] = await Promise.allSettled([
     listDevices(apiTarget),
     listQueue(apiTarget),
+    fetchServerCapabilities(apiTarget),
   ]);
   if (deviceResult.status === "fulfilled") devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled") plan.value = queueResult.value.plan;
+  lifecycleMutable.value =
+    capabilityResult.status === "fulfilled" && capabilityResult.value.devices?.lifecycle === true;
 }
 
 async function toggleDevice(deviceId: string, enabled: boolean) {
@@ -108,7 +114,7 @@ async function reset(row: ConfigRow) {
       class="mb-5"
       :devices="devices"
       :plan="plan"
-      mutable
+      :mutable="lifecycleMutable"
       :busy-device-id="mutatingDeviceId"
       @unpin="unpinWork"
       @toggle="toggleDevice"

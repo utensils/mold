@@ -162,7 +162,17 @@ impl DeviceRegistry {
     /// Foundation for Phase C lifecycle mutation. Phase A has no route that
     /// calls this method, but DB-disabled mode already behaves correctly:
     /// changes remain process-local and log that they will not persist.
-    pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<()> {
+    /// Persist a device preference and return whether its effective value
+    /// changed. The write lock spans persistence so concurrent callers cannot
+    /// both publish the same logical transition.
+    pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<bool> {
+        let mut preferences = self
+            .explicit_preferences
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if preferences.get(device_id).copied().unwrap_or(true) == enabled {
+            return Ok(false);
+        }
         if let Some(db) = self.metadata_db.as_ref().as_ref() {
             mold_db::DevicePreferences::new(db).set(device_id, enabled)?;
         } else {
@@ -172,12 +182,9 @@ impl DeviceRegistry {
                 "metadata DB disabled; device preference will not persist"
             );
         }
-        self.explicit_preferences
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(device_id.to_string(), enabled);
+        preferences.insert(device_id.to_string(), enabled);
         self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(true)
     }
 
     pub fn discovered_device(&self, device_id: &str) -> Option<DiscoveredDevice> {
@@ -765,7 +772,9 @@ mod tests {
             DeviceRegistry::new(Arc::new(StaticDeviceDiscovery::default()), Arc::new(None));
         let id = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+        assert_eq!(registry.mutation_sequence(), 0);
         registry.set_desired_enabled(id, false).unwrap();
+        assert_eq!(registry.mutation_sequence(), 1);
         assert_eq!(
             registry
                 .explicit_preferences
@@ -774,6 +783,13 @@ mod tests {
                 .get(id)
                 .copied(),
             Some(false)
+        );
+
+        registry.set_desired_enabled(id, false).unwrap();
+        assert_eq!(
+            registry.mutation_sequence(),
+            1,
+            "repeating the same preference is not a semantic mutation"
         );
     }
 

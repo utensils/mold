@@ -64,12 +64,24 @@ describe("pickAutoHost", () => {
     expect(picked?.id).toBe("b");
   });
 
-  it("prefers the earliest predicted completion over raw queue depth", () => {
+  it("uses predicted completion to refine equal queue depths", () => {
     const picked = pickAutoHost([
-      host({ id: "slow", queueDepth: 1, predictedCompletionMs: 20_000 }),
-      host({ id: "fast", queueDepth: 4, predictedCompletionMs: 10_000 }),
+      host({ id: "slow", queueDepth: 2, predictedCompletionMs: 20_000 }),
+      host({ id: "fast", queueDepth: 2, predictedCompletionMs: 10_000 }),
     ]);
     expect(picked?.id).toBe("fast");
+  });
+
+  it("does not starve an idle planless host in a mixed-version fleet", () => {
+    const picked = pickAutoHost([
+      host({
+        id: "planned-busy",
+        queueDepth: 4,
+        predictedCompletionMs: 10_000,
+      }),
+      host({ id: "planless-idle", queueDepth: 0, predictedCompletionMs: null }),
+    ]);
+    expect(picked?.id).toBe("planless-idle");
   });
 
   it("treats an unknown queue depth as busiest", () => {

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../api/devices";
 import DevicePanel from "./DevicePanel.vue";
 
@@ -90,6 +90,14 @@ describe("DevicePanel", () => {
     expect(wrapper.emitted("toggle")?.[0]).toEqual([device(0).id, false]);
   });
 
+  it("hides lifecycle mutations when the host does not advertise them", () => {
+    const wrapper = mount(DevicePanel, {
+      props: { devices: [device(0)], mutable: false },
+    });
+
+    expect(wrapper.find('[data-test="device-toggle-0"]').exists()).toBe(false);
+  });
+
   it("offers Auto and re-enable recovery for a disabled hard pin", async () => {
     const pinned = device(0, {
       desired_enabled: false,
@@ -131,5 +139,52 @@ describe("DevicePanel", () => {
     await buttons[1]!.trigger("click");
     expect(wrapper.emitted("unpin")?.[0]).toEqual(["job-1"]);
     expect(wrapper.emitted("toggle")?.[0]).toEqual([pinned.id, true]);
+  });
+
+  it("updates ETA and replan countdowns while the snapshot is otherwise static", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const wrapper = mount(DevicePanel, {
+        props: {
+          devices: [device(0)],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "debouncing",
+            dirty_since_unix_ms: 10_000,
+            next_replan_at_unix_ms: 13_500,
+            work_items: [
+              {
+                work_id: "job-1",
+                parent_id: "job-1",
+                work_kind: "generation",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                planned_device_id: device(0).id,
+                lane_order: 0,
+                estimated_finish_unix_ms: 14_500,
+                estimate_confidence: "high",
+              },
+            ],
+          },
+        },
+      });
+      expect(wrapper.get('[data-test="replan-countdown"]').text()).toContain(
+        "optimizing in 4s",
+      );
+      expect(wrapper.get('[data-test="device-lane"]').text()).toContain("~5s");
+
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(wrapper.get('[data-test="replan-countdown"]').text()).toContain(
+        "optimizing in 3s",
+      );
+      expect(wrapper.get('[data-test="device-lane"]').text()).toContain("~4s");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

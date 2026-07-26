@@ -58,11 +58,20 @@ export const useEventsStore = defineStore("events", {
       await this.subscribe();
     },
     openStream() {
+      const primary = useHostsStore().primaryHost;
+      if (!primary?.baseUrl) {
+        this.live = false;
+        this.startPolling();
+        return;
+      }
       const abort = new AbortController();
       this.abort = abort;
       void sseStream("/api/events", {
+        target: { baseUrl: primary.baseUrl, apiKey: primary.apiKey },
         signal: abort.signal,
         retry: true,
+        terminalHttpStatuses: [401, 403, 404],
+        onOpen: () => this.refreshAuthoritativePrimary(),
         onEvent: (_event, data) => {
           try {
             this.apply(JSON.parse(data) as ServerEvent);
@@ -96,6 +105,7 @@ export const useEventsStore = defineStore("events", {
           if (queue && (!queue.plan || queue.plan.plan_version < ev.plan.plan_version)) {
             queue.plan = ev.plan;
           }
+          this.refreshAuthoritativePrimary();
           break;
         }
         case "device_state_changed": {
@@ -107,6 +117,7 @@ export const useEventsStore = defineStore("events", {
               .filter((device) => device.schedulable && device.ordinal !== null)
               .map((device) => device.ordinal as number);
           }
+          this.refreshAuthoritativePrimary();
           break;
         }
         // job_* frames: the generation store tracks its own jobs via their
@@ -114,6 +125,10 @@ export const useEventsStore = defineStore("events", {
         default:
           break;
       }
+    },
+    refreshAuthoritativePrimary() {
+      const primary = useHostsStore().primaryHost;
+      if (primary) void useJobsStore().refreshHost(primary);
     },
     /**
      * Old-server fallback: while any generation is pending, refetch the

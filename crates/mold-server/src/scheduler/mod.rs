@@ -99,6 +99,7 @@ pub enum WorkerEvent {
         owner_epoch: u64,
         worker_generation: u64,
         successful: bool,
+        load_ms: Option<u64>,
     },
     Stopped {
         device_id: String,
@@ -811,6 +812,29 @@ fn device_event_signature(state: &mold_core::DeviceState) -> DeviceEventSignatur
         .collect()
 }
 
+fn queue_plan_semantically_equal(
+    left: &mold_core::QueuePlan,
+    right: &mold_core::QueuePlan,
+) -> bool {
+    fn normalized(plan: &mold_core::QueuePlan) -> mold_core::QueuePlan {
+        let mut plan = plan.clone();
+        plan.plan_version = 0;
+        plan.state_version = 0;
+        plan.dirty_since_unix_ms = None;
+        plan.next_replan_at_unix_ms = None;
+        for work in &mut plan.work_items {
+            let duration = work
+                .estimated_start_unix_ms
+                .zip(work.estimated_finish_unix_ms)
+                .map(|(start, finish)| finish.saturating_sub(start));
+            work.estimated_start_unix_ms = work.estimated_start_unix_ms.map(|_| 0);
+            work.estimated_finish_unix_ms = duration;
+        }
+        plan
+    }
+    normalized(left) == normalized(right)
+}
+
 struct Coordinator {
     state: AppState,
     planner: Planner,
@@ -834,6 +858,7 @@ struct Coordinator {
     last_worker_claims: BTreeMap<String, usize>,
     last_device_preferences_sequence: u64,
     last_device_event_signature: Option<DeviceEventSignature>,
+    device_state_dirty: bool,
     plan_invalidations: BTreeMap<String, u8>,
     dispatch_retry_round: u8,
     dispatch_retry_not_before_ms: Option<u64>,
@@ -898,6 +923,7 @@ impl Coordinator {
             last_worker_claims: BTreeMap::new(),
             last_device_preferences_sequence: 0,
             last_device_event_signature: None,
+            device_state_dirty: true,
             plan_invalidations: BTreeMap::new(),
             dispatch_retry_round: 0,
             dispatch_retry_not_before_ms: None,
@@ -1086,6 +1112,7 @@ impl Coordinator {
     }
 
     fn handle_worker_event(&mut self, event: WorkerEvent, immediate: &mut bool) {
+        self.device_state_dirty = true;
         match event {
             WorkerEvent::Ready {
                 device_id,
@@ -1456,6 +1483,7 @@ impl Coordinator {
                 owner_epoch,
                 worker_generation,
                 successful,
+                load_ms,
             } => {
                 let valid = self.leases.get(&device_id).is_some_and(|lease| {
                     lease.owner_epoch == owner_epoch && lease.worker_generation == worker_generation
@@ -1468,7 +1496,7 @@ impl Coordinator {
                     self.memory.release(&lease.work_id);
                     self.memory.collect_now();
                     self.plan_invalidations.remove(&lease.work_id);
-                    let vram_high_water_bytes =
+                    let vram_completion_sample_bytes =
                         self.state.resources.latest().and_then(|snapshot| {
                             snapshot
                                 .gpus
@@ -1486,9 +1514,9 @@ impl Coordinator {
                                     .as_millis()
                                     .try_into()
                                     .unwrap_or(u64::MAX),
-                                load_ms: None,
-                                vram_high_water_bytes,
-                                host_high_water_bytes: None,
+                                load_ms,
+                                vram_completion_sample_bytes,
+                                host_completion_sample_bytes: None,
                                 observed_at_unix_s: unix_seconds(),
                             },
                         );
@@ -1640,6 +1668,7 @@ impl Coordinator {
         let device_preferences_sequence = self.state.device_registry.mutation_sequence();
         if device_preferences_sequence != self.last_device_preferences_sequence {
             self.last_device_preferences_sequence = device_preferences_sequence;
+            self.device_state_dirty = true;
             self.mutate(immediate);
         }
 
@@ -2832,11 +2861,12 @@ impl Coordinator {
             .latest_plan
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current
-            .as_ref()
-            .is_some_and(|existing| existing.plan_version >= wire.plan_version)
-        {
-            return;
+        if let Some(existing) = current.as_ref() {
+            if existing.plan_version >= wire.plan_version
+                || queue_plan_semantically_equal(existing, &wire)
+            {
+                return;
+            }
         }
         *current = Some(wire.clone());
         drop(current);
@@ -2998,7 +3028,10 @@ pub async fn run_scheduler_coordinator(
                 coordinator.dirty.clear_through(planned_state_version);
             }
         }
-        coordinator.publish_device_state_if_changed();
+        if coordinator.device_state_dirty {
+            coordinator.device_state_dirty = false;
+            coordinator.publish_device_state_if_changed();
+        }
     }
     coordinator.stop_preparations().await;
     for worker in &coordinator.state.gpu_pool.workers {
@@ -3165,7 +3198,6 @@ fn queue_plan_projection(
                 priority_class: snake_debug(work.priority_class),
                 queue_rank: work.queue_rank,
                 bypass_count: work.bypass_count,
-                device_id: None,
                 gpu: planned_gpu,
                 hard_pinned_device_id: hard_id,
                 target_gpu,
@@ -3178,9 +3210,6 @@ fn queue_plan_projection(
                     .copied()
                     .unwrap_or_default(),
                 reason,
-                chain_stage: None,
-                batch_partitions: Vec::new(),
-                activity_phase: None,
             }
         })
         .collect();
@@ -3219,8 +3248,8 @@ fn load_estimate_store(state: &AppState) -> EstimateStore {
                 sample_count: record.sample_count,
                 ewma_total_ms: record.ewma_total_ms,
                 ewma_load_ms: record.ewma_load_ms,
-                vram_high_water_bytes: record.vram_high_water_bytes,
-                host_high_water_bytes: record.host_high_water_bytes,
+                vram_conservative_bytes: record.vram_high_water_bytes,
+                host_conservative_bytes: record.host_high_water_bytes,
                 last_observed_at_unix_s: record.last_observed_at,
             }))
         }
@@ -3242,8 +3271,10 @@ fn estimate_record(bucket: &EstimateBucket) -> mold_db::SchedulerEstimateRecord 
         sample_count: bucket.sample_count,
         ewma_total_ms: bucket.ewma_total_ms,
         ewma_load_ms: bucket.ewma_load_ms,
-        vram_high_water_bytes: bucket.vram_high_water_bytes,
-        host_high_water_bytes: bucket.host_high_water_bytes,
+        // Schema v13 used "high_water" before the runtime semantics were
+        // corrected. Retain the column names for migration compatibility.
+        vram_high_water_bytes: bucket.vram_conservative_bytes,
+        host_high_water_bytes: bucket.host_conservative_bytes,
         last_observed_at: bucket.last_observed_at_unix_s,
     }
 }
@@ -4087,6 +4118,46 @@ mod tests {
     }
 
     #[test]
+    fn queue_plan_event_dedup_ignores_versions_and_wall_clock_drift() {
+        let work = mold_core::QueueWorkItem {
+            work_id: "work-a".into(),
+            parent_id: "job-a".into(),
+            work_kind: "generation".into(),
+            priority_class: "user".into(),
+            planned_device_id: Some("cuda:stable".into()),
+            lane_order: Some(0),
+            estimated_start_unix_ms: Some(10_000),
+            estimated_finish_unix_ms: Some(15_000),
+            ..Default::default()
+        };
+        let first = mold_core::QueuePlan {
+            plan_version: 1,
+            state_version: 2,
+            optimizer_state: "optimized".into(),
+            dirty_since_unix_ms: Some(9_000),
+            next_replan_at_unix_ms: Some(11_000),
+            work_items: vec![work.clone()],
+        };
+        let shifted = mold_core::QueuePlan {
+            plan_version: 99,
+            state_version: 100,
+            dirty_since_unix_ms: Some(10_000),
+            next_replan_at_unix_ms: Some(12_000),
+            work_items: vec![mold_core::QueueWorkItem {
+                estimated_start_unix_ms: Some(11_000),
+                estimated_finish_unix_ms: Some(16_000),
+                ..work
+            }],
+            ..first.clone()
+        };
+        assert!(queue_plan_semantically_equal(&first, &shifted));
+
+        let mut slower = shifted;
+        slower.work_items[0].estimated_finish_unix_ms = Some(17_000);
+        assert!(!queue_plan_semantically_equal(&first, &slower));
+    }
+
+    #[test]
     fn device_events_publish_once_per_semantic_health_transition() {
         let (worker, _worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
@@ -4123,6 +4194,30 @@ mod tests {
         assert!(
             receiver.try_recv().is_err(),
             "unchanged snapshots must not emit duplicate events"
+        );
+
+        let device_id = worker.gpu.stable_id.as_deref().unwrap();
+        assert!(coordinator
+            .state
+            .device_registry
+            .set_desired_enabled(device_id, false)
+            .unwrap());
+        coordinator.publish_device_state_if_changed();
+        let disabled = receiver.try_recv().expect("preference transition");
+        assert!(matches!(
+            disabled,
+            mold_core::ServerEvent::DeviceStateChanged { state }
+                if state.devices[0].admin_state == mold_core::DeviceAdminState::Disabled
+        ));
+        assert!(!coordinator
+            .state
+            .device_registry
+            .set_desired_enabled(device_id, false)
+            .unwrap());
+        coordinator.publish_device_state_if_changed();
+        assert!(
+            receiver.try_recv().is_err(),
+            "an idempotent preference update must not emit another event"
         );
 
         worker.poisoned.store(true, Ordering::SeqCst);
@@ -4180,6 +4275,7 @@ mod tests {
                     ordinal: 0,
                     worker_generation: 1,
                     successful,
+                    load_ms: Some(250),
                 },
                 &mut immediate,
             );
@@ -4198,6 +4294,58 @@ mod tests {
             succeeded.estimates.exact(&key).is_some(),
             "successful post-upscale must train EWMA"
         );
+        assert_eq!(
+            succeeded.estimates.exact(&key).unwrap().ewma_load_ms,
+            Some(250.0),
+            "worker-measured activation time must train the load estimate"
+        );
+    }
+
+    #[test]
+    fn db_disabled_estimator_learns_for_the_process_lifetime() {
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            Arc::new(GpuPool {
+                workers: Vec::new(),
+            }),
+            1,
+        );
+        assert!(
+            state.metadata_db.as_ref().as_ref().is_none(),
+            "fixture must exercise metadata-DB-disabled mode"
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let key = EstimateKey {
+            device_class: "cuda:sm86:24gb".into(),
+            model_fingerprint: "flux-dev:q8".into(),
+            work_kind: "generation".into(),
+            shape_bucket: "1024x1024".into(),
+            execution_fingerprint: "q8".into(),
+        };
+
+        coordinator.observe_estimate(
+            key.clone(),
+            EstimateObservation {
+                total_ms: 12_000,
+                load_ms: Some(2_000),
+                vram_completion_sample_bytes: Some(20 << 30),
+                host_completion_sample_bytes: Some(8 << 30),
+                observed_at_unix_s: unix_seconds(),
+            },
+        );
+
+        let learned = coordinator
+            .estimates
+            .exact(&key)
+            .expect("the in-memory estimator remains active without persistence");
+        assert_eq!(learned.sample_count, 1);
+        assert_eq!(learned.ewma_total_ms, 12_000.0);
     }
 
     #[test]
@@ -4980,6 +5128,7 @@ mod tests {
                 owner_epoch: 1,
                 worker_generation: 1,
                 successful: false,
+                load_ms: None,
             },
             &mut immediate,
         );

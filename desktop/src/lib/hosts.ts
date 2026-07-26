@@ -133,19 +133,22 @@ export interface RoutableHost {
 }
 
 /**
- * Auto routing: predicted completion wins when available, then legacy queue
- * depth. Unknown values count as busiest; the local host wins full ties.
+ * Auto routing: queue depth is the rollout-safe primary signal. Predicted
+ * completion refines ties only when both hosts have a projection; planless
+ * current, legacy, and observe-mode hosts remain eligible.
  */
 export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
-    const finish = (x: RoutableHost) => x.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
     const depth = (x: RoutableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
-    if (finish(h) < finish(best)) return h;
-    if (finish(h) > finish(best)) return best;
     if (depth(h) < depth(best)) return h;
-    if (depth(h) === depth(best) && h.kind === "local" && best.kind !== "local") return h;
+    if (depth(h) > depth(best)) return best;
+    const hFinish = h.predictedCompletionMs;
+    const bestFinish = best.predictedCompletionMs;
+    if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
+      return hFinish < bestFinish ? h : best;
+    if (h.kind === "local" && best.kind !== "local") return h;
     return best;
   });
 }

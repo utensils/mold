@@ -63,13 +63,10 @@ function depth(host: RoutableHost): number {
   return host.queueDepth ?? Number.MAX_SAFE_INTEGER;
 }
 
-function completion(host: RoutableHost): number {
-  return host.predictedCompletionMs ?? Number.MAX_SAFE_INTEGER;
-}
-
 /**
- * Auto routing: the ready host with the shallowest queue wins; unknown depth
- * counts as busiest; this server wins ties. Null when nothing is ready.
+ * Auto routing: the ready host with the shallowest queue wins. Predictions
+ * refine equal-depth hosts only when both are known, so a planless current,
+ * legacy, or observe-mode host is never starved by rollout asymmetry.
  */
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],
@@ -77,11 +74,14 @@ export function pickAutoHost<T extends RoutableHost>(
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
-    if (completion(h) < completion(best)) return h;
-    if (completion(h) > completion(best)) return best;
     if (depth(h) < depth(best)) return h;
-    if (depth(h) === depth(best) && isOrigin(h) && !isOrigin(best)) return h;
-    if (depth(h) === depth(best) && h.id < best.id) return h;
+    if (depth(h) > depth(best)) return best;
+    const hFinish = h.predictedCompletionMs;
+    const bestFinish = best.predictedCompletionMs;
+    if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
+      return hFinish < bestFinish ? h : best;
+    if (isOrigin(h) && !isOrigin(best)) return h;
+    if (h.id < best.id) return h;
     return best;
   });
 }

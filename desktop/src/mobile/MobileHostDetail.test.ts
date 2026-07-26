@@ -154,6 +154,7 @@ function installApi(): void {
     }
     if (path === "/api/capabilities") {
       return Promise.resolve({
+        events: { available: true },
         devices: { available: true, lifecycle: true, restart_enable: false },
         dispatch: { active_mode: "v2", v2_authoritative: true },
       });
@@ -219,6 +220,10 @@ describe("MobileHostDetail remote host data", () => {
       retry: true,
     });
     expect(stream("/api/downloads/stream").options).toMatchObject({
+      target: studioTarget,
+      retry: true,
+    });
+    expect(stream("/api/events").options).toMatchObject({
       target: studioTarget,
       retry: true,
     });
@@ -620,17 +625,20 @@ describe("MobileHostDetail host switching", () => {
     const view = await mountDetail();
     const oldResources = stream("/api/resources/stream");
     const oldDownloads = stream("/api/downloads/stream");
+    const oldDeviceEvents = stream("/api/events");
 
     await view.setProps({ host: renderBox });
     await flushPromises();
 
     expect(oldResources.options.signal.aborted).toBe(true);
     expect(oldDownloads.options.signal.aborted).toBe(true);
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/status");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/models");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/queue");
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(false);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(false);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(false);
 
     oldResources.options.onEvent(
       "snapshot",
@@ -664,6 +672,26 @@ describe("MobileHostDetail host switching", () => {
     wrapper = null;
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(true);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(true);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(true);
+  });
+
+  it("restarts every authoritative source when the same host rotates credentials", async () => {
+    const view = await mountDetail();
+    const oldDeviceEvents = stream("/api/events");
+    const rotated = { ...studio, apiKey: "rotated-secret" };
+
+    await view.setProps({ host: rotated });
+    await flushPromises();
+
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
+    expect(stream("/api/events").options.target).toEqual({
+      baseUrl: studio.baseUrl,
+      apiKey: "rotated-secret",
+    });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: studio.baseUrl, apiKey: "rotated-secret" },
+      "/api/devices",
+    );
   });
 
   it("ignores a late status response from the previously selected host", async () => {

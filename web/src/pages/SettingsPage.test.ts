@@ -4,13 +4,16 @@ import SettingsPage from "./SettingsPage.vue";
 import settingsPageSource from "./SettingsPage.vue?raw";
 import { theme, themeFamily } from "../lib/theme";
 import { resetNotifications, useNotifications } from "../lib/toasts";
+import { originHost } from "../lib/hostRegistry";
 import type { ServerStatus } from "../types";
 
 const statusRef = vi.hoisted(() => ({ value: null as ServerStatus | null }));
+const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
 
 vi.mock("../composables/useStatusPoll", () => ({
   useStatusPoll: () => ({ status: statusRef }),
 }));
+vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
 const originalFetch = globalThis.fetch;
 
@@ -63,6 +66,7 @@ describe("SettingsPage", () => {
 
   beforeEach(() => {
     statusRef.value = null;
+    subscribeToDeviceSnapshots.mockClear();
     resetNotifications();
     localStorage.clear();
     globalThis.fetch = vi.fn(
@@ -111,6 +115,33 @@ describe("SettingsPage", () => {
   it("falls back to an em dash when the server version is unknown", () => {
     const wrapper = mount(SettingsPage);
     expect(wrapper.get('[data-test="about-version"]').text()).toBe("—");
+  });
+
+  it("refreshes device truth on SSE connect and semantic invalidations", async () => {
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+    const [target, _signal, refresh] =
+      subscribeToDeviceSnapshots.mock.calls[0]!;
+    expect(target).toEqual({
+      baseUrl: originHost().url,
+      apiKey: originHost().apiKey ?? null,
+    });
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const before = fetchMock.mock.calls.filter(([input]) =>
+      String(input).endsWith("/api/devices"),
+    ).length;
+    expect(before).toBe(1);
+
+    refresh();
+    await flushPromises();
+
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/api/devices"),
+      ),
+    ).toHaveLength(before + 1);
+    wrapper.unmount();
   });
 
   it("persists the theme family through the shared lib/theme refs", async () => {

@@ -36,13 +36,45 @@ fn resolve_device<'a>(devices: &'a [DeviceInfo], selector: &str) -> Result<&'a D
 fn human_state(device: &DeviceInfo) -> String {
     match (device.admin_state, device.health) {
         (DeviceAdminState::Draining, _) => "finishing current work".yellow().to_string(),
-        (_, DeviceHealth::Unavailable | DeviceHealth::Poisoned) => format!("{:?}", device.health)
-            .to_lowercase()
-            .red()
-            .to_string(),
+        (_, DeviceHealth::Unavailable | DeviceHealth::Poisoned) => {
+            device.health.as_str().red().to_string()
+        }
         (DeviceAdminState::Enabled, DeviceHealth::Healthy) => "enabled".green().to_string(),
-        _ => format!("{:?}", device.admin_state).to_lowercase(),
+        _ => device.admin_state.as_str().to_string(),
     }
+}
+
+fn format_device_line(device: &DeviceInfo) -> String {
+    let ordinal = device
+        .ordinal
+        .map(|value| format!("GPU {value}"))
+        .unwrap_or_else(|| "GPU —".into());
+    let kind = if device.device_kind == mold_core::DeviceKind::Mig {
+        format!(
+            "MIG {}",
+            device.mig_profile.as_deref().unwrap_or("profile unknown")
+        )
+    } else {
+        device.backend.as_str().to_ascii_uppercase()
+    };
+    let used = device.memory.used_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
+    let total = device.memory.total_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
+    let utilization = device
+        .telemetry
+        .utilization_percent
+        .map(|value| format!("{value}%"))
+        .unwrap_or_else(|| "—".into());
+    format!(
+        "{}  {}  {}  {}  {}  VRAM {:.1}/{:.1} GiB  util {}",
+        device.id,
+        ordinal,
+        device.name,
+        kind,
+        human_state(device),
+        used,
+        total,
+        utilization
+    )
 }
 
 pub async fn list(json: bool) -> Result<()> {
@@ -59,27 +91,7 @@ pub async fn list(json: bool) -> Result<()> {
         return Ok(());
     }
     for device in &state.devices {
-        let ordinal = device
-            .ordinal
-            .map(|value| format!("GPU {value}"))
-            .unwrap_or_else(|| "GPU —".into());
-        let used = device.memory.used_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
-        let total = device.memory.total_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
-        let utilization = device
-            .telemetry
-            .utilization_percent
-            .map(|value| format!("{value}%"))
-            .unwrap_or_else(|| "—".into());
-        println!(
-            "{}  {}  {}  {}  VRAM {:.1}/{:.1} GiB  util {}",
-            device.id,
-            ordinal,
-            device.name,
-            human_state(device),
-            used,
-            total,
-            utilization
-        );
+        println!("{}", format_device_line(device));
     }
     Ok(())
 }
@@ -182,5 +194,29 @@ mod tests {
 
         legacy.dispatch.v2_authoritative = true;
         assert!(ensure_supported(&legacy, &enabled, false).is_ok());
+    }
+
+    #[test]
+    fn startup_excluded_uses_the_wire_spelling() {
+        let mut excluded = device("cuda:excluded", 0);
+        excluded.admin_state = DeviceAdminState::StartupExcluded;
+        assert_eq!(human_state(&excluded), "startup_excluded");
+    }
+
+    #[test]
+    fn formats_one_two_eight_and_sixty_four_devices_including_mig_and_lifecycle_states() {
+        for count in [1, 2, 8, 64] {
+            let lines = (0..count)
+                .map(|ordinal| format_device_line(&device(&format!("cuda:{ordinal}"), ordinal)))
+                .collect::<Vec<_>>();
+            assert_eq!(lines.len(), count);
+            assert!(lines.iter().all(|line| line.contains("GPU ")));
+        }
+        let mut mig = device("cuda:mig", 0);
+        mig.device_kind = DeviceKind::Mig;
+        mig.mig_profile = Some("1g.10gb".into());
+        mig.admin_state = DeviceAdminState::Draining;
+        assert!(format_device_line(&mig).contains("MIG 1g.10gb"));
+        assert!(format_device_line(&mig).contains("finishing current work"));
     }
 }

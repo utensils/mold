@@ -2,6 +2,12 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
+  parseQueueListing,
+  setQueueDevicePin,
+  type QueuePlan,
+} from "@studio/api/queuePlan";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import {
   canMutateDevice,
   deviceActionLabel,
   deviceLifecycleMessage,
@@ -11,6 +17,7 @@ import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
 import { sseStream } from "../lib/api/sse";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import type {
   DownloadEvent,
   GpuSnapshot,
@@ -52,6 +59,7 @@ const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const installed = ref<ModelEntry[]>([]);
 const queue = ref<QueueEntry[]>([]);
+const queuePlan = ref<QueuePlan | null>(null);
 const queueApiAvailable = ref(false);
 const downloads = ref<DownloadsState>(emptyDownloadsState());
 const loading = ref(false);
@@ -63,6 +71,7 @@ const unloading = ref<Set<string>>(new Set());
 let loadEpoch = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
+let deviceEventsAbort: AbortController | null = null;
 let queueTimer: ReturnType<typeof setInterval> | null = null;
 
 const target = computed(() => mobileHostTarget(props.host));
@@ -89,17 +98,20 @@ const disk = computed(() => status.value?.models_disk ?? null);
 function stopLiveServices(): void {
   resourceAbort?.abort();
   downloadsAbort?.abort();
+  deviceEventsAbort?.abort();
   resourceAbort = null;
   downloadsAbort = null;
+  deviceEventsAbort = null;
   if (queueTimer) clearInterval(queueTimer);
   queueTimer = null;
 }
 
 async function refreshQueue(epoch = loadEpoch): Promise<void> {
   try {
-    const listing = await apiJsonTo<{ entries: QueueEntry[] }>(target.value, "/api/queue");
+    const listing = parseQueueListing(await apiJsonTo<unknown>(target.value, "/api/queue"));
     if (epoch === loadEpoch) {
-      queue.value = listing.entries;
+      queue.value = listing.entries as QueueEntry[];
+      queuePlan.value = listing.plan;
       queueApiAvailable.value = true;
     }
   } catch {
@@ -110,6 +122,15 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
 async function loadDevices(): Promise<DeviceInfo[]> {
   const response = await apiJsonTo<unknown>(target.value, "/api/devices");
   return parseDeviceListResponse(response).devices;
+}
+
+async function refreshDevices(epoch = loadEpoch): Promise<void> {
+  try {
+    const next = await loadDevices();
+    if (epoch === loadEpoch) devices.value = next;
+  } catch {
+    // Device inventory is additive; older hosts retain legacy telemetry.
+  }
 }
 
 function startLiveServices(epoch: number): void {
@@ -143,6 +164,12 @@ function startLiveServices(epoch: number): void {
     },
   });
 
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(target.value, deviceEventsAbort.signal, () => {
+    void refreshQueue(epoch);
+    void refreshDevices(epoch);
+  });
+
   void refreshQueue(epoch);
   queueTimer = setInterval(() => void refreshQueue(epoch), 5_000);
 }
@@ -158,6 +185,7 @@ async function loadHost(): Promise<void> {
   deviceCapabilities.value = null;
   installed.value = [];
   queue.value = [];
+  queuePlan.value = null;
   queueApiAvailable.value = false;
   downloads.value = emptyDownloadsState();
   renameValue.value = props.host.name;
@@ -200,6 +228,21 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
     const next = new Set(deviceMutations.value);
     next.delete(device.id);
     deviceMutations.value = next;
+  }
+}
+
+async function toggleDeviceById(deviceId: string, enabled: boolean): Promise<void> {
+  const device = devices.value?.find((candidate) => candidate.id === deviceId);
+  if (!device || enabled === device.desired_enabled) return;
+  await toggleDevice(device);
+}
+
+async function unpinWork(workId: string): Promise<void> {
+  try {
+    await setQueueDevicePin(target.value, workId, null);
+    await refreshQueue();
+  } catch (caught) {
+    error.value = describeTransportError(caught, props.host.name);
   }
 }
 
@@ -251,7 +294,9 @@ function downloadPercent(done: number, total: number): number {
   return total > 0 ? percent(done, total) : 0;
 }
 
-watch(() => props.host.id, loadHost, { immediate: true });
+watch(() => [props.host.id, props.host.baseUrl, props.host.apiKey] as const, loadHost, {
+  immediate: true,
+});
 onBeforeUnmount(() => {
   loadEpoch += 1;
   stopLiveServices();
@@ -444,6 +489,18 @@ onBeforeUnmount(() => {
             }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
           >
         </div>
+        <DevicePanel
+          v-if="devices.length"
+          :devices="devices"
+          :plan="queuePlan"
+          :mutable="
+            deviceCapabilities?.devices?.lifecycle === true &&
+            deviceCapabilities?.dispatch?.v2_authoritative === true
+          "
+          :busy-device-id="[...deviceMutations][0] ?? null"
+          @unpin="unpinWork"
+          @toggle="toggleDeviceById"
+        />
         <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
           <li v-for="entry in queue" :key="entry.id">
             <div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DeviceInfo } from "../api/devices";
 import type { QueuePlan, QueueWorkItem } from "../api/queuePlan";
 
@@ -19,6 +19,8 @@ const emit = defineEmits<{
 }>();
 
 const compact = computed(() => props.devices.length <= 1);
+const nowUnixMs = ref(Date.now());
+let clockTimer: ReturnType<typeof setInterval> | null = null;
 const blocked = computed(
   () => props.plan?.work_items.filter((work) => blockedReason(work)) ?? [],
 );
@@ -77,7 +79,7 @@ function pinnedDevice(work: QueueWorkItem): DeviceInfo | null {
 function eta(work: QueueWorkItem): string {
   const finish = work.estimated_finish_unix_ms;
   if (finish == null) return "ETA pending";
-  const seconds = Math.max(0, Math.ceil((finish - Date.now()) / 1000));
+  const seconds = Math.max(0, Math.ceil((finish - nowUnixMs.value) / 1000));
   return `~${seconds}s · ${work.estimate_confidence} confidence`;
 }
 
@@ -86,9 +88,19 @@ function replanLabel(): string | null {
   if (deadline == null) return null;
   return `Tentative plan · optimizing in ${Math.max(
     0,
-    Math.ceil((deadline - Date.now()) / 1000),
+    Math.ceil((deadline - nowUnixMs.value) / 1000),
   )}s`;
 }
+
+onMounted(() => {
+  clockTimer = setInterval(() => {
+    nowUnixMs.value = Date.now();
+  }, 1_000);
+});
+
+onBeforeUnmount(() => {
+  if (clockTimer !== null) clearInterval(clockTimer);
+});
 </script>
 
 <template>

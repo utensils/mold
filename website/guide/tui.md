@@ -295,6 +295,8 @@ loaded model, active work, and lifecycle state.
 | g     | Select the next GPU on the current machine               |
 | e     | Enable or disable the selected GPU                       |
 | r     | Refresh telemetry and queue now                          |
+| [ / ] | Select the previous or next GPU/MIG device               |
+| e     | Enable or disable the selected device (when advertised)  |
 | x     | Cancel the selected queued job (detail focus, confirms)  |
 | Esc   | Back to Create                                           |
 

@@ -19,7 +19,6 @@ export interface QueueWorkItem {
   priority_class: string;
   queue_rank: number;
   bypass_count: number;
-  device_id?: string | null;
   gpu?: number | null;
   hard_pinned_device_id?: string | null;
   target_gpu?: number | null;
@@ -29,9 +28,6 @@ export interface QueueWorkItem {
   estimated_finish_unix_ms?: number | null;
   estimate_confidence: EstimateConfidence;
   reason?: string | null;
-  chain_stage?: number | null;
-  batch_partitions?: number[];
-  activity_phase?: string | null;
 }
 
 export interface QueuePlan {

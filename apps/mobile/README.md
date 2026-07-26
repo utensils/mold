@@ -90,6 +90,10 @@ pushed screen opened from the header.
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions.
+  Current V2 hosts also expose every GPU/MIG device and its queue lane. Device
+  lifecycle controls are shown only when the host advertises
+  `devices.lifecycle`; disabling a busy device leaves its current work running
+  and shows the draining state until completion.
 - **Settings** persists the Mold Studio theme families (Mold or Safelight) and
   System, Dark, or Light appearance. Fresh installs start with Safelight +
   System; valid saved choices remain authoritative. Its default-on Photos

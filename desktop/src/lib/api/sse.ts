@@ -18,6 +18,8 @@ export interface StreamOptions {
   onClose?: (error: Error | null) => void;
   /** Retry transient drops (default true for GET snapshots-first streams). */
   retry?: boolean;
+  /** HTTP responses that are configuration errors, not reconnectable drops. */
+  terminalHttpStatuses?: readonly number[];
   /** Additional request headers, merged with authentication and SSE defaults. */
   headers?: HeadersInit;
   /** Explicit host; defaults to the primary connection. */
@@ -46,7 +48,10 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
       openWhenHidden: true,
       onopen(response) {
         if (!response.ok) {
-          const error = new Error(`SSE request failed with HTTP ${response.status}`);
+          const error = Object.assign(
+            new Error(`SSE request failed with HTTP ${response.status}`),
+            { status: response.status },
+          );
           options.onOpenError?.(error);
           throw error;
         }
@@ -63,6 +68,8 @@ export async function sseStream(path: string, options: StreamOptions): Promise<v
           options.onOpenError(error);
           throw error;
         }
+        const status = (error as Error & { status?: number }).status;
+        if (status !== undefined && options.terminalHttpStatuses?.includes(status)) throw error;
         if (!retriable) throw error;
         // returning undefined lets fetchEventSource retry with backoff
       },

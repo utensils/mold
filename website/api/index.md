@@ -91,7 +91,12 @@ scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and
 unavailable runtimes report false. Those runtimes advertise
 `devices.restart_enable` instead: clients may offer **Enable on restart** only
 for a device whose persisted preference is disabled. Live controls must also
-require `dispatch.v2_authoritative`. Clients must only request
+require `dispatch.v2_authoritative`. Stable pin support is advertised as
+`devices.stable_pins`; versioned lanes and learned ETA are advertised as
+`devices.planned_lanes` and `devices.learned_eta` only while V2 is
+authoritative. Dispatch rollout is exposed as `dispatch.active_mode`,
+`dispatch.v2_authoritative`, and `dispatch.observes_v2_decisions`. Clients must
+only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
@@ -453,7 +458,9 @@ metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 
 `GET /api/queue` returns queued and running generation jobs. Running jobs carry
 their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
-can render one lane per GPU plus an automatic lane.
+can render one lane per GPU plus an automatic lane. Current authoritative V2
+servers also return a nullable `plan` with versioned stable-device lanes,
+estimated start/finish times, confidence, and the next tentative replan time.
 
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
@@ -461,10 +468,13 @@ Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 ```bash
 curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000 \
   -H "Content-Type: application/json" \
-  -d '{"target_gpu":0,"position":1}'
+  -d '{"hard_pinned_device_id":"cuda:0123...","position":1}'
 ```
 
 Set `target_gpu` to `null` to return the queued job to automatic placement.
+`hard_pinned_device_id` accepts the opaque ID from `/api/devices`; send `null`
+to return to Auto. If both ordinal and stable-ID pins are supplied, they must
+name the same device.
 Omitting either field leaves it unchanged. `position` is clamped to the current
 queued range, so a large value sends a job to the back. Reordering changes real
 dispatch priority, not only the listing returned by `GET /api/queue`.

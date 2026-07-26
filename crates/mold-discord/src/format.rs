@@ -301,12 +301,20 @@ pub fn format_server_status_with_devices(
                 let state = if device.admin_state == mold_core::DeviceAdminState::Draining {
                     "finishing current work".to_string()
                 } else if device.health != mold_core::DeviceHealth::Healthy {
-                    format!("{:?}", device.health).to_lowercase()
+                    device.health.as_str().to_string()
                 } else {
-                    format!("{:?}", device.admin_state).to_lowercase()
+                    device.admin_state.as_str().to_string()
+                };
+                let kind = if device.device_kind == mold_core::DeviceKind::Mig {
+                    format!(
+                        "MIG {}",
+                        device.mig_profile.as_deref().unwrap_or("profile unknown")
+                    )
+                } else {
+                    device.backend.as_str().to_ascii_uppercase()
                 };
                 format!(
-                    "GPU {ordinal} · {} · `{}` · {state} · {used}/{total}MB",
+                    "GPU {ordinal} · {} · {kind} · `{}` · {state} · {used}/{total}MB",
                     device.name, device.id
                 )
             })

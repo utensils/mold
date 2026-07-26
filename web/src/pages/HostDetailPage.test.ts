@@ -11,7 +11,7 @@ import type {
   QueueEntry,
   ResourceSnapshot,
 } from "../types";
-import { addHost, getHost } from "../lib/hostRegistry";
+import { addHost, getHost, updateHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
@@ -55,12 +55,14 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
   setDeviceEnabled,
 }));
+const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/toasts", () => ({
   toast: vi.fn(),
   requestConfirm,
   requestText,
 }));
+vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
 const routeHolder = { id: "origin" };
 
@@ -229,6 +231,7 @@ beforeEach(() => {
   routerPush.mockClear();
   requestConfirm.mockReset().mockResolvedValue(true);
   requestText.mockReset().mockResolvedValue("Render box");
+  subscribeToDeviceSnapshots.mockClear();
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     devices: ref<DeviceInfo[] | null>(null),
@@ -249,6 +252,19 @@ afterEach(() => {
 });
 
 describe("HostDetailPage — telemetry", () => {
+  it("subscribes with the viewed host key and refreshes authoritative state", async () => {
+    const host = getHost(routeHolder.id)!;
+    updateHost(routeHolder.id, { apiKey: "host-key" });
+    await mountDetail();
+
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+    const [target, _signal, refresh] =
+      subscribeToDeviceSnapshots.mock.calls[0]!;
+    expect(target).toEqual({ baseUrl: host.url, apiKey: "host-key" });
+    refresh();
+    expect(poll.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("maps the resource snapshot into the telemetry card", async () => {
     const w = await mountDetail();
     expect(w.get('[data-test="machine-detail-title"]').text()).toBe("Studio");

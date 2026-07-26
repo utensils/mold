@@ -85,6 +85,9 @@ export interface ServerCapabilities {
     available?: boolean;
     lifecycle?: boolean;
     restart_enable?: boolean;
+    stable_pins?: boolean;
+    planned_lanes?: boolean;
+    learned_eta?: boolean;
   } | null;
   dispatch?: {
     active_mode?: string | null;

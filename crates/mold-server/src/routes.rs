@@ -3123,17 +3123,24 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             cooperative_cancellation: false,
             server_batch: false,
         },
-        devices: mold_core::DeviceCapabilities {
-            available: true,
-            lifecycle: state.scheduled_work.v2_authoritative(),
-            restart_enable: !state.scheduled_work.v2_authoritative(),
-            stable_pins: true,
-            planned_lanes: state.scheduled_work.v2_authoritative(),
-            learned_eta: true,
-        },
+        devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
+}
+
+fn device_capabilities(
+    handle: &crate::scheduler::ScheduledWorkHandle,
+) -> mold_core::DeviceCapabilities {
+    let v2_authoritative = handle.v2_authoritative();
+    mold_core::DeviceCapabilities {
+        available: true,
+        lifecycle: v2_authoritative,
+        restart_enable: !v2_authoritative,
+        stable_pins: true,
+        planned_lanes: v2_authoritative,
+        learned_eta: v2_authoritative,
+    }
 }
 
 fn dispatch_capabilities(
@@ -4552,6 +4559,10 @@ mod tests {
         assert_eq!(legacy.active_mode.as_deref(), Some("legacy"));
         assert!(!legacy.v2_authoritative);
         assert!(!legacy.observes_v2_decisions);
+        let legacy_devices = device_capabilities(&legacy_handle);
+        assert!(!legacy_devices.lifecycle);
+        assert!(!legacy_devices.planned_lanes);
+        assert!(!legacy_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let observe_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -4562,6 +4573,10 @@ mod tests {
         assert_eq!(observe.active_mode.as_deref(), Some("observe"));
         assert!(!observe.v2_authoritative);
         assert!(observe.observes_v2_decisions);
+        let observe_devices = device_capabilities(&observe_handle);
+        assert!(!observe_devices.lifecycle);
+        assert!(!observe_devices.planned_lanes);
+        assert!(!observe_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let v2_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -4573,6 +4588,10 @@ mod tests {
         assert!(v2.v2_authoritative);
         assert!(!v2.observes_v2_decisions);
         assert_eq!(v2.modes, ["legacy", "observe", "v2"]);
+        let v2_devices = device_capabilities(&v2_handle);
+        assert!(v2_devices.lifecycle);
+        assert!(v2_devices.planned_lanes);
+        assert!(v2_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let maintenance = crate::scheduler::ScheduledWorkHandle::for_runtime(

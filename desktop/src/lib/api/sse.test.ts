@@ -54,4 +54,37 @@ describe("sseStream", () => {
 
     expect(onOpen).toHaveBeenCalledTimes(2);
   });
+
+  for (const status of [401, 403, 404]) {
+    it(`makes HTTP ${status} terminal when the consumer marks it non-retryable`, async () => {
+      fetchEventSource.mockImplementation(
+        async (
+          _url: string,
+          options: {
+            onopen: (response: Response) => Promise<void>;
+            onerror: (error: Error) => void;
+          },
+        ) => {
+          let failure: Error;
+          try {
+            await options.onopen(new Response(null, { status }));
+            throw new Error("expected onopen to reject");
+          } catch (error) {
+            failure = error as Error;
+          }
+          expect(() => options.onerror(failure)).toThrow(`HTTP ${status}`);
+        },
+      );
+
+      await sseStream("/api/events", {
+        signal: new AbortController().signal,
+        onEvent: vi.fn(),
+        retry: true,
+        terminalHttpStatuses: [401, 403, 404],
+        target: { baseUrl: "http://host", apiKey: "stale" },
+      });
+
+      expect(fetchEventSource).toHaveBeenCalledTimes(1);
+    });
+  }
 });

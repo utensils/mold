@@ -67,8 +67,9 @@ pub struct StaticEstimate {
 pub struct EstimateObservation {
     pub total_ms: u64,
     pub load_ms: Option<u64>,
-    pub vram_high_water_bytes: Option<u64>,
-    pub host_high_water_bytes: Option<u64>,
+    /// Completion-time sample, not a measured execution peak.
+    pub vram_completion_sample_bytes: Option<u64>,
+    pub host_completion_sample_bytes: Option<u64>,
     pub observed_at_unix_s: i64,
 }
 
@@ -78,8 +79,9 @@ pub struct EstimateBucket {
     pub sample_count: u64,
     pub ewma_total_ms: f64,
     pub ewma_load_ms: Option<f64>,
-    pub vram_high_water_bytes: Option<u64>,
-    pub host_high_water_bytes: Option<u64>,
+    /// Decaying conservative envelope of completion-time samples.
+    pub vram_conservative_bytes: Option<u64>,
+    pub host_conservative_bytes: Option<u64>,
     pub last_observed_at_unix_s: i64,
 }
 
@@ -158,13 +160,13 @@ impl EstimateStore {
                     bucket.ewma_load_ms,
                     observation.load_ms.map(|value| value as f64),
                 );
-                bucket.vram_high_water_bytes = optional_max(
-                    bucket.vram_high_water_bytes,
-                    observation.vram_high_water_bytes,
+                bucket.vram_conservative_bytes = update_conservative_envelope(
+                    bucket.vram_conservative_bytes,
+                    observation.vram_completion_sample_bytes,
                 );
-                bucket.host_high_water_bytes = optional_max(
-                    bucket.host_high_water_bytes,
-                    observation.host_high_water_bytes,
+                bucket.host_conservative_bytes = update_conservative_envelope(
+                    bucket.host_conservative_bytes,
+                    observation.host_completion_sample_bytes,
                 );
                 bucket.sample_count = bucket.sample_count.saturating_add(1);
                 bucket.last_observed_at_unix_s = observation.observed_at_unix_s;
@@ -177,8 +179,8 @@ impl EstimateStore {
                         sample_count: 1,
                         ewma_total_ms: observation.total_ms as f64,
                         ewma_load_ms: observation.load_ms.map(|value| value as f64),
-                        vram_high_water_bytes: observation.vram_high_water_bytes,
-                        host_high_water_bytes: observation.host_high_water_bytes,
+                        vram_conservative_bytes: observation.vram_completion_sample_bytes,
+                        host_conservative_bytes: observation.host_completion_sample_bytes,
                         last_observed_at_unix_s: observation.observed_at_unix_s,
                     },
                 );
@@ -200,14 +202,14 @@ impl EstimateStore {
         };
         ResolvedEstimate {
             total_ms: bucket.ewma_total_ms.max(0.0).round() as u64,
-            // Learned high-water marks are advisory evidence, never authority
-            // to weaken static admission safety.
+            // The decaying completion-sample envelope is advisory evidence,
+            // never authority to weaken static admission safety.
             vram_bytes: static_estimate
                 .vram_bytes
-                .max(bucket.vram_high_water_bytes.unwrap_or_default()),
+                .max(bucket.vram_conservative_bytes.unwrap_or_default()),
             host_bytes: static_estimate
                 .host_bytes
-                .max(bucket.host_high_water_bytes.unwrap_or_default()),
+                .max(bucket.host_conservative_bytes.unwrap_or_default()),
             confidence: bucket.confidence(),
             learned: true,
         }
@@ -237,7 +239,10 @@ impl EstimateStore {
 }
 
 fn update_ewma(prior: f64, sample: f64) -> f64 {
-    let bounded = sample.clamp(prior * 0.25, prior * 4.0);
+    // A zero-duration first observation (coarse clock/test double) must not
+    // collapse the winsorization window to [0, 0] forever.
+    let winsor_center = prior.max(1.0);
+    let bounded = sample.clamp(winsor_center * 0.25, winsor_center * 4.0);
     prior.mul_add(1.0 - EWMA_ALPHA, bounded * EWMA_ALPHA)
 }
 
@@ -249,10 +254,10 @@ fn update_optional_ewma(prior: Option<f64>, sample: Option<f64>) -> Option<f64> 
     }
 }
 
-fn optional_max(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (left, None) => left,
-        (None, right) => right,
+fn update_conservative_envelope(prior: Option<u64>, sample: Option<u64>) -> Option<u64> {
+    match (prior, sample) {
+        (Some(prior), Some(sample)) => Some((prior.saturating_mul(95) / 100).max(sample)),
+        (prior, None) => prior,
+        (None, sample) => sample,
     }
 }

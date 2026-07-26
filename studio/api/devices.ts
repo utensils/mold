@@ -1,8 +1,4 @@
-import {
-  IncompatibleHostError,
-  apiJsonTo,
-  type ApiTarget,
-} from "./client";
+import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 
 export type DeviceBackend = "cuda" | "metal";
 export type DeviceKind = "full_gpu" | "mig" | "unknown_cuda" | "metal";

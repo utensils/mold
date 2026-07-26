@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
+import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
 import { apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
@@ -495,17 +496,22 @@ export const useHostsStore = defineStore("hosts", {
           if (!host.baseUrl || host.status === "connecting") return;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
           try {
-            const [status, devices] = await Promise.all([
+            const [status, devices, queue] = await Promise.all([
               apiJsonTo<ServerStatus>(target, "/api/status"),
               listDevices(target).then(
                 (snapshot) => snapshot.devices,
+                () => null,
+              ),
+              listQueue(target).then(
+                (listing) => listing,
                 () => null,
               ),
             ]);
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
-              predictedCompletionMs: this.telemetry[host.id]?.predictedCompletionMs ?? null,
+              predictedCompletionMs:
+                queue?.plan == null ? null : predictedCompletionUnixMs(queue.plan),
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,

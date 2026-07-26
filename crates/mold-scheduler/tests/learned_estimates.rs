@@ -20,8 +20,8 @@ fn learned_timing_never_lowers_the_static_memory_floor() {
         EstimateObservation {
             total_ms: 1_000,
             load_ms: Some(100),
-            vram_high_water_bytes: Some(2_000),
-            host_high_water_bytes: Some(3_000),
+            vram_completion_sample_bytes: Some(2_000),
+            host_completion_sample_bytes: Some(3_000),
             observed_at_unix_s: 100,
         },
     );
@@ -53,8 +53,8 @@ fn samples_are_winsorized_then_ewma_updated_with_documented_confidence() {
                     _ => 1_750,
                 },
                 load_ms: None,
-                vram_high_water_bytes: None,
-                host_high_water_bytes: None,
+                vram_completion_sample_bytes: None,
+                host_completion_sample_bytes: None,
                 observed_at_unix_s,
             },
         );
@@ -67,6 +67,51 @@ fn samples_are_winsorized_then_ewma_updated_with_documented_confidence() {
 }
 
 #[test]
+fn a_zero_first_sample_does_not_pin_the_ewma_at_zero() {
+    let mut store = EstimateStore::default();
+    let key = key("zero-clock");
+    for (total_ms, observed_at_unix_s) in [(0, 1), (1_000, 2)] {
+        store.observe(
+            key.clone(),
+            EstimateObservation {
+                total_ms,
+                load_ms: None,
+                vram_completion_sample_bytes: None,
+                host_completion_sample_bytes: None,
+                observed_at_unix_s,
+            },
+        );
+    }
+
+    let bucket = store.exact(&key).unwrap();
+    assert!(bucket.ewma_total_ms > 0.0);
+    assert_eq!(bucket.sample_count, 2);
+}
+
+#[test]
+fn conservative_completion_memory_samples_decay_after_an_outlier() {
+    let mut store = EstimateStore::default();
+    let key = key("memory-envelope");
+    for (sample, observed_at_unix_s) in [(10_000, 1), (1_000, 2), (1_000, 3)] {
+        store.observe(
+            key.clone(),
+            EstimateObservation {
+                total_ms: 1_000,
+                load_ms: None,
+                vram_completion_sample_bytes: Some(sample),
+                host_completion_sample_bytes: None,
+                observed_at_unix_s,
+            },
+        );
+    }
+
+    assert_eq!(
+        store.exact(&key).unwrap().vram_conservative_bytes,
+        Some(9_025)
+    );
+}
+
+#[test]
 fn old_buckets_and_capacity_overflow_are_pruned_deterministically() {
     let mut store = EstimateStore::with_limits(2, 180 * 24 * 60 * 60);
     for (suffix, observed_at_unix_s) in [("old", 1), ("newer", 20), ("newest", 30)] {
@@ -75,8 +120,8 @@ fn old_buckets_and_capacity_overflow_are_pruned_deterministically() {
             EstimateObservation {
                 total_ms: 1_000,
                 load_ms: None,
-                vram_high_water_bytes: None,
-                host_high_water_bytes: None,
+                vram_completion_sample_bytes: None,
+                host_completion_sample_bytes: None,
                 observed_at_unix_s,
             },
         );

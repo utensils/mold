@@ -6,8 +6,11 @@
  * About card sourced from GET /api/status. Set-once prefs only; per-generation
  * knobs stay in Create's Advanced.
  */
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import CardSurface from "@ui/components/CardSurface.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import type { DeviceInfo } from "@studio/api/devices";
+import { setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigSettingsPanel from "../components/ConfigSettingsPanel.vue";
 import SegmentedControl, {
   type SegmentOption,
@@ -16,19 +19,20 @@ import { theme, themeFamily, type Theme, type ThemeFamily } from "../lib/theme";
 import { toast } from "../lib/toasts";
 import { useStatusPoll } from "../composables/useStatusPoll";
 import {
-  listDevices,
-  setDeviceEnabled,
-  type DeviceInfo,
-} from "@studio/api/devices";
-import {
   canMutateDevice,
   deviceActionLabel,
   deviceLifecycleMessage,
   deviceStateLabel,
 } from "@studio/lib/deviceLifecycle";
-import { apiJsonTo } from "@studio/api/client";
 import type { ServerCapabilities } from "../types";
-import { originUrl } from "../lib/hostRegistry";
+import { originHost } from "../lib/hostRegistry";
+import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
+import {
+  hostCapabilities,
+  hostDevices,
+  hostQueue,
+  setHostDeviceEnabled,
+} from "../components/machines/hostClient";
 import {
   deleteCatalogCredential,
   getCatalogCredentialStatus,
@@ -146,30 +150,33 @@ const version = computed(() => status.value?.version ?? "—");
 const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
-const originTarget = () => ({ baseUrl: originUrl(), apiKey: null });
+const queuePlan = ref<QueuePlan | null>(null);
 
-async function loadDevices() {
-  try {
-    const nextDevices = await listDevices(originTarget());
-    const nextCapabilities = await apiJsonTo<ServerCapabilities>(
-      originTarget(),
-      "/api/capabilities",
-    ).catch(() => null);
-    devices.value = nextDevices.devices;
-    deviceCapabilities.value = nextCapabilities;
-  } catch {
-    devices.value = null;
-    deviceCapabilities.value = null;
-  }
+async function loadDevicePanel() {
+  const host = originHost();
+  const [deviceResult, queueResult, capabilityResult] =
+    await Promise.allSettled([
+      hostDevices(host),
+      hostQueue(host),
+      hostCapabilities(host),
+    ]);
+  if (deviceResult.status === "fulfilled")
+    devices.value = deviceResult.value.devices;
+  if (queueResult.status === "fulfilled")
+    queuePlan.value = queueResult.value.plan ?? null;
+  deviceCapabilities.value =
+    capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+  if (deviceResult.status !== "fulfilled") devices.value = null;
 }
 
-async function toggleDevice(device: DeviceInfo) {
+async function toggleDeviceById(deviceId: string, enabled: boolean) {
+  const device = devices.value?.find((candidate) => candidate.id === deviceId);
+  if (!device || enabled === device.desired_enabled) return;
   if (!canMutateDevice(device, deviceCapabilities.value)) return;
-  const enabled = !device.desired_enabled;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
-    await setDeviceEnabled(originTarget(), device.id, enabled);
-    await loadDevices();
+    await setHostDeviceEnabled(originHost(), device.id, enabled);
+    await loadDevicePanel();
   } catch (error) {
     toast("error", `Could not update ${device.name}: ${errorMessage(error)}`);
   } finally {
@@ -179,9 +186,40 @@ async function toggleDevice(device: DeviceInfo) {
   }
 }
 
+function toggleDevice(device: DeviceInfo) {
+  return toggleDeviceById(device.id, !device.desired_enabled);
+}
+
+async function unpinWork(workId: string) {
+  const host = originHost();
+  try {
+    await setQueueDevicePin(
+      { baseUrl: host.url, apiKey: host.apiKey ?? null },
+      workId,
+      null,
+    );
+    await loadDevicePanel();
+  } catch (error) {
+    toast("error", `Queue pin was not changed: ${errorMessage(error)}`);
+  }
+}
+
+let deviceEventsAbort: AbortController | null = null;
+
 onMounted(() => {
-  void loadDevices();
+  const host = originHost();
+  // Bootstrap even when the server predates `/api/events`; the subscription
+  // is an invalidation accelerator, not the source of initial truth.
+  void loadDevicePanel();
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    deviceEventsAbort.signal,
+    () => void loadDevicePanel(),
+  );
 });
+
+onBeforeUnmount(() => deviceEventsAbort?.abort());
 </script>
 
 <template>
@@ -210,6 +248,26 @@ onMounted(() => {
           @update:model-value="setAppearance"
         />
       </div>
+    </CardSurface>
+
+    <p v-if="devices?.length && queuePlan?.work_items.length" class="kicker">
+      Scheduler plan
+    </p>
+    <CardSurface
+      v-if="devices?.length && queuePlan?.work_items.length"
+      class="settings__card"
+    >
+      <DevicePanel
+        :devices="devices"
+        :plan="queuePlan"
+        :mutable="
+          deviceCapabilities?.devices?.lifecycle === true &&
+          deviceCapabilities?.dispatch?.v2_authoritative === true
+        "
+        :busy-device-id="[...deviceMutations][0] ?? null"
+        @unpin="unpinWork"
+        @toggle="toggleDeviceById"
+      />
     </CardSurface>
 
     <p class="kicker">Accounts</p>

@@ -43,6 +43,7 @@ import {
 } from "../lib/hostRegistry";
 import { reorderQueueJob, updateQueueJobTargetGpu } from "../api";
 import { requestConfirm, requestText, toast } from "../lib/toasts";
+import { subscribeToDeviceSnapshots } from "../lib/deviceEvents";
 import type { DownloadJobWire, ModelInfoExtended, QueueEntry } from "../types";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import {
@@ -317,6 +318,7 @@ function downloadPct(job: DownloadJobWire): number {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let deviceEventsAbort: AbortController | null = null;
 
 onMounted(async () => {
   if (!host) return;
@@ -326,11 +328,21 @@ onMounted(async () => {
     /* default controls-off */
   }
   await reloadAll();
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    deviceEventsAbort.signal,
+    () => {
+      void poll?.refresh();
+      void reloadQueue();
+    },
+  );
   timer = setInterval(() => void reloadAll(), 4000);
 });
 
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer);
+  deviceEventsAbort?.abort();
 });
 </script>
 
