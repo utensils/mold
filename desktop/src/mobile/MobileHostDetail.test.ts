@@ -298,6 +298,47 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
   });
 
+  it("renders every status GPU before the resource stream produces a snapshot", async () => {
+    apiJsonTo.mockImplementation(
+      (target: { baseUrl: string }, path: string): Promise<unknown> => {
+        if (path === "/api/status") {
+          return Promise.resolve(
+            serverStatus({
+              gpus: [
+                {
+                  ordinal: 0,
+                  name: "NVIDIA RTX 3090",
+                  vram_total_bytes: 24_000_000_000,
+                  vram_used_bytes: 8_000_000_000,
+                  state: "generating",
+                },
+                {
+                  ordinal: 1,
+                  name: "NVIDIA B200",
+                  vram_total_bytes: 80_000_000_000,
+                  vram_used_bytes: 20_000_000_000,
+                  state: "idle",
+                },
+              ],
+            }),
+          );
+        }
+        if (path === "/api/models") return Promise.resolve([]);
+        if (path === "/api/queue") return Promise.resolve({ entries: [] });
+        return Promise.reject(
+          new Error(`Unexpected API path: ${path} for ${target.baseUrl}`),
+        );
+      },
+    );
+
+    const view = await mountDetail();
+
+    expect(view.text()).toContain("NVIDIA RTX 3090");
+    expect(view.text()).toContain("NVIDIA B200");
+    expect(view.text()).toContain("8.0 GB/24.0 GB");
+    expect(view.text()).toContain("20.0 GB/80.0 GB");
+  });
+
   it("uses the live queue count after the queue API responds", async () => {
     apiJsonTo.mockImplementation((target: { baseUrl: string }, path: string): Promise<unknown> => {
       if (path === "/api/status") return Promise.resolve(serverStatus({ queue_depth: 7 }));

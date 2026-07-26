@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
+import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
 import { sseStream } from "../lib/api/sse";
 import type {
   DownloadEvent,
@@ -67,18 +68,7 @@ const modelLabel = (name: string) => modelDisplayNameForId(name, installed.value
 
 const gpus = computed<GpuSnapshot[]>(() => {
   if (snapshot.value?.gpus.length) return snapshot.value.gpus;
-  const gpu = status.value?.gpu_info;
-  if (!gpu) return [];
-  return [
-    {
-      ordinal: 0,
-      name: gpu.name,
-      backend: gpu.backend ?? inferBackendFromGpuName(gpu.name),
-      vram_total: gpu.vram_total_mb * 1_000_000,
-      vram_used: gpu.vram_used_mb * 1_000_000,
-      gpu_utilization: null,
-    },
-  ];
+  return gpuSnapshotsFromStatus(status.value);
 });
 
 const ram = computed(() => snapshot.value?.system_ram ?? null);

@@ -3771,6 +3771,51 @@ describe("MobileApp machines telemetry", () => {
     expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("41");
   });
 
+  it("aggregates every GPU on a host card", async () => {
+    apiJsonTo.mockReset().mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status")
+        return Promise.resolve({
+          ...status,
+          gpu_info: {
+            name: "RTX 3090",
+            vram_total_mb: 24_000,
+            vram_used_mb: 10_000,
+            backend: "cuda",
+          },
+          gpus: [
+            {
+              ordinal: 0,
+              name: "RTX 3090",
+              vram_total_bytes: 24_000_000_000,
+              vram_used_bytes: 10_000_000_000,
+              state: "generating",
+            },
+            {
+              ordinal: 1,
+              name: "NVIDIA B200",
+              vram_total_bytes: 80_000_000_000,
+              vram_used_bytes: 20_000_000_000,
+              state: "idle",
+            },
+          ],
+          queue_depth: 1,
+        } satisfies ServerStatus);
+      if (path === "/api/models") return Promise.resolve([model]);
+      if (path === "/api/gallery") return Promise.resolve([print]);
+      return Promise.reject(new Error(`Unexpected API path: ${path}`));
+    });
+
+    wrapper = mountMobileApp();
+    await flushPromises();
+    await openMachines();
+
+    const telemetry = wrapper.get("[data-test='mobile-host-telemetry']");
+    expect(telemetry.get(".host-telemetry-mem").text()).toBe(
+      "30.0 / 104.0 GB",
+    );
+    expect(telemetry.get(".meter").attributes("aria-valuenow")).toBe("29");
+  });
+
   it("shows dashes and a zero queue when the host omits GPU info", async () => {
     wrapper = mountMobileApp();
     await flushPromises();

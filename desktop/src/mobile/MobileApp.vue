@@ -5,6 +5,7 @@ import EstimateBadge from "../components/generate/EstimateBadge.vue";
 import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
+import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { modelSupportsSequence } from "@studio/lib/sequence";
@@ -340,10 +341,10 @@ function hostQueueLabel(id: string): string {
 }
 
 function captureHostTelemetry(hostId: string, status: ServerStatus): void {
-  const gpu = status.gpu_info;
+  const memory = summarizeStatusGpuMemory(status);
   hostTelemetry[hostId] = {
-    vramUsedMb: gpu?.vram_used_mb ?? null,
-    vramTotalMb: gpu?.vram_total_mb ?? null,
+    vramUsedMb: memory?.usedMb ?? null,
+    vramTotalMb: memory?.totalMb ?? null,
     queueDepth: status.queue_depth ?? null,
   };
 }
