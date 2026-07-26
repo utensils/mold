@@ -213,7 +213,14 @@ fn run_gpu_owner_loop(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
-        drop(cached);
+        if let Err(error) = teardown_inference_engines_safely(worker, cached, "GPU owner shutdown")
+        {
+            tracing::error!(
+                gpu = worker.gpu.ordinal,
+                %error,
+                "GPU owner shutdown teardown failed; retaining remaining resources for process exit"
+            );
+        }
     }
     // A poisoned primary context is never touched again. In that case keep
     // the cache intact so no container operation can trigger a CUDA-backed
@@ -328,21 +335,7 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
                 let _ = progress_tx.send(SseMessage::Progress(event.into()));
             }));
         }
-        let result = engine.upscale(&job.request);
-        engine.clear_on_progress();
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|error| quarantine_if_fatal_cuda_error(worker, error))
-        {
-            // A destructor may call into the poisoned CUDA context. Process
-            // teardown owns recovery; deliberately leak this one engine.
-            std::mem::forget(engine);
-            return result;
-        }
-        engine.unload();
-        drop(engine);
-        result
+        run_upscale_engine_safely(worker, engine, &job.request)
     })();
     if result
         .as_ref()
@@ -463,8 +456,18 @@ fn evict_idle_on_worker(worker: &GpuWorker, ttl: Duration) {
         contain_poisoned_cuda(evicted);
         return;
     }
-    let count = evicted.len();
-    drop(evicted);
+    let engines = evicted.into_iter().map(|(_, engine)| engine);
+    let count = match teardown_inference_engines_safely(worker, engines, "idle cache eviction") {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::error!(
+                gpu = worker.gpu.ordinal,
+                %error,
+                "idle model cache teardown failed; quarantining owner context"
+            );
+            return;
+        }
+    };
     if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst) {
         return;
     }
@@ -574,6 +577,76 @@ fn contain_worker_cache(worker: &GpuWorker) {
     contain_poisoned_cuda(remaining);
 }
 
+/// Tear down inference engines while retaining ownership across every callback.
+///
+/// All engines are wrapped before the first callback so a panic cannot unwind
+/// through the untouched tail and run additional CUDA-backed destructors. A
+/// teardown-callback panic quarantines the worker and intentionally retains the
+/// current engine plus the tail for process teardown. Successful engines still
+/// unload and drop on the owner thread.
+///
+/// A destructor can itself be the first operation to panic. That cannot be
+/// predicted without leaking every ordinary engine, so the explicit drop is
+/// caught: the faulting destructor has begun, but no remaining suspect engine
+/// or worker-cache destructor is allowed to run afterward.
+fn teardown_inference_engines_safely(
+    worker: &GpuWorker,
+    engines: impl IntoIterator<Item = Box<dyn mold_inference::InferenceEngine>>,
+    operation: &str,
+) -> anyhow::Result<usize> {
+    let mut engines: Vec<std::mem::ManuallyDrop<Box<dyn mold_inference::InferenceEngine>>> =
+        engines
+            .into_iter()
+            .map(std::mem::ManuallyDrop::new)
+            .collect();
+    let count = engines.len();
+
+    for engine in &mut engines {
+        if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            anyhow::bail!("{operation} stopped because the CUDA owner context is quarantined");
+        }
+
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if engine.is_loaded() {
+                engine.unload();
+            }
+        })) {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            anyhow::bail!(
+                "{operation} teardown panicked; CUDA state quarantined: {}",
+                panic_payload_message(payload.as_ref())
+            );
+        }
+
+        if worker.poisoned.load(Ordering::SeqCst) || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            anyhow::bail!("{operation} stopped because the CUDA owner context is quarantined");
+        }
+
+        // SAFETY: each wrapper is dropped at most once in this loop. On
+        // unwind, ManuallyDrop suppresses a second attempt; on success the
+        // wrapper remains inert for the rest of the function.
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            std::mem::ManuallyDrop::drop(engine);
+        })) {
+            quarantine_poisoned_worker(worker);
+            contain_worker_cache(worker);
+            anyhow::bail!(
+                "{operation} destructor panicked; CUDA state quarantined: {}",
+                panic_payload_message(payload.as_ref())
+            );
+        }
+    }
+
+    Ok(count)
+}
+
 fn synchronize_after_oom(worker: &GpuWorker) -> bool {
     match device::try_synchronize_device(worker.gpu.ordinal) {
         Ok(()) => true,
@@ -626,6 +699,7 @@ pub(crate) fn run_upscale_engine_safely(
                     .unwrap_or("unknown panic");
                 anyhow::bail!("upscaler cleanup panicked; CUDA state quarantined: {message}");
             }
+            drop_upscale_engine_safely(worker, engine)?;
             Ok(response)
         }
         Ok(Err(error)) if is_fatal_cuda_error(&error) => {
@@ -649,6 +723,7 @@ pub(crate) fn run_upscale_engine_safely(
                     .unwrap_or("unknown panic");
                 anyhow::bail!("upscaler cleanup panicked; CUDA state quarantined: {message}");
             }
+            drop_upscale_engine_safely(worker, engine)?;
             Err(error)
         }
         Err(payload) => {
@@ -663,6 +738,21 @@ pub(crate) fn run_upscale_engine_safely(
             anyhow::bail!("upscale panicked: {message}")
         }
     }
+}
+
+fn drop_upscale_engine_safely(
+    worker: &GpuWorker,
+    engine: Box<dyn mold_inference::UpscaleEngine>,
+) -> anyhow::Result<()> {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(engine))) {
+        quarantine_poisoned_worker(worker);
+        contain_worker_cache(worker);
+        anyhow::bail!(
+            "upscaler destructor panicked; CUDA state quarantined: {}",
+            panic_payload_message(payload.as_ref())
+        );
+    }
+    Ok(())
 }
 
 fn load_engine_safely(
@@ -1901,7 +1991,7 @@ fn evict_cached_model_blocking(
         worker.set_resident_model(None);
     }
     ensure_worker_not_poisoned(worker, model_name)?;
-    drop(engine);
+    teardown_inference_engines_safely(worker, std::iter::once(engine), "cached admin eviction")?;
     ensure_worker_not_poisoned(worker, model_name)?;
     match device::post_drop_free_vram_bytes(worker.gpu.ordinal) {
         Ok(free_after_drop) => tracing::info!(
@@ -2144,13 +2234,45 @@ mod tests {
 
     struct PanickingDropEngine {
         name: String,
+        unload_calls: Arc<AtomicUsize>,
         drop_calls: Arc<AtomicUsize>,
+    }
+
+    struct DestructorPanickingEngine {
+        name: String,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DestructorPanickingEngine {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected first-operation destructor panic");
+        }
+    }
+
+    impl InferenceEngine for DestructorPanickingEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("destructor safety test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            false
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {}
     }
 
     impl Drop for PanickingDropEngine {
         fn drop(&mut self) {
             self.drop_calls.fetch_add(1, Ordering::SeqCst);
-            panic!("injected CUDA-backed destructor panic");
         }
     }
 
@@ -2171,7 +2293,10 @@ mod tests {
             Ok(())
         }
 
-        fn unload(&mut self) {}
+        fn unload(&mut self) {
+            self.unload_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected CUDA-backed teardown panic");
+        }
     }
 
     struct CudaCallbackRecordingEngine {
@@ -2720,6 +2845,37 @@ mod tests {
     }
 
     #[test]
+    fn clean_owner_shutdown_contains_cache_after_teardown_panic() {
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(PanickingDropEngine {
+                name: "shutdown-engine".to_string(),
+                unload_calls: unload_calls.clone(),
+                drop_calls: drop_calls.clone(),
+            }),
+            0,
+        );
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+
+        worker.request_shutdown();
+        handle
+            .join()
+            .expect("owner shutdown catches teardown panic");
+
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn poisoned_idle_eviction_invokes_no_engine_or_device_cleanup() {
         let dropped_on = Arc::new(Mutex::new(None));
         let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
@@ -2741,17 +2897,31 @@ mod tests {
 
     #[test]
     fn idle_eviction_contains_engine_before_a_destructor_can_poison_cuda() {
-        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let first_drop_calls = Arc::new(AtomicUsize::new(0));
+        let tail_dropped_on = Arc::new(Mutex::new(None));
         let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
         {
             let mut cache = worker.model_cache.lock().unwrap();
             cache.insert(
-                Box::new(PanickingDropEngine {
-                    name: "evict-me".to_string(),
-                    drop_calls: drop_calls.clone(),
+                Box::new(DestructorPanickingEngine {
+                    name: "first".to_string(),
+                    drop_calls: first_drop_calls.clone(),
                 }),
                 0,
             );
+            cache.insert(
+                Box::new(DropRecordingEngine {
+                    name: "tail".to_string(),
+                    dropped_on: tail_dropped_on.clone(),
+                }),
+                0,
+            );
+            let mut first = cache.take("first").unwrap();
+            first.last_used = Instant::now() - Duration::from_secs(2);
+            cache.restore(first);
+            let mut tail = cache.take("tail").unwrap();
+            tail.last_used = Instant::now() - Duration::from_secs(1);
+            cache.restore(tail);
             let mut keep_one = cache.take("keep-one").unwrap();
             keep_one.last_used = Instant::now();
             cache.restore(keep_one);
@@ -2773,10 +2943,16 @@ mod tests {
             .join()
             .unwrap();
 
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
         assert_eq!(
-            drop_calls.load(Ordering::SeqCst),
-            0,
-            "eviction must contain a suspect engine before its CUDA-backed destructor executes"
+            first_drop_calls.load(Ordering::SeqCst),
+            1,
+            "a destructor cannot be known to panic until it starts"
+        );
+        assert!(
+            tail_dropped_on.lock().unwrap().is_none(),
+            "eviction must retain untouched tail engines after the first destructor panics"
         );
     }
 
@@ -2820,6 +2996,102 @@ mod tests {
         assert_eq!(unload_calls.load(Ordering::SeqCst), 0);
         assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
         assert!(worker.model_cache.lock().unwrap().contains("active"));
+    }
+
+    #[test]
+    fn cached_admin_eviction_contains_engine_after_teardown_panic() {
+        let unload_calls = Arc::new(AtomicUsize::new(0));
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(PanickingDropEngine {
+                name: "evict-me".to_string(),
+                unload_calls: unload_calls.clone(),
+                drop_calls: drop_calls.clone(),
+            }),
+            0,
+        );
+        worker
+            .owner_thread_id
+            .set(std::thread::current().id())
+            .expect("test binds admin eviction to the owner thread");
+
+        let error = evict_cached_model_blocking(&worker, "evict-me")
+            .expect_err("teardown panic must fail cached admin eviction");
+
+        assert!(error.to_string().contains("teardown panicked"), "{error:#}");
+        assert_eq!(unload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn destructor_panic_is_reported_and_contains_untouched_tail() {
+        let first_drop_calls = Arc::new(AtomicUsize::new(0));
+        let tail_unload_calls = Arc::new(AtomicUsize::new(0));
+        let tail_drop_calls = Arc::new(AtomicUsize::new(0));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        let engines: Vec<Box<dyn InferenceEngine>> = vec![
+            Box::new(DestructorPanickingEngine {
+                name: "first".to_string(),
+                drop_calls: first_drop_calls.clone(),
+            }),
+            Box::new(CudaCallbackRecordingEngine {
+                name: "tail".to_string(),
+                unload_calls: tail_unload_calls.clone(),
+                drop_calls: tail_drop_calls.clone(),
+            }),
+        ];
+
+        let error = teardown_inference_engines_safely(&worker, engines, "destructor panic proof")
+            .expect_err("destructor panic must be surfaced");
+
+        assert!(
+            error.to_string().contains("destructor panicked"),
+            "{error:#}"
+        );
+        assert_eq!(
+            first_drop_calls.load(Ordering::SeqCst),
+            1,
+            "the first destructor is unknowable until it starts"
+        );
+        assert_eq!(tail_unload_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(tail_drop_calls.load(Ordering::SeqCst), 0);
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+        assert!(worker.fatal_cuda_error.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cached_admin_eviction_unloads_and_drops_normally_on_owner_thread() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(LifecycleRecordingEngine {
+                name: "evict-me".to_string(),
+                loaded: true,
+                operations: operations.clone(),
+            }),
+            0,
+        );
+        worker
+            .owner_thread_id
+            .set(std::thread::current().id())
+            .expect("test binds admin eviction to the owner thread");
+
+        let removed = evict_cached_model_blocking(&worker, "evict-me")
+            .expect("ordinary cached admin eviction succeeds");
+
+        assert_eq!(removed.as_deref(), Some("evict-me"));
+        let recorded: Vec<_> = operations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(operation, _)| operation.clone())
+            .collect();
+        assert_eq!(recorded, ["unload".to_string(), "drop".to_string()]);
+        assert!(!worker.poisoned.load(Ordering::SeqCst));
+        assert!(!worker.fatal_cuda_error.load(Ordering::SeqCst));
     }
 
     #[test]
