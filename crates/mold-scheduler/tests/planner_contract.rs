@@ -839,6 +839,76 @@ fn busy_only_work_reports_no_idle_device_after_other_openings_fill() {
 }
 
 #[test]
+fn idle_candidate_short_circuit_matches_the_previous_minimum_reference() {
+    for mask in 0_u16..256 {
+        let mut devices = vec![DeviceSnapshot::busy("gpu-0", 24 * GIB, 5_000)];
+        for device_index in 1..4 {
+            let mut candidate_device = device(&format!("gpu-{device_index}"));
+            if mask & (1 << (device_index - 1)) != 0 {
+                candidate_device.activity = mold_scheduler::DeviceActivity::Busy;
+                candidate_device.available_at_ms = Some(5_000);
+            }
+            if mask & (1 << (device_index + 2)) != 0 {
+                candidate_device.health = DeviceHealth::Degraded;
+            }
+            candidate_device.available_vram_bytes = if mask & (1 << (device_index + 5)) != 0 {
+                4 * GIB
+            } else {
+                24 * GIB
+            };
+            devices.push(candidate_device);
+        }
+
+        let mut target_candidates = vec![candidate("gpu-0", 0)];
+        for device_index in 1..4 {
+            target_candidates.push(candidate(&format!("gpu-{device_index}"), 0).with_vram(8 * GIB));
+        }
+        target_candidates.rotate_left((mask as usize) % 4);
+
+        let reference_has_idle = target_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let device = devices
+                    .iter()
+                    .find(|device| device.id == candidate.device_id)?;
+                (device.is_idle() && candidate.predicted_vram_bytes <= device.available_vram_bytes)
+                    .then_some(candidate.incremental_host_ram_bytes)
+            })
+            .min()
+            .is_some();
+
+        let mut jobs = devices
+            .iter()
+            .filter(|device| device.is_idle())
+            .enumerate()
+            .map(|(rank, device)| {
+                work(
+                    &format!("critical-filler-{rank}"),
+                    rank as u64,
+                    vec![candidate(device.id.as_str(), 0)],
+                )
+                .with_priority(PriorityClass::Critical)
+                .with_hard_device(device.id.clone())
+            })
+            .collect::<Vec<_>>();
+        jobs.push(work("target", 10_000, target_candidates));
+
+        let plan = Planner::default()
+            .plan(&snapshot(devices, jobs, 128))
+            .expect("valid plan");
+        assert_eq!(
+            plan.blocked_reason(&WorkId::from("target")),
+            Some(if reference_has_idle {
+                &BlockedReason::LowerPriorityOpening
+            } else {
+                &BlockedReason::NoIdleDevice
+            }),
+            "mask {mask:08b}"
+        );
+    }
+}
+
+#[test]
 fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
     let plan = Planner::default()
         .plan(&snapshot(

@@ -491,7 +491,11 @@ fn has_idle_candidate(
     candidates: &[CandidatePlacement],
     devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
 ) -> bool {
-    minimum_immediate_host_ram(work, candidates, devices).is_some()
+    candidates.iter().any(|candidate| {
+        devices
+            .get(&candidate.device_id)
+            .is_some_and(|device| candidate_is_eligible(work, candidate, device, true))
+    })
 }
 
 /// Returns a lower bound for adding `work` to the current minimum-host-RAM
