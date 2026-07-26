@@ -180,6 +180,12 @@ fn clear_parsed_lora_cache_for_test() {
     cache.order.clear();
 }
 
+#[cfg(test)]
+fn lock_parsed_lora_cache_tests() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
 /// Parsed LoRA adapter: pairs of (A, B) keyed by canonical layer stem
 /// (the part before `.lora_A.weight` / `.lora_down.weight`).
 pub(crate) struct LoraAdapter {
@@ -1505,6 +1511,7 @@ mod tests {
 
     #[test]
     fn parsed_lora_cache_hits_on_second_load() {
+        let _cache_test_guard = lock_parsed_lora_cache_tests();
         clear_parsed_lora_cache_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("hit.safetensors");
@@ -1520,6 +1527,7 @@ mod tests {
 
     #[test]
     fn parsed_lora_cache_invalidates_on_mtime_change() {
+        let _cache_test_guard = lock_parsed_lora_cache_tests();
         clear_parsed_lora_cache_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("invalidate.safetensors");

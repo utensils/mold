@@ -6030,7 +6030,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let gate = state.gallery_publication_gate.clone();
@@ -6108,7 +6108,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: Vec::new().into(),
         });
         let state = AppState::empty(config, queue, gpu_pool, 200);
         let gate = state.gallery_publication_gate.clone();

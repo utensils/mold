@@ -4479,6 +4479,8 @@ mod tests {
                 output_dir: None,
                 config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                 metadata_db: Arc::new(None),
+                gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
+                ),
                 queue: QueueHandle::new(queue_tx),
                 registry: JobRegistry::new(),
                 events: crate::events::EventBroadcaster::new(),
@@ -4592,6 +4594,8 @@ mod tests {
                     output_dir: None,
                     config: Arc::new(tokio::sync::RwLock::new(Config::default())),
                     metadata_db: Arc::new(None),
+                    gallery_publication_gate:
+                        crate::batch_transaction::GalleryPublicationGate::default(),
                     queue: QueueHandle::new(queue_tx),
                     registry: JobRegistry::new(),
                     events: crate::events::EventBroadcaster::new(),

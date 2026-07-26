@@ -4771,10 +4771,6 @@ mod tests {
             },
             &mut immediate,
         );
-        // Rejection samples the real host. Keep this scheduling test
-        // independent of whichever processes share the test machine.
-        publish_ample_memory(&mut coordinator.memory);
-
         assert!(coordinator.leases.is_empty());
         assert!(coordinator.memory.reservations.is_empty());
         assert_eq!(
@@ -4859,7 +4855,6 @@ mod tests {
             },
             &mut immediate,
         );
-        publish_ample_memory(&mut coordinator.memory);
         coordinator
             .pending
             .get_mut("plan-invalidated")

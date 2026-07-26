@@ -166,6 +166,17 @@ impl GalleryNameReservation {
 
 impl Drop for GalleryNameReservation {
     fn drop(&mut self) {
+        let _bookkeeping_lock = match acquire_gallery_bookkeeping_lock(&self.output_dir) {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::warn!(
+                    final_name = %self.final_name,
+                    %error,
+                    "failed to lock gallery bookkeeping; retaining ordinary filename reservation"
+                );
+                return;
+            }
+        };
         if let Err(error) = release_reservation(&self.output_dir, &self.final_name, &self.owner) {
             tracing::warn!(
                 final_name = %self.final_name,
@@ -234,7 +245,25 @@ impl BatchTransaction {
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
+        records: Vec<GenerationRecord>,
+    ) -> anyhow::Result<Self> {
+        Self::begin_with_reservation_directory_hook(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            normalized_request,
+            records,
+            || {},
+        )
+    }
+
+    fn begin_with_reservation_directory_hook(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+        normalized_request: serde_json::Value,
         mut records: Vec<GenerationRecord>,
+        after_reservation_directory_created: impl FnOnce(),
     ) -> anyhow::Result<Self> {
         validate_component(parent_id, "parent id")?;
         ensure!(!records.is_empty(), "batch transaction must have children");
@@ -243,6 +272,13 @@ impl BatchTransaction {
         }
         fs::create_dir_all(output_dir)
             .with_context(|| format!("creating gallery {}", output_dir.display()))?;
+        // Lock the stable gallery directory inode, not a removable file below
+        // the transaction tree. This serializes directory lifecycle across
+        // threads and processes without leaving cleanup bookkeeping behind.
+        // In particular, an ordinary reservation drop cannot rmdir the empty
+        // reservations directory between this begin and its first durable
+        // create-new reservation.
+        let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
         let attempts_root = attempt_dir
             .parent()
@@ -257,7 +293,9 @@ impl BatchTransaction {
         if let Err(error) = (|| {
             fs::create_dir(attempt_dir.join("staging"))?;
             fs::create_dir_all(reservations_dir(output_dir))?;
-            sync_transaction_hierarchy(output_dir, &attempt_dir)
+            sync_transaction_hierarchy(output_dir, &attempt_dir)?;
+            after_reservation_directory_created();
+            Ok(())
         })() {
             let _ = fs::remove_dir_all(&attempt_dir);
             return Err(error);
@@ -1562,6 +1600,45 @@ fn reservations_dir(output_dir: &Path) -> PathBuf {
     output_dir.join(TRANSACTION_DIR).join("reservations")
 }
 
+fn acquire_gallery_bookkeeping_lock(output_dir: &Path) -> anyhow::Result<File> {
+    let lock = open_gallery_bookkeeping_lock_target(output_dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("locking gallery bookkeeping {}", output_dir.display()))?;
+    Ok(lock)
+}
+
+#[cfg(unix)]
+fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
+    File::open(output_dir)
+        .with_context(|| format!("opening gallery directory {}", output_dir.display()))
+}
+
+#[cfg(not(unix))]
+fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
+    // std cannot portably open a directory handle on every non-Unix target.
+    // Keep the stable lock outside the removable transaction subtree so
+    // ordinary gallery cleanup never creates a split-lock inode.
+    let parent = output_dir
+        .parent()
+        .context("gallery directory has no parent for bookkeeping lock")?;
+    let name = output_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("gallery directory name is not UTF-8")?;
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join(format!(".{name}.mold-gallery.lock")))
+        .with_context(|| {
+            format!(
+                "opening gallery bookkeeping lock for {}",
+                output_dir.display()
+            )
+        })
+}
+
 fn committed_manifests_dir(output_dir: &Path, parent_id: &str) -> PathBuf {
     output_dir
         .join(TRANSACTION_DIR)
@@ -1686,6 +1763,8 @@ pub(crate) fn reserve_gallery_final_name_with_directory_sync(
     desired: &str,
     sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<GalleryNameReservation> {
+    fs::create_dir_all(output_dir)?;
+    let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
     fs::create_dir_all(reservations_dir(output_dir))?;
     let owner = ReservationOwner {
         parent_id: format!("ordinary:{}", uuid::Uuid::new_v4()),
@@ -2022,6 +2101,7 @@ mod tests {
     use super::*;
     use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
     use mold_db::RecordSource;
+    use std::io::BufRead as _;
     use std::sync::{Arc as StdArc, Barrier};
 
     fn record(name: &str, seed: u64) -> GenerationRecord {
@@ -2112,6 +2192,226 @@ mod tests {
         .unwrap();
         assert_eq!(report.rolled_back, 1);
         assert!(!attempt.exists());
+    }
+
+    #[test]
+    fn ordinary_reservation_drop_cannot_remove_directory_during_batch_begin() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = StdArc::new(dir.path().to_path_buf());
+        let ordinary = reserve_gallery_final_name_with_directory_sync(
+            &output_dir,
+            "ordinary.png",
+            &|_| Ok(()),
+        )
+        .unwrap();
+        let (directory_ready_tx, directory_ready_rx) = std::sync::mpsc::channel();
+        let (continue_begin_tx, continue_begin_rx) = std::sync::mpsc::channel();
+        let begin_output = StdArc::clone(&output_dir);
+        let begin = std::thread::spawn(move || {
+            BatchTransaction::begin_with_reservation_directory_hook(
+                &begin_output,
+                "parent",
+                0,
+                serde_json::json!({"batch_size": 1}),
+                vec![record("batch.png", 0)],
+                move || {
+                    directory_ready_tx.send(()).unwrap();
+                    continue_begin_rx.recv().unwrap();
+                },
+            )
+        });
+        directory_ready_rx.recv().unwrap();
+
+        let (drop_started_tx, drop_started_rx) = std::sync::mpsc::channel();
+        let (drop_completed_tx, drop_completed_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop_started_tx.send(()).unwrap();
+            drop(ordinary);
+            drop_completed_tx.send(()).unwrap();
+        });
+        drop_started_rx.recv().unwrap();
+        let drop_completed_while_begin_was_paused = drop_completed_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+        continue_begin_tx.send(()).unwrap();
+
+        let transaction = begin.join().unwrap();
+        dropper.join().unwrap();
+        assert!(
+            !drop_completed_while_begin_was_paused,
+            "ordinary cleanup must wait for batch begin's filesystem authority"
+        );
+        let transaction = transaction.expect("batch begin must retain the reservations directory");
+        assert!(
+            reservation_path(&output_dir, "batch.png").is_file(),
+            "batch reservation authority was lost"
+        );
+        assert!(
+            !reservation_path(&output_dir, "ordinary.png").exists(),
+            "ordinary reservation bookkeeping leaked"
+        );
+        transaction.release_reservations();
+        remove_failed_attempt(&transaction);
+    }
+
+    #[test]
+    fn ordinary_reservation_drop_cleans_an_otherwise_empty_gallery() {
+        let dir = tempfile::tempdir().unwrap();
+        let reservation =
+            reserve_gallery_final_name_with_directory_sync(dir.path(), "ordinary.png", &|_| Ok(()))
+                .unwrap();
+        drop(reservation);
+
+        assert!(
+            !dir.path().join(TRANSACTION_DIR).exists(),
+            "ordinary saves must not leave batch bookkeeping in a clean gallery"
+        );
+    }
+
+    fn write_process_test_marker(marker: &str) {
+        println!("MOLD_RESERVATION_TEST:{marker}");
+        std::io::stdout().flush().unwrap();
+    }
+
+    fn read_process_test_marker(
+        reader: &mut impl std::io::BufRead,
+        expected: &str,
+    ) -> anyhow::Result<()> {
+        let expected = format!("MOLD_RESERVATION_TEST:{expected}");
+        loop {
+            let mut line = String::new();
+            ensure!(
+                reader.read_line(&mut line)? != 0,
+                "reservation helper exited before marker {expected}"
+            );
+            if line.trim() == expected {
+                return Ok(());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the cross-process reservation race test"]
+    fn ordinary_reservation_drop_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let reservation = reserve_gallery_final_name_with_directory_sync(
+            &output_dir,
+            "ordinary-process.png",
+            &|_| Ok(()),
+        )
+        .unwrap();
+        write_process_test_marker("READY");
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "CHECK");
+        let lock = open_gallery_bookkeeping_lock_target(&output_dir).unwrap();
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                write_process_test_marker("CONTENDED");
+            }
+            Ok(()) => {
+                fs2::FileExt::unlock(&lock).unwrap();
+                write_process_test_marker("UNEXPECTEDLY_ACQUIRED");
+            }
+            Err(error) => panic!("unexpected gallery lock probe error: {error}"),
+        }
+        command.clear();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "DROP");
+        write_process_test_marker("DROP_STARTED");
+        drop(reservation);
+        write_process_test_marker("COMPLETED");
+    }
+
+    #[test]
+    fn ordinary_reservation_drop_is_serialized_across_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::ordinary_reservation_drop_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child_input = child.stdin.take().unwrap();
+        let mut child_output = std::io::BufReader::new(child.stdout.take().unwrap());
+        read_process_test_marker(&mut child_output, "READY").unwrap();
+
+        let output_dir = dir.path().to_path_buf();
+        let (begin_paused_tx, begin_paused_rx) = std::sync::mpsc::channel();
+        let (continue_begin_tx, continue_begin_rx) = std::sync::mpsc::channel();
+        let begin = std::thread::spawn(move || {
+            BatchTransaction::begin_with_reservation_directory_hook(
+                &output_dir,
+                "parent",
+                0,
+                serde_json::json!({"batch_size": 1}),
+                vec![record("batch-process.png", 0)],
+                move || {
+                    begin_paused_tx.send(()).unwrap();
+                    continue_begin_rx.recv().unwrap();
+                },
+            )
+        });
+        begin_paused_rx.recv().unwrap();
+        writeln!(child_input, "CHECK").unwrap();
+        child_input.flush().unwrap();
+        read_process_test_marker(&mut child_output, "CONTENDED").unwrap();
+        writeln!(child_input, "DROP").unwrap();
+        child_input.flush().unwrap();
+        read_process_test_marker(&mut child_output, "DROP_STARTED").unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let completion_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut child_output, "COMPLETED");
+            completed_tx.send(result).unwrap();
+            // Keep the pipe open and drain libtest's trailing result output;
+            // closing stdout immediately after the marker makes the helper
+            // process report a BrokenPipe even though the test passed.
+            let _ = std::io::copy(&mut child_output, &mut std::io::sink());
+        });
+        let completed_while_begin_was_paused =
+            match completed_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(result) => {
+                    result.unwrap();
+                    true
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                Err(error) => panic!("reservation helper completion channel failed: {error}"),
+            };
+        continue_begin_tx.send(()).unwrap();
+
+        let transaction = begin.join().unwrap();
+        if !completed_while_begin_was_paused {
+            completed_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("reservation drop did not complete after batch begin")
+                .unwrap();
+        }
+        completion_reader.join().unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "reservation-drop helper failed: {status}");
+        assert!(
+            !completed_while_begin_was_paused,
+            "a separate process bypassed batch begin's filesystem authority"
+        );
+        let transaction =
+            transaction.expect("cross-process cleanup must not break batch reservation");
+        assert!(reservation_path(dir.path(), "batch-process.png").is_file());
+        assert!(
+            !reservation_path(dir.path(), "ordinary-process.png").exists(),
+            "cross-process ordinary reservation bookkeeping leaked"
+        );
+        transaction.release_reservations();
+        remove_failed_attempt(&transaction);
     }
 
     fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
