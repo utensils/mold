@@ -834,9 +834,9 @@ fn multi_gpu_loaded_models(state: &AppState) -> std::collections::HashSet<String
                 set.insert(g.model.clone());
             }
         }
-        if let Ok(cache) = worker.model_cache.lock() {
-            if let Some(name) = cache.active_model() {
-                set.insert(name.to_string());
+        if let Ok(resident) = worker.resident_model.read() {
+            if let Some(name) = resident.as_ref() {
+                set.insert(name.clone());
             }
         }
     }
@@ -1813,6 +1813,7 @@ mod tests {
                 free_vram_bytes: 24_000_000_000,
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -3070,6 +3071,7 @@ mod tests {
             }
             cache.insert(Box::new(Engine("a")), 0);
         }
+        worker.set_resident_model(Some("a"));
 
         let (job_tx, job_rx) = tokio::sync::mpsc::channel(8);
         let queue = QueueHandle::new(job_tx.clone());

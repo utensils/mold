@@ -91,6 +91,7 @@ fn fatal_cuda_user_message(model_name: &str) -> String {
 
 fn quarantine_poisoned_worker(worker: &GpuWorker) {
     worker.poisoned.store(true, Ordering::SeqCst);
+    worker.set_resident_model(None);
     worker.consecutive_failures.store(3, Ordering::SeqCst);
     *worker.degraded_until.write().unwrap() = None;
     worker.fatal_cuda_error.store(true, Ordering::SeqCst);
@@ -851,6 +852,20 @@ pub fn ensure_model_ready_sync(
     hint: Option<crate::model_manager::ActivationHint>,
     request_has_lora: bool,
 ) -> anyhow::Result<()> {
+    let result = ensure_model_ready_sync_inner(worker, model_name, config, hint, request_has_lora);
+    if result.is_ok() {
+        worker.set_resident_model(Some(model_name));
+    }
+    result
+}
+
+fn ensure_model_ready_sync_inner(
+    worker: &GpuWorker,
+    model_name: &str,
+    config: &Config,
+    hint: Option<crate::model_manager::ActivationHint>,
+    request_has_lora: bool,
+) -> anyhow::Result<()> {
     let cache = worker.model_cache.lock().unwrap();
 
     // Already loaded?
@@ -909,7 +924,9 @@ pub fn ensure_model_ready_sync(
         // Unload active model first.
         {
             let mut cache = worker.model_cache.lock().unwrap();
-            cache.unload_active();
+            if cache.unload_active().is_some() {
+                worker.set_resident_model(None);
+            }
         }
         device::reclaim_gpu_memory(worker.gpu.ordinal);
 
@@ -1059,7 +1076,9 @@ pub fn ensure_model_ready_sync(
     // Unload active model first.
     {
         let mut cache = worker.model_cache.lock().unwrap();
-        cache.unload_active();
+        if cache.unload_active().is_some() {
+            worker.set_resident_model(None);
+        }
     }
     device::reclaim_gpu_memory(worker.gpu.ordinal);
 
@@ -1130,6 +1149,7 @@ pub fn unload_blocking(worker: &GpuWorker) -> Option<String> {
         cache.unload_active()
     };
     if unloaded.is_some() {
+        worker.set_resident_model(None);
         device::reclaim_gpu_memory(worker.gpu.ordinal);
     }
     unloaded
@@ -1366,6 +1386,7 @@ mod tests {
                 free_vram_bytes: 24_000_000_000,
             },
             model_cache: Arc::new(Mutex::new(cache)),
+            resident_model: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),

@@ -386,27 +386,37 @@ impl DeviceRegistry {
         })
     }
 
-    pub fn legacy_gpu_status_from_snapshot(
-        pool: &GpuPool,
-        devices: &DeviceState,
-    ) -> Vec<GpuWorkerStatus> {
-        let mut statuses = pool.gpu_status();
-        for status in &mut statuses {
-            let Some(device) = devices
-                .devices
-                .iter()
-                .find(|device| device.ordinal == Some(status.ordinal))
-            else {
-                continue;
-            };
-            if let Some(total) = device.memory.total_bytes {
-                status.vram_total_bytes = total;
-            }
-            if let Some(used) = device.memory.used_bytes {
-                status.vram_used_bytes = used;
-            }
-        }
-        statuses
+    pub fn legacy_gpu_status_from_snapshot(devices: &DeviceState) -> Vec<GpuWorkerStatus> {
+        devices
+            .devices
+            .iter()
+            .filter_map(|device| {
+                let ordinal = device.ordinal?;
+                let state = if device.health == DeviceHealth::Degraded
+                    || device.health == DeviceHealth::Poisoned
+                {
+                    GpuWorkerState::Degraded
+                } else {
+                    match device.activity {
+                        DeviceActivity::Generating | DeviceActivity::Upscaling => {
+                            GpuWorkerState::Generating
+                        }
+                        DeviceActivity::Loading
+                        | DeviceActivity::AdminLoading
+                        | DeviceActivity::Stopping => GpuWorkerState::Loading,
+                        DeviceActivity::Idle => GpuWorkerState::Idle,
+                    }
+                };
+                Some(GpuWorkerStatus {
+                    ordinal,
+                    name: device.name.clone(),
+                    vram_total_bytes: device.memory.total_bytes.unwrap_or(0),
+                    vram_used_bytes: device.memory.used_bytes.unwrap_or(0),
+                    loaded_model: device.loaded_models.first().cloned(),
+                    state,
+                })
+            })
+            .collect()
     }
 
     fn transient_id_for(&self, device: &DiscoveredDevice) -> String {

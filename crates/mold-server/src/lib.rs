@@ -111,6 +111,7 @@ pub async fn run_server(
             model_cache: std::sync::Arc::new(std::sync::Mutex::new(model_cache::ModelCache::new(
                 max_cached,
             ))),
+            resident_model: std::sync::Arc::new(std::sync::RwLock::new(None)),
             active_generation: std::sync::Arc::new(std::sync::RwLock::new(None)),
             model_load_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             shared_pool: shared_pool.clone(),

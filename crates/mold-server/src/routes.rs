@@ -2067,8 +2067,8 @@ async fn model_is_gpu_resident(state: &AppState, canonical: &str) -> bool {
                 return true;
             }
         }
-        if let Ok(cache) = worker.model_cache.lock() {
-            if cache.active_model() == Some(canonical) {
+        if let Ok(resident) = worker.resident_model.read() {
+            if resident.as_deref() == Some(canonical) {
                 return true;
             }
         }
@@ -2155,6 +2155,15 @@ async fn delete_model(
     for worker in &state.gpu_pool.workers {
         if let Ok(mut cache) = worker.model_cache.lock() {
             let _ = cache.remove(&canonical);
+        }
+        if worker
+            .resident_model
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(canonical.as_str())
+        {
+            worker.set_resident_model(None);
         }
     }
 
@@ -2251,10 +2260,8 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
         state
             .device_registry
             .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
-    let gpu_statuses = crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(
-        &state.gpu_pool,
-        &devices,
-    );
+    let gpu_statuses =
+        crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(&devices);
     let has_gpus = !gpu_statuses.is_empty();
 
     // Collect loaded models from GPU workers.

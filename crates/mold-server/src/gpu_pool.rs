@@ -110,6 +110,12 @@ pub(crate) fn clear_model_cuda_ooms_for_tests() {
 pub struct GpuWorker {
     pub gpu: DiscoveredGpu,
     pub model_cache: Arc<Mutex<ModelCache>>,
+    /// Driver-free snapshot of the model currently resident on this worker.
+    ///
+    /// Status endpoints must never lock `model_cache`: an engine drop/load can
+    /// block there while owning CUDA resources. Model-loading code updates this
+    /// snapshot only after a successful residency transition.
+    pub resident_model: Arc<RwLock<Option<String>>>,
     pub active_generation: Arc<RwLock<Option<ActiveGeneration>>>,
     pub model_load_lock: Arc<Mutex<()>>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
@@ -170,6 +176,13 @@ pub struct GpuPool {
 }
 
 impl GpuWorker {
+    pub(crate) fn set_resident_model(&self, model: Option<&str>) {
+        *self
+            .resident_model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.map(str::to_string);
+    }
+
     /// Check if this worker is in a degraded state (3+ consecutive failures, within cooldown).
     ///
     /// When the cooldown has expired we clear the failure counter and the
@@ -203,14 +216,10 @@ impl GpuWorker {
     pub fn status(&self) -> GpuWorkerStatus {
         let active_gen = self.active_generation.read().unwrap();
         let in_flight = self.in_flight.load(Ordering::SeqCst);
-        // Prefer the active-generation model name — during inflight generation
-        // the cache entry is taken out of the cache (take-and-restore pattern),
-        // so `cache.active_model()` returns None. Falling back to the cache
-        // afterwards handles the idle-but-loaded case.
-        let loaded_model = active_gen.as_ref().map(|g| g.model.clone()).or_else(|| {
-            let cache = self.model_cache.lock().unwrap();
-            cache.active_model().map(|s| s.to_string())
-        });
+        let loaded_model = active_gen
+            .as_ref()
+            .map(|g| g.model.clone())
+            .or_else(|| self.resident_model.read().unwrap().clone());
 
         let state = if self.is_degraded() {
             GpuWorkerState::Degraded
@@ -224,7 +233,9 @@ impl GpuWorker {
             ordinal: self.gpu.ordinal,
             name: self.gpu.name.clone(),
             vram_total_bytes: self.gpu.total_vram_bytes,
-            vram_used_bytes: mold_inference::device::vram_in_use_bytes(self.gpu.ordinal),
+            // The registry overlays cached sampler telemetry. Never query the
+            // CUDA driver while serving a status request.
+            vram_used_bytes: 0,
             loaded_model,
             state,
         }
@@ -503,6 +514,7 @@ mod tests {
                 free_vram_bytes: total_vram_bytes,
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -515,6 +527,23 @@ mod tests {
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    #[test]
+    fn worker_status_does_not_lock_the_model_cache_or_query_the_driver() {
+        let (worker, _job_rx) = test_worker(0, 24_000_000_000);
+        *worker.resident_model.write().unwrap() = Some("flux-dev:q4".to_string());
+
+        let cache = worker.model_cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("poison cache to prove status never acquires it");
+        })
+        .join();
+
+        let status = worker.status();
+        assert_eq!(status.loaded_model.as_deref(), Some("flux-dev:q4"));
+        assert_eq!(status.vram_used_bytes, 0);
     }
 
     #[test]

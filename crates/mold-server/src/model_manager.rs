@@ -160,10 +160,7 @@ fn loaded_models_across_pool(state: &AppState) -> Vec<String> {
             .read()
             .ok()
             .and_then(|g| g.as_ref().map(|g| g.model.clone()));
-        let loaded = active.or_else(|| {
-            let cache = worker.model_cache.lock().ok()?;
-            cache.active_model().map(|s| s.to_string())
-        });
+        let loaded = active.or_else(|| worker.resident_model.read().ok()?.clone());
         if let Some(name) = loaded {
             if !names.contains(&name) {
                 names.push(name);

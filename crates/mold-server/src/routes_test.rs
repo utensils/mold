@@ -482,6 +482,7 @@ mod tests {
                 free_vram_bytes: 24_000_000_000,
             },
             model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
+            resident_model: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
@@ -652,6 +653,12 @@ mod tests {
     #[tokio::test]
     async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
         let worker = gpu_worker_stub(0);
+        let cache = worker.model_cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("poison cache to prove status routes never acquire it");
+        })
+        .join();
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
             workers: vec![worker],
