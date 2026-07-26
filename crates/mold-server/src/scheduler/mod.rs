@@ -833,6 +833,10 @@ impl Coordinator {
         self.dispatch_retry_not_before_ms = None;
     }
 
+    fn record_dispatch_progress(&mut self) {
+        self.clear_dispatch_retry();
+    }
+
     fn enqueue(&mut self, mut job: GenerationJob, immediate: &mut bool) {
         if job.id.is_empty() {
             self.synthetic_id = self.synthetic_id.saturating_add(1);
@@ -2517,12 +2521,13 @@ impl Coordinator {
                     // Successful grants make finite queue progress; do not let
                     // a later transport failure consume the no-progress retry
                     // budget for the remaining Ready capacity.
+                    self.record_dispatch_progress();
                     replans_this_turn = 0;
                 }
                 continue;
             }
 
-            self.clear_dispatch_retry();
+            self.record_dispatch_progress();
             for update in &plan.bypass_updates {
                 if let Some(pending) = self.pending.get_mut(update.work_id.as_str()) {
                     pending.bypass_count = update.new_count;
@@ -4856,6 +4861,33 @@ mod tests {
             "failed grant reservation must settle before same-turn replan"
         );
         drop(results);
+    }
+
+    #[test]
+    fn partial_forward_progress_resets_the_cross_turn_dispatch_retry_round() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.dispatch_retry_round = 7;
+        coordinator.dispatch_retry_not_before_ms = Some(monotonic_ms().saturating_add(10_000));
+
+        coordinator.record_dispatch_progress();
+
+        assert_eq!(coordinator.dispatch_retry_round, 0);
+        assert_eq!(coordinator.dispatch_retry_not_before_ms, None);
     }
 
     #[test]

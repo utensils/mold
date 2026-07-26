@@ -217,6 +217,36 @@ fn startup_plan(
     }
 }
 
+fn startup_enabled_devices<'a>(
+    selected: &'a [mold_inference::device::DiscoveredGpu],
+    registry: &device_registry::DeviceRegistry,
+) -> Vec<&'a mold_inference::device::DiscoveredGpu> {
+    selected
+        .iter()
+        .filter(|gpu| {
+            gpu.stable_id
+                .as_deref()
+                .is_none_or(|device_id| registry.desired_enabled(device_id))
+        })
+        .collect()
+}
+
+fn v2_lifecycle_devices(
+    selected: &[mold_inference::device::DiscoveredGpu],
+) -> std::collections::BTreeMap<String, mold_inference::device::DiscoveredGpu> {
+    selected
+        .iter()
+        .cloned()
+        .map(|gpu| {
+            let id = gpu
+                .stable_id
+                .clone()
+                .unwrap_or_else(|| format!("runtime:gpu:{}", gpu.ordinal));
+            (id, gpu)
+        })
+        .collect()
+}
+
 pub async fn run_server(
     bind: &str,
     port: u16,
@@ -252,6 +282,48 @@ pub async fn run_server(
 
     let discovered = mold_inference::device::discover_gpus();
     let selected = mold_inference::device::resolve_gpu_selection(&discovered, &gpu_selection)?;
+
+    // Open persistence and project device preferences before creating any GPU
+    // owner thread. A disabled device remains in the startup-selected
+    // inventory (and therefore in V2's dynamic worker factory), but it must
+    // not transiently own a CUDA context or receive legacy/observe work after
+    // restart.
+    let metadata_db = match mold_db::open_default() {
+        Ok(Some(db)) => {
+            info!(db = %db.path().display(), "metadata DB opened");
+            std::sync::Arc::new(Some(db))
+        }
+        Ok(None) => {
+            tracing::info!("metadata DB disabled (MOLD_DB_DISABLE set or MOLD_HOME unresolved)");
+            std::sync::Arc::new(None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to open metadata DB: {e:#} — gallery falls back to filesystem scan"
+            );
+            std::sync::Arc::new(None)
+        }
+    };
+    let selected_ordinals: std::collections::BTreeSet<_> =
+        selected.iter().map(|gpu| gpu.ordinal).collect();
+    let telemetry_inventory =
+        std::sync::Arc::new(resources::TelemetryInventory::from_discovered(&discovered));
+    let inventory = discovered
+        .iter()
+        .map(|gpu| {
+            device_registry::DiscoveredDevice::from_runtime_gpu(
+                gpu,
+                selected_ordinals.contains(&gpu.ordinal),
+                telemetry_inventory.target(gpu.ordinal),
+            )
+        })
+        .collect();
+    let device_registry = std::sync::Arc::new(device_registry::DeviceRegistry::new(
+        std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
+        metadata_db.clone(),
+    ));
+    let startup_devices = startup_enabled_devices(&selected, &device_registry);
+
     let startup = startup_plan(
         &gpu_selection,
         discovered.len(),
@@ -284,7 +356,7 @@ pub async fn run_server(
     let max_cached = state::resolve_max_cached_models();
     let cache_idle_ttl = std::time::Duration::from_secs(state::resolve_cache_idle_ttl_secs());
     if startup.start_gpu_workers {
-        for gpu in &selected {
+        for gpu in startup_devices {
             let (job_tx, job_rx) = std::sync::mpsc::sync_channel(per_worker_channel_size);
             let worker = std::sync::Arc::new(gpu_pool::GpuWorker {
                 owner_epoch: 1,
@@ -343,17 +415,7 @@ pub async fn run_server(
         workers: workers.into(),
     });
     if startup.start_v2_coordinator {
-        let devices = selected
-            .iter()
-            .cloned()
-            .map(|gpu| {
-                let id = gpu
-                    .stable_id
-                    .clone()
-                    .unwrap_or_else(|| format!("runtime:gpu:{}", gpu.ordinal));
-                (id, gpu)
-            })
-            .collect();
+        let devices = v2_lifecycle_devices(&selected);
         gpu_pool
             .workers
             .install_factory(
@@ -531,73 +593,8 @@ pub async fn run_server(
         startup.start_v2_coordinator,
         startup.observe_v2_decisions,
     );
-
-    // Open the gallery metadata DB (best-effort — server still runs without it).
-    match mold_db::open_default() {
-        Ok(Some(db)) => {
-            info!(db = %db.path().display(), "metadata DB opened");
-            state.metadata_db = std::sync::Arc::new(Some(db));
-        }
-        Ok(None) => {
-            tracing::info!("metadata DB disabled (MOLD_DB_DISABLE set or MOLD_HOME unresolved)");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "failed to open metadata DB: {e:#} — gallery falls back to filesystem scan"
-            );
-        }
-    }
-
-    // Freeze discovery-owned facts into the read registry. CUDA UUID/type
-    // fields are intentionally supplied through this adapter boundary by the
-    // UUID-first discovery change; the legacy baseline has no persistable
-    // CUDA identity, so such workers remain visible-but-unavailable here
-    // rather than inventing an ordinal identity.
-    let selected_ordinals: std::collections::BTreeSet<_> =
-        selected.iter().map(|gpu| gpu.ordinal).collect();
-    let telemetry_inventory =
-        std::sync::Arc::new(resources::TelemetryInventory::from_discovered(&discovered));
-    let inventory = discovered
-        .iter()
-        .map(|gpu| {
-            device_registry::DiscoveredDevice::from_runtime_gpu(
-                gpu,
-                selected_ordinals.contains(&gpu.ordinal),
-                telemetry_inventory.target(gpu.ordinal),
-            )
-        })
-        .collect();
-    state.device_registry = std::sync::Arc::new(device_registry::DeviceRegistry::new(
-        std::sync::Arc::new(device_registry::StaticDeviceDiscovery::new(inventory)),
-        state.metadata_db.clone(),
-    ));
-    if startup.start_v2_coordinator {
-        for device in state
-            .device_registry
-            .snapshot(&state.gpu_pool, None, &state.job_registry)
-            .devices
-            .into_iter()
-            .filter(|device| {
-                device.admin_state != mold_core::DeviceAdminState::StartupExcluded
-                    && !device.desired_enabled
-            })
-        {
-            let owner_epoch = state
-                .gpu_pool
-                .worker_snapshot()
-                .into_iter()
-                .find(|worker| scheduler::worker_device_id(worker) == device.id)
-                .map(|worker| worker.owner_epoch);
-            if state.gpu_pool.workers.request_disable(&device.id).is_ok() {
-                if let Some(owner_epoch) = owner_epoch {
-                    state
-                        .gpu_pool
-                        .workers
-                        .wait_and_reap(&device.id, owner_epoch);
-                }
-            }
-        }
-    }
+    state.metadata_db = metadata_db;
+    state.device_registry = device_registry;
 
     // Resolve the persistent instance id (ephemeral when the DB is
     // unavailable). Scoped per (data dir, port) so two servers sharing one
@@ -1088,6 +1085,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
                     axum::http::Method::GET,
                     axum::http::Method::HEAD,
                     axum::http::Method::POST,
+                    axum::http::Method::PATCH,
                     axum::http::Method::DELETE,
                 ])
                 .allow_headers(tower_http::cors::Any)
@@ -1114,17 +1112,24 @@ fn build_cors_layer() -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cors_layer, classify_startup_mode, startup_plan, trace_request_path, GpuOwnerThreads,
-        StartupMode,
+        build_cors_layer, classify_startup_mode, startup_enabled_devices, startup_plan,
+        trace_request_path, v2_lifecycle_devices, GpuOwnerThreads, StartupMode,
     };
+    use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
+    use crate::device_registry::{DeviceRegistry, StaticDeviceDiscovery};
     use crate::gpu_pool::{GpuWorker, GpuWorkerCommand};
     use crate::{gpu_worker, model_cache};
+    use axum::http::{header, Method, Request};
+    use axum::routing::patch;
+    use axum::Router;
     use mold_core::types::GpuSelection;
     use mold_inference::device::{CudaDeviceKind, DiscoveredGpu};
     use mold_inference::shared_pool::SharedPool;
+    use std::collections::{BTreeSet, HashSet};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
+    use tower::ServiceExt;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1144,6 +1149,95 @@ mod tests {
         let result = build_cors_layer();
         std::env::remove_var("MOLD_CORS_ORIGIN");
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configured_origin_preflight_allows_authenticated_device_patch() {
+        let cors = {
+            let _lock = ENV_LOCK.lock().unwrap();
+            std::env::set_var("MOLD_CORS_ORIGIN", "https://studio.example");
+            let cors = build_cors_layer().unwrap();
+            std::env::remove_var("MOLD_CORS_ORIGIN");
+            cors
+        };
+        let auth_state = Some(Arc::new(ApiKeySet::new(HashSet::from([
+            "correct-key".to_string()
+        ]))));
+        let app = Router::new()
+            .route(
+                "/api/devices/:id",
+                patch(|| async { axum::http::StatusCode::OK }),
+            )
+            .layer(axum::middleware::from_fn(require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                inject_auth_state,
+            ))
+            .layer(cors);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/devices/cuda:test")
+                    .header(header::ORIGIN, "https://studio.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "x-api-key")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&axum::http::HeaderValue::from_static(
+                "https://studio.example"
+            ))
+        );
+        let methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(methods.split(',').any(|method| method.trim() == "PATCH"));
+        let headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            headers == "*"
+                || headers
+                    .split(',')
+                    .any(|header_name| header_name.trim().eq_ignore_ascii_case("x-api-key"))
+        );
+
+        let missing_key = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/devices/cuda:test")
+                    .header(header::ORIGIN, "https://studio.example")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_key.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .oneshot(
+                Request::patch("/api/devices/cuda:test")
+                    .header(header::ORIGIN, "https://studio.example")
+                    .header("x-api-key", "correct-key")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), axum::http::StatusCode::OK);
     }
 
     #[test]
@@ -1262,6 +1356,77 @@ mod tests {
             assert!(!plan.start_v2_coordinator);
             assert!(!plan.observe_v2_decisions);
         }
+    }
+
+    fn discovered_gpu(ordinal: usize, stable_id: &str) -> DiscoveredGpu {
+        DiscoveredGpu {
+            ordinal,
+            stable_id: Some(stable_id.to_string()),
+            raw_cuda_uuid: Some([ordinal as u8; 16]),
+            device_kind: Some(CudaDeviceKind::FullGpu),
+            identity_error: None,
+            backend: mold_core::GpuBackend::Cuda,
+            name: format!("GPU {ordinal}"),
+            compute_capability: Some((8, 6)),
+            pci_bus_id: None,
+            total_vram_bytes: 24 << 30,
+            free_vram_bytes: 24 << 30,
+        }
+    }
+
+    #[test]
+    fn persisted_preferences_filter_restart_workers_across_dispatch_modes_and_selectors() {
+        use crate::dispatch_mode::DispatchMode;
+
+        const GPU_0: &str = "cuda:00000000000000000000000000000000";
+        const GPU_1: &str = "cuda:11111111111111111111111111111111";
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let preferences = mold_db::DevicePreferences::new(&db);
+        preferences.set(GPU_1, false).unwrap();
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::default()),
+            Arc::new(Some(db)),
+        );
+        let all = vec![discovered_gpu(0, GPU_0), discovered_gpu(1, GPU_1)];
+
+        for dispatch_mode in [
+            DispatchMode::Legacy,
+            DispatchMode::Observe,
+            DispatchMode::V2,
+        ] {
+            let plan = startup_plan(
+                &GpuSelection::All,
+                all.len(),
+                all.len(),
+                true,
+                dispatch_mode,
+            );
+            assert!(plan.start_gpu_workers);
+            let worker_ids: BTreeSet<_> = startup_enabled_devices(&all, &registry)
+                .into_iter()
+                .filter_map(|gpu| gpu.stable_id.as_deref())
+                .collect();
+            assert_eq!(worker_ids, BTreeSet::from([GPU_0]));
+        }
+
+        // Explicit startup allowlists are resolved before preferences. A
+        // disabled allowed device gets no owner; an excluded device is never
+        // reintroduced by its enabled-by-default preference.
+        assert!(startup_enabled_devices(&all[1..], &registry).is_empty());
+        assert!(startup_enabled_devices(&[], &registry).is_empty());
+
+        registry.set_desired_enabled(GPU_0, false).unwrap();
+        assert!(startup_enabled_devices(&all, &registry).is_empty());
+
+        // V2 retains the complete startup-selected inventory for dynamic
+        // re-enable even though neither disabled device owns a worker.
+        assert_eq!(
+            v2_lifecycle_devices(&all)
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([GPU_0, GPU_1])
+        );
     }
 
     fn owner_test_worker() -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {

@@ -142,6 +142,19 @@ fn validate_cli_batch_for_family(family: Option<&str>, batch: u32) -> Result<()>
     Ok(())
 }
 
+fn validate_batch_stdout(batch: u32, piped: bool, output: &Option<String>) -> Result<()> {
+    if batch > 1 {
+        let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
+        if stdout_output {
+            anyhow::bail!(
+                "--batch with more than 1 output is not supported with stdout output. \
+                 Use --output <path> to save batch outputs to separate files."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Re-derive request defaults after an auto-pull refreshed the model
 /// config. `cli_*` carry the user's explicit flags — `None` means the
 /// field was defaulted at request-build time and must now track the
@@ -415,16 +428,7 @@ pub async fn run(
 
     let piped = is_piped();
 
-    // Reject batch > 1 when output goes to stdout (piped with no --output, or --output -)
-    if batch > 1 {
-        let stdout_output = (piped && output.is_none()) || output.as_deref() == Some("-");
-        if stdout_output {
-            anyhow::bail!(
-                "--batch with more than 1 image is not supported with stdout output. \
-                 Use --output <path> to save batch images to files."
-            );
-        }
-    }
+    validate_batch_stdout(batch, piped, &output)?;
 
     // Default to the source image size for img2img/inpainting when neither
     // dimension was provided. We still normalize to the validation envelope
@@ -2185,6 +2189,19 @@ mod tests {
         // "--output -" triggers stdout output in both interactive and piped modes
         let path = "-";
         assert_eq!(path, "-");
+    }
+
+    #[test]
+    fn batch_stdout_rejection_is_media_neutral_for_images_and_videos() {
+        for (piped, output) in [(true, None), (false, Some("-".to_string()))] {
+            let error = validate_batch_stdout(2, piped, &output).unwrap_err();
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("more than 1 output"));
+            assert!(rendered.contains("batch outputs"));
+            assert!(!rendered.contains("image"));
+        }
+        validate_batch_stdout(2, true, &Some("clip.mp4".to_string())).unwrap();
+        validate_batch_stdout(1, true, &None).unwrap();
     }
 
     #[test]
