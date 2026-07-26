@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /*
  * Gallery grid — the grid-first Mold Studio library view (spec §06, prototype
- * WEB GALLERY). Renders session prints as square @ui MediaTiles on a 2/3/4/5
- * column responsive grid. Freshly-arrived prints carry a NEW badge; video
+ * WEB GALLERY). Renders session prints as square @ui MediaTiles on a responsive
+ * grid whose target pixel size comes from the shared Library toolbar. Freshly
+ * arrived prints carry a NEW badge; video
  * prints show a play glyph + duration in the tile's overlay corner.
  *
  * Selection is gallery-only: when `selectMode` is on, a transparent hit layer
@@ -26,6 +27,7 @@ const props = withDefaults(
     entries: GalleryImage[];
     models?: ModelInfoExtended[];
     loading: boolean;
+    thumbnailSize?: number;
     selectMode?: boolean;
     /** Selected print keys — `hostId|filename`, never a bare filename. */
     selection?: Set<string>;
@@ -37,6 +39,7 @@ const props = withDefaults(
     selection: () => new Set<string>(),
     fresh: () => new Set<string>(),
     models: () => [],
+    thumbnailSize: 220,
   },
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, props.models);
@@ -275,6 +278,7 @@ onBeforeUnmount(() => {
     ref="gridRoot"
     class="gg"
     :class="{ 'gg--selecting': selectMode }"
+    :style="{ '--gallery-thumbnail-size': `${thumbnailSize}px` }"
     @pointerdown="onPointerDown"
   >
     <!-- Loading skeletons -->
@@ -409,17 +413,10 @@ onBeforeUnmount(() => {
 }
 @media (min-width: 640px) {
   .gg__grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-@media (min-width: 900px) {
-  .gg__grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-@media (min-width: 1200px) {
-  .gg__grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(
+      auto-fill,
+      minmax(min(var(--gallery-thumbnail-size), 100%), 1fr)
+    );
   }
 }
 

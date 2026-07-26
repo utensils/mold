@@ -81,8 +81,10 @@ surface powers it, so anything the app does maps to a documented endpoint.
   generation setting to the selected model's defaults while keeping the
   prompt, the model choice, and any prepared batch size.
 - **Library** — a justified, virtualized contact-sheet grid (the renamed
-  gallery), with NEW badges on fresh prints, a two-pane lightbox, and a History
-  drawer holding Runs and Prompts. **Space** opens
+  gallery), with a Lightroom-style small-to-large slider in the top toolbar
+  that resizes the contact sheet continuously and remembers its setting, NEW
+  badges on fresh prints, a two-pane lightbox, and a History drawer holding
+  Runs and Prompts. **Space** opens
   Quick Look, ←/→ navigate, and **Reuse settings** jumps back to Create with
   every parameter restored. All merges every connected host without repeating
   matching saved prints, prefers the copy on **This device**, and labels every

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Web and desktop Library gain a Lightroom-style thumbnail-size slider.** The compact small-to-large control sits in the top toolbar, updates the responsive web grid or desktop's justified contact sheet continuously, supports native keyboard range input, and remembers the chosen pixel size on each surface.
 - **iPhone can automatically save generated images to Photos.** A default-on Settings → Photos option mirrors desktop's automatic remote-output saving without retaining large base64 generation payloads in the WebView: after a still completes, Mold fetches the authenticated saved gallery file and hands it to the native Photos bridge. Post-generation upscales save both the original and upscaled image; videos remain streamable in Mold Library.
 - **iPhone image actions and Library parity.** Generated stills now open the full-screen print viewer on tap. The viewer replaces crash-prone image long-press handling with explicit native **Copy image** and **Save photo** actions, using the authenticated full-resolution bytes and add-only Photos permission. Mobile Library now carries desktop's persistent **New** badges. Desktop and iPhone Library tiles/viewers identify post-generation upscaled images with the same **Upscaled** badge, using persisted generation dimensions with a filename fallback for standalone upscales.
 
