@@ -7,11 +7,15 @@ import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
+import { modelSupportsSequence } from "@studio/lib/sequence";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
 import type {
   CompleteEvent,
+  ChainJobDetail,
+  ChainRequest,
+  CreateChainJobResponse,
   DownloadJob,
   ExpandCapabilities,
   GalleryImage,
@@ -93,6 +97,7 @@ import MobilePromptTools from "./MobilePromptTools.vue";
 import MobilePreparedExpansionBatch from "./MobilePreparedExpansionBatch.vue";
 import MobileResolutionPicker from "./MobileResolutionPicker.vue";
 import MobileSeedPicker from "./MobileSeedPicker.vue";
+import MobileSequenceComposer from "./MobileSequenceComposer.vue";
 import MobileSettingsView from "./MobileSettingsView.vue";
 import MobileSourceControls from "./MobileSourceControls.vue";
 import MobileStyleChips from "./MobileStyleChips.vue";
@@ -111,6 +116,7 @@ import {
 import { reconcileInterruptedGenerationJobs } from "./mobileGenerationRecovery";
 
 type Tab = "generate" | "gallery" | "catalog" | "hosts";
+type CreateMode = "single" | "sequence";
 
 interface DiscoveredHost {
   name: string;
@@ -148,8 +154,12 @@ const SELECTED_KEY = "mold.mobile.selected-host.v1";
 const LIBRARY_SEEN_AT_KEY = "mold.mobile.library-seen-at.v1";
 const LEGACY_LIBRARY_SEEN_KEY = "mold.mobile.library-seen.v1";
 const LIBRARY_VISITED_KEY = "mold.mobile.library-visited.v1";
+const CREATE_MODE_KEY = "mold.mobile.create-mode.v1";
+const SEQUENCE_RECOVERY_KEY = "mold.mobile.sequence-job.v1";
 const HOST_PROBE_TIMEOUT_MS = 9_000;
 const tab = ref<Tab>("generate");
+const savedCreateMode = localStorage.getItem(CREATE_MODE_KEY);
+const createMode = ref<CreateMode>(savedCreateMode === "sequence" ? "sequence" : "single");
 const mobileContent = ref<HTMLElement | null>(null);
 const settingsOpen = ref(false);
 const settingsButton = ref<HTMLButtonElement | null>(null);
@@ -168,6 +178,11 @@ const models = ref<ModelEntry[]>([]);
 const modelsHostId = ref("");
 const loadingModels = ref(false);
 const modelLoadError = ref("");
+const sequenceJob = ref<ChainJobDetail | null>(null);
+const sequenceStarting = ref(false);
+const sequenceError = ref("");
+let sequencePollTimer: ReturnType<typeof setInterval> | null = null;
+let sequenceRoute: { hostId: string; target: ApiTarget } | null = null;
 const expandCapabilities = reactive<Record<string, ExpandCapabilities | null | undefined>>({});
 const form = reactive<GenerateForm>(newGenerateForm());
 const seedValid = ref(true);
@@ -414,6 +429,9 @@ const quickStaleReasons = computed(() => {
 });
 const generationModels = computed(() =>
   models.value.filter((model) => model.downloaded && isGenerationModel(model)),
+);
+const sequenceModels = computed(() =>
+  generationModels.value.filter((model) => modelSupportsSequence(model)),
 );
 const modelLabel = (name: string) => modelDisplayNameForId(name, generationModels.value);
 const upscalers = computed(() =>
@@ -858,6 +876,182 @@ async function refreshModels(): Promise<boolean> {
   } finally {
     if (epoch === modelLoadEpoch && selectedHostId.value === hostId) loadingModels.value = false;
   }
+}
+
+function clearSequencePoll(): void {
+  if (sequencePollTimer) clearInterval(sequencePollTimer);
+  sequencePollTimer = null;
+}
+
+function clearSequenceRecovery(): void {
+  try {
+    localStorage.removeItem(SEQUENCE_RECOVERY_KEY);
+  } catch {
+    // Recovery persistence is best effort; the live job remains authoritative.
+  }
+}
+
+function persistSequenceRecovery(host: MobileHost, jobId: string): void {
+  try {
+    localStorage.setItem(
+      SEQUENCE_RECOVERY_KEY,
+      JSON.stringify({
+        hostId: host.id,
+        baseUrl: host.baseUrl,
+        instanceId: host.instanceId ?? null,
+        jobId,
+      }),
+    );
+  } catch {
+    // A storage failure must never turn an accepted durable job into an error.
+  }
+}
+
+async function pollSequenceJob(): Promise<void> {
+  const route = sequenceRoute;
+  const jobId = sequenceJob.value?.id;
+  if (!route || !jobId) return;
+  try {
+    const job = await apiJsonTo<ChainJobDetail>(
+      route.target,
+      `/api/chain-jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (sequenceRoute !== route) return;
+    sequenceJob.value = job;
+    sequenceError.value = "";
+    if (job.state === "completed" || job.state === "failed" || job.state === "cancelled") {
+      clearSequencePoll();
+      clearSequenceRecovery();
+      generationAnnouncement.value =
+        job.state === "completed"
+          ? `Sequence completed on ${hosts.value.find((host) => host.id === route.hostId)?.name ?? "the selected host"}.`
+          : `Sequence ${job.state}. ${job.error ?? ""}`.trim();
+      if (job.state === "completed" && tab.value === "gallery") {
+        void refreshGallery();
+      }
+    }
+  } catch (error) {
+    if (sequenceRoute !== route) return;
+    sequenceError.value = describeTransportError(
+      error,
+      hosts.value.find((host) => host.id === route.hostId)?.name ?? "sequence host",
+    );
+  }
+}
+
+function watchSequenceJob(hostId: string, target: ApiTarget, jobId: string): void {
+  clearSequencePoll();
+  sequenceRoute = { hostId, target: { ...target } };
+  sequenceJob.value = {
+    id: jobId,
+    state: "queued",
+    model: "",
+    stage_count: 0,
+    current_stage: 0,
+    created_at_unix_ms: Date.now(),
+    updated_at_unix_ms: Date.now(),
+    error: null,
+    ephemeral: false,
+    stages: [],
+    finalizes: [],
+    retakes: [],
+    script: {
+      schema: "mold.chain.v1",
+      chain: {
+        model: "",
+        width: 0,
+        height: 0,
+        fps: 24,
+        steps: 0,
+        guidance: 0,
+        strength: 1,
+        motion_tail_frames: 0,
+        output_format: "mp4",
+      },
+      stage: [],
+    },
+  };
+  void pollSequenceJob();
+  sequencePollTimer = setInterval(() => void pollSequenceJob(), 2_000);
+}
+
+async function submitMobileSequence(request: ChainRequest): Promise<void> {
+  const host = selectedHost.value;
+  if (!host || sequenceStarting.value) return;
+  const target = { ...mobileHostTarget(host) };
+  sequenceStarting.value = true;
+  sequenceError.value = "";
+  try {
+    const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    persistSequenceRecovery(host, response.job_id);
+    watchSequenceJob(host.id, target, response.job_id);
+  } catch (error) {
+    sequenceError.value = describeTransportError(error, host.name);
+  } finally {
+    sequenceStarting.value = false;
+  }
+}
+
+async function cancelMobileSequence(): Promise<void> {
+  const route = sequenceRoute;
+  const job = sequenceJob.value;
+  if (!route || !job) return;
+  sequenceError.value = "";
+  try {
+    await apiFetchTo(route.target, `/api/chain-jobs/${encodeURIComponent(job.id)}/cancel`, {
+      method: "POST",
+    });
+    await pollSequenceJob();
+  } catch (error) {
+    sequenceError.value = describeTransportError(
+      error,
+      hosts.value.find((host) => host.id === route.hostId)?.name ?? "sequence host",
+    );
+  }
+}
+
+function dismissMobileSequence(): void {
+  clearSequencePoll();
+  clearSequenceRecovery();
+  sequenceRoute = null;
+  sequenceJob.value = null;
+  sequenceError.value = "";
+}
+
+function recoverMobileSequence(): void {
+  let saved: {
+    hostId?: string;
+    baseUrl?: string;
+    instanceId?: string | null;
+    jobId?: string;
+  } | null = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(SEQUENCE_RECOVERY_KEY) ?? "null") as {
+      hostId?: string;
+      baseUrl?: string;
+      instanceId?: string | null;
+      jobId?: string;
+    } | null;
+  } catch {
+    clearSequenceRecovery();
+    return;
+  }
+  if (!saved?.hostId || !saved.jobId) return;
+  const host = hosts.value.find((candidate) => candidate.id === saved!.hostId);
+  if (
+    !host ||
+    host.baseUrl !== saved.baseUrl ||
+    (saved.instanceId != null && saved.instanceId !== host.instanceId)
+  ) {
+    clearSequenceRecovery();
+    sequenceError.value = "The exact machine for this saved sequence is no longer available.";
+    return;
+  }
+  watchSequenceJob(host.id, mobileHostTarget(host), saved.jobId);
 }
 
 function changeModel(): void {
@@ -2184,6 +2378,14 @@ watch(selectedHostId, (id, previousId) => {
   else localStorage.removeItem(SELECTED_KEY);
 });
 
+watch(createMode, (mode) => {
+  try {
+    localStorage.setItem(CREATE_MODE_KEY, mode);
+  } catch {
+    // The selected mode can fall back to Single on the next launch.
+  }
+});
+
 watch(
   () => {
     const attempt = expansionPullAttempt.value;
@@ -2318,6 +2520,7 @@ onMounted(async () => {
   }
   await hydrateApiKeys();
   if (unmounted) return;
+  recoverMobileSequence();
   // Start the cadence before awaiting individual tailnet hosts. One slow host
   // must not prevent every other saved host from being probed on schedule.
   hostProbeTimer = setInterval(probeHosts, 10_000);
@@ -2347,6 +2550,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pageshow", handleForegroundResume);
   if (hostProbeTimer) clearInterval(hostProbeTimer);
   hostProbeTimer = null;
+  clearSequencePoll();
   for (const id of [...hostProbes.keys()]) cancelHostProbe(id);
   generation.resetJobs();
   for (const url of objectUrls) URL.revokeObjectURL(url);
@@ -2428,473 +2632,513 @@ onBeforeUnmount(() => {
               </option>
             </select>
           </label>
-          <label class="field">
-            <span>Model</span>
-            <select
-              v-model="form.model"
-              class="control"
-              :disabled="loadingModels || generationModels.length === 0"
-              @change="changeModel"
-            >
-              <option v-if="!form.model" value="" disabled>
-                {{ loadingModels ? "Loading models…" : "No generation models available" }}
-              </option>
-              <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
-                {{ modelLabel(form.model) }} · not installed
-              </option>
-              <option v-for="model in generationModels" :key="model.name" :value="model.name">
-                {{ modelDisplayName(model) }}
-              </option>
-            </select>
-          </label>
           <div
-            v-if="modelLoadError"
-            class="mobile-model-state is-error"
-            role="alert"
-            data-test="mobile-model-error"
+            class="mobile-create-mode"
+            role="radiogroup"
+            aria-label="Create mode"
+            data-test="mobile-create-mode"
           >
-            <p>{{ modelLoadError }}</p>
             <button
-              class="secondary-button"
               type="button"
-              data-test="mobile-model-retry"
-              @click="refreshModels"
+              role="radio"
+              :aria-checked="createMode === 'single'"
+              :class="{ active: createMode === 'single' }"
+              @click="createMode = 'single'"
             >
-              Retry
+              Single
+            </button>
+            <button
+              type="button"
+              role="radio"
+              :aria-checked="createMode === 'sequence'"
+              :class="{ active: createMode === 'sequence' }"
+              @click="createMode = 'sequence'"
+            >
+              Sequence
             </button>
           </div>
-          <div
-            v-else-if="!loadingModels && generationModels.length === 0"
-            class="mobile-model-state"
-            data-test="mobile-model-empty"
-          >
-            <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
-            <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
-              Open Catalog
-            </button>
-          </div>
-          <label class="field">
-            <span>Prompt</span>
-            <textarea
-              id="mobile-prompt"
-              v-model="form.prompt"
-              class="control"
-              placeholder="Describe the print…"
-            />
-          </label>
-          <MobileStyleChips v-model="form.stylePreset" />
-          <MobilePromptTools
-            v-if="selectedTarget"
-            :form="form"
+          <MobileSequenceComposer
+            v-if="createMode === 'sequence' && selectedTarget"
+            :models="sequenceModels"
             :target="selectedTarget"
-            :running="expansionRunning"
-            :can-undo="quickExpansionOriginal !== null"
-            :blocked="!!preparedBatch"
-            :models="generationModels"
-            @expand="expandForCurrentBatch()"
-            @undo="restoreQuickExpansion"
+            :host-name="selectedHost.name"
+            :job="sequenceJob"
+            :starting="sequenceStarting"
+            :error="sequenceError"
+            @submit="submitMobileSequence"
+            @cancel="cancelMobileSequence"
+            @dismiss="dismissMobileSequence"
+            @browse="openCatalog(selectedHost.id)"
           />
-          <div
-            v-if="quickStaleReasons.length"
-            class="mobile-generate-validation"
-            role="alert"
-            data-test="mobile-quick-expansion-stale"
-          >
-            <div class="mobile-generate-validation-copy">
-              <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
-              <button
-                class="mobile-error-copy"
-                type="button"
-                aria-label="Copy error message"
-                title="Copy error message"
-                @click="copyQuickExpansionError"
-              >
-                <svg
-                  width="17"
-                  height="17"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.7"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <rect x="8" y="8" width="11" height="11" rx="2" />
-                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
-                </svg>
-              </button>
-            </div>
-            <div class="mobile-generate-validation-actions">
-              <button
-                class="primary-button mobile-touch-action"
-                type="button"
-                data-test="mobile-reexpand-and-develop"
-                :disabled="expansionRunning || preparedSubmitting"
-                @click="reexpandAndDevelop"
-              >
-                Re-expand and Develop
-              </button>
-              <button
-                class="secondary-button mobile-touch-action"
-                type="button"
-                data-test="mobile-develop-expanded-anyway"
-                :disabled="expansionRunning || preparedSubmitting"
-                @click="developExpandedAnyway"
-              >
-                Develop anyway
-              </button>
-              <button
-                class="secondary-button mobile-touch-action"
-                type="button"
-                @click="restoreQuickExpansion"
-              >
-                Restore original
-              </button>
-            </div>
-          </div>
-          <div
-            v-if="expansionError && !expansionMissingModel && !preparedBatch"
-            class="mobile-generate-validation"
-            role="alert"
-            data-test="mobile-expansion-error"
-          >
-            <div class="mobile-generate-validation-copy">
-              <p>{{ expansionError }}</p>
-              <button
-                class="mobile-error-copy"
-                type="button"
-                aria-label="Copy error message"
-                title="Copy error message"
-                @click="copyMobileError(expansionError)"
-              >
-                <svg
-                  width="17"
-                  height="17"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.7"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <rect x="8" y="8" width="11" height="11" rx="2" />
-                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
-                </svg>
-              </button>
-            </div>
-          </div>
-          <MobileExpansionPullStatus
-            v-if="expansionMissingModel && expansionPullStatus"
-            :model="expansionMissingModel.model"
-            :host-label="expansionMissingModel.route.label"
-            :error="expansionError"
-            :status="expansionPullStatus"
-            :eta-seconds="expansionPullEtaSeconds"
-            :models="generationModels"
-            @pull="pullExpansionModel"
-            @retry-expansion="retryExpansionAfterPull"
-          />
-          <MobilePreparedExpansionBatch
-            v-if="preparedBatch"
-            :batch="preparedBatch"
-            :stale-reasons="preparedStaleReasons"
-            :preparing="expansionRunning"
-            :error="expansionMissingModel ? '' : expansionError"
-            :submitting="preparedSubmitting"
-            @edit="editPreparedPrompt"
-            @remove="removePreparedPrompt"
-            @collapse="collapsePreparedBatch"
-            @regenerate="expandForCurrentBatch(true, preparedBatch.route)"
-            @refresh="expandForCurrentBatch(true)"
-            @discard="discardPreparedBatch"
-            @generate="generate"
-          />
-          <p
-            v-if="mobileMediaBudgetError"
-            class="mobile-generate-validation"
-            role="alert"
-            data-test="mobile-media-budget-error"
-          >
-            {{ mobileMediaBudgetError }}
-          </p>
-
-          <MobileResolutionPicker
-            v-model:width="form.width"
-            v-model:height="form.height"
-            :family="form.family"
-            :disabled="loadingModels"
-            @validity-change="resolutionValid = $event"
-          />
-          <div class="field-grid">
+          <template v-else>
             <label class="field">
-              <span>Steps</span>
-              <input
-                v-model.number="form.steps"
+              <span>Model</span>
+              <select
+                v-model="form.model"
                 class="control"
-                type="number"
-                inputmode="numeric"
-                min="1"
-                max="100"
-                :aria-invalid="stepsError ? 'true' : undefined"
-              />
-            </label>
-            <label class="field"
-              ><span>Guidance</span
-              ><input
-                v-model.number="form.guidance"
-                class="control"
-                type="number"
-                inputmode="decimal"
-                step="0.1"
-                min="0"
-                max="100"
-                :aria-invalid="guidanceError ? 'true' : undefined"
-            /></label>
-          </div>
-          <p
-            v-if="stepsError || guidanceError"
-            class="mobile-generate-validation"
-            role="alert"
-            data-test="mobile-basic-parameter-error"
-          >
-            {{ stepsError || guidanceError }}
-          </p>
-          <MobileSeedPicker
-            v-model="form.seed"
-            :last-seed="generation.lastSeedUsed"
-            @validity-change="seedValid = $event"
-          />
-
-          <div class="mobile-advanced-row">
-            <button
-              class="mobile-advanced-trigger"
-              type="button"
-              data-test="mobile-open-advanced"
-              @click="openAdvancedSheet"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 6h16M4 12h16M4 18h16" />
-              </svg>
-              <span>Advanced (sampler, LoRA, source)</span>
-              <span
-                v-if="advancedActiveCount > 0"
-                class="mobile-advanced-trigger-badge"
-                data-test="mobile-advanced-trigger-count"
-                >{{ advancedActiveCount }}</span
+                :disabled="loadingModels || generationModels.length === 0"
+                @change="changeModel"
               >
-            </button>
-            <button
-              class="mobile-settings-reset"
-              type="button"
-              data-test="mobile-settings-reset"
-              aria-label="Reset settings to model defaults"
-              @click="resetCreateSettings"
-            >
-              ↺ Reset
-            </button>
-          </div>
-
-          <MobileAdvancedSheet
-            :open="advancedSheetOpen"
-            :count="advancedActiveCount"
-            @close="closeAdvancedSheet"
-            @reset="resetAdvancedSettings"
-          >
-            <MobileGenerateParameters
-              :form="form"
-              :upscalers="upscalers"
-              :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
-              @validity-change="parameterValid = $event"
-            />
-            <label v-if="form.model && caps.supportsNegativePrompt" class="field">
-              <span>Negative prompt</span>
-              <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
+                <option v-if="!form.model" value="" disabled>
+                  {{ loadingModels ? "Loading models…" : "No generation models available" }}
+                </option>
+                <option v-if="form.model && !selectedModelAvailable" :value="form.model" disabled>
+                  {{ modelLabel(form.model) }} · not installed
+                </option>
+                <option v-for="model in generationModels" :key="model.name" :value="model.name">
+                  {{ modelDisplayName(model) }}
+                </option>
+              </select>
             </label>
-            <details
-              v-if="form.model && caps.supportsImg2img"
-              class="mobile-native-disclosure"
-              :open="
-                !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
-                caps.sourceImageMode === 'qwen-edit'
-              "
-              data-test="mobile-source-disclosure"
+            <div
+              v-if="modelLoadError"
+              class="mobile-model-state is-error"
+              role="alert"
+              data-test="mobile-model-error"
             >
-              <summary>
-                <span>{{ sourceSectionTitle }}</span>
-                <small>{{ sourceSectionSummary }}</small>
-              </summary>
-              <MobileSourceControls
-                :form="form"
-                :target="selectedTarget"
-                :control-models="controlModels"
-                :upscalers="upscalers"
-                @validity-change="sourceValid = $event"
+              <p>{{ modelLoadError }}</p>
+              <button
+                class="secondary-button"
+                type="button"
+                data-test="mobile-model-retry"
+                @click="refreshModels"
+              >
+                Retry
+              </button>
+            </div>
+            <div
+              v-else-if="!loadingModels && generationModels.length === 0"
+              class="mobile-model-state"
+              data-test="mobile-model-empty"
+            >
+              <p>No downloaded generation model is available on {{ selectedHost.name }}.</p>
+              <button class="secondary-button" type="button" @click="openCatalog(selectedHost.id)">
+                Open Catalog
+              </button>
+            </div>
+            <label class="field">
+              <span>Prompt</span>
+              <textarea
+                id="mobile-prompt"
+                v-model="form.prompt"
+                class="control"
+                placeholder="Describe the print…"
               />
-            </details>
-            <MobileLoraControls
+            </label>
+            <MobileStyleChips v-model="form.stylePreset" />
+            <MobilePromptTools
               v-if="selectedTarget"
               :form="form"
               :target="selectedTarget"
-              @append-word="appendPromptWord"
+              :running="expansionRunning"
+              :can-undo="quickExpansionOriginal !== null"
+              :blocked="!!preparedBatch"
+              :models="generationModels"
+              @expand="expandForCurrentBatch()"
+              @undo="restoreQuickExpansion"
             />
-            <label class="field"
-              ><span>Format</span
-              ><select v-model="form.outputFormat" class="control">
-                <option v-for="format in outputFormats" :key="format" :value="format">
-                  {{ format.toUpperCase() }}
-                </option>
-              </select></label
+            <div
+              v-if="quickStaleReasons.length"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-quick-expansion-stale"
             >
-          </MobileAdvancedSheet>
-
-          <MobileTemplates
-            :form="form"
-            :host-id="selectedHost.id"
-            :models="generationModels"
-            @load="loadTemplate"
-          />
-
-          <div class="mobile-estimate">
-            <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
-          </div>
-          <button
-            v-if="!preparedBatch"
-            class="primary-button"
-            type="button"
-            :disabled="
-              !form.prompt.trim() ||
-              !selectedModelAvailable ||
-              !seedValid ||
-              !parameterValid ||
-              !sourceControlsValid ||
-              !resolutionValid ||
-              !basicParametersValid ||
-              !!mobileMediaBudgetError ||
-              preparingGeneration
-            "
-            data-test="mobile-develop-button"
-            @click="generate"
-          >
-            {{ developButtonLabel }}
-          </button>
-          <section
-            v-if="queuedJobs.length"
-            class="mobile-generation-queue"
-            aria-label="Generation queue"
-            data-test="mobile-generation-queue"
-          >
-            <div class="mobile-generation-queue-head">
-              <h2>Queue</h2>
-              <span>{{ queuedJobs.length }} active</span>
-            </div>
-            <ol>
-              <li
-                v-for="job in queuedJobs"
-                :key="job.clientId"
-                class="mobile-generation-job"
-                data-test="mobile-generation-job"
-              >
-                <div class="mobile-generation-job-copy">
-                  <p>{{ job.prompt }}</p>
-                  <span>{{ modelLabel(job.model) }} · {{ job.hostLabel }}</span>
-                </div>
-                <div class="mobile-generation-job-action">
-                  <span data-test="mobile-generation-status">{{ jobStatusCode(job) }}</span>
-                  <button
-                    class="mobile-generation-cancel"
-                    type="button"
-                    :aria-label="`Cancel ${job.prompt}`"
-                    data-test="mobile-generation-cancel"
-                    @click="cancelGeneration(job)"
+              <div class="mobile-generate-validation-copy">
+                <p>{{ quickStaleReasons.join(" ") }} Choose how to continue.</p>
+                <button
+                  class="mobile-error-copy"
+                  type="button"
+                  aria-label="Copy error message"
+                  title="Copy error message"
+                  @click="copyQuickExpansionError"
+                >
+                  <svg
+                    width="17"
+                    height="17"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
                   >
-                    Cancel
-                  </button>
-                </div>
-              </li>
-            </ol>
-          </section>
-          <!-- Live develop bed: once the host streams latent previews the
+                    <rect x="8" y="8" width="11" height="11" rx="2" />
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                  </svg>
+                </button>
+              </div>
+              <div class="mobile-generate-validation-actions">
+                <button
+                  class="primary-button mobile-touch-action"
+                  type="button"
+                  data-test="mobile-reexpand-and-develop"
+                  :disabled="expansionRunning || preparedSubmitting"
+                  @click="reexpandAndDevelop"
+                >
+                  Re-expand and Develop
+                </button>
+                <button
+                  class="secondary-button mobile-touch-action"
+                  type="button"
+                  data-test="mobile-develop-expanded-anyway"
+                  :disabled="expansionRunning || preparedSubmitting"
+                  @click="developExpandedAnyway"
+                >
+                  Develop anyway
+                </button>
+                <button
+                  class="secondary-button mobile-touch-action"
+                  type="button"
+                  @click="restoreQuickExpansion"
+                >
+                  Restore original
+                </button>
+              </div>
+            </div>
+            <div
+              v-if="expansionError && !expansionMissingModel && !preparedBatch"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-expansion-error"
+            >
+              <div class="mobile-generate-validation-copy">
+                <p>{{ expansionError }}</p>
+                <button
+                  class="mobile-error-copy"
+                  type="button"
+                  aria-label="Copy error message"
+                  title="Copy error message"
+                  @click="copyMobileError(expansionError)"
+                >
+                  <svg
+                    width="17"
+                    height="17"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.7"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="8" y="8" width="11" height="11" rx="2" />
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <MobileExpansionPullStatus
+              v-if="expansionMissingModel && expansionPullStatus"
+              :model="expansionMissingModel.model"
+              :host-label="expansionMissingModel.route.label"
+              :error="expansionError"
+              :status="expansionPullStatus"
+              :eta-seconds="expansionPullEtaSeconds"
+              :models="generationModels"
+              @pull="pullExpansionModel"
+              @retry-expansion="retryExpansionAfterPull"
+            />
+            <MobilePreparedExpansionBatch
+              v-if="preparedBatch"
+              :batch="preparedBatch"
+              :stale-reasons="preparedStaleReasons"
+              :preparing="expansionRunning"
+              :error="expansionMissingModel ? '' : expansionError"
+              :submitting="preparedSubmitting"
+              @edit="editPreparedPrompt"
+              @remove="removePreparedPrompt"
+              @collapse="collapsePreparedBatch"
+              @regenerate="expandForCurrentBatch(true, preparedBatch.route)"
+              @refresh="expandForCurrentBatch(true)"
+              @discard="discardPreparedBatch"
+              @generate="generate"
+            />
+            <p
+              v-if="mobileMediaBudgetError"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-media-budget-error"
+            >
+              {{ mobileMediaBudgetError }}
+            </p>
+
+            <MobileResolutionPicker
+              v-model:width="form.width"
+              v-model:height="form.height"
+              :family="form.family"
+              :disabled="loadingModels"
+              @validity-change="resolutionValid = $event"
+            />
+            <div class="field-grid">
+              <label class="field">
+                <span>Steps</span>
+                <input
+                  v-model.number="form.steps"
+                  class="control"
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  max="100"
+                  :aria-invalid="stepsError ? 'true' : undefined"
+                />
+              </label>
+              <label class="field"
+                ><span>Guidance</span
+                ><input
+                  v-model.number="form.guidance"
+                  class="control"
+                  type="number"
+                  inputmode="decimal"
+                  step="0.1"
+                  min="0"
+                  max="100"
+                  :aria-invalid="guidanceError ? 'true' : undefined"
+              /></label>
+            </div>
+            <p
+              v-if="stepsError || guidanceError"
+              class="mobile-generate-validation"
+              role="alert"
+              data-test="mobile-basic-parameter-error"
+            >
+              {{ stepsError || guidanceError }}
+            </p>
+            <MobileSeedPicker
+              v-model="form.seed"
+              :last-seed="generation.lastSeedUsed"
+              @validity-change="seedValid = $event"
+            />
+
+            <div class="mobile-advanced-row">
+              <button
+                class="mobile-advanced-trigger"
+                type="button"
+                data-test="mobile-open-advanced"
+                @click="openAdvancedSheet"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+                <span>Advanced (sampler, LoRA, source)</span>
+                <span
+                  v-if="advancedActiveCount > 0"
+                  class="mobile-advanced-trigger-badge"
+                  data-test="mobile-advanced-trigger-count"
+                  >{{ advancedActiveCount }}</span
+                >
+              </button>
+              <button
+                class="mobile-settings-reset"
+                type="button"
+                data-test="mobile-settings-reset"
+                aria-label="Reset settings to model defaults"
+                @click="resetCreateSettings"
+              >
+                ↺ Reset
+              </button>
+            </div>
+
+            <MobileAdvancedSheet
+              :open="advancedSheetOpen"
+              :count="advancedActiveCount"
+              @close="closeAdvancedSheet"
+              @reset="resetAdvancedSettings"
+            >
+              <MobileGenerateParameters
+                :form="form"
+                :upscalers="upscalers"
+                :audio-output-supported="selectedGenerationModel?.supports_audio !== false"
+                @validity-change="parameterValid = $event"
+              />
+              <label v-if="form.model && caps.supportsNegativePrompt" class="field">
+                <span>Negative prompt</span>
+                <input v-model="form.negativePrompt" class="control" placeholder="Optional" />
+              </label>
+              <details
+                v-if="form.model && caps.supportsImg2img"
+                class="mobile-native-disclosure"
+                :open="
+                  !!(form.sourceImage || form.controlImage || form.imageAttachments.length) ||
+                  caps.sourceImageMode === 'qwen-edit'
+                "
+                data-test="mobile-source-disclosure"
+              >
+                <summary>
+                  <span>{{ sourceSectionTitle }}</span>
+                  <small>{{ sourceSectionSummary }}</small>
+                </summary>
+                <MobileSourceControls
+                  :form="form"
+                  :target="selectedTarget"
+                  :control-models="controlModels"
+                  :upscalers="upscalers"
+                  @validity-change="sourceValid = $event"
+                />
+              </details>
+              <MobileLoraControls
+                v-if="selectedTarget"
+                :form="form"
+                :target="selectedTarget"
+                @append-word="appendPromptWord"
+              />
+              <label class="field"
+                ><span>Format</span
+                ><select v-model="form.outputFormat" class="control">
+                  <option v-for="format in outputFormats" :key="format" :value="format">
+                    {{ format.toUpperCase() }}
+                  </option>
+                </select></label
+              >
+            </MobileAdvancedSheet>
+
+            <MobileTemplates
+              :form="form"
+              :host-id="selectedHost.id"
+              :models="generationModels"
+              @load="loadTemplate"
+            />
+
+            <div class="mobile-estimate">
+              <EstimateBadge :request="estimateRequest" :target="selectedTarget" />
+            </div>
+            <button
+              v-if="!preparedBatch"
+              class="primary-button"
+              type="button"
+              :disabled="
+                !form.prompt.trim() ||
+                !selectedModelAvailable ||
+                !seedValid ||
+                !parameterValid ||
+                !sourceControlsValid ||
+                !resolutionValid ||
+                !basicParametersValid ||
+                !!mobileMediaBudgetError ||
+                preparingGeneration
+              "
+              data-test="mobile-develop-button"
+              @click="generate"
+            >
+              {{ developButtonLabel }}
+            </button>
+            <section
+              v-if="queuedJobs.length"
+              class="mobile-generation-queue"
+              aria-label="Generation queue"
+              data-test="mobile-generation-queue"
+            >
+              <div class="mobile-generation-queue-head">
+                <h2>Queue</h2>
+                <span>{{ queuedJobs.length }} active</span>
+              </div>
+              <ol>
+                <li
+                  v-for="job in queuedJobs"
+                  :key="job.clientId"
+                  class="mobile-generation-job"
+                  data-test="mobile-generation-job"
+                >
+                  <div class="mobile-generation-job-copy">
+                    <p>{{ job.prompt }}</p>
+                    <span>{{ modelLabel(job.model) }} · {{ job.hostLabel }}</span>
+                  </div>
+                  <div class="mobile-generation-job-action">
+                    <span data-test="mobile-generation-status">{{ jobStatusCode(job) }}</span>
+                    <button
+                      class="mobile-generation-cancel"
+                      type="button"
+                      :aria-label="`Cancel ${job.prompt}`"
+                      data-test="mobile-generation-cancel"
+                      @click="cancelGeneration(job)"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </li>
+              </ol>
+            </section>
+            <!-- Live develop bed: once the host streams latent previews the
                active print literally forms here — the preview's blur tightens
                with denoise progress while the Develop grain thins over it.
                Without previews the status line below stands alone, and the
                grain's rAF loop stays parked (nothing mounts), which keeps the
                WebKit compositor free during model load. -->
-          <div
-            v-if="activeGeneration && activeGeneration.previewUrl"
-            class="mobile-develop-bed"
-            data-test="mobile-develop-bed"
-            aria-hidden="true"
-            :style="{
-              aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}`,
-              // The 55vh height cap rides the width axis (see mobile.css) so a
-              // portrait bed shrinks instead of distorting its layered media.
-              '--bed-ar': `${activeGeneration.width / Math.max(1, activeGeneration.height)}`,
-            }"
-          >
-            <img
-              class="mobile-develop-preview"
-              data-test="mobile-develop-preview"
-              :src="activeGeneration.previewUrl"
-              alt=""
+            <div
+              v-if="activeGeneration && activeGeneration.previewUrl"
+              class="mobile-develop-bed"
+              data-test="mobile-develop-bed"
+              aria-hidden="true"
               :style="{
-                filter: `blur(${Math.max(2, 14 - 12 * jobProgress(activeGeneration))}px)`,
+                aspectRatio: `${activeGeneration.width} / ${activeGeneration.height}`,
+                // The 55vh height cap rides the width axis (see mobile.css) so a
+                // portrait bed shrinks instead of distorting its layered media.
+                '--bed-ar': `${activeGeneration.width / Math.max(1, activeGeneration.height)}`,
               }"
-            />
-            <DevelopCanvas
-              :seed="activeGeneration.visualSeed"
-              :progress="jobProgress(activeGeneration)"
-              :phase="jobPhase(activeGeneration)"
-              class="mobile-develop-grain"
-              :style="{
-                opacity: String(Math.max(0.18, 1 - jobProgress(activeGeneration) * 0.9)),
-              }"
-            />
-          </div>
-          <div
-            class="status-line"
-            :class="{ 'error-text': generationStatusIsError }"
-            data-test="mobile-generation-summary"
-          >
-            {{ generationStatus }}
-          </div>
-          <div v-if="resultPreviewError" class="result-preview-error" role="alert">
-            <p class="status-line error-text">{{ resultPreviewError }}</p>
-            <button class="secondary-button" type="button" @click="retryGeneratedPreview">
-              Try preview again
-            </button>
-          </div>
-          <video
-            v-if="resultUrl && resultIsVideo"
-            :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
-            class="result-media"
-            :src="resultUrl"
-            controls
-            playsinline
-            @play="renewGeneratedResult(false)"
-            @loadedmetadata="generatedMediaReady"
-            @error="recoverGeneratedMedia"
-          />
-          <button
-            v-else-if="resultUrl"
-            class="result-media-button"
-            type="button"
-            data-test="mobile-generated-result"
-            aria-label="Expand generated print"
-            @click="generatedViewerOpen = true"
-          >
-            <img
+            >
+              <img
+                class="mobile-develop-preview"
+                data-test="mobile-develop-preview"
+                :src="activeGeneration.previewUrl"
+                alt=""
+                :style="{
+                  filter: `blur(${Math.max(2, 14 - 12 * jobProgress(activeGeneration))}px)`,
+                }"
+              />
+              <DevelopCanvas
+                :seed="activeGeneration.visualSeed"
+                :progress="jobProgress(activeGeneration)"
+                :phase="jobPhase(activeGeneration)"
+                class="mobile-develop-grain"
+                :style="{
+                  opacity: String(Math.max(0.18, 1 - jobProgress(activeGeneration) * 0.9)),
+                }"
+              />
+            </div>
+            <div
+              class="status-line"
+              :class="{ 'error-text': generationStatusIsError }"
+              data-test="mobile-generation-summary"
+            >
+              {{ generationStatus }}
+            </div>
+            <div v-if="resultPreviewError" class="result-preview-error" role="alert">
+              <p class="status-line error-text">{{ resultPreviewError }}</p>
+              <button class="secondary-button" type="button" @click="retryGeneratedPreview">
+                Try preview again
+              </button>
+            </div>
+            <video
+              v-if="resultUrl && resultIsVideo"
               :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
               class="result-media"
               :src="resultUrl"
-              alt="Generated print"
-              draggable="false"
-              @load="generatedMediaReady"
+              controls
+              playsinline
+              @play="renewGeneratedResult(false)"
+              @loadedmetadata="generatedMediaReady"
               @error="recoverGeneratedMedia"
-              @contextmenu.prevent
             />
-          </button>
+            <button
+              v-else-if="resultUrl"
+              class="result-media-button"
+              type="button"
+              data-test="mobile-generated-result"
+              aria-label="Expand generated print"
+              @click="generatedViewerOpen = true"
+            >
+              <img
+                :key="`${latestResultJob?.clientId}:${resultMediaLoadKey}`"
+                class="result-media"
+                :src="resultUrl"
+                alt="Generated print"
+                draggable="false"
+                @load="generatedMediaReady"
+                @error="recoverGeneratedMedia"
+                @contextmenu.prevent
+              />
+            </button>
+          </template>
         </template>
       </template>
 

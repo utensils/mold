@@ -9,6 +9,7 @@ import { computed } from "vue";
 import Icon from "@ui/components/Icon.vue";
 import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type { ChainStageToml } from "../lib/chainToml";
+import { sequenceFrameOptions, transitionLabel } from "@studio/lib/sequence";
 
 const props = defineProps<{
   index: number;
@@ -16,6 +17,7 @@ const props = defineProps<{
   stage: ChainStageToml;
   framesPerClipCap: number;
   fadeFramesMax: number;
+  motionTailFrames: number;
 }>();
 
 const emit = defineEmits<{
@@ -42,19 +44,17 @@ function updateTransition(v: string) {
   });
 }
 
-const transitionOptions = [
-  { value: "smooth", label: "Continue motion" },
-  { value: "cut", label: "Cut" },
-  { value: "fade", label: "Crossfade" },
-] as const;
+const transitionOptions = computed(() => [
+  { value: "smooth", label: transitionLabel("smooth", props.motionTailFrames) },
+  { value: "cut", label: transitionLabel("cut", props.motionTailFrames) },
+  { value: "fade", label: transitionLabel("fade", props.motionTailFrames) },
+]);
 const transitionValue = computed(() => props.stage.transition ?? "smooth");
 
 const durationSec = computed(() => (props.stage.frames / 24).toFixed(2));
-const frameOptions = computed(() => {
-  const out: number[] = [];
-  for (let n = 9; n <= props.framesPerClipCap; n += 8) out.push(n);
-  return out;
-});
+const frameOptions = computed(() =>
+  sequenceFrameOptions(props.framesPerClipCap, props.motionTailFrames),
+);
 
 const hasSourceImage = computed(() => Boolean(props.stage.source_image_b64));
 const sourceImageLabel = computed(() => {

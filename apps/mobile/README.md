@@ -132,9 +132,15 @@ chain joins are bounded to the original submission window, so a later
 fixed-seed duplicate cannot be mistaken for the interrupted print or cancelled
 as its zombie. Background failure notifications wait for this reconciliation.
 
-The initial mobile scope does not include a local engine, the desktop Chains
-editor and durable-jobs workspace, RunPod provisioning, desktop engine
-settings, or desktop self-update channels.
+Create also includes a guided **Sequence** mode for compatible installed video
+models. It starts with two plain-language clips, derives a valid duration from
+the selected host's chain limits, and keeps advanced transition settings behind
+Sequence tools. Submission, polling, cancellation, and relaunch recovery stay
+pinned to one immutable host ID, URL, instance ID, and Keychain-supplied API
+key. Local storage retains only the non-secret route identity and durable job
+ID. The initial mobile scope does not include a local engine, the desktop TOML
+chain editor and full durable-jobs administration workspace, RunPod
+provisioning, desktop engine settings, or desktop self-update channels.
 
 ## Persistence and security
 
@@ -142,6 +148,10 @@ WebView local storage contains non-secret mobile state:
 
 - `mold.mobile.hosts.v1` — host metadata with API keys removed
 - `mold.mobile.selected-host.v1` — selected generation host
+- `mold.mobile.create-mode.v1` — the last Single or Sequence authoring mode
+- `mold.mobile.sequence-job.v1` — non-secret exact-host identity and active
+  durable sequence job ID for relaunch recovery; a saved instance UUID must
+  exactly match the current host identity before Mold reattaches
 - `mold.mobile.settings.v1` — appearance, color family, and Photos auto-save preference
 - `mold.mobile.generation.templates.v1` — mobile-local generation templates
 - `mold.mobile.library-seen-at.v1` / `mold.mobile.library-visited.v1` — bounded

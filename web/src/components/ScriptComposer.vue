@@ -3,7 +3,9 @@ import { computed, onMounted, ref, watch } from "vue";
 import { VueDraggable } from "vue-draggable-plus";
 import Icon from "@ui/components/Icon.vue";
 import {
+  DEFAULT_SEQUENCE_CLIP_FRAMES,
   defaultSequenceStages,
+  sequenceMotionTailFrames,
   sequenceDuration,
   sequenceValidation,
   type SequenceStage,
@@ -25,6 +27,7 @@ const props = defineProps<{
   width: number;
   height: number;
   fps: number;
+  family: string;
 }>();
 
 const emit = defineEmits<{
@@ -35,7 +38,7 @@ const emit = defineEmits<{
 const DRAFT_KEY = "mold.chain.draft.v2";
 
 function blankStage(transition?: "smooth" | "cut" | "fade"): ChainStageToml {
-  return { prompt: "", frames: 97, transition };
+  return { prompt: "", frames: DEFAULT_SEQUENCE_CLIP_FRAMES, transition };
 }
 
 function newScript(): ChainScriptToml {
@@ -49,7 +52,10 @@ function newScript(): ChainScriptToml {
       steps: 8,
       guidance: 3.0,
       strength: 1.0,
-      motion_tail_frames: 25,
+      motion_tail_frames: sequenceMotionTailFrames({
+        name: props.model,
+        family: props.family,
+      }),
       output_format: "mp4",
     },
     stage: defaultSequenceStages().map((stage) => ({
@@ -83,6 +89,9 @@ onMounted(async () => {
   }
   if (script.value.stage.length < 2) {
     script.value.stage.push(blankStage("smooth"));
+  }
+  if (props.family === "ltx-video") {
+    script.value.chain.motion_tail_frames = 0;
   }
   limits.value = await fetchChainLimits(props.model).catch(() => null);
   limitsLoaded.value = true;
@@ -124,9 +133,13 @@ watch(
 );
 
 watch(
-  () => props.model,
-  async (m) => {
+  () => [props.model, props.family] as const,
+  async ([m, family]) => {
     script.value.chain.model = m;
+    script.value.chain.motion_tail_frames = sequenceMotionTailFrames({
+      name: m,
+      family,
+    });
     limitsLoaded.value = false;
     limits.value = await fetchChainLimits(m).catch(() => null);
     limitsLoaded.value = true;
@@ -378,6 +391,7 @@ defineExpose({ getStagePrompt, setStagePrompt, openStagePicker });
         :stage="stage"
         :frames-per-clip-cap="framesPerClipCap"
         :fade-frames-max="fadeFramesMax"
+        :motion-tail-frames="script.chain.motion_tail_frames"
         @update:stage="updateStage(i, $event)"
         @delete="deleteStage(i)"
         @move-up="moveUp(i)"

@@ -18,6 +18,10 @@ import {
 import type { ChainStage, TransitionMode } from "./api/types";
 
 describe("frame-count validation", () => {
+  it("starts new guided sequences at the Plato-verified comfortable duration", () => {
+    expect(newChainForm().stages.map((stage) => stage.frames)).toEqual([25, 25]);
+  });
+
   it("accepts only 8n+1 counts", () => {
     for (const ok of [1, 9, 17, 25, 33, 97]) expect(isLtx2FrameCount(ok)).toBe(true);
     for (const bad of [0, 2, 8, 50, 96, 98, 100]) expect(isLtx2FrameCount(bad)).toBe(false);

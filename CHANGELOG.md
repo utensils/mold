@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The iPhone Models family filter no longer stays stuck on "All families".** The family taxonomy was fetched once when the Models tab first mounted, so a host that was unreachable — or whose API key was still coming out of the Keychain — left the picker with its single placeholder option for the rest of the session, and a failed catalog search was never retried either. Mold now re-drives the taxonomy and a failed search whenever the browsed host's address, key, or reachability changes, keeps the last taxonomy that did load instead of blanking it on a failed reload, and falls back to a session-sticky set of the families seen in catalog results and installed host inventories when the taxonomy endpoint cannot be read at all — accumulated rather than derived from the rows on screen, which would collapse the picker to the family already filtered on.
 - **Desktop Library now uses native save language for gallery media.** The print-details action says **Save image** or **Save video** instead of the browser-oriented **Download**, while preserving the existing user-chosen file-save behavior.
+- **New video sequences now start at a GPU-safe clip duration.** Web,
+  desktop, and iPhone use the Plato-verified 25-frame default instead of
+  treating the server's 97-frame format recommendation as a memory guarantee.
+  iPhone memory failures now explain how to recover instead of repeating a raw
+  CUDA driver error. LTX-Video sequences correctly use zero context overlap
+  and say **Join clips**, while LTX-2 hides clip durations that cannot exceed
+  its 17-frame motion tail. iPhone relaunch recovery also fails closed when a
+  saved server identity can no longer be verified.
 - **Desktop status now follows the host selected in Create.** A concrete host pick in the upper-right Create chip is immediately reflected in the sidebar status trigger and popover, including that host's GPU, queue, and loaded models while idle. Auto and Most capable continue to follow the host of the latest live job, then fall back to This device.
 - **Expanded prompts no longer leave Generate looking broken after the model or route changes.** Desktop Create now surfaces the stale Batch 1 state immediately with explicit **Re-expand and generate**, **Generate expanded prompt anyway**, and **Restore original** actions; re-expansion starts from the original prompt instead of recursively expanding the rewrite. Generation and expansion errors use larger copy and expose a copy-to-clipboard control. Generation progress/result chrome on desktop, web, iPhone, and TUI resolves opaque `cv:` / `hf:` wire IDs through the installed-model inventory, so people see names such as “Juggernaut XL - Ragnarok” while requests and metadata retain the stable ID.
 - **Web sequences now prevent incompatible LTX-2 pipelines from failing after submission.** Entering Sequence filters the installed picker to chain-capable video models and selects a compatible model when available; otherwise the guide links directly to Discover with Video + Models filters. The server exposes and enforces model-specific sequence support before creating a durable job, job/stage and action errors remain visible, active cancellation shows progress and rejects duplicate clicks, and settled cards can be dismissed. Discover no longer offers aggregate Hugging Face repositories such as `Lightricks/LTX-2.3` as runnable downloads, and pull failures from cards or details surface as error toasts instead of rejected promises in the console.
@@ -21,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **iPhone Create now supports explicit multi-clip video sequences.** The
+  touch-native Single / Sequence switch starts with two required clips,
+  filters to compatible installed video models, keeps duration and seed tools
+  under disclosure, submits a durable job to the exact Keychain-authenticated
+  host, and restores or cancels that job after navigation or relaunch.
 - **Desktop Sequence is now a guided two-clip workflow.** Create requires a
   description for every clip, filters out incompatible video checkpoints,
   calls transitions **Continue motion**, **Cut**, and **Crossfade**, and keeps
