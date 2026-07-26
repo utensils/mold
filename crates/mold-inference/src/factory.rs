@@ -15,6 +15,52 @@ use crate::shared_pool::SharedPool;
 use crate::wuerstchen::WuerstchenEngine;
 use crate::zimage::ZImageEngine;
 
+/// Immutable inputs that may change the concrete engine constructed for a
+/// model. Scheduler-owned execution plans capture this once and pass it to
+/// [`create_engine_with_frozen_config`], so worker dispatch never consults a
+/// newer `Config` or process environment after admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrozenEngineConfig {
+    pub family: String,
+    pub is_schnell: Option<bool>,
+    pub is_turbo: Option<bool>,
+    pub scheduler: Option<Scheduler>,
+    pub t5_variant: Option<String>,
+    pub qwen3_variant: Option<String>,
+    pub qwen2_variant: Option<String>,
+    pub qwen2_text_encoder_mode: Option<String>,
+    pub ltx2_gemma_variant: Option<String>,
+    pub attention_backend: crate::attention::AttentionBackend,
+    pub attention_chunk: crate::attention::AttentionChunkPolicy,
+    pub vae_tiling: crate::vae_tiling::TiledMode,
+    pub vae_dtype: crate::device::VaeDtypePolicy,
+}
+
+impl FrozenEngineConfig {
+    pub fn resolve(model_name: &str, config: &Config) -> Self {
+        let model_cfg = config.resolved_model_config(model_name);
+        Self {
+            family: resolve_family(model_name, config),
+            is_schnell: model_cfg.is_schnell,
+            is_turbo: model_cfg.is_turbo,
+            scheduler: model_cfg.scheduler,
+            t5_variant: std::env::var("MOLD_T5_VARIANT")
+                .ok()
+                .or_else(|| config.t5_variant.clone()),
+            qwen3_variant: std::env::var("MOLD_QWEN3_VARIANT")
+                .ok()
+                .or_else(|| config.qwen3_variant.clone()),
+            qwen2_variant: std::env::var("MOLD_QWEN2_VARIANT").ok(),
+            qwen2_text_encoder_mode: std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok(),
+            ltx2_gemma_variant: std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok(),
+            attention_backend: crate::attention::AttentionBackend::resolve(),
+            attention_chunk: crate::attention::resolved_chunk_policy(),
+            vae_tiling: crate::vae_tiling::resolve_mode(),
+            vae_dtype: crate::device::resolved_vae_dtype_policy(),
+        }
+    }
+}
+
 /// Determine the model family from config or manifest, defaulting to "flux".
 fn resolve_family(model_name: &str, config: &Config) -> String {
     let model_cfg = config.resolved_model_config(model_name);
@@ -122,20 +168,53 @@ pub fn create_engine_with_pool(
     offload: bool,
     shared_pool: Option<Arc<Mutex<SharedPool>>>,
 ) -> Result<Box<dyn InferenceEngine>> {
-    let family = resolve_family(&model_name, config);
-    let model_cfg = config.resolved_model_config(&model_name);
+    let frozen = FrozenEngineConfig::resolve(&model_name, config);
+    create_engine_with_frozen_config(
+        model_name,
+        paths,
+        &frozen,
+        load_strategy,
+        gpu_ordinal,
+        offload,
+        shared_pool,
+    )
+}
 
-    match family.as_str() {
+/// Create an engine from scheduler-frozen construction inputs.
+///
+/// Unlike [`create_engine_with_pool`], this path performs no live config or
+/// environment resolution. It is the only factory entry point valid after a
+/// scheduler lease has been granted.
+pub fn create_engine_with_frozen_config(
+    model_name: String,
+    paths: ModelPaths,
+    frozen: &FrozenEngineConfig,
+    load_strategy: LoadStrategy,
+    gpu_ordinal: usize,
+    offload: bool,
+    shared_pool: Option<Arc<Mutex<SharedPool>>>,
+) -> Result<Box<dyn InferenceEngine>> {
+    let current_attention = crate::attention::AttentionBackend::resolve();
+    let current_chunk = crate::attention::resolved_chunk_policy();
+    let current_vae_tiling = crate::vae_tiling::resolve_mode();
+    let current_vae_dtype = crate::device::resolved_vae_dtype_policy();
+    if frozen.attention_backend != current_attention
+        || frozen.attention_chunk != current_chunk
+        || frozen.vae_tiling != current_vae_tiling
+        || frozen.vae_dtype != current_vae_dtype
+    {
+        bail!(
+            "frozen engine runtime policy does not match the process-frozen \
+             attention/chunk/VAE authority"
+        );
+    }
+    match frozen.family.as_str() {
         "flux" => {
-            let is_schnell = model_cfg.is_schnell;
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
             Ok(Box::new(FluxEngine::new(
                 model_name,
                 paths,
-                is_schnell,
-                t5_variant,
+                frozen.is_schnell,
+                frozen.t5_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -143,7 +222,7 @@ pub fn create_engine_with_pool(
             )))
         }
         "sd15" | "sd1.5" | "stable-diffusion-1.5" => {
-            let scheduler = model_cfg.scheduler.unwrap_or(Scheduler::Ddim);
+            let scheduler = frozen.scheduler.unwrap_or(Scheduler::Ddim);
             if is_single_file(&paths) {
                 // Companion-pulled CLIP-L tokenizer. Civitai
                 // single-file checkpoints never bundle the tokenizer.
@@ -175,10 +254,10 @@ pub fn create_engine_with_pool(
             }
         }
         "sdxl" => {
-            let is_turbo = model_cfg
+            let is_turbo = frozen
                 .is_turbo
                 .unwrap_or_else(|| model_name.contains("turbo"));
-            let scheduler = model_cfg.scheduler.unwrap_or(if is_turbo {
+            let scheduler = frozen.scheduler.unwrap_or(if is_turbo {
                 Scheduler::EulerAncestral
             } else {
                 Scheduler::Ddim
@@ -220,19 +299,16 @@ pub fn create_engine_with_pool(
             }
         }
         "sd3" | "sd3.5" | "stable-diffusion-3" | "stable-diffusion-3.5" => {
-            let is_turbo = model_cfg
+            let is_turbo = frozen
                 .is_turbo
                 .unwrap_or_else(|| model_name.contains("turbo"));
             let is_medium = model_name.contains("medium");
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
             Ok(Box::new(SD3Engine::new(
                 model_name,
                 paths,
                 is_turbo,
                 is_medium,
-                t5_variant,
+                frozen.t5_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -240,13 +316,10 @@ pub fn create_engine_with_pool(
             )))
         }
         "z-image" => {
-            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
-                .ok()
-                .or_else(|| config.qwen3_variant.clone());
             Ok(Box::new(ZImageEngine::new(
                 model_name,
                 paths,
-                qwen3_variant,
+                frozen.qwen3_variant.clone(),
                 load_strategy,
                 gpu_ordinal,
                 offload,
@@ -254,9 +327,6 @@ pub fn create_engine_with_pool(
             )))
         }
         "flux2" | "flux.2" | "flux2-klein" => {
-            let qwen3_variant = std::env::var("MOLD_QWEN3_VARIANT")
-                .ok()
-                .or_else(|| config.qwen3_variant.clone());
             if is_flux2_bfl_native_single_file(&paths) {
                 // Civitai / ComfyUI fine-tunes ship as one BFL-native
                 // safetensors. The VAE + Qwen3 text encoder come from the
@@ -268,7 +338,7 @@ pub fn create_engine_with_pool(
                     paths.vae.clone(),
                     paths.text_encoder_files.clone(),
                     paths.text_tokenizer.clone(),
-                    qwen3_variant,
+                    frozen.qwen3_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     offload,
@@ -278,7 +348,7 @@ pub fn create_engine_with_pool(
                 Ok(Box::new(Flux2Engine::new(
                     model_name,
                     paths,
-                    qwen3_variant,
+                    frozen.qwen3_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     offload,
@@ -286,26 +356,27 @@ pub fn create_engine_with_pool(
                 )))
             }
         }
-        "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new(
+        "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
             gpu_ordinal,
             offload,
             shared_pool,
+            frozen.qwen2_variant.clone(),
+            frozen.qwen2_text_encoder_mode.clone(),
         ))),
-        "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new(
+        "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
             gpu_ordinal,
             offload,
             shared_pool,
+            frozen.qwen2_variant.clone(),
+            frozen.qwen2_text_encoder_mode.clone(),
         ))),
         "ltx-video" | "ltx_video" => {
-            let t5_variant = std::env::var("MOLD_T5_VARIANT")
-                .ok()
-                .or_else(|| config.t5_variant.clone());
             if is_single_file(&paths) {
                 // Civitai single-file dispatch. `paths.vae` is
                 // either the same checkpoint (combined transformer+VAE) or
@@ -321,7 +392,7 @@ pub fn create_engine_with_pool(
                     vae_path,
                     paths.t5_encoder.clone(),
                     paths.t5_tokenizer.clone(),
-                    t5_variant,
+                    frozen.t5_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
@@ -330,7 +401,7 @@ pub fn create_engine_with_pool(
                 Ok(Box::new(LtxVideoEngine::new(
                     model_name,
                     paths,
-                    t5_variant,
+                    frozen.t5_variant.clone(),
                     load_strategy,
                     gpu_ordinal,
                     shared_pool,
@@ -344,19 +415,21 @@ pub fn create_engine_with_pool(
                 // Pass the full companion graph so both the Gemma encoder
                 // and version-matched VAE reach the runtime and chain stages.
                 let checkpoint = paths.transformer.clone();
-                Ok(Box::new(Ltx2Engine::from_single_file(
+                Ok(Box::new(Ltx2Engine::from_single_file_with_gemma_variant(
                     model_name,
                     checkpoint,
                     paths,
                     load_strategy,
                     gpu_ordinal,
+                    frozen.ltx2_gemma_variant.clone(),
                 )?))
             } else {
-                Ok(Box::new(Ltx2Engine::new(
+                Ok(Box::new(Ltx2Engine::new_with_gemma_variant(
                     model_name,
                     paths,
                     load_strategy,
                     gpu_ordinal,
+                    frozen.ltx2_gemma_variant.clone(),
                 )))
             }
         }
@@ -398,6 +471,30 @@ mod tests {
             text_tokenizer: None,
             decoder: None,
         }
+    }
+
+    #[test]
+    fn frozen_factory_rejects_runtime_policy_claim_it_cannot_consume() {
+        let config = Config::default();
+        let mut frozen = FrozenEngineConfig::resolve("flux-dev:q4", &config);
+        frozen.attention_backend = match frozen.attention_backend {
+            crate::attention::AttentionBackend::Math => crate::attention::AttentionBackend::Flash,
+            crate::attention::AttentionBackend::Flash => crate::attention::AttentionBackend::Math,
+        };
+        let error = create_engine_with_frozen_config(
+            "flux-dev:q4".into(),
+            dummy_paths(),
+            &frozen,
+            LoadStrategy::Sequential,
+            0,
+            false,
+            None,
+        )
+        .err()
+        .expect("mismatched runtime policy must fail closed");
+        assert!(error
+            .to_string()
+            .contains("process-frozen attention/chunk/VAE authority"));
     }
 
     #[test]

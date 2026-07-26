@@ -53,6 +53,7 @@ pub struct Ltx2Engine {
     /// Separate LTX-2.3 Gemma hidden-state projection used by diffusion-only
     /// and quantized checkpoints. Combined checkpoints leave this unset.
     text_projection_path: Option<PathBuf>,
+    gemma_variant: Option<String>,
 }
 
 fn validate_audio_output_request(req: &GenerateRequest, supported: bool) -> Result<()> {
@@ -87,6 +88,22 @@ impl Ltx2Engine {
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
     ) -> Self {
+        Self::new_with_gemma_variant(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok(),
+        )
+    }
+
+    pub fn new_with_gemma_variant(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        gemma_variant: Option<String>,
+    ) -> Self {
         let text_projection_path = paths
             .text_encoder_files
             .iter()
@@ -107,6 +124,7 @@ impl Ltx2Engine {
             gpu_ordinal,
             preset_hint: None,
             text_projection_path,
+            gemma_variant,
         }
     }
 
@@ -136,6 +154,24 @@ impl Ltx2Engine {
         paths: ModelPaths,
         load_strategy: LoadStrategy,
         gpu_ordinal: usize,
+    ) -> anyhow::Result<Self> {
+        Self::from_single_file_with_gemma_variant(
+            model_name,
+            checkpoint,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok(),
+        )
+    }
+
+    pub fn from_single_file_with_gemma_variant(
+        model_name: String,
+        checkpoint: PathBuf,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        gemma_variant: Option<String>,
     ) -> anyhow::Result<Self> {
         if !checkpoint.exists() {
             anyhow::bail!(
@@ -185,7 +221,13 @@ impl Ltx2Engine {
             ..paths
         };
 
-        let mut engine = Self::new(model_name, paths, load_strategy, gpu_ordinal);
+        let mut engine = Self::new_with_gemma_variant(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            gemma_variant,
+        );
         // Catalog (`cv:*`) IDs don't contain `ltx-2.3` / `ltx-2` substrings,
         // so `preset_for_model` would bail. The bundled `model_version`
         // from the safetensors `__metadata__` (e.g. `"2.3.0"`) is the
@@ -224,6 +266,7 @@ impl Ltx2Engine {
             gpu_ordinal: 0,
             preset_hint: None,
             text_projection_path: None,
+            gemma_variant: None,
         }
     }
 
@@ -453,6 +496,7 @@ impl Ltx2Engine {
             &plan.preset,
             &prompt_device,
             dtype,
+            self.gemma_variant.as_deref(),
         )?;
         Self::log_timing("pipeline.create_runtime.load_prompt_encoder", load_start);
         // Cross-device case (transformer on CUDA, encoder on CPU/sibling GPU)

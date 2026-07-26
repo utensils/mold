@@ -39,7 +39,9 @@ pub mod zimage;
 
 pub use engine::{InferenceEngine, LoadStrategy};
 pub use error::InferenceError;
-pub use factory::{create_engine, create_engine_with_pool};
+pub use factory::{
+    create_engine, create_engine_with_frozen_config, create_engine_with_pool, FrozenEngineConfig,
+};
 pub use flux::FluxEngine;
 pub use flux2::Flux2Engine;
 pub use ltx2::Ltx2Engine;

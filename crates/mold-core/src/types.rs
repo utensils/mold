@@ -1645,6 +1645,10 @@ pub struct CpuSnapshot {
 pub struct RamSnapshot {
     pub total: u64,
     pub used: u64,
+    /// OS-reported memory immediately available without swapping. Additive
+    /// and optional so older resource snapshots remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<u64>,
     pub used_by_mold: u64,
     pub used_by_other: u64,
 }
@@ -3583,6 +3587,7 @@ mod tests {
             system_ram: RamSnapshot {
                 total: 64_000_000_000,
                 used: 38_400_000_000,
+                available: None,
                 used_by_mold: 22_100_000_000,
                 used_by_other: 16_300_000_000,
             },
@@ -3599,6 +3604,30 @@ mod tests {
         assert_eq!(back.gpus[0].backend, GpuBackend::Cuda);
         assert_eq!(back.gpus[0].vram_used_by_mold, Some(10_100_000_000));
         assert_eq!(back.system_ram.used_by_mold, 22_100_000_000);
+    }
+
+    #[test]
+    fn ram_available_is_additive_and_wire_backward_compatible() {
+        let legacy = r#"{
+            "total": 64000000000,
+            "used": 50000000000,
+            "used_by_mold": 10000000000,
+            "used_by_other": 40000000000
+        }"#;
+        let parsed: RamSnapshot = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.available, None);
+
+        let current = RamSnapshot {
+            total: 64_000_000_000,
+            used: 50_000_000_000,
+            available: Some(20_000_000_000),
+            used_by_mold: 10_000_000_000,
+            used_by_other: 40_000_000_000,
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains(r#""available":20000000000"#));
+        let round_trip: RamSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.available, current.available);
     }
 
     #[test]

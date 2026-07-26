@@ -78,7 +78,11 @@ nvml-wrapper = { version = "0.10", optional = true }
 sysinfo = "0.34"
 async-stream = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
+filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 # Chain route tests build a synthetic motion-tail Tensor via the same

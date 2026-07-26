@@ -22,6 +22,13 @@ pub trait InferenceEngine: Send + Sync {
     fn is_loaded(&self) -> bool;
     /// Load model weights. Called automatically on first generate if not yet loaded.
     fn load(&mut self) -> Result<()>;
+    /// Load model weights using the exact request placement selected before
+    /// dispatch. Engines whose placement affects construction must override
+    /// this method; the default preserves engines with no request-sensitive
+    /// load behavior.
+    fn load_for_request(&mut self, _req: &GenerateRequest) -> Result<()> {
+        self.load()
+    }
     /// Unload model weights to free GPU memory. The engine remains valid and
     /// can be re-loaded by calling `load()` or generating again.
     fn unload(&mut self) {}
@@ -43,6 +50,11 @@ pub trait InferenceEngine: Send + Sync {
     }
     /// Exact request-controlled block-offload flag supplied at creation.
     fn configured_block_offload(&self) -> Option<bool> {
+        None
+    }
+    /// Scheduler execution-plan fingerprint that governed this engine's
+    /// successful load.
+    fn configured_execution_fingerprint(&self) -> Option<&str> {
         None
     }
 

@@ -1703,6 +1703,13 @@ impl InferenceEngine for SD15Engine {
         SD15Engine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = SD15Engine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         clear_cache(&self.prompt_cache);

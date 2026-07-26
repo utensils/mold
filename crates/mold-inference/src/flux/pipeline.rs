@@ -2619,6 +2619,13 @@ impl InferenceEngine for FluxEngine {
         FluxEngine::load(self)
     }
 
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        let result = FluxEngine::load(self);
+        self.pending_placement = None;
+        result
+    }
+
     fn unload(&mut self) {
         self.base.unload();
         // prompt_cache holds GPU-resident T5/CLIP embedding tensors; clear so

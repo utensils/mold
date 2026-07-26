@@ -525,6 +525,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),

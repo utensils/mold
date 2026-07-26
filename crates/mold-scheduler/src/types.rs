@@ -84,6 +84,9 @@ pub struct DeviceSnapshot {
     /// Credible monotonic availability estimate for a busy device.
     pub available_at_ms: Option<u64>,
     pub worker_generation: u64,
+    /// Effective capacity at the next owner-thread allocation boundary:
+    /// sampled free bytes plus only memory that the owner can safely reclaim
+    /// from its measured resident cache entry. Never raw total VRAM.
     pub available_vram_bytes: u64,
     pub warm_execution_fingerprints: BTreeSet<ExecutionFingerprint>,
 }
@@ -145,10 +148,59 @@ pub struct CandidatePlacement {
     pub device_id: DeviceId,
     pub execution_fingerprint: ExecutionFingerprint,
     pub predicted_vram_bytes: u64,
+    /// Effective device capacity used to admit this concrete edge. Runtime
+    /// adapters derive it from authoritative free and safely reclaimable
+    /// resident bytes, then replan if it changes.
+    pub device_available_vram_bytes: u64,
     pub incremental_host_ram_bytes: u64,
     pub cold_setup_ms: u64,
     pub warm_setup_ms: u64,
     pub predicted_run_ms: u64,
+}
+
+/// Conservative static scheduler timing used until Phase E has a credible
+/// learned estimate for the exact execution fingerprint and request shape.
+///
+/// These values are planning fallbacks, not performance claims. Both
+/// authoritative and observe-mode callers must use this one table so a
+/// rollout comparison never invents a separate cost model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StaticTimingEstimate {
+    pub cold_setup_ms: u64,
+    pub warm_setup_ms: u64,
+    pub predicted_run_ms: u64,
+}
+
+pub const fn static_timing_for(kind: WorkKind) -> StaticTimingEstimate {
+    match kind {
+        WorkKind::Generation | WorkKind::PreparedSibling | WorkKind::BatchChild => {
+            StaticTimingEstimate {
+                cold_setup_ms: 8_000,
+                warm_setup_ms: 250,
+                predicted_run_ms: 30_000,
+            }
+        }
+        WorkKind::ChainStage => StaticTimingEstimate {
+            cold_setup_ms: 10_000,
+            warm_setup_ms: 250,
+            predicted_run_ms: 60_000,
+        },
+        WorkKind::PostUpscale | WorkKind::StandaloneUpscale => StaticTimingEstimate {
+            cold_setup_ms: 3_000,
+            warm_setup_ms: 100,
+            predicted_run_ms: 5_000,
+        },
+        WorkKind::PromptExpansion => StaticTimingEstimate {
+            cold_setup_ms: 2_000,
+            warm_setup_ms: 50,
+            predicted_run_ms: 2_000,
+        },
+        WorkKind::AdminModelLoad | WorkKind::AdminModelUnload => StaticTimingEstimate {
+            cold_setup_ms: 5_000,
+            warm_setup_ms: 100,
+            predicted_run_ms: 1_000,
+        },
+    }
 }
 
 impl CandidatePlacement {
@@ -161,6 +213,7 @@ impl CandidatePlacement {
             device_id: device_id.into(),
             execution_fingerprint: execution_fingerprint.into(),
             predicted_vram_bytes: 0,
+            device_available_vram_bytes: u64::MAX,
             incremental_host_ram_bytes,
             cold_setup_ms: 0,
             warm_setup_ms: 0,
@@ -173,6 +226,11 @@ impl CandidatePlacement {
         self
     }
 
+    pub fn with_device_available_vram(mut self, available_vram_bytes: u64) -> Self {
+        self.device_available_vram_bytes = available_vram_bytes;
+        self
+    }
+
     pub fn with_timing(
         mut self,
         cold_setup_ms: u64,
@@ -182,6 +240,14 @@ impl CandidatePlacement {
         self.cold_setup_ms = cold_setup_ms;
         self.warm_setup_ms = warm_setup_ms;
         self.predicted_run_ms = predicted_run_ms;
+        self
+    }
+
+    pub fn with_static_timing(mut self, kind: WorkKind) -> Self {
+        let timing = static_timing_for(kind);
+        self.cold_setup_ms = timing.cold_setup_ms;
+        self.warm_setup_ms = timing.warm_setup_ms;
+        self.predicted_run_ms = timing.predicted_run_ms;
         self
     }
 }
@@ -498,6 +564,9 @@ pub struct BypassUpdate {
 pub struct ReservationItem {
     pub work_id: WorkId,
     pub device_id: DeviceId,
+    pub execution_fingerprint: ExecutionFingerprint,
+    pub predicted_vram_bytes: u64,
+    pub device_available_vram_bytes: u64,
     pub host_ram_bytes: u64,
 }
 
@@ -606,6 +675,28 @@ impl Plan {
                 current: current.device_id.clone(),
             });
         }
+        if current.execution_fingerprint != lease.placement.execution_fingerprint {
+            return Err(PlanValidationError::ExecutionFingerprintChanged {
+                planned: lease.placement.execution_fingerprint.clone(),
+                current: current.execution_fingerprint.clone(),
+            });
+        }
+        if current.available_vram_bytes < lease.placement.predicted_vram_bytes {
+            return Err(PlanValidationError::InsufficientCurrentVram {
+                device_id: lease.device_id.clone(),
+                planned_bytes: lease.placement.predicted_vram_bytes,
+                available_bytes: current.available_vram_bytes,
+            });
+        }
+        if lease.placement.device_available_vram_bytes != u64::MAX
+            && current.available_vram_bytes != lease.placement.device_available_vram_bytes
+        {
+            return Err(PlanValidationError::DeviceVramSampleChanged {
+                device_id: lease.device_id.clone(),
+                planned_bytes: lease.placement.device_available_vram_bytes,
+                current_bytes: current.available_vram_bytes,
+            });
+        }
         if !self.immediate_leases.contains(lease) {
             return Err(PlanValidationError::LeaseNotProposed {
                 work_id: lease.work_id.clone(),
@@ -661,6 +752,10 @@ pub struct GrantValidationSnapshot {
     pub worker_ready: bool,
     pub device_admin_state: DeviceAdminState,
     pub device_health: DeviceHealth,
+    /// Exact plan identity produced by fresh pre-grant resolution.
+    pub execution_fingerprint: ExecutionFingerprint,
+    /// Fresh effective VRAM capacity for the selected device.
+    pub available_vram_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -692,6 +787,20 @@ pub enum PlanValidationError {
     GrantDeviceMismatch {
         planned: DeviceId,
         current: DeviceId,
+    },
+    ExecutionFingerprintChanged {
+        planned: ExecutionFingerprint,
+        current: ExecutionFingerprint,
+    },
+    InsufficientCurrentVram {
+        device_id: DeviceId,
+        planned_bytes: u64,
+        available_bytes: u64,
+    },
+    DeviceVramSampleChanged {
+        device_id: DeviceId,
+        planned_bytes: u64,
+        current_bytes: u64,
     },
     WorkNotReady {
         work_id: WorkId,

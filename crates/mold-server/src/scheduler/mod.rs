@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use mold_scheduler::{
     Backend, BlockedReason, CandidatePlacement, DeviceActivity, DeviceAdminState, DeviceHealth,
     DeviceId, DeviceSnapshot, ExecutionFingerprint, GrantValidationSnapshot, HostMemorySnapshot,
-    Plan, Planner, PlannerSnapshot, PriorityClass, WorkId, WorkSnapshot,
+    Plan, Planner, PlannerSnapshot, PriorityClass, WorkId, WorkKind, WorkSnapshot,
 };
 
 use crate::gpu_pool::{GpuJob, GpuWorker, LeaseGrant, OwnerWork};
@@ -223,10 +223,15 @@ struct ActiveLease {
     worker_generation: u64,
     accepted: bool,
     previous_target: Option<usize>,
+    estimated_finish_ms: u64,
+    ready_at_ms: u64,
+    bypass_count: u8,
+    warm_wait_started_ms: Option<u64>,
 }
 
 struct PendingGeneration {
     job: GenerationJob,
+    ready_at_ms: u64,
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
     preparation: PreparationState,
@@ -255,6 +260,9 @@ struct PendingOwnerWork {
     hard_ordinal: Option<usize>,
     priority: PriorityClass,
     queue_rank: u64,
+    ready_at_ms: u64,
+    bypass_count: u8,
+    warm_wait_started_ms: Option<u64>,
     work: OwnerWork,
 }
 
@@ -448,7 +456,8 @@ impl HostMemoryLedger {
         self.publish_sample(
             collection_started_sequence,
             ram.total,
-            ram.total.saturating_sub(ram.used),
+            ram.available
+                .unwrap_or_else(|| ram.total.saturating_sub(ram.used)),
         );
     }
 
@@ -734,6 +743,7 @@ impl Coordinator {
             id,
             PendingGeneration {
                 job,
+                ready_at_ms: monotonic_ms(),
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
@@ -778,6 +788,9 @@ impl Coordinator {
                 hard_ordinal: submission.hard_ordinal,
                 priority: submission.priority,
                 queue_rank,
+                ready_at_ms: monotonic_ms(),
+                bypass_count: 0,
+                warm_wait_started_ms: None,
                 work: submission.work,
             },
         );
@@ -945,10 +958,19 @@ impl Coordinator {
                     ?reason,
                     "worker rejected a fenced grant"
                 );
-                let previous_target = self
-                    .leases
-                    .remove(&device_id)
+                let rejected_lease = self.leases.remove(&device_id);
+                let previous_target = rejected_lease
+                    .as_ref()
                     .and_then(|lease| lease.previous_target);
+                let preserved_bypass_count = rejected_lease
+                    .as_ref()
+                    .map_or(0, |lease| lease.bypass_count);
+                let preserved_warm_wait_started_ms = rejected_lease
+                    .as_ref()
+                    .and_then(|lease| lease.warm_wait_started_ms);
+                let preserved_ready_at_ms = rejected_lease
+                    .as_ref()
+                    .map_or_else(monotonic_ms, |lease| lease.ready_at_ms);
                 let work_id = grant.work.id().to_string();
                 self.memory.release(&work_id);
                 self.memory.collect_now();
@@ -994,8 +1016,9 @@ impl Coordinator {
                                     generation_job.id.clone(),
                                     PendingGeneration {
                                         job: generation_job,
-                                        bypass_count: 0,
-                                        warm_wait_started_ms: None,
+                                        ready_at_ms: preserved_ready_at_ms,
+                                        bypass_count: preserved_bypass_count,
+                                        warm_wait_started_ms: preserved_warm_wait_started_ms,
                                         preparation: PreparationState::Ready,
                                         retry_not_before_ms: Some(
                                             monotonic_ms().saturating_add(backoff_ms),
@@ -1011,8 +1034,9 @@ impl Coordinator {
                                 generation_job.id.clone(),
                                 PendingGeneration {
                                     job: generation_job,
-                                    bypass_count: 0,
-                                    warm_wait_started_ms: None,
+                                    ready_at_ms: preserved_ready_at_ms,
+                                    bypass_count: preserved_bypass_count,
+                                    warm_wait_started_ms: preserved_warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
                                     retry_not_before_ms: None,
                                 },
@@ -1036,6 +1060,9 @@ impl Coordinator {
                                 hard_ordinal: None,
                                 priority: PriorityClass::User,
                                 queue_rank: self.synthetic_id,
+                                ready_at_ms: preserved_ready_at_ms,
+                                bypass_count: preserved_bypass_count,
+                                warm_wait_started_ms: preserved_warm_wait_started_ms,
                             });
                             self.pending_owner_work.insert(
                                 work_id,
@@ -1046,6 +1073,9 @@ impl Coordinator {
                                     hard_ordinal: retry.hard_ordinal,
                                     priority: retry.priority,
                                     queue_rank: retry.queue_rank,
+                                    ready_at_ms: retry.ready_at_ms,
+                                    bypass_count: retry.bypass_count,
+                                    warm_wait_started_ms: retry.warm_wait_started_ms,
                                     work,
                                 },
                             );
@@ -1164,7 +1194,10 @@ impl Coordinator {
                     .map(|gpu| {
                         (
                             (gpu.backend, gpu.ordinal),
-                            gpu.vram_total.saturating_sub(gpu.vram_used),
+                            (
+                                gpu.vram_total.saturating_sub(gpu.vram_used),
+                                gpu.vram_used_by_mold,
+                            ),
                         )
                     })
                     .collect::<BTreeMap<_, _>>()
@@ -1187,14 +1220,27 @@ impl Coordinator {
                     DeviceHealth::Healthy
                 };
                 let mut warm = BTreeSet::new();
-                if let Some(model) = worker
-                    .resident_model
+                if let Some(fingerprint) = worker
+                    .resident_execution_fingerprint
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone()
                 {
-                    warm.insert(ExecutionFingerprint::new(model));
+                    warm.insert(ExecutionFingerprint::new(fingerprint));
                 }
+                let active_lease = self.leases.get(&id);
+                let (sampled_available_vram_bytes, sampled_mold_vram_bytes) = sampled_free
+                    .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                    .copied()
+                    .unwrap_or((worker.gpu.free_vram_bytes, None));
+                let measured_cache_bytes = worker
+                    .model_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .active_vram_bytes();
+                let reclaimable_cache_bytes = sampled_mold_vram_bytes
+                    .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
+                    .unwrap_or(0);
                 DeviceSnapshot {
                     id: DeviceId::new(id),
                     backend: match worker.gpu.backend {
@@ -1211,16 +1257,17 @@ impl Coordinator {
                     } else {
                         DeviceActivity::Busy
                     },
-                    available_at_ms: None,
+                    available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
                     worker_generation: ready.map_or(0, |ready| ready.generation),
                     // The periodic resource sample is authoritative. Before
                     // its first tick, discovery's driver sample is still an
                     // actual free-memory reading; total VRAM is never used as
                     // a proxy for free capacity.
-                    available_vram_bytes: sampled_free
-                        .get(&(worker.gpu.backend, worker.gpu.ordinal))
-                        .copied()
-                        .unwrap_or(worker.gpu.free_vram_bytes),
+                    available_vram_bytes: effective_available_vram_bytes(
+                        sampled_available_vram_bytes,
+                        reclaimable_cache_bytes,
+                        worker.gpu.total_vram_bytes,
+                    ),
                     warm_execution_fingerprints: warm,
                 }
             })
@@ -1228,8 +1275,15 @@ impl Coordinator {
     }
 
     fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
-        self.device_snapshots()
-            .into_iter()
+        self.device_facts_from_snapshots(&self.device_snapshots())
+    }
+
+    fn device_facts_from_snapshots(
+        &self,
+        snapshots: &[DeviceSnapshot],
+    ) -> Vec<crate::execution_plan::DeviceFact> {
+        snapshots
+            .iter()
             .filter(|device| device.is_schedulable())
             .filter_map(|device| {
                 let worker = self
@@ -1251,6 +1305,14 @@ impl Coordinator {
         &self,
         pending: &PendingGeneration,
     ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
+        self.generation_plans_with_device_facts(pending, &self.device_facts())
+    }
+
+    fn generation_plans_with_device_facts(
+        &self,
+        pending: &PendingGeneration,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) -> Result<Vec<crate::execution_plan::ResolvedExecutionPlan>, GenerationPlanFailure> {
         let config = self.state.config.try_read().map_err(|_| {
             GenerationPlanFailure::Transient(
                 "configuration changed while resolving execution plan".to_string(),
@@ -1263,7 +1325,7 @@ impl Coordinator {
         let resolved = crate::execution_plan::resolve_execution_plans(
             &config,
             &pending.job.request,
-            &self.device_facts(),
+            device_facts,
             offload_requested,
         );
         #[cfg(test)]
@@ -1275,10 +1337,10 @@ impl Coordinator {
             // no filesystem model. Keep their transport/fencing focus without
             // weakening production admission.
             let estimate = crate::queue::estimate_model_vram(&pending.job.request.model);
-            return Ok(self
-                .device_facts()
-                .into_iter()
+            return Ok(device_facts
+                .iter()
                 .filter(|device| device.available_vram_bytes >= estimate)
+                .cloned()
                 .map(|device| crate::execution_plan::ResolvedExecutionPlan {
                     device_id: device.id,
                     device_ordinal: device.ordinal,
@@ -1287,10 +1349,33 @@ impl Coordinator {
                         components: BTreeMap::new(),
                     },
                     components: BTreeMap::new(),
-                    attention_backend: crate::execution_plan::AttentionBackend::Auto,
+                    engine_paths: mold_core::ModelPaths {
+                        transformer: std::path::PathBuf::from(&pending.job.request.model),
+                        transformer_shards: vec![],
+                        vae: std::path::PathBuf::from(&pending.job.request.model),
+                        spatial_upscaler: None,
+                        temporal_upscaler: None,
+                        distilled_lora: None,
+                        t5_encoder: None,
+                        clip_encoder: None,
+                        t5_tokenizer: None,
+                        clip_tokenizer: None,
+                        clip_encoder_2: None,
+                        clip_tokenizer_2: None,
+                        text_encoder_files: vec![],
+                        text_tokenizer: None,
+                        decoder: None,
+                    },
+                    engine_config: mold_inference::FrozenEngineConfig::resolve(
+                        &pending.job.request.model,
+                        &config,
+                    ),
+                    effective_loras: vec![],
+                    attention_backend: crate::execution_plan::AttentionBackend::Math,
                     engine_load_strategy: mold_inference::LoadStrategy::Eager,
                     offload_mode: crate::execution_plan::OffloadMode::None,
                     predicted_vram_peak_bytes: estimate,
+                    admitted_available_vram_bytes: device.available_vram_bytes,
                     predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
                     determinism_class:
                         crate::execution_plan::DeterminismClass::CpuSeededCrossBackend,
@@ -1308,6 +1393,29 @@ impl Coordinator {
                 GenerationPlanFailure::Terminal(error)
             }
         })
+    }
+
+    fn generation_plan_catalog(
+        &self,
+        device_facts: &[crate::execution_plan::DeviceFact],
+    ) -> BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>> {
+        self.pending
+            .iter()
+            .filter(|(_, pending)| pending.preparation == PreparationState::Ready)
+            .map(|(id, pending)| {
+                let plans = self
+                    .generation_plans_with_device_facts(pending, device_facts)
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(
+                            job_id = id,
+                            %error,
+                            "generation has no valid execution plan"
+                        );
+                        Vec::new()
+                    });
+                (id.clone(), plans)
+            })
+            .collect()
     }
 
     fn reject_terminal_generation_plan_errors(&mut self) -> bool {
@@ -1335,7 +1443,11 @@ impl Coordinator {
         true
     }
 
-    fn work_snapshots(&self) -> Vec<WorkSnapshot> {
+    fn work_snapshots(
+        &self,
+        generation_plans: &BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
+        device_snapshots: &[DeviceSnapshot],
+    ) -> Vec<WorkSnapshot> {
         let queue_order = self.state.job_registry.queued_ids_in_order();
         let ranks = queue_order
             .iter()
@@ -1355,14 +1467,12 @@ impl Coordinator {
             .map(|(id, pending)| {
                 let model = pending.job.request.model.as_str();
                 let failed = crate::gpu_pool::failed_ordinals_for_model(model);
-                let candidates = self
-                    .generation_plans(pending)
-                    .unwrap_or_else(|error| {
-                        tracing::debug!(job_id = id, %error, "generation has no valid execution plan");
-                        Vec::new()
-                    })
+                let candidates = generation_plans
+                    .get(id)
                     .into_iter()
+                    .flatten()
                     .filter(|plan| !failed.contains(&plan.device_ordinal))
+                    .cloned()
                     .map(|plan| {
                         CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
@@ -1370,6 +1480,8 @@ impl Coordinator {
                             plan.predicted_host_increment_bytes,
                         )
                         .with_vram(plan.predicted_vram_peak_bytes)
+                        .with_device_available_vram(plan.admitted_available_vram_bytes)
+                        .with_static_timing(WorkKind::Generation)
                     })
                     .collect::<Vec<_>>();
                 let mut work = WorkSnapshot::new(
@@ -1377,7 +1489,8 @@ impl Coordinator {
                     ranks.get(id.as_str()).copied().unwrap_or(u64::MAX),
                     candidates,
                 )
-                .with_bypass_count(pending.bypass_count);
+                .with_bypass_count(pending.bypass_count)
+                .with_ready_at(pending.ready_at_ms);
                 if let Some(started) = pending.warm_wait_started_ms {
                     work = work.with_warm_wait_started_at(started);
                 }
@@ -1400,6 +1513,11 @@ impl Coordinator {
                 work
             })
             .collect();
+        let authoritative_available_vram = device_snapshots
+            .iter()
+            .cloned()
+            .map(|device| (device.id, device.available_vram_bytes))
+            .collect::<BTreeMap<_, _>>();
         snapshots.extend(self.pending_owner_work.iter().map(|(id, pending)| {
             let candidates = self
                 .state
@@ -1412,11 +1530,14 @@ impl Coordinator {
                         ExecutionFingerprint::new(pending.model_fingerprint.clone()),
                         pending.estimated_host_ram_bytes,
                     )
-                    .with_vram(
-                        pending
-                            .estimated_vram_bytes
-                            .min(worker.gpu.total_vram_bytes),
+                    .with_vram(pending.estimated_vram_bytes)
+                    .with_device_available_vram(
+                        authoritative_available_vram
+                            .get(&DeviceId::new(worker_device_id(worker)))
+                            .copied()
+                            .unwrap_or(0),
                     )
+                    .with_static_timing(pending.work.kind())
                 })
                 .collect::<Vec<_>>();
             let mut work = WorkSnapshot::new(
@@ -1424,7 +1545,12 @@ impl Coordinator {
                 (u64::MAX / 2).saturating_add(pending.queue_rank),
                 candidates,
             )
-            .with_priority(pending.priority);
+            .with_priority(pending.priority)
+            .with_bypass_count(pending.bypass_count)
+            .with_ready_at(pending.ready_at_ms);
+            if let Some(started) = pending.warm_wait_started_ms {
+                work = work.with_warm_wait_started_at(started);
+            }
             work.kind = pending.work.kind();
             if let Some(ordinal) = pending.hard_ordinal {
                 if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
@@ -1439,16 +1565,28 @@ impl Coordinator {
         snapshots
     }
 
-    fn planner_snapshot(&self) -> PlannerSnapshot {
-        PlannerSnapshot {
-            state_version: self.state_version,
-            next_plan_version: self.plan_version.saturating_add(1),
-            now_ms: monotonic_ms(),
-            next_replan_at_ms: self.dirty.deadline().map(monotonic_deadline_ms),
-            host_memory: self.memory.snapshot(),
-            devices: self.device_snapshots(),
-            work: self.work_snapshots(),
-        }
+    fn planner_snapshot(
+        &self,
+    ) -> (
+        PlannerSnapshot,
+        BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
+    ) {
+        let devices = self.device_snapshots();
+        let device_facts = self.device_facts_from_snapshots(&devices);
+        let generation_plans = self.generation_plan_catalog(&device_facts);
+        let work = self.work_snapshots(&generation_plans, &devices);
+        (
+            PlannerSnapshot {
+                state_version: self.state_version,
+                next_plan_version: self.plan_version.saturating_add(1),
+                now_ms: monotonic_ms(),
+                next_replan_at_ms: self.dirty.deadline().map(monotonic_deadline_ms),
+                host_memory: self.memory.snapshot(),
+                devices,
+                work,
+            },
+            generation_plans,
+        )
     }
 
     async fn dispatch_ready(&mut self) -> Option<u64> {
@@ -1474,7 +1612,7 @@ impl Coordinator {
             {
                 return None;
             }
-            let snapshot = self.planner_snapshot();
+            let (snapshot, generation_plans) = self.planner_snapshot();
             let plan = match self.planner.plan(&snapshot) {
                 Ok(plan) => plan,
                 Err(error) => {
@@ -1524,6 +1662,10 @@ impl Coordinator {
                 .into_iter()
                 .map(|device| (device.id.clone(), device))
                 .collect::<BTreeMap<_, _>>();
+            let current_device_facts = self.device_facts_from_snapshots(
+                &current_devices.values().cloned().collect::<Vec<_>>(),
+            );
+            let current_generation_plans = self.generation_plan_catalog(&current_device_facts);
             let grants_valid = plan.immediate_leases.iter().all(|lease| {
                 let device_id = lease.device_id.to_string();
                 let Ok(ready) = validate_worker_grant(
@@ -1550,6 +1692,42 @@ impl Coordinator {
                 } else {
                     utility.is_none_or(|pending| pending.work.is_cancelled())
                 };
+                let current_execution_fingerprint = if generation.is_some() {
+                    let planned_execution = generation_plans
+                        .get(&work_id)
+                        .into_iter()
+                        .flatten()
+                        .find(|execution| {
+                            execution.device_id == device_id
+                                && execution.execution_fingerprint
+                                    == lease.placement.execution_fingerprint.as_str()
+                                && execution.predicted_vram_peak_bytes
+                                    == lease.placement.predicted_vram_bytes
+                                && execution.predicted_host_increment_bytes
+                                    == lease.placement.incremental_host_ram_bytes
+                                && execution.admitted_available_vram_bytes
+                                    == lease.placement.device_available_vram_bytes
+                        });
+                    let current_execution = current_generation_plans
+                        .get(&work_id)
+                        .into_iter()
+                        .flatten()
+                        .find(|execution| execution.device_id == device_id);
+                    if planned_execution.is_none() || planned_execution != current_execution {
+                        return false;
+                    }
+                    ExecutionFingerprint::new(
+                        current_execution
+                            .expect("checked equal concrete execution plans")
+                            .execution_fingerprint
+                            .clone(),
+                    )
+                } else {
+                    let Some(utility) = utility else {
+                        return false;
+                    };
+                    ExecutionFingerprint::new(utility.model_fingerprint.clone())
+                };
                 plan.validate_lease_for_grant(
                     lease,
                     &GrantValidationSnapshot {
@@ -1565,6 +1743,8 @@ impl Coordinator {
                         worker_ready: true,
                         device_admin_state: device.admin_state,
                         device_health: device.health,
+                        execution_fingerprint: current_execution_fingerprint,
+                        available_vram_bytes: device.available_vram_bytes,
                     },
                 )
                 .is_ok()
@@ -1623,18 +1803,23 @@ impl Coordinator {
                     break;
                 }
                 if let Some(pending) = self.pending.remove(&id) {
-                    let execution_plan = match self.generation_plans(&pending) {
-                        Ok(plans) => plans.into_iter().find(|plan| plan.device_id == device_id),
-                        Err(GenerationPlanFailure::Terminal(error)) => {
-                            worker.release_in_flight();
-                            self.plan_invalidations.remove(&id);
-                            reject_generation(&self.state, pending.job, error.to_string());
-                            self.state_version = self.state_version.saturating_add(1);
-                            grant_failed = true;
-                            break;
-                        }
-                        Err(GenerationPlanFailure::Transient(_)) => None,
-                    };
+                    // Transport the exact immutable plan used by matching and
+                    // the all-or-none reservation. Never re-resolve a
+                    // potentially different plan after admission.
+                    let execution_plan = generation_plans
+                        .get(&id)
+                        .into_iter()
+                        .flatten()
+                        .find(|execution| {
+                            execution.device_id == device_id
+                                && execution.execution_fingerprint
+                                    == lease.placement.execution_fingerprint.as_str()
+                                && execution.predicted_vram_peak_bytes
+                                    == lease.placement.predicted_vram_bytes
+                                && execution.predicted_host_increment_bytes
+                                    == lease.placement.incremental_host_ram_bytes
+                        })
+                        .cloned();
                     let Some(execution_plan) = execution_plan else {
                         self.pending.insert(id.clone(), pending);
                         worker.release_in_flight();
@@ -1644,6 +1829,7 @@ impl Coordinator {
                     };
                     let bypass_count = pending.bypass_count;
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
+                    let ready_at_ms = pending.ready_at_ms;
                     let retry_not_before_ms = pending.retry_not_before_ms;
                     let gpu_job = gpu_job_from_generation(
                         &self.state,
@@ -1678,6 +1864,10 @@ impl Coordinator {
                                     worker_generation: ready.generation,
                                     accepted: false,
                                     previous_target,
+                                    estimated_finish_ms: lease.estimated_finish_ms,
+                                    ready_at_ms,
+                                    bypass_count,
+                                    warm_wait_started_ms,
                                 },
                             );
                             granted.push(id);
@@ -1702,6 +1892,7 @@ impl Coordinator {
                                 generation.id.clone(),
                                 PendingGeneration {
                                     job: generation,
+                                    ready_at_ms,
                                     bypass_count,
                                     warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
@@ -1721,6 +1912,9 @@ impl Coordinator {
                         pending.hard_ordinal,
                         pending.priority,
                         pending.queue_rank,
+                        pending.ready_at_ms,
+                        pending.bypass_count,
+                        pending.warm_wait_started_ms,
                     );
                     let grant = Box::new(LeaseGrant {
                         fence,
@@ -1732,6 +1926,9 @@ impl Coordinator {
                             hard_ordinal: metadata.3,
                             priority: metadata.4,
                             queue_rank: metadata.5,
+                            ready_at_ms: metadata.6,
+                            bypass_count: metadata.7,
+                            warm_wait_started_ms: metadata.8,
                         }),
                     });
                     match worker.try_send_job(grant) {
@@ -1745,6 +1942,10 @@ impl Coordinator {
                                     worker_generation: ready.generation,
                                     accepted: false,
                                     previous_target: None,
+                                    estimated_finish_ms: lease.estimated_finish_ms,
+                                    ready_at_ms: metadata.6,
+                                    bypass_count: metadata.7,
+                                    warm_wait_started_ms: metadata.8,
                                 },
                             );
                             granted.push(id);
@@ -1764,6 +1965,9 @@ impl Coordinator {
                                     hard_ordinal: metadata.3,
                                     priority: metadata.4,
                                     queue_rank: metadata.5,
+                                    ready_at_ms: metadata.6,
+                                    bypass_count: metadata.7,
+                                    warm_wait_started_ms: metadata.8,
                                     work: returned.work,
                                 },
                             );
@@ -1804,9 +2008,15 @@ impl Coordinator {
                 if let Some(pending) = self.pending.get_mut(update.work_id.as_str()) {
                     pending.bypass_count = update.new_count;
                 }
+                if let Some(pending) = self.pending_owner_work.get_mut(update.work_id.as_str()) {
+                    pending.bypass_count = update.new_count;
+                }
             }
             for wait in &plan.warm_waits {
                 if let Some(pending) = self.pending.get_mut(wait.work_id.as_str()) {
+                    pending.warm_wait_started_ms = Some(wait.started_at_ms);
+                }
+                if let Some(pending) = self.pending_owner_work.get_mut(wait.work_id.as_str()) {
                     pending.warm_wait_started_ms = Some(wait.started_at_ms);
                 }
             }
@@ -1966,7 +2176,7 @@ fn gpu_job_from_generation(
     execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
 ) -> GpuJob {
     if let Some(plan) = execution_plan.as_ref() {
-        job.request.placement = Some(crate::execution_plan::materialized_placement(plan));
+        crate::execution_plan::materialize_request(plan, &mut job.request);
     }
     GpuJob {
         id: job.id,
@@ -2029,7 +2239,7 @@ fn log_typed_blocks(plan: &Plan) {
     }
 }
 
-fn monotonic_ms() -> u64 {
+pub(crate) fn monotonic_ms() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START
         .get_or_init(Instant::now)
@@ -2037,6 +2247,20 @@ fn monotonic_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+/// Capacity that can safely be available at the next owner-thread allocation
+/// boundary: current driver-reported free bytes plus only the measured active
+/// cache entry that the same owner can unload or reuse. Other process and
+/// non-cache allocations are deliberately never treated as reclaimable.
+pub(crate) fn effective_available_vram_bytes(
+    sampled_free_bytes: u64,
+    reclaimable_cache_bytes: u64,
+    total_vram_bytes: u64,
+) -> u64 {
+    sampled_free_bytes
+        .saturating_add(reclaimable_cache_bytes)
+        .min(total_vram_bytes)
 }
 
 fn monotonic_deadline_ms(deadline: Instant) -> u64 {
@@ -2067,6 +2291,26 @@ mod tests {
         memory
     }
 
+    #[test]
+    fn effective_vram_counts_only_measured_reclaimable_cache_memory() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(
+            effective_available_vram_bytes(4 * GIB, 16 * GIB, 24 * GIB),
+            20 * GIB,
+            "a warm resident or cold evictable 16 GiB model remains feasible"
+        );
+        assert_eq!(
+            effective_available_vram_bytes(4 * GIB, 0, 24 * GIB),
+            4 * GIB,
+            "active non-cache allocations must not be invented as reclaimable"
+        );
+        assert_eq!(
+            effective_available_vram_bytes(20 * GIB, 16 * GIB, 24 * GIB),
+            24 * GIB,
+            "effective capacity must remain capped at physical VRAM"
+        );
+    }
+
     struct ImmediatePreparer;
 
     impl DependencyPreparer for ImmediatePreparer {
@@ -2078,6 +2322,29 @@ mod tests {
             _progress: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
         ) -> PreparationFuture {
             Box::pin(async { Ok(None) })
+        }
+    }
+
+    struct ResidentTestEngine;
+
+    impl mold_inference::InferenceEngine for ResidentTestEngine {
+        fn generate(
+            &mut self,
+            _req: &mold_core::GenerateRequest,
+        ) -> anyhow::Result<mold_core::GenerateResponse> {
+            unreachable!("capacity test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            "resident-test"
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
@@ -2104,6 +2371,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(1))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -2326,6 +2594,10 @@ mod tests {
                 worker_generation: 7,
                 accepted: true,
                 previous_target: None,
+                estimated_finish_ms: 1,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
             },
         )]);
         assert_eq!(
@@ -2479,6 +2751,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 128 << 30,
                 used: 1 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -2493,6 +2766,96 @@ mod tests {
             coordinator.device_snapshots()[0].available_vram_bytes,
             5 << 30
         );
+    }
+
+    #[test]
+    fn warm_and_cold_resident_capacity_is_safe_while_idle_or_busy() {
+        const GIB: u64 = 1 << 30;
+        let (worker, _rx) = test_worker(0);
+        worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .insert(Box::new(ResidentTestEngine), 16 * GIB);
+        worker.set_resident_execution_fingerprint(Some("warm-plan"));
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".into(),
+            timestamp: 1,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu-0".into(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 * GIB,
+                vram_used: 20 * GIB,
+                vram_used_by_mold: Some(16 * GIB),
+                vram_used_by_other: Some(4 * GIB),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 128 * GIB,
+                used: GIB,
+                available: Some(127 * GIB),
+                used_by_mold: 0,
+                used_by_other: GIB,
+            },
+            cpu: None,
+        });
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let device_id = worker_device_id(&worker);
+        coordinator.ready.insert(
+            device_id.clone(),
+            ReadyWorker {
+                ordinal: 0,
+                generation: 1,
+            },
+        );
+
+        let idle = coordinator.device_snapshots().remove(0);
+        assert_eq!(idle.available_vram_bytes, 20 * GIB);
+        assert!(idle
+            .warm_execution_fingerprints
+            .contains(&ExecutionFingerprint::new("warm-plan")));
+
+        let checked_out = worker
+            .model_cache
+            .lock()
+            .unwrap()
+            .take("resident-test")
+            .unwrap();
+        worker.in_flight.store(1, Ordering::SeqCst);
+        coordinator.leases.insert(
+            device_id,
+            ActiveLease {
+                work_id: "busy".into(),
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+                estimated_finish_ms: 5_000,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+            },
+        );
+        let busy = coordinator.device_snapshots().remove(0);
+        assert_eq!(busy.available_vram_bytes, 20 * GIB);
+        assert_eq!(busy.available_at_ms, Some(5_000));
+        assert_eq!(busy.activity, DeviceActivity::Busy);
+        worker.model_cache.lock().unwrap().restore(checked_out);
     }
 
     #[test]
@@ -2534,6 +2897,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 128 << 30,
                 used: 1 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 1 << 30,
             },
@@ -2992,6 +3356,10 @@ mod tests {
                 worker_generation: 1,
                 accepted: true,
                 previous_target: None,
+                estimated_finish_ms: 1,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
             },
         );
         let mut immediate = false;
@@ -3093,6 +3461,178 @@ mod tests {
             .expect("cancelled generation must settle")
             .expect("cancel result sender");
         assert!(outcome.is_err());
+    }
+
+    #[tokio::test]
+    async fn telemetry_change_after_plan_before_grant_replans_without_transport() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 4);
+        let (job, _result) = fake_generation("telemetry-race");
+        state.job_registry.register("telemetry-race", "flux-dev:q4");
+        queue.submit(job, 4).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("telemetry-race")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        let plan_built = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        coordinator.before_grant_hook = Some(BeforeGrantHook {
+            plan_built: plan_built.clone(),
+            resume: resume.clone(),
+        });
+        let dispatch = tokio::spawn(async move {
+            let _ = coordinator.dispatch_ready().await;
+            coordinator
+        });
+
+        plan_built.notified().await;
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 2,
+            gpus: vec![mold_core::GpuSnapshot {
+                ordinal: 0,
+                name: "gpu-0".to_string(),
+                backend: mold_core::GpuBackend::Cuda,
+                vram_total: 24 << 30,
+                vram_used: 23 << 30,
+                vram_used_by_mold: Some(0),
+                vram_used_by_other: Some(23 << 30),
+                gpu_utilization: Some(0),
+            }],
+            system_ram: mold_core::RamSnapshot {
+                total: 128 << 30,
+                used: 1 << 30,
+                available: Some(127 << 30),
+                used_by_mold: 0,
+                used_by_other: 1 << 30,
+            },
+            cpu: None,
+        });
+        resume.notify_one();
+        let coordinator = dispatch.await.unwrap();
+
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "a candidate invalidated by a lower free-VRAM sample must never reach the worker"
+        );
+        assert!(coordinator.pending.contains_key("telemetry-race"));
+        assert!(coordinator.leases.is_empty());
+        assert_eq!(worker.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn config_artifact_change_after_plan_transports_only_the_replanned_fingerprint() {
+        let root = tempfile::TempDir::new().unwrap();
+        let transformer = root.path().join("transformer-q4.gguf");
+        let vae = root.path().join("vae.safetensors");
+        let encoder = root.path().join("t5.safetensors");
+        std::fs::write(&transformer, b"old-transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        std::fs::write(&encoder, b"encoder").unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "config-race:q4".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                t5_encoder: Some(encoder.display().to_string()),
+                family: Some("flux2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()],
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+        let queue = QueueHandle::new(ingress_tx);
+        let state = AppState::empty(config, queue.clone(), pool, 4);
+        let (mut job, _result) = fake_generation("config-race");
+        job.request.model = "config-race:q4".to_string();
+        state.job_registry.register("config-race", "config-race:q4");
+        queue.submit(job, 4).await.unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
+        coordinator
+            .pending
+            .get_mut("config-race")
+            .unwrap()
+            .preparation = PreparationState::Ready;
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        let (_, original_catalog) = coordinator.planner_snapshot();
+        let original_fingerprint = original_catalog["config-race"][0]
+            .execution_fingerprint
+            .clone();
+        let plan_built = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        coordinator.before_grant_hook = Some(BeforeGrantHook {
+            plan_built: plan_built.clone(),
+            resume: resume.clone(),
+        });
+        let dispatch = tokio::spawn(async move {
+            let _ = coordinator.dispatch_ready().await;
+            coordinator
+        });
+
+        plan_built.notified().await;
+        std::fs::write(&transformer, b"new-transformer").unwrap();
+        resume.notify_one();
+        let coordinator = dispatch.await.unwrap();
+
+        let grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        let transported_fingerprint = match &grant.work {
+            OwnerWork::Generation(job) => job
+                .execution_plan
+                .as_ref()
+                .expect("planned generation")
+                .execution_fingerprint
+                .clone(),
+            other => panic!("unexpected work kind: {:?}", other.kind()),
+        };
+        assert_ne!(
+            transported_fingerprint, original_fingerprint,
+            "the pre-mutation execution plan must never cross the transport boundary"
+        );
+        assert_eq!(coordinator.leases.len(), 1);
     }
 
     #[tokio::test]
@@ -3248,11 +3788,12 @@ mod tests {
         );
         let mut immediate = false;
         coordinator.enqueue(ingress_rx.recv().await.unwrap(), &mut immediate);
-        coordinator
-            .pending
-            .get_mut("plan-invalidated")
-            .unwrap()
-            .preparation = PreparationState::Ready;
+        {
+            let pending = coordinator.pending.get_mut("plan-invalidated").unwrap();
+            pending.preparation = PreparationState::Ready;
+            pending.bypass_count = 2;
+            pending.warm_wait_started_ms = Some(17);
+        }
         let device_id = worker_device_id(&worker);
         coordinator.handle_worker_event(
             WorkerEvent::Ready {
@@ -3299,6 +3840,12 @@ mod tests {
             "the invalidated claim must be released exactly once"
         );
         assert!(coordinator.pending.contains_key("plan-invalidated"));
+        assert_eq!(coordinator.pending["plan-invalidated"].bypass_count, 2);
+        assert_eq!(
+            coordinator.pending["plan-invalidated"].warm_wait_started_ms,
+            Some(17),
+            "plan invalidation must preserve starvation and warm-wait state"
+        );
         assert_eq!(
             state.job_registry.entry("plan-invalidated").unwrap().state,
             crate::job_registry::JobLifecycle::Queued

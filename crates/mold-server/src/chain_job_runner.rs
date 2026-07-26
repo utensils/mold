@@ -2531,6 +2531,7 @@ mod tests {
                     },
                     model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(1))),
                     resident_model: Arc::new(std::sync::RwLock::new(None)),
+                    resident_execution_fingerprint: Arc::new(std::sync::RwLock::new(None)),
                     active_generation: Arc::new(std::sync::RwLock::new(None)),
                     model_load_lock: Arc::new(Mutex::new(())),
                     shared_pool: Arc::new(Mutex::new(

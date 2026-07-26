@@ -185,6 +185,10 @@ pub struct GpuWorker {
     /// block there while owning CUDA resources. Model-loading code updates this
     /// snapshot only after a successful residency transition.
     pub resident_model: Arc<RwLock<Option<String>>>,
+    /// Exact resolved execution fingerprint currently resident. `None` is
+    /// intentionally conservative for legacy work that did not execute a
+    /// frozen plan.
+    pub resident_execution_fingerprint: Arc<RwLock<Option<String>>>,
     pub active_generation: Arc<RwLock<Option<ActiveGeneration>>>,
     pub model_load_lock: Arc<Mutex<()>>,
     pub shared_pool: Arc<Mutex<SharedPool>>,
@@ -415,6 +419,9 @@ pub struct OwnerWorkRetry {
     pub hard_ordinal: Option<usize>,
     pub priority: mold_scheduler::PriorityClass,
     pub queue_rank: u64,
+    pub ready_at_ms: u64,
+    pub bypass_count: u8,
+    pub warm_wait_started_ms: Option<u64>,
 }
 
 pub enum GpuWorkerCommand {
@@ -742,6 +749,17 @@ impl GpuWorker {
             .resident_model
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.map(str::to_string);
+        *self
+            .resident_execution_fingerprint
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub(crate) fn set_resident_execution_fingerprint(&self, fingerprint: Option<&str>) {
+        *self
+            .resident_execution_fingerprint
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fingerprint.map(str::to_string);
     }
 
     /// Check if this worker is in a degraded state (3+ consecutive failures, within cooldown).
@@ -1106,6 +1124,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),

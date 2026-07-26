@@ -8,7 +8,10 @@
 use mold_core::{Config, DevicePlacement, DeviceRef, GenerateRequest, ModelPaths};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(any(unix, windows)))]
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const MIB: u64 = 1024 * 1024;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
@@ -19,11 +22,46 @@ pub enum ComponentRole {
     Transformer,
     TransformerShard(u8),
     Vae,
-    TextEncoder(u8),
+    T5,
+    T5Tokenizer,
+    ClipL,
+    ClipLTokenizer,
+    ClipG,
+    ClipGTokenizer,
+    QwenShard(u16),
+    GemmaShard(u16),
+    GenericTextEncoderShard(u16),
+    TextTokenizer,
+    Lora(u16),
     SpatialUpscaler,
     TemporalUpscaler,
     Decoder,
     DistilledLora,
+}
+
+impl ComponentRole {
+    fn is_text_encoder(&self) -> bool {
+        matches!(
+            self,
+            Self::T5
+                | Self::ClipL
+                | Self::ClipG
+                | Self::QwenShard(_)
+                | Self::GemmaShard(_)
+                | Self::GenericTextEncoderShard(_)
+        )
+    }
+
+    fn is_host_only(&self) -> bool {
+        matches!(
+            self,
+            Self::T5Tokenizer
+                | Self::ClipLTokenizer
+                | Self::ClipGTokenizer
+                | Self::TextTokenizer
+                | Self::Lora(_)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +102,8 @@ pub enum PlannedDType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttentionBackend {
-    Auto,
+    Math,
+    Flash,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,13 +155,36 @@ pub struct ResolvedExecutionPlan {
     pub model_fingerprint: String,
     pub effective_placement: EffectivePlacement,
     pub components: BTreeMap<ComponentRole, ComponentExecutionPlan>,
+    /// Exact paths and factory inputs consumed after the lease grant. Worker
+    /// dispatch must not re-resolve these from mutable config or environment.
+    pub engine_paths: ModelPaths,
+    pub engine_config: mold_inference::FrozenEngineConfig,
+    /// Ordered effective request/default LoRA stack. Scale uses IEEE bits so
+    /// cache identity and equality preserve every finite wire value exactly.
+    pub effective_loras: Vec<PlannedLora>,
     pub attention_backend: AttentionBackend,
     pub engine_load_strategy: mold_inference::LoadStrategy,
     pub offload_mode: OffloadMode,
     pub predicted_vram_peak_bytes: u64,
+    /// Exact effective capacity against which this candidate was admitted:
+    /// current sampled free VRAM plus only owner-reclaimable resident bytes.
+    pub admitted_available_vram_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub determinism_class: DeterminismClass,
     pub execution_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedLora {
+    pub path: PathBuf,
+    pub content_fingerprint: ContentFingerprint,
+    pub scale_bits: u64,
+}
+
+impl PlannedLora {
+    pub fn scale(&self) -> f64 {
+        f64::from_bits(self.scale_bits)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,7 +206,7 @@ pub enum ExecutionPlanError {
     UnavailableDevice(String),
     #[error("component placement spans multiple devices: {0}")]
     CrossDevicePlacement(String),
-    #[error("no device has enough sampled free VRAM for a safe execution plan")]
+    #[error("no device has enough effective VRAM capacity for a safe execution plan")]
     InsufficientVram,
     #[error("execution plan was invalidated before CUDA work: {0}")]
     PlanInvalidated(String),
@@ -228,7 +290,9 @@ pub fn resolve_execution_plans(
     }
 
     let normalized = config.effective_placement(&request.model, request.placement.as_ref());
-    let artifacts = concrete_artifacts(&paths);
+    let effective_loras = effective_loras(config, request);
+    let artifacts = concrete_artifacts_for_family(&paths, &family, &effective_loras);
+    let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, config);
     let constraints = effective_constraints(&normalized, &artifacts);
     validate_cpu_constraints(&family, &capabilities, &constraints)?;
     let hard_devices = hard_device_ids(&constraints, devices)?;
@@ -244,6 +308,8 @@ pub fn resolve_execution_plans(
         capabilities: &capabilities,
         request,
         paths: &paths,
+        engine_config: &engine_config,
+        effective_loras: &effective_loras,
         artifacts: &artifacts,
         effective: &constraints,
         offload_requested,
@@ -264,7 +330,7 @@ pub fn validate_before_cuda(
     worker_device_id: &str,
     worker_ordinal: usize,
     config: &Config,
-    model: &str,
+    request: &GenerateRequest,
 ) -> Result<(), ExecutionPlanError> {
     if plan.device_id != worker_device_id || plan.device_ordinal != worker_ordinal {
         return Err(ExecutionPlanError::PlanInvalidated(format!(
@@ -272,10 +338,28 @@ pub fn validate_before_cuda(
             plan.device_id, plan.device_ordinal
         )));
     }
+    let model = request.model.as_str();
     let current_paths = ModelPaths::resolve(model, config).ok_or_else(|| {
         ExecutionPlanError::PlanInvalidated("model paths are no longer resolvable".into())
     })?;
-    let current_artifacts = concrete_artifacts(&current_paths);
+    let family = config
+        .resolved_model_config(model)
+        .family
+        .or_else(|| {
+            mold_core::manifest::find_manifest(model).map(|manifest| manifest.family.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let current_loras = effective_loras(config, request);
+    let current_artifacts = concrete_artifacts_for_family(&current_paths, &family, &current_loras);
+    let current_engine_config = mold_inference::FrozenEngineConfig::resolve(model, config);
+    if current_paths != plan.engine_paths
+        || current_engine_config != plan.engine_config
+        || current_loras != plan.effective_loras
+    {
+        return Err(ExecutionPlanError::PlanInvalidated(
+            "frozen engine paths, config, or LoRA stack changed after admission".into(),
+        ));
+    }
     let planned_artifacts = plan
         .components
         .iter()
@@ -319,46 +403,95 @@ pub fn materialized_placement(plan: &ResolvedExecutionPlan) -> DevicePlacement {
             })
             .unwrap_or(DeviceRef::Auto)
     };
-    let text = plan
-        .components
-        .iter()
-        .find(|(role, _)| matches!(role, ComponentRole::TextEncoder(_)))
-        .map(|(_, component)| match &component.placement {
-            ResolvedComponentPlacement::Cpu => DeviceRef::Cpu,
-            ResolvedComponentPlacement::Device(id) => DeviceRef::device(id.clone()),
-        })
-        .unwrap_or(DeviceRef::Auto);
+    let role_ref = |predicate: &dyn Fn(&ComponentRole) -> bool| {
+        plan.components
+            .iter()
+            .find(|(role, _)| predicate(role))
+            .map(|(_, component)| match &component.placement {
+                ResolvedComponentPlacement::Cpu => DeviceRef::Cpu,
+                ResolvedComponentPlacement::Device(id) => DeviceRef::device(id.clone()),
+            })
+    };
+    let text = role_ref(&|role| {
+        matches!(
+            role,
+            ComponentRole::GemmaShard(_) | ComponentRole::GenericTextEncoderShard(_)
+        )
+    })
+    .or_else(|| role_ref(&ComponentRole::is_text_encoder))
+    .unwrap_or(DeviceRef::Auto);
     DevicePlacement {
         text_encoders: text.clone(),
         advanced: Some(mold_core::types::AdvancedPlacement {
             transformer: component_ref(&ComponentRole::Transformer),
             vae: component_ref(&ComponentRole::Vae),
-            clip_l: Some(text.clone()),
-            clip_g: Some(text.clone()),
-            t5: Some(text.clone()),
-            qwen: Some(text),
+            clip_l: role_ref(&|role| matches!(role, ComponentRole::ClipL)),
+            clip_g: role_ref(&|role| matches!(role, ComponentRole::ClipG)),
+            t5: role_ref(&|role| matches!(role, ComponentRole::T5)),
+            qwen: role_ref(&|role| matches!(role, ComponentRole::QwenShard(_))),
         }),
     }
 }
 
-fn concrete_artifacts(paths: &ModelPaths) -> BTreeMap<ComponentRole, PathBuf> {
+/// Apply the request-shaping portion of a selected plan. This freezes the
+/// ordered default/request LoRA stack in the payload actually consumed by the
+/// engine; later config edits cannot inject or reorder adapters.
+pub fn materialize_request(plan: &ResolvedExecutionPlan, request: &mut GenerateRequest) {
+    request.placement = Some(materialized_placement(plan));
+    let loras = plan
+        .effective_loras
+        .iter()
+        .map(|lora| mold_core::LoraWeight {
+            path: lora.path.to_string_lossy().into_owned(),
+            scale: lora.scale(),
+        })
+        .collect::<Vec<_>>();
+    request.lora = None;
+    request.loras = (!loras.is_empty()).then_some(loras);
+}
+
+fn concrete_artifacts_for_family(
+    paths: &ModelPaths,
+    family: &str,
+    effective_loras: &[PlannedLora],
+) -> BTreeMap<ComponentRole, PathBuf> {
     let mut artifacts = BTreeMap::new();
     artifacts.insert(ComponentRole::Transformer, paths.transformer.clone());
     for (index, shard) in paths.transformer_shards.iter().enumerate() {
         artifacts.insert(ComponentRole::TransformerShard(index as u8), shard.clone());
     }
     artifacts.insert(ComponentRole::Vae, paths.vae.clone());
-    for path in [
-        paths.t5_encoder.as_ref(),
-        paths.clip_encoder.as_ref(),
-        paths.clip_encoder_2.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(paths.text_encoder_files.iter())
-    .enumerate()
-    {
-        artifacts.insert(ComponentRole::TextEncoder(path.0 as u8), path.1.clone());
+    if let Some(path) = &paths.t5_encoder {
+        artifacts.insert(ComponentRole::T5, path.clone());
+    }
+    if let Some(path) = &paths.t5_tokenizer {
+        artifacts.insert(ComponentRole::T5Tokenizer, path.clone());
+    }
+    if let Some(path) = &paths.clip_encoder {
+        artifacts.insert(ComponentRole::ClipL, path.clone());
+    }
+    if let Some(path) = &paths.clip_tokenizer {
+        artifacts.insert(ComponentRole::ClipLTokenizer, path.clone());
+    }
+    if let Some(path) = &paths.clip_encoder_2 {
+        artifacts.insert(ComponentRole::ClipG, path.clone());
+    }
+    if let Some(path) = &paths.clip_tokenizer_2 {
+        artifacts.insert(ComponentRole::ClipGTokenizer, path.clone());
+    }
+    for (index, path) in paths.text_encoder_files.iter().enumerate() {
+        let index = index as u16;
+        let role = match family {
+            "ltx2" | "ltx-2" | "ltx2.3" => ComponentRole::GemmaShard(index),
+            "qwen-image" | "qwen-image-edit" | "z-image" | "flux2" | "flux.2" | "flux2-klein" => {
+                ComponentRole::QwenShard(index)
+            }
+            _ => ComponentRole::GenericTextEncoderShard(index),
+        };
+        artifacts.insert(role, path.clone());
+    }
+    if let Some(path) = &paths.text_tokenizer {
+        artifacts.insert(ComponentRole::TextTokenizer, path.clone());
     }
     if let Some(path) = &paths.spatial_upscaler {
         artifacts.insert(ComponentRole::SpatialUpscaler, path.clone());
@@ -372,7 +505,40 @@ fn concrete_artifacts(paths: &ModelPaths) -> BTreeMap<ComponentRole, PathBuf> {
     if let Some(path) = &paths.distilled_lora {
         artifacts.insert(ComponentRole::DistilledLora, path.clone());
     }
+    for (index, lora) in effective_loras.iter().enumerate() {
+        artifacts.insert(ComponentRole::Lora(index as u16), lora.path.clone());
+    }
     artifacts
+}
+
+fn effective_loras(config: &Config, request: &GenerateRequest) -> Vec<PlannedLora> {
+    const ZERO_SCALE_EPS: f64 = 1e-8;
+    let requested = request
+        .loras
+        .as_ref()
+        .filter(|stack| !stack.is_empty())
+        .cloned()
+        .or_else(|| request.lora.clone().map(|lora| vec![lora]))
+        .or_else(|| {
+            config
+                .resolved_model_config(&request.model)
+                .effective_lora()
+                .map(|(path, scale)| mold_core::LoraWeight { path, scale })
+                .map(|lora| vec![lora])
+        })
+        .unwrap_or_default();
+    requested
+        .into_iter()
+        .filter(|lora| lora.scale.abs() > ZERO_SCALE_EPS)
+        .map(|lora| {
+            let path = PathBuf::from(lora.path);
+            PlannedLora {
+                content_fingerprint: fingerprint_path(&path),
+                path,
+                scale_bits: lora.scale.to_bits(),
+            }
+        })
+        .collect()
 }
 
 fn effective_constraints(
@@ -387,18 +553,22 @@ fn effective_constraints(
                 advanced.map(|value| &value.transformer)
             }
             ComponentRole::Vae => advanced.map(|value| &value.vae),
-            ComponentRole::TextEncoder(index) => {
-                if let Some(advanced) = advanced {
-                    match *index {
-                        0 => advanced.t5.as_ref().or(Some(&placement.text_encoders)),
-                        1 => advanced.clip_l.as_ref().or(Some(&placement.text_encoders)),
-                        2 => advanced.clip_g.as_ref().or(Some(&placement.text_encoders)),
-                        _ => advanced.qwen.as_ref().or(Some(&placement.text_encoders)),
-                    }
-                } else {
-                    Some(&placement.text_encoders)
-                }
+            ComponentRole::T5 => advanced
+                .and_then(|value| value.t5.as_ref())
+                .or(Some(&placement.text_encoders)),
+            ComponentRole::ClipL => advanced
+                .and_then(|value| value.clip_l.as_ref())
+                .or(Some(&placement.text_encoders)),
+            ComponentRole::ClipG => advanced
+                .and_then(|value| value.clip_g.as_ref())
+                .or(Some(&placement.text_encoders)),
+            ComponentRole::QwenShard(_) => advanced
+                .and_then(|value| value.qwen.as_ref())
+                .or(Some(&placement.text_encoders)),
+            ComponentRole::GemmaShard(_) | ComponentRole::GenericTextEncoderShard(_) => {
+                Some(&placement.text_encoders)
             }
+            role if role.is_host_only() => Some(&DeviceRef::Cpu),
             _ => None,
         }
         .unwrap_or(&DeviceRef::Auto);
@@ -428,7 +598,8 @@ fn validate_cpu_constraints(
             continue;
         }
         let supported = match role {
-            ComponentRole::TextEncoder(_) => capabilities.supports_text_encoder_cpu,
+            role if role.is_host_only() => true,
+            role if role.is_text_encoder() => capabilities.supports_text_encoder_cpu,
             ComponentRole::Vae => capabilities.supports_vae_cpu,
             ComponentRole::Transformer | ComponentRole::TransformerShard(_) => {
                 matches!(family, "flux2" | "flux.2" | "flux2-klein")
@@ -483,6 +654,8 @@ struct PlanContext<'a> {
     capabilities: &'a PlacementCapabilities,
     request: &'a GenerateRequest,
     paths: &'a ModelPaths,
+    engine_config: &'a mold_inference::FrozenEngineConfig,
+    effective_loras: &'a [PlannedLora],
     artifacts: &'a BTreeMap<ComponentRole, PathBuf>,
     effective: &'a EffectivePlacement,
     offload_requested: bool,
@@ -498,7 +671,7 @@ fn build_plan(
         context.request,
         context.family,
     ));
-    let request_has_lora = crate::model_manager::request_has_effective_lora(context.request);
+    let request_has_lora = !context.effective_loras.is_empty();
     let initial_memory = crate::memory_preflight::estimate_generation_memory_for_request(
         context.request,
         context.paths,
@@ -524,8 +697,9 @@ fn build_plan(
                 .get(role)
                 .cloned()
                 .unwrap_or(ResolvedComponentConstraint::Auto);
-            let cpu = constraint == ResolvedComponentConstraint::Cpu
-                || (auto_cpu_text && matches!(role, ComponentRole::TextEncoder(_)));
+            let cpu = role.is_host_only()
+                || constraint == ResolvedComponentConstraint::Cpu
+                || (auto_cpu_text && role.is_text_encoder());
             (role.clone(), cpu)
         })
         .collect::<BTreeMap<_, _>>();
@@ -572,7 +746,7 @@ fn build_plan(
                 ) {
                 host_paths.insert(path.clone());
                 ComponentLoadStrategy::StreamedBlocks
-            } else if matches!(role, ComponentRole::TextEncoder(_)) {
+            } else if role.is_text_encoder() {
                 ComponentLoadStrategy::DropReload
             } else {
                 ComponentLoadStrategy::Resident
@@ -590,8 +764,8 @@ fn build_plan(
                 role: role.clone(),
                 artifact_path: path.clone(),
                 content_fingerprint: fingerprint_path(path),
-                dtype,
-                quantization,
+                dtype: (!role.is_host_only()).then_some(dtype).flatten(),
+                quantization: (!role.is_host_only()).then_some(quantization).flatten(),
                 placement,
                 load_strategy,
                 predicted_vram_bytes: vram,
@@ -609,6 +783,8 @@ fn build_plan(
         device,
         context.effective,
         &components,
+        context.engine_config,
+        context.effective_loras,
         memory.block_offload,
     );
     Some(Ok(ResolvedExecutionPlan {
@@ -617,7 +793,13 @@ fn build_plan(
         model_fingerprint: model_fingerprint(context.model, context.artifacts),
         effective_placement: context.effective.clone(),
         components,
-        attention_backend: AttentionBackend::Auto,
+        engine_paths: context.paths.clone(),
+        engine_config: context.engine_config.clone(),
+        effective_loras: context.effective_loras.to_vec(),
+        attention_backend: match context.engine_config.attention_backend {
+            mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
+            mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
+        },
         engine_load_strategy: memory.load_strategy,
         offload_mode: if memory.block_offload {
             OffloadMode::Block
@@ -625,6 +807,7 @@ fn build_plan(
             OffloadMode::None
         },
         predicted_vram_peak_bytes: predicted_vram,
+        admitted_available_vram_bytes: device.available_vram_bytes,
         predicted_host_increment_bytes: predicted_host,
         determinism_class: DeterminismClass::CpuSeededCrossBackend,
         execution_fingerprint: fingerprint,
@@ -655,34 +838,29 @@ fn gpu_resident_paths(
         gpu.vae = PathBuf::new();
     }
 
-    let mut encoder_index = 0_u8;
-    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+    if on_cpu(&ComponentRole::T5) {
         gpu.t5_encoder = None;
     }
-    if paths.t5_encoder.is_some() {
-        encoder_index = encoder_index.saturating_add(1);
-    }
-    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+    if on_cpu(&ComponentRole::ClipL) {
         gpu.clip_encoder = None;
     }
-    if paths.clip_encoder.is_some() {
-        encoder_index = encoder_index.saturating_add(1);
-    }
-    if on_cpu(&ComponentRole::TextEncoder(encoder_index)) {
+    if on_cpu(&ComponentRole::ClipG) {
         gpu.clip_encoder_2 = None;
-    }
-    if paths.clip_encoder_2.is_some() {
-        encoder_index = encoder_index.saturating_add(1);
     }
     gpu.text_encoder_files = paths
         .text_encoder_files
         .iter()
         .enumerate()
-        .filter_map(|(offset, path)| {
-            (!on_cpu(&ComponentRole::TextEncoder(
-                encoder_index.saturating_add(offset as u8),
-            )))
-            .then_some(path.clone())
+        .filter_map(|(index, path)| {
+            let index = index as u16;
+            let on_cpu_for_family = [
+                ComponentRole::QwenShard(index),
+                ComponentRole::GemmaShard(index),
+                ComponentRole::GenericTextEncoderShard(index),
+            ]
+            .iter()
+            .any(&on_cpu);
+            (!on_cpu_for_family).then_some(path.clone())
         })
         .collect();
     gpu
@@ -702,8 +880,9 @@ fn infer_quantization(
         "{} {}",
         model.to_ascii_lowercase(),
         artifacts
-            .values()
-            .map(|path| path.to_string_lossy().to_ascii_lowercase())
+            .iter()
+            .filter(|(role, _)| !role.is_host_only())
+            .map(|(_, path)| path.to_string_lossy().to_ascii_lowercase())
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -729,21 +908,156 @@ fn infer_dtype(model: &str) -> Option<PlannedDType> {
     }
 }
 
-fn fingerprint_path(path: &Path) -> ContentFingerprint {
-    let mut hash = Sha256::new();
-    hash.update(path.as_os_str().as_encoded_bytes());
-    match std::fs::metadata(path) {
-        Ok(metadata) => {
-            hash.update(metadata.len().to_le_bytes());
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    hash.update(since_epoch.as_nanos().to_le_bytes());
-                }
-            }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactMetadataIdentity {
+    len: u64,
+    platform_identity: Vec<u64>,
+}
+
+fn artifact_metadata_identity(
+    _path: &Path,
+    metadata: &std::fs::Metadata,
+) -> ArtifactMetadataIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ArtifactMetadataIdentity {
+            len: metadata.len(),
+            // inode/file-id plus ctime detects replacement and in-place
+            // mutation even when a caller restores size and mtime.
+            platform_identity: vec![
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ],
         }
-        Err(error) => hash.update(error.kind().to_string().as_bytes()),
     }
-    ContentFingerprint(format!("{:x}", hash.finalize()))
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        };
+        let change_time = std::fs::File::open(_path)
+            .ok()
+            .and_then(|file| {
+                let mut info = std::mem::MaybeUninit::<FILE_BASIC_INFO>::uninit();
+                // SAFETY: `file` owns a valid handle for the duration of the
+                // call and `info` is correctly sized/aligned for FileBasicInfo.
+                let result = unsafe {
+                    GetFileInformationByHandleEx(
+                        file.as_raw_handle() as _,
+                        FileBasicInfo,
+                        info.as_mut_ptr().cast(),
+                        std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                    )
+                };
+                // SAFETY: Win32 initializes the entire FILE_BASIC_INFO on a
+                // nonzero result.
+                (result != 0).then(|| unsafe { info.assume_init().ChangeTime as u64 })
+            })
+            .unwrap_or(0);
+        ArtifactMetadataIdentity {
+            len: metadata.file_size(),
+            // File ID catches replacement; NTFS ChangeTime catches an
+            // in-place overwrite even if last-write time and size are
+            // restored by the caller.
+            platform_identity: vec![
+                u64::from(metadata.volume_serial_number().unwrap_or(0)),
+                metadata.file_index().unwrap_or(0),
+                metadata.creation_time(),
+                change_time,
+            ],
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos() as u64);
+        ArtifactMetadataIdentity {
+            len: metadata.len(),
+            platform_identity: vec![modified],
+        }
+    }
+}
+
+type ArtifactFingerprintCache = BTreeMap<PathBuf, (ArtifactMetadataIdentity, ContentFingerprint)>;
+
+fn artifact_fingerprint_cache() -> &'static Mutex<ArtifactFingerprintCache> {
+    static CACHE: OnceLock<Mutex<ArtifactFingerprintCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hash_artifact_contents(path: &Path) -> std::io::Result<ContentFingerprint> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(ContentFingerprint(format!("{:x}", hash.finalize())))
+}
+
+fn fingerprint_path(path: &Path) -> ContentFingerprint {
+    let Ok(before_metadata) = std::fs::metadata(path) else {
+        let mut hash = Sha256::new();
+        hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(b"missing");
+        return ContentFingerprint(format!("{:x}", hash.finalize()));
+    };
+    let before = artifact_metadata_identity(path, &before_metadata);
+    if let Some((_, fingerprint)) = artifact_fingerprint_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .filter(|(identity, _)| identity == &before)
+    {
+        return fingerprint.clone();
+    }
+
+    // Unix inode+ctime and Windows creation/file metadata are immutable
+    // replacement identities and avoid reading multi-gigabyte checkpoints.
+    // Exotic platforms fall back to one cached content hash per metadata
+    // identity.
+    #[cfg(any(unix, windows))]
+    let fingerprint = {
+        let mut hash = Sha256::new();
+        hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(before.len.to_le_bytes());
+        for value in &before.platform_identity {
+            hash.update(value.to_le_bytes());
+        }
+        ContentFingerprint(format!("{:x}", hash.finalize()))
+    };
+    #[cfg(not(any(unix, windows)))]
+    let fingerprint = hash_artifact_contents(path).unwrap_or_else(|error| {
+        let mut hash = Sha256::new();
+        hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(error.kind().to_string().as_bytes());
+        ContentFingerprint(format!("{:x}", hash.finalize()))
+    });
+    if std::fs::metadata(path)
+        .ok()
+        .map(|metadata| artifact_metadata_identity(path, &metadata))
+        .as_ref()
+        == Some(&before)
+    {
+        artifact_fingerprint_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.to_path_buf(), (before, fingerprint.clone()));
+    }
+    fingerprint
 }
 
 fn model_fingerprint(model: &str, artifacts: &BTreeMap<ComponentRole, PathBuf>) -> String {
@@ -761,6 +1075,8 @@ fn execution_fingerprint(
     device: &DeviceFact,
     effective: &EffectivePlacement,
     components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+    engine_config: &mold_inference::FrozenEngineConfig,
+    effective_loras: &[PlannedLora],
     offload: bool,
 ) -> String {
     let mut hash = Sha256::new();
@@ -768,6 +1084,8 @@ fn execution_fingerprint(
     hash.update(device.id.as_bytes());
     hash.update(format!("{effective:?}").as_bytes());
     hash.update(format!("{components:?}").as_bytes());
+    hash.update(format!("{engine_config:?}").as_bytes());
+    hash.update(format!("{effective_loras:?}").as_bytes());
     hash.update([u8::from(offload)]);
     format!("{:x}", hash.finalize())
 }
@@ -902,8 +1220,7 @@ mod tests {
             BASE_HOST_TRANSIENT + MIB
         );
         assert!(plan.components.iter().any(|(role, component)| {
-            matches!(role, ComponentRole::TextEncoder(_))
-                && component.placement == ResolvedComponentPlacement::Cpu
+            role.is_text_encoder() && component.placement == ResolvedComponentPlacement::Cpu
         }));
     }
 
@@ -991,8 +1308,7 @@ mod tests {
                 .unwrap()
                 .remove(0);
         assert!(pressured.components.iter().any(|(role, component)| {
-            matches!(role, ComponentRole::TextEncoder(_))
-                && component.placement == ResolvedComponentPlacement::Cpu
+            role.is_text_encoder() && component.placement == ResolvedComponentPlacement::Cpu
         }));
 
         let unsupported = config(root.path(), "unknown-family", None);
@@ -1052,7 +1368,7 @@ mod tests {
     }
 
     #[test]
-    fn each_candidate_uses_its_own_sampled_free_vram() {
+    fn each_candidate_uses_its_own_effective_vram_capacity() {
         let root = TempDir::new().unwrap();
         let (config, request) = sized_config(root.path(), "flux2", 12, 1, 2);
         let plans = resolve_execution_plans(
@@ -1138,7 +1454,8 @@ mod tests {
             std::fs::write(root.path().join(name), vec![0_u8; 1024]).unwrap();
         }
         let config = config(root.path(), "flux2", None);
-        let plan = resolve_execution_plans(&config, &request(None), &devices(&[24 * GIB]), false)
+        let request = request(None);
+        let plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
             .unwrap()
             .remove(0);
         let placement = materialized_placement(&plan);
@@ -1146,12 +1463,268 @@ mod tests {
             placement.advanced.unwrap().transformer,
             DeviceRef::Device { .. }
         ));
-        validate_before_cuda(&plan, "cuda:0", 0, &config, "test:q4").unwrap();
+        validate_before_cuda(&plan, "cuda:0", 0, &config, &request).unwrap();
 
         std::fs::write(root.path().join("transformer-q4.gguf"), vec![1_u8; 2048]).unwrap();
         assert!(matches!(
-            validate_before_cuda(&plan, "cuda:0", 0, &config, "test:q4"),
+            validate_before_cuda(&plan, "cuda:0", 0, &config, &request),
             Err(ExecutionPlanError::PlanInvalidated(_))
         ));
+    }
+
+    #[test]
+    fn plan_freezes_tokenizers_factory_config_and_ordered_default_lora_stack() {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "transformer-q4.gguf",
+            "vae.safetensors",
+            "t5.safetensors",
+            "t5-tokenizer.json",
+            "first-lora.safetensors",
+            "second-lora.safetensors",
+        ] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let mut config = config(root.path(), "flux", None);
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.t5_tokenizer = Some(root.path().join("t5-tokenizer.json").display().to_string());
+        model.is_schnell = Some(true);
+        model.lora = Some(
+            root.path()
+                .join("first-lora.safetensors")
+                .display()
+                .to_string(),
+        );
+        model.lora_scale = Some(0.75);
+        config.t5_variant = Some("q4".into());
+
+        let mut request = request(None);
+        let default_plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert!(default_plan
+            .components
+            .contains_key(&ComponentRole::T5Tokenizer));
+        assert_eq!(default_plan.effective_loras.len(), 1);
+        assert_eq!(default_plan.effective_loras[0].scale(), 0.75);
+        assert_eq!(default_plan.engine_config.is_schnell, Some(true));
+        assert_eq!(default_plan.engine_config.t5_variant.as_deref(), Some("q4"));
+
+        let flux2_transformer = root.path().join("flux2-transformer.safetensors");
+        std::fs::write(&flux2_transformer, b"weights").unwrap();
+        let model = config.models.get_mut("test:q4").unwrap();
+        model.family = Some("flux2".into());
+        model.transformer = Some(flux2_transformer.display().to_string());
+        let default_lora_plan =
+            resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), true)
+                .unwrap()
+                .remove(0);
+        assert_eq!(
+            default_lora_plan.offload_mode,
+            OffloadMode::None,
+            "model-default LoRA must participate in offload/memory admission"
+        );
+
+        request.loras = Some(vec![
+            mold_core::LoraWeight {
+                path: root
+                    .path()
+                    .join("second-lora.safetensors")
+                    .display()
+                    .to_string(),
+                scale: -0.5,
+            },
+            mold_core::LoraWeight {
+                path: root
+                    .path()
+                    .join("first-lora.safetensors")
+                    .display()
+                    .to_string(),
+                scale: 1.25,
+            },
+        ]);
+        let request_plan = resolve_execution_plans(&config, &request, &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        assert_ne!(
+            request_plan.execution_fingerprint,
+            default_plan.execution_fingerprint
+        );
+        assert_eq!(
+            request_plan
+                .effective_loras
+                .iter()
+                .map(PlannedLora::scale)
+                .collect::<Vec<_>>(),
+            vec![-0.5, 1.25]
+        );
+        let mut materialized = request.clone();
+        materialize_request(&request_plan, &mut materialized);
+        assert!(materialized.lora.is_none());
+        assert_eq!(
+            materialized
+                .loras
+                .unwrap()
+                .iter()
+                .map(|lora| lora.scale)
+                .collect::<Vec<_>>(),
+            vec![-0.5, 1.25]
+        );
+
+        config.models.get_mut("test:q4").unwrap().is_schnell = Some(false);
+        assert!(matches!(
+            validate_before_cuda(&request_plan, "cuda:0", 0, &config, &request),
+            Err(ExecutionPlanError::PlanInvalidated(_))
+        ));
+    }
+
+    #[test]
+    fn semantic_encoder_roles_preserve_sparse_and_mixed_topologies() {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "transformer.safetensors",
+            "vae.safetensors",
+            "clip-l.safetensors",
+            "clip-g.safetensors",
+            "t5.safetensors",
+            "qwen-0.safetensors",
+            "qwen-1.safetensors",
+        ] {
+            std::fs::write(root.path().join(name), b"x").unwrap();
+        }
+        let paths = ModelPaths {
+            transformer: root.path().join("transformer.safetensors"),
+            transformer_shards: Vec::new(),
+            vae: root.path().join("vae.safetensors"),
+            spatial_upscaler: None,
+            temporal_upscaler: None,
+            distilled_lora: None,
+            t5_encoder: Some(root.path().join("t5.safetensors")),
+            clip_encoder: Some(root.path().join("clip-l.safetensors")),
+            t5_tokenizer: None,
+            clip_tokenizer: None,
+            clip_encoder_2: Some(root.path().join("clip-g.safetensors")),
+            clip_tokenizer_2: None,
+            text_encoder_files: vec![
+                root.path().join("qwen-0.safetensors"),
+                root.path().join("qwen-1.safetensors"),
+            ],
+            text_tokenizer: None,
+            decoder: None,
+        };
+        let artifacts = concrete_artifacts_for_family(&paths, "qwen-image", &[]);
+        assert!(artifacts.contains_key(&ComponentRole::T5));
+        assert!(artifacts.contains_key(&ComponentRole::ClipL));
+        assert!(artifacts.contains_key(&ComponentRole::ClipG));
+        assert!(artifacts.contains_key(&ComponentRole::QwenShard(0)));
+        assert!(artifacts.contains_key(&ComponentRole::QwenShard(1)));
+        for family in ["flux2", "flux.2", "flux2-klein", "z-image"] {
+            let family_artifacts = concrete_artifacts_for_family(&paths, family, &[]);
+            assert!(
+                family_artifacts.contains_key(&ComponentRole::QwenShard(0)),
+                "{family} must retain semantic Qwen topology"
+            );
+        }
+
+        let sparse_ltx = ModelPaths {
+            t5_encoder: None,
+            clip_encoder: None,
+            clip_encoder_2: None,
+            text_encoder_files: vec![root.path().join("qwen-0.safetensors")],
+            ..paths
+        };
+        let ltx_artifacts = concrete_artifacts_for_family(&sparse_ltx, "ltx2", &[]);
+        assert!(ltx_artifacts.contains_key(&ComponentRole::GemmaShard(0)));
+        assert!(!ltx_artifacts.keys().any(|role| matches!(
+            role,
+            ComponentRole::T5 | ComponentRole::ClipL | ComponentRole::ClipG
+        )));
+    }
+
+    #[test]
+    fn materialized_placement_preserves_clip_only_and_mixed_encoder_choices() {
+        let root = TempDir::new().unwrap();
+        for name in [
+            "transformer.safetensors",
+            "vae.safetensors",
+            "clip-l.safetensors",
+            "t5.safetensors",
+        ] {
+            std::fs::write(root.path().join(name), b"x").unwrap();
+        }
+
+        let mut clip_only_config = Config::default();
+        clip_only_config.models.insert(
+            "clip-only:bf16".into(),
+            ModelConfig {
+                transformer: Some(
+                    root.path()
+                        .join("transformer.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(root.path().join("vae.safetensors").display().to_string()),
+                clip_encoder: Some(root.path().join("clip-l.safetensors").display().to_string()),
+                family: Some("sdxl".into()),
+                ..ModelConfig::default()
+            },
+        );
+        let clip_request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"clip-only:bf16","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        let clip_plan = resolve_execution_plans(
+            &clip_only_config,
+            &clip_request,
+            &devices(&[24 * GIB]),
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        let clip_materialized = materialized_placement(&clip_plan);
+        assert!(matches!(
+            clip_materialized.text_encoders,
+            DeviceRef::Device { .. }
+        ));
+        assert!(matches!(
+            clip_materialized.advanced.unwrap().clip_l,
+            Some(DeviceRef::Device { .. })
+        ));
+
+        let mut mixed_config = config(root.path(), "flux", None);
+        mixed_config.models.get_mut("test:q4").unwrap().clip_encoder =
+            Some(root.path().join("clip-l.safetensors").display().to_string());
+        let mixed_request = request(Some(DevicePlacement {
+            text_encoders: DeviceRef::Auto,
+            advanced: Some(AdvancedPlacement {
+                t5: Some(DeviceRef::Cpu),
+                clip_l: Some(DeviceRef::device("cuda:0")),
+                ..AdvancedPlacement::default()
+            }),
+        }));
+        let mixed_plan =
+            resolve_execution_plans(&mixed_config, &mixed_request, &devices(&[24 * GIB]), false)
+                .unwrap()
+                .remove(0);
+        let mixed_materialized = materialized_placement(&mixed_plan);
+        let advanced = mixed_materialized.advanced.unwrap();
+        assert_eq!(advanced.t5, Some(DeviceRef::Cpu));
+        assert!(matches!(advanced.clip_l, Some(DeviceRef::Device { .. })));
+    }
+
+    #[test]
+    fn same_size_in_place_overwrite_with_restored_mtime_changes_content_identity() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("weights.safetensors");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
+        let before = fingerprint_path(&path);
+
+        std::fs::write(&path, b"bbbb").unwrap();
+        set_file_mtime(&path, original_mtime).unwrap();
+
+        assert_ne!(before, fingerprint_path(&path));
     }
 }

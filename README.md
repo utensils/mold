@@ -67,14 +67,18 @@ cross-GPU component pins fail instead of falling back. `mold run --local
 selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
 selection.
 
-`MOLD_DISPATCH_MODE=v2` is the default server dispatch owner. During the
+`MOLD_DISPATCH_MODE=legacy` remains the default server dispatch owner until
+the Phase A–E cutover gates pass. Set `MOLD_DISPATCH_MODE=v2` explicitly to
+qualify the new scheduler. During the
 rollout window, restart with `legacy` for rollback or `observe` to keep legacy
 dispatch authoritative while recording the read-only V2 decision at each
 legacy dispatch point. The mode is restart-only; Mold never switches CUDA
 owners or contexts live. Legacy/observe retain their depth-two transport, but
 transport backlog is separate from the same binary execution claim used by V2
 and durable chains. Queue pause applies to generation, utility, and admin GPU
-work in every mode.
+work in every mode. Phase E/F cutover explicitly changes the compiled default
+back to V2 after the A–E acceptance matrix passes; Phase B does not imply that
+cutover.
 
 ## Install
 

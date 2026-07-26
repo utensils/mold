@@ -1179,7 +1179,7 @@ async fn generate_local(
     }));
 
     let handle = tokio::task::spawn_blocking(move || {
-        engine.load()?;
+        engine.load_for_request(&req)?;
         engine.generate(&req)
     });
 
@@ -1232,11 +1232,11 @@ async fn generate_local_batch(
     }
 
     use super::local_engine::{
-        apply_local_engine_env_overrides, build_local_engine_on_gpu, local_batch_assignments,
-        selected_local_gpu_ordinals,
+        apply_local_engine_env_overrides, build_local_engine_from_plan,
+        partition_local_owner_lanes, plan_local_batch,
     };
 
-    let (base_req, paths, effective_config, overrides) = prepare_local_request(
+    let (base_req, _paths, effective_config, overrides) = prepare_local_request(
         req,
         config,
         gpus,
@@ -1258,19 +1258,24 @@ async fn generate_local_batch(
         overrides.qwen2_variant.as_deref(),
         overrides.qwen2_text_encoder_mode.as_deref(),
     );
-    let ordinals = selected_local_gpu_ordinals(&effective_config, &overrides)?;
-    let assignments = local_batch_assignments(&ordinals, batch as usize)?;
-    let first_wave_len = ordinals.len().min(batch as usize);
-    let mut per_device = std::collections::BTreeMap::<usize, Vec<(u32, GenerateRequest)>>::new();
-    let shared_work = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<(
-        u32,
-        GenerateRequest,
-    )>::new()));
-    for (index, ordinal) in assignments.into_iter().enumerate() {
+    let (assignments, execution_plans) =
+        plan_local_batch(&base_req, &effective_config, &overrides, batch as usize)?;
+    let first_wave_len = assignments
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        .min(batch as usize);
+    let mut planned_items = Vec::<(u32, GenerateRequest)>::with_capacity(batch as usize);
+    for (index, ordinal) in assignments.iter().copied().enumerate() {
         let mut iter_req = base_req.clone();
         let index = index as u32;
         iter_req.seed = Some(base_seed.wrapping_add(index as u64));
         iter_req.batch_size = 1;
+        let execution_plan = execution_plans.get(&ordinal).ok_or_else(|| {
+            anyhow::anyhow!("local scheduler omitted execution plan for GPU {ordinal}")
+        })?;
+        mold_server::execution_plan::materialize_request(execution_plan, &mut iter_req);
         if let Some(prompt) = batch_prompts.and_then(|prompts| prompts.get(index as usize)) {
             iter_req.prompt = prompt.clone();
         }
@@ -1294,51 +1299,35 @@ async fn generate_local_batch(
                 );
             }
         }
-        if (index as usize) < first_wave_len {
-            per_device
-                .entry(ordinal)
-                .or_default()
-                .push((index, iter_req));
-        } else {
-            shared_work
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_back((index, iter_req));
-        }
+        planned_items.push((index, iter_req));
     }
+    let per_device = partition_local_owner_lanes(&assignments, planned_items)?;
 
     let mut workers = tokio::task::JoinSet::new();
     let mut progress_tasks = Vec::new();
     for (ordinal, work) in per_device {
-        let model = base_req.model.clone();
-        let paths = paths.clone();
         let config = effective_config.clone();
-        let overrides = overrides.clone();
-        let shared_work = std::sync::Arc::clone(&shared_work);
+        let execution_plan = execution_plans.get(&ordinal).cloned().ok_or_else(|| {
+            anyhow::anyhow!("local scheduler omitted execution plan for GPU {ordinal}")
+        })?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<mold_core::SseProgressEvent>();
         let render = tokio::spawn(render_progress(rx));
         workers.spawn_blocking(move || -> Result<Vec<(u32, GenerateResponse)>> {
             // Engine construction, loading, generation, and drop all remain
             // on this device's one local owner thread.
             mold_inference::device::init_thread_gpu_ordinal(ordinal);
+            let preload_request = work
+                .first()
+                .map(|(_, request)| request)
+                .ok_or_else(|| anyhow::anyhow!("local owner lane cannot be empty"))?;
             let mut engine =
-                build_local_engine_on_gpu(&model, paths, &config, &overrides, ordinal)?;
+                build_local_engine_from_plan(preload_request, &config, &execution_plan)?;
             engine.set_on_progress(Box::new(move |event| {
                 let _ = tx.send(event.into());
             }));
-            engine.load()?;
+            engine.load_for_request(preload_request)?;
             let mut completed = Vec::new();
             for (index, request) in work {
-                completed.push((index, engine.generate(&request)?));
-            }
-            loop {
-                let next = shared_work
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .pop_front();
-                let Some((index, request)) = next else {
-                    break;
-                };
                 completed.push((index, engine.generate(&request)?));
             }
             engine.clear_on_progress();

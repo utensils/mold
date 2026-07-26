@@ -190,13 +190,155 @@ pub(crate) fn build_local_engine_on_gpu(
     )
 }
 
-/// Assign local batch items through the same deterministic scheduler core
-/// used by the server. Each returned value is a device ordinal for the item at
-/// that index. Devices are reused in waves; no device-count ceiling exists.
+/// Resolve the same concrete execution plans used by the server coordinator,
+/// then run the pure scheduler against real discovered free VRAM and OS
+/// available-RAM headroom. Each ordinal maps to exactly the immutable plan
+/// that admitted it.
+#[cfg(any(feature = "cuda", feature = "metal"))]
+pub(crate) fn plan_local_batch(
+    request: &mold_core::GenerateRequest,
+    config: &Config,
+    ov: &EngineOverrides,
+    item_count: usize,
+) -> Result<(
+    Vec<usize>,
+    std::collections::BTreeMap<usize, mold_server::execution_plan::ResolvedExecutionPlan>,
+)> {
+    use sysinfo::System;
+
+    let selected_ordinals = selected_local_gpu_ordinals(config, ov)?;
+    let discovered = mold_inference::device::discover_gpus();
+    let facts = discovered
+        .iter()
+        .filter(|gpu| selected_ordinals.contains(&gpu.ordinal))
+        .filter_map(|gpu| {
+            Some(mold_server::execution_plan::DeviceFact {
+                id: gpu.stable_id.clone()?,
+                ordinal: gpu.ordinal,
+                available_vram_bytes: gpu.free_vram_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+    if facts.is_empty() {
+        anyhow::bail!("local scheduler has no discovered device with stable identity");
+    }
+    let offload_requested = ov.offload
+        || std::env::var("MOLD_OFFLOAD")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    let plans = mold_server::execution_plan::resolve_execution_plans(
+        config,
+        request,
+        &facts,
+        offload_requested,
+    )?;
+    let by_ordinal = plans
+        .into_iter()
+        .map(|plan| (plan.device_ordinal, plan))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let candidates = by_ordinal
+        .values()
+        .map(|plan| LocalCandidate {
+            ordinal: plan.device_ordinal,
+            device_id: plan.device_id.clone(),
+            execution_fingerprint: plan.execution_fingerprint.clone(),
+            available_vram_bytes: plan.admitted_available_vram_bytes,
+            predicted_vram_bytes: plan.predicted_vram_peak_bytes,
+            predicted_host_ram_bytes: plan.predicted_host_increment_bytes,
+        })
+        .collect::<Vec<_>>();
+
+    let mut system = System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_memory(sysinfo::MemoryRefreshKind::everything()),
+    );
+    system.refresh_memory();
+    let total = system.total_memory();
+    let safety_floor = (total.saturating_mul(15) / 100).max(8 << 30);
+    let host_headroom = system.available_memory().saturating_sub(safety_floor);
+    let assignments = local_batch_assignments(&candidates, item_count, host_headroom)?;
+    Ok((assignments, by_ordinal))
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+pub(crate) fn build_local_engine_from_plan(
+    request: &mold_core::GenerateRequest,
+    config: &Config,
+    plan: &mold_server::execution_plan::ResolvedExecutionPlan,
+) -> Result<Box<dyn mold_inference::InferenceEngine>> {
+    mold_server::execution_plan::validate_before_cuda(
+        plan,
+        &plan.device_id,
+        plan.device_ordinal,
+        config,
+        request,
+    )?;
+    let current_free =
+        mold_inference::device::free_vram_bytes(plan.device_ordinal).ok_or_else(|| {
+            anyhow::anyhow!(
+                "current free VRAM is unavailable for GPU {}",
+                plan.device_ordinal
+            )
+        })?;
+    if current_free < plan.predicted_vram_peak_bytes {
+        anyhow::bail!(
+            "local execution plan invalidated before CUDA: GPU {} now has {} bytes free but the exact plan requires {}",
+            plan.device_ordinal,
+            current_free,
+            plan.predicted_vram_peak_bytes
+        );
+    }
+    mold_inference::create_engine_with_frozen_config(
+        request.model.clone(),
+        plan.engine_paths.clone(),
+        &plan.engine_config,
+        plan.engine_load_strategy,
+        plan.device_ordinal,
+        plan.offload_mode == mold_server::execution_plan::OffloadMode::Block,
+        None,
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+pub(crate) struct LocalCandidate {
+    pub ordinal: usize,
+    pub device_id: String,
+    pub execution_fingerprint: String,
+    pub available_vram_bytes: u64,
+    pub predicted_vram_bytes: u64,
+    pub predicted_host_ram_bytes: u64,
+}
+
+/// Partition payloads into immutable owner lanes. There is deliberately no
+/// shared steal queue: a payload carrying GPU 0's materialized plan can never
+/// be claimed by GPU 1.
+#[cfg(any(feature = "cuda", feature = "metal", test))]
+pub(crate) fn partition_local_owner_lanes<T>(
+    assignments: &[usize],
+    items: Vec<T>,
+) -> anyhow::Result<std::collections::BTreeMap<usize, Vec<T>>> {
+    if assignments.len() != items.len() {
+        anyhow::bail!(
+            "local scheduler produced {} assignments for {} items",
+            assignments.len(),
+            items.len()
+        );
+    }
+    let mut lanes = std::collections::BTreeMap::<usize, Vec<T>>::new();
+    for (ordinal, item) in assignments.iter().copied().zip(items) {
+        lanes.entry(ordinal).or_default().push(item);
+    }
+    Ok(lanes)
+}
+
+/// Assign local batch items through the shared deterministic scheduler using
+/// concrete capacity and placement facts. The returned ordinal for each item
+/// is its lease lane; callers must keep all work for that lane on one owner
+/// thread.
 #[cfg(any(feature = "cuda", feature = "metal", test))]
 pub(crate) fn local_batch_assignments(
-    device_ordinals: &[usize],
+    candidates: &[LocalCandidate],
     item_count: usize,
+    host_headroom_bytes: u64,
 ) -> anyhow::Result<Vec<usize>> {
     use mold_scheduler::{
         CandidatePlacement, DeviceSnapshot, HostMemorySnapshot, Planner, PlannerSnapshot,
@@ -205,15 +347,20 @@ pub(crate) fn local_batch_assignments(
     if item_count == 0 {
         return Ok(Vec::new());
     }
-    if device_ordinals.is_empty() {
+    if candidates.is_empty() {
         anyhow::bail!("local scheduler has no eligible device");
     }
-    let mut ordinals = device_ordinals.to_vec();
-    ordinals.sort_unstable();
-    ordinals.dedup();
-    let devices = ordinals
+    let mut candidates = candidates.to_vec();
+    candidates.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.execution_fingerprint.cmp(&right.execution_fingerprint))
+    });
+    let devices = candidates
         .iter()
-        .map(|ordinal| DeviceSnapshot::idle(format!("local:{ordinal}"), u64::MAX))
+        .map(|candidate| {
+            DeviceSnapshot::idle(candidate.device_id.clone(), candidate.available_vram_bytes)
+        })
         .collect::<Vec<_>>();
     let mut assignments = vec![usize::MAX; item_count];
     let planner = Planner::default();
@@ -225,10 +372,17 @@ pub(crate) fn local_batch_assignments(
                 WorkSnapshot::new(
                     format!("item:{index}"),
                     index as u64,
-                    ordinals
+                    candidates
                         .iter()
-                        .map(|ordinal| {
-                            CandidatePlacement::new(format!("local:{ordinal}"), "local-batch", 0)
+                        .map(|candidate| {
+                            CandidatePlacement::new(
+                                candidate.device_id.clone(),
+                                candidate.execution_fingerprint.clone(),
+                                candidate.predicted_host_ram_bytes,
+                            )
+                            .with_vram(candidate.predicted_vram_bytes)
+                            .with_device_available_vram(candidate.available_vram_bytes)
+                            .with_static_timing(mold_scheduler::WorkKind::Generation)
                         })
                         .collect(),
                 )
@@ -240,7 +394,7 @@ pub(crate) fn local_batch_assignments(
             now_ms: 0,
             next_replan_at_ms: None,
             host_memory: HostMemorySnapshot {
-                headroom_bytes: u64::MAX,
+                headroom_bytes: host_headroom_bytes,
                 sample_generation: 1,
                 ledger_sequence: 1,
             },
@@ -261,11 +415,10 @@ pub(crate) fn local_batch_assignments(
                 .strip_prefix("item:")
                 .and_then(|value| value.parse::<usize>().ok())
                 .ok_or_else(|| anyhow::anyhow!("local scheduler returned an invalid work id"))?;
-            let ordinal = lease
-                .device_id
-                .as_str()
-                .strip_prefix("local:")
-                .and_then(|value| value.parse::<usize>().ok())
+            let ordinal = candidates
+                .iter()
+                .find(|candidate| candidate.device_id == lease.device_id.as_str())
+                .map(|candidate| candidate.ordinal)
                 .ok_or_else(|| anyhow::anyhow!("local scheduler returned an invalid device id"))?;
             assignments[index] = ordinal;
             assigned_indices.push(index);
@@ -319,16 +472,33 @@ mod tests {
     }
 
     #[test]
-    fn local_batch_scheduler_supports_zero_one_and_arbitrary_device_counts() {
-        assert!(local_batch_assignments(&[], 1).is_err());
+    fn local_batch_scheduler_supports_zero_one_and_arbitrary_real_capacities() {
+        let candidates = |count: usize| {
+            (0..count)
+                .map(|ordinal| LocalCandidate {
+                    ordinal,
+                    device_id: format!("cuda:{ordinal}"),
+                    execution_fingerprint: format!("exec:{ordinal}"),
+                    available_vram_bytes: 24 << 30,
+                    predicted_vram_bytes: 8 << 30,
+                    predicted_host_ram_bytes: 1 << 30,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(local_batch_assignments(&[], 1, 32 << 30).is_err());
         assert_eq!(
-            local_batch_assignments(&[7], 0).unwrap(),
+            local_batch_assignments(&candidates(1), 0, 32 << 30).unwrap(),
             Vec::<usize>::new()
         );
-        assert_eq!(local_batch_assignments(&[7], 3).unwrap(), vec![7, 7, 7]);
+        let mut one = candidates(1);
+        one[0].ordinal = 7;
+        assert_eq!(
+            local_batch_assignments(&one, 3, 32 << 30).unwrap(),
+            vec![7, 7, 7]
+        );
         for count in [2_usize, 8, 16, 64] {
-            let devices = (0..count).collect::<Vec<_>>();
-            let assignments = local_batch_assignments(&devices, count * 2 + 1).unwrap();
+            let assignments =
+                local_batch_assignments(&candidates(count), count * 2 + 1, 128 << 30).unwrap();
             assert_eq!(assignments.len(), count * 2 + 1);
             for wave in assignments.chunks(count) {
                 let unique = wave
@@ -337,6 +507,47 @@ mod tests {
                     .collect::<std::collections::BTreeSet<_>>();
                 assert_eq!(unique.len(), wave.len());
             }
+        }
+
+        let mut oversized = candidates(1);
+        oversized[0].predicted_vram_bytes = 25 << 30;
+        assert!(local_batch_assignments(&oversized, 1, 32 << 30).is_err());
+
+        let host_heavy = candidates(2);
+        let host_limited = local_batch_assignments(&host_heavy, 2, (2 << 30) - 1).unwrap();
+        assert_eq!(
+            host_limited
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "host headroom may admit only one persistent local owner lane"
+        );
+
+        let pinned = vec![candidates(2)[1].clone()];
+        assert_eq!(
+            local_batch_assignments(&pinned, 2, 32 << 30).unwrap(),
+            vec![1, 1]
+        );
+    }
+
+    #[test]
+    fn local_owner_lanes_cannot_steal_another_devices_concrete_plan() {
+        let assignments = vec![0, 1, 0, 1];
+        let items = vec![
+            (0, "plan-gpu-0"),
+            (1, "plan-gpu-1"),
+            (2, "plan-gpu-0"),
+            (3, "plan-gpu-1"),
+        ];
+        let lanes = partition_local_owner_lanes(&assignments, items).unwrap();
+        assert_eq!(lanes[&0], vec![(0, "plan-gpu-0"), (2, "plan-gpu-0")]);
+        assert_eq!(lanes[&1], vec![(1, "plan-gpu-1"), (3, "plan-gpu-1")]);
+        for (owner, items) in lanes {
+            assert!(items
+                .iter()
+                .all(|(_, plan)| *plan == format!("plan-gpu-{owner}")));
         }
     }
 }

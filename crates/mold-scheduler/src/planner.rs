@@ -180,7 +180,6 @@ impl Planner {
         let bypass_updates = build_bypass_updates(
             &work,
             &immediate_leases,
-            &warm_waits,
             &prepared,
             snapshot.host_memory.headroom_bytes,
             reservation.total_host_ram_bytes,
@@ -306,7 +305,6 @@ pub fn operation_budget(
 struct PreparedWork {
     all_candidates: Vec<MatchCandidate>,
     immediate_candidates: Vec<MatchCandidate>,
-    declined_candidates: Vec<MatchCandidate>,
     warm_wait: Option<WarmWait>,
 }
 
@@ -432,11 +430,9 @@ fn prepare_work(
     }
 
     sort_match_candidates(&mut immediate_candidates);
-    sort_match_candidates(&mut declined_candidates);
     PreparedWork {
         all_candidates,
         immediate_candidates,
-        declined_candidates,
         warm_wait,
     }
 }
@@ -580,6 +576,9 @@ fn build_reservation(
         .map(|lease| ReservationItem {
             work_id: lease.work_id.clone(),
             device_id: lease.device_id.clone(),
+            execution_fingerprint: lease.placement.execution_fingerprint.clone(),
+            predicted_vram_bytes: lease.placement.predicted_vram_bytes,
+            device_available_vram_bytes: lease.placement.device_available_vram_bytes,
             host_ram_bytes: lease.placement.incremental_host_ram_bytes,
         })
         .collect::<Vec<_>>();
@@ -597,7 +596,6 @@ fn build_reservation(
 fn build_bypass_updates(
     ordered_work: &[&WorkSnapshot],
     leases: &[ImmediateLease],
-    warm_waits: &[WarmWait],
     prepared: &BTreeMap<WorkId, PreparedWork>,
     host_headroom: u64,
     reserved_host_ram: u64,
@@ -607,25 +605,34 @@ fn build_bypass_updates(
         .map(|work| (work.id.clone(), *work))
         .collect::<BTreeMap<_, _>>();
     let mut updates = Vec::new();
-    for wait in warm_waits {
-        let Some(waiting_work) = work_map.get(&wait.work_id) else {
-            continue;
-        };
-        let Some(prepared_work) = prepared.get(&wait.work_id) else {
+    let leased_ids = leases
+        .iter()
+        .map(|lease| lease.work_id.clone())
+        .collect::<BTreeSet<_>>();
+    for waiting_work in ordered_work.iter().copied().filter(|work| {
+        work.ready
+            && work.priority_class != crate::PriorityClass::Admin
+            && work.bypass_count < 3
+            && !leased_ids.contains(&work.id)
+    }) {
+        let Some(prepared_work) = prepared.get(&waiting_work.id) else {
             continue;
         };
         let younger_starts = leases.iter().filter_map(|lease| {
             let younger_work = work_map.get(&lease.work_id)?;
-            if work_order(younger_work) <= work_order(waiting_work) {
+            let arrived_later = younger_work.ready_at_ms > waiting_work.ready_at_ms
+                || (younger_work.ready_at_ms == waiting_work.ready_at_ms
+                    && work_order(younger_work) > work_order(waiting_work));
+            if !arrived_later {
                 return None;
             }
-            let declined = prepared_work
-                .declined_candidates
+            let compatible = prepared_work
+                .all_candidates
                 .iter()
                 .find(|candidate| candidate.placement.device_id == lease.device_id)?;
             let replaced_total = reserved_host_ram
                 .saturating_sub(lease.placement.incremental_host_ram_bytes)
-                .saturating_add(declined.placement.incremental_host_ram_bytes);
+                .saturating_add(compatible.placement.incremental_host_ram_bytes);
             (replaced_total <= host_headroom).then_some(lease)
         });
         let mut bypass_count = waiting_work.bypass_count;

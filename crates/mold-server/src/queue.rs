@@ -1569,6 +1569,9 @@ async fn dispatch_legacy_scheduled_work(
             hard_ordinal: current.hard_ordinal,
             priority: current.priority,
             queue_rank: 0,
+            ready_at_ms: 0,
+            bypass_count: 0,
+            warm_wait_started_ms: None,
         };
         let fence = crate::scheduler::LeaseFence {
             work_id: current.id,
@@ -2043,6 +2046,7 @@ pub(crate) fn build_observed_dispatch(
     if !state.scheduled_work.observes_v2_decisions() {
         return None;
     }
+    let now_ms = crate::scheduler::monotonic_ms();
 
     let resource_snapshot = state.resources.latest();
     let sampled_free = resource_snapshot
@@ -2054,7 +2058,10 @@ pub(crate) fn build_observed_dispatch(
                 .map(|gpu| {
                     (
                         (gpu.backend, gpu.ordinal),
-                        gpu.vram_total.saturating_sub(gpu.vram_used),
+                        (
+                            gpu.vram_total.saturating_sub(gpu.vram_used),
+                            gpu.vram_used_by_mold,
+                        ),
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()
@@ -2068,7 +2075,7 @@ pub(crate) fn build_observed_dispatch(
             let device_id = crate::scheduler::worker_device_id(worker);
             let sampled_available_vram = sampled_free
                 .get(&(worker.gpu.backend, worker.gpu.ordinal))
-                .copied();
+                .map(|(free, _)| *free);
             let health = if worker.poisoned.load(Ordering::SeqCst)
                 || worker.fatal_cuda_error.load(Ordering::SeqCst)
             {
@@ -2094,14 +2101,29 @@ pub(crate) fn build_observed_dispatch(
             } else {
                 mold_scheduler::DeviceActivity::Busy
             };
-            let available_vram_bytes = sampled_available_vram
+            let sampled_available_vram_bytes = sampled_available_vram
                 // Observe comparisons are post-startup telemetry. Unlike the
                 // authoritative coordinator's explicitly documented bootstrap
                 // allowance, they must not turn a stale discovery sample into
                 // a claimed current placement.
                 .unwrap_or(0);
+            let measured_cache_bytes = worker
+                .model_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .active_vram_bytes();
+            let reclaimable_cache_bytes = sampled_free
+                .get(&(worker.gpu.backend, worker.gpu.ordinal))
+                .and_then(|(_, used_by_mold)| *used_by_mold)
+                .map(|used_by_mold| measured_cache_bytes.min(used_by_mold))
+                .unwrap_or(0);
+            let available_vram_bytes = crate::scheduler::effective_available_vram_bytes(
+                sampled_available_vram_bytes,
+                reclaimable_cache_bytes,
+                worker.gpu.total_vram_bytes,
+            );
             let warm = worker
-                .resident_model
+                .resident_execution_fingerprint
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -2117,9 +2139,14 @@ pub(crate) fn build_observed_dispatch(
                 admin_state: mold_scheduler::DeviceAdminState::Enabled,
                 health,
                 activity,
-                // Legacy has no lease-backed completion estimate. Supplying
-                // one would manufacture an impossible end-to-end comparison.
-                available_at_ms: None,
+                // Observe mode uses the same documented static fallback as
+                // authoritative planning until learned Phase E estimates
+                // exist. It does not fabricate an observe-only duration.
+                available_at_ms: (activity == mold_scheduler::DeviceActivity::Busy).then(|| {
+                    now_ms.saturating_add(
+                        mold_scheduler::static_timing_for(work_kind).predicted_run_ms,
+                    )
+                }),
                 worker_generation: 0,
                 available_vram_bytes,
                 warm_execution_fingerprints: warm,
@@ -2174,7 +2201,8 @@ pub(crate) fn build_observed_dispatch(
                             plan.predicted_host_increment_bytes,
                         )
                         .with_vram(plan.predicted_vram_peak_bytes)
-                        .with_timing(1_000, 0, 1_000)
+                        .with_device_available_vram(plan.admitted_available_vram_bytes)
+                        .with_static_timing(mold_scheduler::WorkKind::Generation)
                     })
                     .collect()
             }
@@ -2199,7 +2227,15 @@ pub(crate) fn build_observed_dispatch(
                     estimated_host_ram_bytes,
                 )
                 .with_vram(estimated_vram_bytes)
-                .with_timing(1_000, 0, 1_000)
+                .with_device_available_vram(
+                    devices
+                        .iter()
+                        .find(|device| {
+                            device.id.as_str() == crate::scheduler::worker_device_id(worker)
+                        })
+                        .map_or(0, |device| device.available_vram_bytes),
+                )
+                .with_static_timing(work_kind)
             })
             .collect::<Vec<_>>()
     };
@@ -2215,10 +2251,12 @@ pub(crate) fn build_observed_dispatch(
     }
     let work_id = mold_scheduler::WorkId::new(work_id);
     let host_memory_headroom = resource_snapshot.as_ref().map_or(0, |snapshot| {
-        let available = snapshot
-            .system_ram
-            .total
-            .saturating_sub(snapshot.system_ram.used);
+        let available = snapshot.system_ram.available.unwrap_or_else(|| {
+            snapshot
+                .system_ram
+                .total
+                .saturating_sub(snapshot.system_ram.used)
+        });
         let safety_floor = (snapshot.system_ram.total.saturating_mul(15) / 100).max(8 << 30);
         available.saturating_sub(safety_floor)
     });
@@ -2243,7 +2281,7 @@ pub(crate) fn build_observed_dispatch(
     let plan = match mold_scheduler::Planner::default().plan(&mold_scheduler::PlannerSnapshot::new(
         1,
         1,
-        0,
+        now_ms,
         host_memory_headroom,
         devices,
         vec![work],
@@ -2460,6 +2498,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(3))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -2506,6 +2545,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 64 << 30,
                 used: 8 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -2572,6 +2612,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 64 << 30,
                 used: 8 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -2601,6 +2642,73 @@ mod tests {
             worker_rx.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn observe_busy_availability_is_absolute_and_preserves_warm_wait_economics() {
+        let (busy, _busy_rx) = test_worker(0, 1);
+        let (idle, _idle_rx) = test_worker(1, 1);
+        busy.in_flight.store(1, Ordering::SeqCst);
+        *busy
+            .resident_execution_fingerprint
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some("utility-exec".to_string());
+
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![busy.clone(), idle.clone()],
+        });
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+        );
+        state.resources.publish(mold_core::ResourceSnapshot {
+            hostname: "test".to_string(),
+            timestamp: 0,
+            gpus: [0, 1]
+                .into_iter()
+                .map(|ordinal| mold_core::GpuSnapshot {
+                    ordinal,
+                    name: format!("gpu{ordinal}"),
+                    backend: mold_core::GpuBackend::Cuda,
+                    vram_total: 24_000_000_000,
+                    vram_used: 0,
+                    vram_used_by_mold: Some(0),
+                    vram_used_by_other: Some(0),
+                    gpu_utilization: Some(0),
+                })
+                .collect(),
+            system_ram: mold_core::RamSnapshot {
+                total: 64 << 30,
+                used: 8 << 30,
+                available: Some(56 << 30),
+                used_by_mold: 0,
+                used_by_other: 8 << 30,
+            },
+            cpu: None,
+        });
+
+        let observation = build_observed_dispatch(
+            &state,
+            ObservedDispatchInput {
+                work_id: "observe-absolute-busy-time",
+                work_kind: mold_scheduler::WorkKind::Generation,
+                model_fingerprint: "utility-exec",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 0,
+                request: None,
+                hard_ordinal: None,
+            },
+            &idle,
+        )
+        .expect("observe comparison");
+
+        assert_eq!(
+            observation.v2_device_id.as_deref(),
+            idle.gpu.stable_id.as_deref(),
+            "a 30s busy remainder plus the run must not be treated as an absolute timestamp"
+        );
     }
 
     #[test]
@@ -2649,6 +2757,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 64 << 30,
                 used: 8 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },
@@ -2742,6 +2851,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 64 << 30,
                 used: 8 << 30,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 8 << 30,
             },

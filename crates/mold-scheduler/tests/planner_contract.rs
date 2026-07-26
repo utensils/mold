@@ -5,7 +5,7 @@ use mold_scheduler::{
     operation_budget, optimization_horizon, BlockedReason, CandidatePlacement, DeviceAdminState,
     DeviceHealth, DeviceSnapshot, EligibilityIndex, GrantValidationSnapshot, OptimizerState,
     PlanValidationError, Planner, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode,
-    PriorityClass, WorkId, WorkSnapshot,
+    PriorityClass, WorkId, WorkKind, WorkSnapshot,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -17,6 +17,7 @@ fn device(id: &str) -> DeviceSnapshot {
 fn candidate(device_id: &str, host_gib: u64) -> CandidatePlacement {
     CandidatePlacement::new(device_id, "exec", host_gib * GIB)
         .with_vram(8 * GIB)
+        .with_device_available_vram(24 * GIB)
         .with_timing(1_000, 50, 10_000)
 }
 
@@ -324,6 +325,36 @@ fn warm_wait_never_holds_when_cold_now_finishes_first() {
 
     assert_eq!(plan.immediate_leases[0].device_id.as_str(), "cold");
     assert!(plan.warm_waits.is_empty());
+}
+
+#[test]
+fn busy_future_lane_uses_effective_reclaimable_capacity_not_sampled_free() {
+    let effective_capacity = 20 * GIB; // 4 GiB sampled free + 16 GiB resident.
+    let candidate = candidate("gpu-0", 1)
+        .with_vram(18 * GIB)
+        .with_device_available_vram(effective_capacity)
+        .with_timing(1_000, 100, 5_000);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![DeviceSnapshot::busy("gpu-0", effective_capacity, 5_000).with_warm("exec")],
+            vec![work("job", 0, vec![candidate])],
+            32,
+        ))
+        .expect("valid plan");
+
+    assert!(plan.immediate_leases.is_empty());
+    let assignment = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.assignments)
+        .find(|assignment| assignment.work_id == WorkId::from("job"))
+        .expect("busy device should retain a feasible future assignment");
+    assert!(!assignment.immediate);
+    assert_eq!(assignment.estimated_start_ms, 5_000);
+    assert_ne!(
+        plan.blocked_reason(&WorkId::from("job")),
+        Some(&BlockedReason::InsufficientVram)
+    );
 }
 
 #[test]
@@ -931,9 +962,58 @@ fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
         worker_ready: true,
         device_admin_state: DeviceAdminState::Enabled,
         device_health: DeviceHealth::Healthy,
+        execution_fingerprint: lease.placement.execution_fingerprint.clone(),
+        available_vram_bytes: lease.placement.device_available_vram_bytes,
     };
 
     assert_eq!(plan.validate_lease_for_grant(lease, &current), Ok(()));
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                execution_fingerprint: "re-resolved-different-plan".into(),
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::ExecutionFingerprintChanged {
+            planned: lease.placement.execution_fingerprint.clone(),
+            current: "re-resolved-different-plan".into(),
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                available_vram_bytes: lease
+                    .placement
+                    .device_available_vram_bytes
+                    .saturating_sub(1),
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::DeviceVramSampleChanged {
+            device_id: "gpu-0".into(),
+            planned_bytes: lease.placement.device_available_vram_bytes,
+            current_bytes: lease
+                .placement
+                .device_available_vram_bytes
+                .saturating_sub(1),
+        })
+    );
+    assert_eq!(
+        plan.validate_lease_for_grant(
+            lease,
+            &GrantValidationSnapshot {
+                available_vram_bytes: lease.placement.predicted_vram_bytes.saturating_sub(1),
+                ..current.clone()
+            }
+        ),
+        Err(PlanValidationError::InsufficientCurrentVram {
+            device_id: "gpu-0".into(),
+            planned_bytes: lease.placement.predicted_vram_bytes,
+            available_bytes: lease.placement.predicted_vram_bytes.saturating_sub(1),
+        })
+    );
     assert_eq!(
         plan.validate_lease_for_grant(
             lease,
@@ -1053,6 +1133,64 @@ fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
             device_id: "gpu-0".into(),
         })
     );
+}
+
+#[test]
+fn static_timing_floor_is_shared_and_never_zero() {
+    for kind in [
+        WorkKind::Generation,
+        WorkKind::PreparedSibling,
+        WorkKind::ChainStage,
+        WorkKind::PostUpscale,
+        WorkKind::StandaloneUpscale,
+        WorkKind::PromptExpansion,
+        WorkKind::AdminModelLoad,
+        WorkKind::AdminModelUnload,
+        WorkKind::BatchChild,
+    ] {
+        let timing = mold_scheduler::static_timing_for(kind);
+        assert!(timing.cold_setup_ms > 0, "{kind:?}");
+        assert!(timing.warm_setup_ms > 0, "{kind:?}");
+        assert!(timing.predicted_run_ms > 0, "{kind:?}");
+        assert!(timing.cold_setup_ms >= timing.warm_setup_ms, "{kind:?}");
+    }
+}
+
+#[test]
+fn older_owner_work_accumulates_global_bypasses_under_ordinary_arrivals() {
+    let older_owner = work("owner", 100, vec![candidate("gpu-0", 0)])
+        .with_ready_at(1)
+        .with_priority(PriorityClass::User);
+    let younger_generation = work("ordinary", 0, vec![candidate("gpu-0", 0)])
+        .with_ready_at(2)
+        .with_priority(PriorityClass::User);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![older_owner, younger_generation],
+            8,
+        ))
+        .expect("valid plan");
+    assert_eq!(plan.immediate_leases[0].work_id, WorkId::from("ordinary"));
+    assert_eq!(plan.bypass_updates.len(), 1);
+    assert_eq!(plan.bypass_updates[0].work_id, WorkId::from("owner"));
+    assert_eq!(plan.bypass_updates[0].new_count, 1);
+
+    let forced = work("owner", 100, vec![candidate("gpu-0", 0)])
+        .with_ready_at(1)
+        .with_priority(PriorityClass::User)
+        .with_bypass_count(3);
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![
+                forced,
+                work("ordinary-next", 0, vec![candidate("gpu-0", 0)]).with_ready_at(3),
+            ],
+            8,
+        ))
+        .expect("valid plan");
+    assert_eq!(plan.immediate_leases[0].work_id, WorkId::from("owner"));
 }
 
 #[test]

@@ -509,11 +509,13 @@ pub fn ram_snapshot() -> RamSnapshot {
     );
     let total = sys.total_memory();
     let used = sys.used_memory();
+    let available = sys.available_memory();
     let used_by_mold = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
     let used_by_other = used.saturating_sub(used_by_mold);
     RamSnapshot {
         total,
         used,
+        available: Some(available.min(total)),
         used_by_mold,
         used_by_other,
     }
@@ -807,6 +809,7 @@ pub(crate) fn spawn_aggregator(
                         system_ram: mold_core::RamSnapshot {
                             total: 0,
                             used: 0,
+                            available: None,
                             used_by_mold: 0,
                             used_by_other: 0,
                         },

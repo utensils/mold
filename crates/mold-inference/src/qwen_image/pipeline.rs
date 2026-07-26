@@ -75,12 +75,8 @@ enum Qwen2TextEncoderMode {
 }
 
 impl Qwen2TextEncoderMode {
-    fn from_env() -> Self {
-        match std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+    fn from_value(value: Option<&str>) -> Self {
+        match value.unwrap_or_default().to_ascii_lowercase().as_str() {
             "gpu" => Self::Gpu,
             "cpu-stage" => Self::CpuStage,
             "cpu_stage" => Self::CpuStage,
@@ -367,6 +363,8 @@ pub struct QwenImageEngine {
     #[allow(dead_code)]
     active_lora_fingerprint: Vec<QwenImageLoraFingerprint>,
     shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+    qwen2_variant: Option<String>,
+    qwen2_text_encoder_mode: Qwen2TextEncoderMode,
 }
 
 /// Order-sensitive fingerprint of a single LoRA adapter (path-hash + scale).
@@ -1003,6 +1001,29 @@ impl QwenImageEngine {
         offload: bool,
         shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
     ) -> Self {
+        Self::new_with_preferences(
+            model_name,
+            paths,
+            load_strategy,
+            gpu_ordinal,
+            offload,
+            shared_pool,
+            std::env::var("MOLD_QWEN2_VARIANT").ok(),
+            std::env::var("MOLD_QWEN2_TEXT_ENCODER_MODE").ok(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_preferences(
+        model_name: String,
+        paths: ModelPaths,
+        load_strategy: LoadStrategy,
+        gpu_ordinal: usize,
+        offload: bool,
+        shared_pool: Option<Arc<Mutex<crate::shared_pool::SharedPool>>>,
+        qwen2_variant: Option<String>,
+        qwen2_text_encoder_mode: Option<String>,
+    ) -> Self {
         Self {
             base: EngineBase::new(model_name, paths, load_strategy, gpu_ordinal),
             prompt_cache: Mutex::new(LruCache::new(DEFAULT_PROMPT_CACHE_CAPACITY)),
@@ -1011,6 +1032,10 @@ impl QwenImageEngine {
             pending_loras: Vec::new(),
             active_lora_fingerprint: Vec::new(),
             shared_pool,
+            qwen2_variant,
+            qwen2_text_encoder_mode: Qwen2TextEncoderMode::from_value(
+                qwen2_text_encoder_mode.as_deref(),
+            ),
         }
     }
 
@@ -1447,12 +1472,11 @@ impl QwenImageEngine {
         free_vram: u64,
         usage: Qwen2TextEncoderUsage,
     ) -> Result<ResolvedQwen2TextEncoder> {
-        let preference = std::env::var("MOLD_QWEN2_VARIANT").ok();
         self.resolve_text_encoder_source_with_preference(
             gpu_device,
             free_vram,
             usage,
-            preference.as_deref(),
+            self.qwen2_variant.as_deref(),
         )
     }
 
@@ -1679,7 +1703,7 @@ impl QwenImageEngine {
         let is_cuda = gpu_device.is_cuda();
         let is_metal = gpu_device.is_metal();
         let plan = Self::qwen2_text_encoder_plan_for_mode(
-            Qwen2TextEncoderMode::from_env(),
+            self.qwen2_text_encoder_mode,
             is_cuda,
             is_metal,
             resolved,
@@ -3452,6 +3476,15 @@ impl InferenceEngine for QwenImageEngine {
 
     fn load(&mut self) -> Result<()> {
         QwenImageEngine::load(self)
+    }
+
+    fn load_for_request(&mut self, req: &GenerateRequest) -> Result<()> {
+        self.pending_placement = req.placement.clone();
+        self.pending_loras = effective_loras(req);
+        let result = QwenImageEngine::load(self);
+        self.pending_placement = None;
+        self.pending_loras.clear();
+        result
     }
 
     fn unload(&mut self) {

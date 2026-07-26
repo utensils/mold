@@ -21,6 +21,7 @@ fn fake_snapshot() -> ResourceSnapshot {
         system_ram: RamSnapshot {
             total: 64_000_000_000,
             used: 0,
+            available: Some(64_000_000_000),
             used_by_mold: 0,
             used_by_other: 0,
         },
@@ -166,6 +167,11 @@ fn ram_snapshot_satisfies_invariants() {
         ram.used_by_other,
         ram.used.saturating_sub(ram.used_by_mold),
         "used_by_other must == used - used_by_mold"
+    );
+    assert!(
+        ram.available
+            .is_some_and(|available| available <= ram.total),
+        "OS available RAM must be retained for admission"
     );
 }
 

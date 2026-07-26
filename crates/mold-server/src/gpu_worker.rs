@@ -41,9 +41,19 @@ impl PlannedEngineMode {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PlannedLoadContract<'a> {
+    mode: PlannedEngineMode,
+    execution_fingerprint: &'a str,
+    request: &'a mold_core::GenerateRequest,
+    engine_paths: &'a mold_core::ModelPaths,
+    engine_config: &'a mold_inference::FrozenEngineConfig,
+}
+
 struct PlannedInferenceEngine {
     inner: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
+    execution_fingerprint: String,
 }
 
 impl mold_inference::InferenceEngine for PlannedInferenceEngine {
@@ -64,6 +74,10 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
 
     fn load(&mut self) -> anyhow::Result<()> {
         self.inner.load()
+    }
+
+    fn load_for_request(&mut self, req: &mold_core::GenerateRequest) -> anyhow::Result<()> {
+        self.inner.load_for_request(req)
     }
 
     fn unload(&mut self) {
@@ -90,6 +104,10 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
         Some(self.mode.block_offload)
     }
 
+    fn configured_execution_fingerprint(&self) -> Option<&str> {
+        Some(&self.execution_fingerprint)
+    }
+
     fn as_chain_renderer(&mut self) -> Option<&mut dyn mold_inference::chain::ChainStageRenderer> {
         self.inner.as_chain_renderer()
     }
@@ -98,10 +116,12 @@ impl mold_inference::InferenceEngine for PlannedInferenceEngine {
 fn record_planned_engine_mode(
     engine: Box<dyn mold_inference::InferenceEngine>,
     mode: PlannedEngineMode,
+    execution_fingerprint: &str,
 ) -> Box<dyn mold_inference::InferenceEngine> {
     Box::new(PlannedInferenceEngine {
         inner: engine,
         mode,
+        execution_fingerprint: execution_fingerprint.to_string(),
     })
 }
 
@@ -490,7 +510,7 @@ fn validate_grant_before_acceptance(
         &worker_id,
         worker.gpu.ordinal,
         &config,
-        &job.model,
+        &job.request,
     )
 }
 
@@ -1051,8 +1071,12 @@ fn drop_upscale_engine_safely(
 fn load_engine_safely(
     worker: &GpuWorker,
     mut engine: Box<dyn mold_inference::InferenceEngine>,
+    request: Option<&mold_core::GenerateRequest>,
 ) -> anyhow::Result<Box<dyn mold_inference::InferenceEngine>> {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.load()));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match request {
+        Some(request) => engine.load_for_request(request),
+        None => engine.load(),
+    }));
     match result {
         Ok(Ok(())) => Ok(engine),
         Ok(Err(error)) if is_fatal_cuda_error(&error) => {
@@ -1384,17 +1408,20 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
     let activation_hint =
         crate::model_manager::activation_hint_for_request_sync(&config_snapshot, &job.request);
     let request_has_lora = crate::model_manager::request_has_effective_lora(&job.request);
-    let planned_mode = job
-        .execution_plan
-        .as_ref()
-        .map(PlannedEngineMode::from_plan);
+    let planned_load = job.execution_plan.as_ref().map(|plan| PlannedLoadContract {
+        mode: PlannedEngineMode::from_plan(plan),
+        execution_fingerprint: plan.execution_fingerprint.as_str(),
+        request: &job.request,
+        engine_paths: &plan.engine_paths,
+        engine_config: &plan.engine_config,
+    });
     if let Err(e) = ensure_model_ready_sync_inner_guarded(
         worker,
         &model_name,
         &config_snapshot,
         activation_hint,
         request_has_lora,
-        planned_mode,
+        planned_load,
     ) {
         tracing::error!(gpu = ordinal, model = %model_name, "Failed to load model: {e}");
         // Detect CUDA OOM during load: synchronize the device so subsequent
@@ -1433,6 +1460,11 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
         }
         return;
     }
+    worker.set_resident_execution_fingerprint(
+        job.execution_plan
+            .as_ref()
+            .map(|plan| plan.execution_fingerprint.as_str()),
+    );
 
     // This is the first real allocation boundary: model readiness has
     // completed, so host allocations owned by this lease now exist. The
@@ -1922,7 +1954,7 @@ fn ensure_model_ready_sync_inner_guarded(
     config: &Config,
     hint: Option<crate::model_manager::ActivationHint>,
     request_has_lora: bool,
-    planned_mode: Option<PlannedEngineMode>,
+    planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<()> {
     let result = ensure_model_ready_sync_inner(
         worker,
@@ -1930,7 +1962,7 @@ fn ensure_model_ready_sync_inner_guarded(
         config,
         hint,
         request_has_lora,
-        planned_mode,
+        planned_load,
     );
     if result.is_ok() {
         worker.set_resident_model(Some(model_name));
@@ -1947,8 +1979,13 @@ fn ensure_model_ready_sync_inner(
     config: &Config,
     hint: Option<crate::model_manager::ActivationHint>,
     request_has_lora: bool,
-    planned_mode: Option<PlannedEngineMode>,
+    planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<()> {
+    let planned_mode = planned_load.map(|planned| planned.mode);
+    let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
+    let load_request = planned_load.map(|planned| planned.request);
+    let planned_engine_paths = planned_load.map(|planned| planned.engine_paths);
+    let planned_engine_config = planned_load.map(|planned| planned.engine_config);
     let cache = worker.model_cache.lock().unwrap();
 
     // Already loaded?
@@ -1956,6 +1993,9 @@ fn ensure_model_ready_sync_inner(
         if entry.residency == ModelResidency::Gpu {
             let must_recreate = planned_mode
                 .is_some_and(|mode| !mode.matches(entry.engine.as_ref()))
+                || planned_execution_fingerprint.is_some_and(|fingerprint| {
+                    entry.engine.configured_execution_fingerprint() != Some(fingerprint)
+                })
                 || entry.engine.model_paths().is_some_and(|paths| {
                     crate::model_manager::request_requires_fresh_engine_for_offload_policy(
                         paths,
@@ -2039,9 +2079,12 @@ fn ensure_model_ready_sync_inner(
                 planned_mode.is_none_or(|mode| mode.matches(entry.engine.as_ref()))
             });
         if load_strategy == mold_inference::LoadStrategy::Sequential || !cached_mode_matches {
-            let paths = cached_paths.ok_or_else(|| {
-                anyhow::anyhow!("cached engine for '{model_name}' does not expose model paths")
-            })?;
+            let paths = planned_engine_paths
+                .cloned()
+                .or(cached_paths)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cached engine for '{model_name}' does not expose model paths")
+                })?;
             let old_engine = {
                 let mut cache = worker.model_cache.lock().unwrap();
                 cache
@@ -2059,24 +2102,42 @@ fn ensure_model_ready_sync_inner(
                 },
                 |mode| mode.block_offload,
             );
-            let resolved_catalog_config =
-                crate::model_manager::resolve_installed_catalog_paths_for_worker(
-                    model_name, config,
+            let created = if let Some(engine_config) = planned_engine_config {
+                mold_inference::create_engine_with_frozen_config(
+                    model_name.to_string(),
+                    paths,
+                    engine_config,
+                    load_strategy,
+                    worker.gpu.ordinal,
+                    offload,
+                    Some(worker.shared_pool.clone()),
                 )
-                .map_err(|e| anyhow::anyhow!(e.error))?
-                .map(|(_, config)| config);
-            let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
-            let engine = match mold_inference::create_engine_with_pool(
-                model_name.to_string(),
-                paths,
-                engine_config,
-                load_strategy,
-                worker.gpu.ordinal,
-                offload,
-                Some(worker.shared_pool.clone()),
-            ) {
+            } else {
+                let resolved_catalog_config =
+                    crate::model_manager::resolve_installed_catalog_paths_for_worker(
+                        model_name, config,
+                    )
+                    .map_err(|e| anyhow::anyhow!(e.error))?
+                    .map(|(_, config)| config);
+                let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
+                mold_inference::create_engine_with_pool(
+                    model_name.to_string(),
+                    paths,
+                    engine_config,
+                    load_strategy,
+                    worker.gpu.ordinal,
+                    offload,
+                    Some(worker.shared_pool.clone()),
+                )
+            };
+            let engine = match created {
                 Ok(engine) => match planned_mode {
-                    Some(mode) => record_planned_engine_mode(engine, mode),
+                    Some(mode) => record_planned_engine_mode(
+                        engine,
+                        mode,
+                        planned_execution_fingerprint
+                            .expect("planned engine mode must carry an execution fingerprint"),
+                    ),
                     None => engine,
                 },
                 Err(err) => {
@@ -2095,7 +2156,7 @@ fn ensure_model_ready_sync_inner(
                 "recreating cached engine in sequential mode..."
             );
             let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-            let engine = match load_engine_safely(worker, engine) {
+            let engine = match load_engine_safely(worker, engine, load_request) {
                 Ok(engine) => engine,
                 Err(err) if worker.poisoned.load(Ordering::SeqCst) => {
                     contain_poisoned_cuda(old_engine);
@@ -2136,7 +2197,7 @@ fn ensure_model_ready_sync_inner(
         // Sample VRAM baseline before load so we can record the new model's
         // per-load delta rather than the device-global usage.
         let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-        let engine = load_engine_safely(worker, engine)?;
+        let engine = load_engine_safely(worker, engine, load_request)?;
 
         let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
         // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
@@ -2152,7 +2213,9 @@ fn ensure_model_ready_sync_inner(
     // Not in cache — need to create from scratch.
     // Resolve model paths.
     let mut resolved_catalog_config = None;
-    let paths = if let Some(paths) = ModelPaths::resolve(model_name, config) {
+    let paths = if let Some(paths) = planned_engine_paths.cloned() {
+        paths
+    } else if let Some(paths) = ModelPaths::resolve(model_name, config) {
         paths
     } else if let Some((paths, config)) =
         crate::model_manager::resolve_installed_catalog_paths_for_worker(model_name, config)
@@ -2218,18 +2281,35 @@ fn ensure_model_ready_sync_inner(
         || crate::model_manager::server_offload_enabled_for_paths(&paths, hint, request_has_lora),
         |mode| mode.block_offload,
     );
-    let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
-    let engine = mold_inference::create_engine_with_pool(
-        model_name.to_string(),
-        paths,
-        engine_config,
-        load_strategy,
-        worker.gpu.ordinal,
-        offload,
-        Some(worker.shared_pool.clone()),
-    )?;
+    let engine = if let Some(engine_config) = planned_engine_config {
+        mold_inference::create_engine_with_frozen_config(
+            model_name.to_string(),
+            paths,
+            engine_config,
+            load_strategy,
+            worker.gpu.ordinal,
+            offload,
+            Some(worker.shared_pool.clone()),
+        )?
+    } else {
+        let engine_config = resolved_catalog_config.as_ref().unwrap_or(config);
+        mold_inference::create_engine_with_pool(
+            model_name.to_string(),
+            paths,
+            engine_config,
+            load_strategy,
+            worker.gpu.ordinal,
+            offload,
+            Some(worker.shared_pool.clone()),
+        )?
+    };
     let engine = match planned_mode {
-        Some(mode) => record_planned_engine_mode(engine, mode),
+        Some(mode) => record_planned_engine_mode(
+            engine,
+            mode,
+            planned_execution_fingerprint
+                .expect("planned engine mode must carry an execution fingerprint"),
+        ),
         None => engine,
     };
 
@@ -2241,7 +2321,7 @@ fn ensure_model_ready_sync_inner(
     // Sample VRAM baseline before load so we can record the new model's
     // per-load delta rather than the device-global usage.
     let vram_baseline = device::vram_in_use_bytes(worker.gpu.ordinal);
-    let engine = load_engine_safely(worker, engine)?;
+    let engine = load_engine_safely(worker, engine, load_request)?;
 
     let vram = device::vram_load_delta(worker.gpu.ordinal, vram_baseline);
     // Drop any evicted engine OUTSIDE the cache lock — `cuMemFree` and
@@ -2598,8 +2678,80 @@ mod tests {
         };
         let unconfigured = FakeSlowEngine::boxed("planned", Duration::ZERO);
         assert!(!mode.matches(unconfigured.as_ref()));
-        let configured = record_planned_engine_mode(unconfigured, mode);
+        let configured = record_planned_engine_mode(unconfigured, mode, "plan-fingerprint");
         assert!(mode.matches(configured.as_ref()));
+        assert_eq!(
+            configured.configured_execution_fingerprint(),
+            Some("plan-fingerprint")
+        );
+    }
+
+    struct PlacementRecordingEngine {
+        seen_at_load: Arc<Mutex<Option<mold_core::DevicePlacement>>>,
+    }
+
+    impl mold_inference::InferenceEngine for PlacementRecordingEngine {
+        fn generate(
+            &mut self,
+            _req: &mold_core::GenerateRequest,
+        ) -> anyhow::Result<mold_core::GenerateResponse> {
+            unreachable!("preload forwarding test does not generate")
+        }
+
+        fn model_name(&self) -> &str {
+            "placement-recording"
+        }
+
+        fn is_loaded(&self) -> bool {
+            false
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            anyhow::bail!("plain load must not be used for a planned request")
+        }
+
+        fn load_for_request(&mut self, req: &mold_core::GenerateRequest) -> anyhow::Result<()> {
+            *self.seen_at_load.lock().unwrap() = req.placement.clone();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn planned_preload_receives_materialized_component_placement() {
+        let seen_at_load = Arc::new(Mutex::new(None));
+        let mut engine = record_planned_engine_mode(
+            Box::new(PlacementRecordingEngine {
+                seen_at_load: seen_at_load.clone(),
+            }),
+            PlannedEngineMode {
+                load_strategy: mold_inference::LoadStrategy::Eager,
+                block_offload: false,
+            },
+            "placement-fingerprint",
+        );
+        let mut request: mold_core::GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"x","model":"placement-recording","width":512,"height":512,"steps":4,"guidance":1.0}"#,
+        )
+        .unwrap();
+        request.placement = Some(mold_core::DevicePlacement {
+            text_encoders: mold_core::DeviceRef::Cpu,
+            advanced: Some(mold_core::types::AdvancedPlacement {
+                transformer: mold_core::DeviceRef::Cpu,
+                vae: mold_core::DeviceRef::Cpu,
+                clip_l: Some(mold_core::DeviceRef::device("cuda:0")),
+                clip_g: None,
+                t5: Some(mold_core::DeviceRef::Cpu),
+                qwen: None,
+            }),
+        });
+
+        engine.load_for_request(&request).unwrap();
+
+        assert_eq!(
+            *seen_at_load.lock().unwrap(),
+            request.placement,
+            "exact sparse encoder and CPU transformer/VAE placement must exist before load"
+        );
     }
 
     struct DropRecordingEngine {
@@ -2929,6 +3081,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(cache)),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -3011,6 +3164,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(1))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -3079,6 +3233,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(ModelCache::new(1))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),
@@ -3795,6 +3950,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(cache)),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(SharedPool::new())),

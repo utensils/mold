@@ -483,6 +483,7 @@ mod tests {
             },
             model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(3))),
             resident_model: Arc::new(RwLock::new(None)),
+            resident_execution_fingerprint: Arc::new(RwLock::new(None)),
             active_generation: Arc::new(RwLock::new(None)),
             model_load_lock: Arc::new(Mutex::new(())),
             shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
@@ -735,6 +736,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 64_000_000_000,
                 used: 20_000_000_000,
+                available: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 18_000_000_000,
             },
@@ -2687,6 +2689,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 128_000_000_000,
                 used: 32_000_000_000,
+                available: None,
                 used_by_mold: 2_000_000_000,
                 used_by_other: 30_000_000_000,
             },
@@ -6011,6 +6014,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 1,
                 used: 0,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },
@@ -6065,6 +6069,7 @@ mod tests {
             system_ram: mold_core::RamSnapshot {
                 total: 1,
                 used: 0,
+                available: None,
                 used_by_mold: 0,
                 used_by_other: 0,
             },

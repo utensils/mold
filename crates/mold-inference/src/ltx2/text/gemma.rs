@@ -361,11 +361,22 @@ pub enum GemmaVariant {
 ///    behavior so existing installs don't switch backends silently — opt in
 ///    explicitly via the env var).
 /// 5. Auto with neither present → `Err`.
+#[cfg(test)]
 pub fn resolve_gemma_variant(assets: &GemmaAssets) -> Result<GemmaVariant> {
+    resolve_gemma_variant_with_preference(
+        assets,
+        std::env::var("MOLD_LTX2_GEMMA_VARIANT").ok().as_deref(),
+    )
+}
+
+pub fn resolve_gemma_variant_with_preference(
+    assets: &GemmaAssets,
+    preference: Option<&str>,
+) -> Result<GemmaVariant> {
     let has_bf16 = assets.has_bf16_weights();
     let has_gguf = assets.gguf_path.is_some();
 
-    if let Ok(raw) = std::env::var("MOLD_LTX2_GEMMA_VARIANT") {
+    if let Some(raw) = preference {
         let normalized = raw.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "q4" | "gguf" | "q4_gguf" => {

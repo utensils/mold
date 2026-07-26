@@ -8,9 +8,9 @@ use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DispatchMode {
+    #[default]
     Legacy,
     Observe,
-    #[default]
     V2,
 }
 
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(DispatchMode::parse("legacy"), Ok(DispatchMode::Legacy));
         assert_eq!(DispatchMode::parse(" OBSERVE "), Ok(DispatchMode::Observe));
         assert_eq!(DispatchMode::parse("v2"), Ok(DispatchMode::V2));
-        assert_eq!(DispatchMode::default(), DispatchMode::V2);
+        assert_eq!(DispatchMode::default(), DispatchMode::Legacy);
         assert!(!DispatchMode::Legacy.owns_v2_workers());
         assert!(!DispatchMode::Observe.owns_v2_workers());
         assert!(DispatchMode::V2.owns_v2_workers());
@@ -166,14 +166,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_environment_uses_v2_but_present_invalid_values_fail() {
+    fn missing_environment_keeps_legacy_until_cutover_but_explicit_v2_works() {
         assert_eq!(
             DispatchMode::from_optional_value(None),
-            Ok(DispatchMode::V2)
+            Ok(DispatchMode::Legacy)
         );
         assert_eq!(
             DispatchMode::from_optional_value(Some("legacy")),
             Ok(DispatchMode::Legacy)
+        );
+        assert_eq!(
+            DispatchMode::from_optional_value(Some("v2")),
+            Ok(DispatchMode::V2)
         );
         let error = DispatchMode::from_optional_value(Some("round-robin")).unwrap_err();
         assert!(error.contains("MOLD_DISPATCH_MODE"));

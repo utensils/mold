@@ -287,7 +287,7 @@ impl ModelConfig {
 /// For upscaler models, only `transformer` (weights) is required; `vae` is empty.
 /// For utility models, only `transformer` is required; `vae` may be empty.
 /// Other paths are optional — each engine validates what it needs at load time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPaths {
     pub transformer: PathBuf,
     /// Multi-shard transformer paths (Z-Image BF16); empty means use single `transformer`
