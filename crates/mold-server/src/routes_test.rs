@@ -5512,7 +5512,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: vec![gpu_worker_stub(1)],
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = {
@@ -5671,7 +5671,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let queue = crate::state::QueueHandle::new(tx);
         let gpu_pool = std::sync::Arc::new(crate::gpu_pool::GpuPool {
-            workers: Vec::new(),
+            workers: vec![gpu_worker_stub(1)],
         });
         let state = AppState::empty(mold_core::Config::default(), queue, gpu_pool, 200);
         let app = crate::routes::create_router(state);
