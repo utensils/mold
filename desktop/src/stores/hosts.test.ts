@@ -366,6 +366,52 @@ describe("hosts store", () => {
     expect(hosts.resolveRoute("capable")?.hostId).toBe("hal9000-7680");
   });
 
+  it('resolveRoute("capable") considers every healthy GPU on a host', async () => {
+    testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
+    const hosts = useHostsStore();
+    await hosts.connect("hal9000", null, null);
+    hosts.telemetry["local"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: {
+        name: "NVIDIA RTX A2000",
+        vram_total_mb: 12288,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+      gpuWorkers: [
+        {
+          ordinal: 0,
+          name: "NVIDIA RTX A2000",
+          vram_total_bytes: 12 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+        {
+          ordinal: 1,
+          name: "NVIDIA B200",
+          vram_total_bytes: 80 * 1024 ** 3,
+          vram_used_bytes: 0,
+          state: "idle",
+        },
+      ],
+    };
+    hosts.telemetry["hal9000-7680"] = {
+      queueDepth: 0,
+      queueCapacity: 8,
+      version: null,
+      gpuInfo: {
+        name: "NVIDIA RTX 4090",
+        vram_total_mb: 24564,
+        vram_used_mb: 0,
+        backend: "cuda",
+      },
+    };
+
+    expect(hosts.resolveRoute("capable")?.hostId).toBe("local");
+  });
+
   it('resolveRoute("capable") infers the backend from the GPU name on older servers', async () => {
     testRemoteHost.mockResolvedValue({ ok: true, version: null, error: null });
     const hosts = useHostsStore();
@@ -579,6 +625,15 @@ describe("hosts store", () => {
       version: "0.16.0",
       models_loaded: ["flux2-klein:q4"],
       gpu_info: { name: "NVIDIA GeForce RTX 4090", vram_total_mb: 24564, vram_used_mb: 8192 },
+      gpus: [
+        {
+          ordinal: 0,
+          name: "NVIDIA GeForce RTX 4090",
+          vram_total_bytes: 24564 * 1024 ** 2,
+          vram_used_bytes: 8192 * 1024 ** 2,
+          state: "idle",
+        },
+      ],
     });
     const hosts = useHostsStore();
     await hosts.connect("hal9000", null, null);
@@ -588,6 +643,7 @@ describe("hosts store", () => {
     // The status-bar fallback data rides the same poll.
     expect(hosts.telemetry["hal9000-7680"]?.modelsLoaded).toEqual(["flux2-klein:q4"]);
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
+    expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
   });
 
   it("connect() dedupes a server already connected under another address by instance id", async () => {

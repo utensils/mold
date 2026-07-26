@@ -11,7 +11,12 @@ import {
 } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
-import type { GpuInfo, ServerCapabilities, ServerStatus } from "../lib/api/types";
+import type {
+  GpuInfo,
+  GpuWorkerStatus,
+  ServerCapabilities,
+  ServerStatus,
+} from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -76,10 +81,38 @@ interface HostTelemetry {
   /** GPU summary from `/api/status`; the status bar's fallback when a host's
    *  resources stream is unavailable. */
   gpuInfo?: GpuInfo | null;
+  /** Every runtime worker from `/api/status.gpus`. Routing uses the largest
+   * healthy device because one model must fit on one worker. */
+  gpuWorkers?: GpuWorkerStatus[] | null;
   /** Stable server-installation UUID from `/api/status`; absent on older servers. */
   instanceId?: string | null;
   /** Server-reported hostname from `/api/status`; drives the display label. */
   hostname?: string | null;
+}
+
+function strongestRoutableGpu(telemetry: HostTelemetry | undefined) {
+  const workers = telemetry?.gpuWorkers?.filter(
+    (worker) => worker.state !== "degraded",
+  );
+  if (workers?.length) {
+    const strongest = workers.reduce((best, worker) =>
+      worker.vram_total_bytes > best.vram_total_bytes ? worker : best,
+    );
+    return {
+      backend: telemetry?.gpuInfo?.backend ?? null,
+      name: strongest.name,
+      vramTotalMb: strongest.vram_total_bytes / 1024 ** 2,
+    };
+  }
+  if (telemetry?.gpuWorkers?.length) return null;
+  const legacy = telemetry?.gpuInfo;
+  return legacy
+    ? {
+        backend: legacy.backend ?? null,
+        name: legacy.name,
+        vramTotalMb: legacy.vram_total_mb,
+      }
+    : null;
 }
 
 /** Where a batch will run: resolved just before submit. */
@@ -403,12 +436,9 @@ export const useHostsStore = defineStore("hosts", {
      */
     resolveRoute(selection: string | null, modelName: string | null = null): HostRoute | null {
       const routable = this.all.map((h) => {
-        const gpu = this.telemetry[h.id]?.gpuInfo ?? null;
         return {
           ...h,
-          gpu: gpu
-            ? { backend: gpu.backend ?? null, name: gpu.name, vramTotalMb: gpu.vram_total_mb }
-            : null,
+          gpu: strongestRoutableGpu(this.telemetry[h.id]),
         };
       });
       const modelHostIds = modelName ? useHostModelsStore().hostsFor(modelName) : [];
@@ -448,6 +478,7 @@ export const useHostsStore = defineStore("hosts", {
               version: status.version ?? null,
               modelsLoaded: status.models_loaded ?? [],
               gpuInfo: status.gpu_info ?? null,
+              gpuWorkers: status.gpus ?? null,
               instanceId: status.instance_id ?? null,
               hostname: status.hostname ?? null,
             };
