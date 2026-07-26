@@ -2437,6 +2437,73 @@ mod tests {
         MetadataDb::open_in_memory().unwrap()
     }
 
+    fn claim_test_pool() -> Arc<GpuPool> {
+        let (job_tx, _job_rx) =
+            std::sync::mpsc::sync_channel::<crate::gpu_pool::GpuWorkerCommand>(1);
+        let worker = Arc::new(GpuWorker {
+            gpu: mold_inference::device::DiscoveredGpu {
+                ordinal: 0,
+                stable_id: Some("cuda:00000000000000000000000000000000".to_string()),
+                raw_cuda_uuid: Some([0; 16]),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::UnknownCuda),
+                identity_error: None,
+                backend: mold_core::types::GpuBackend::Cuda,
+                name: "claim-test-gpu".to_string(),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24_000_000_000,
+                free_vram_bytes: 24_000_000_000,
+            },
+            model_cache: Arc::new(Mutex::new(crate::model_cache::ModelCache::new(1))),
+            resident_model: Arc::new(std::sync::RwLock::new(None)),
+            active_generation: Arc::new(std::sync::RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(mold_inference::shared_pool::SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error: Arc::new(AtomicBool::new(false)),
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
+            owner_thread_id: std::sync::OnceLock::new(),
+            degraded_until: std::sync::RwLock::new(None),
+            job_tx,
+        });
+        Arc::new(GpuPool {
+            workers: vec![worker],
+        })
+    }
+
+    #[test]
+    fn waiting_chain_stage_gets_an_opening_within_three_owner_bypasses() {
+        let pool = claim_test_pool();
+        let worker = pool.workers[0].clone();
+        assert!(worker.try_claim_in_flight(), "initial owner claim");
+
+        // This is the exact interleaving permitted by the compatibility loop:
+        // the chain polls just before each completion, then a younger owner
+        // grant reacquires the opening before the chain's next 10 ms poll.
+        let mut bypasses = 0;
+        for _ in 0..4 {
+            assert!(
+                WorkerInFlightGuard::try_claim(worker.clone()).is_none(),
+                "chain poll observes the current owner"
+            );
+            worker.release_in_flight();
+            assert!(
+                worker.try_claim_in_flight(),
+                "younger owner reacquires before the next chain poll"
+            );
+            bypasses += 1;
+        }
+        worker.release_in_flight();
+
+        assert!(
+            bypasses <= 3,
+            "a waiting chain is invisible to scheduler bypass accounting and permitted {bypasses} younger owner claims"
+        );
+    }
+
     fn stage(prompt: &str, transition: TransitionMode) -> ChainStage {
         ChainStage {
             prompt: prompt.into(),

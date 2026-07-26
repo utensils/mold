@@ -2121,6 +2121,38 @@ mod tests {
         dropped_on: Arc<Mutex<Option<String>>>,
     }
 
+    struct PanickingDropEngine {
+        name: String,
+        drop_calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for PanickingDropEngine {
+        fn drop(&mut self) {
+            self.drop_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected CUDA-backed destructor panic");
+        }
+    }
+
+    impl InferenceEngine for PanickingDropEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            unreachable!("destructor safety test never runs inference")
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn unload(&mut self) {}
+    }
+
     struct CudaCallbackRecordingEngine {
         name: String,
         unload_calls: Arc<AtomicUsize>,
@@ -2682,6 +2714,64 @@ mod tests {
 
         assert!(dropped_on.lock().unwrap().is_none());
         assert_eq!(worker.model_cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn idle_eviction_contains_engine_before_a_destructor_can_poison_cuda() {
+        let drop_calls = Arc::new(AtomicUsize::new(0));
+        let worker = single_worker_pool_with_parked("keep-one", Duration::ZERO);
+        {
+            let mut cache = worker.model_cache.lock().unwrap();
+            cache.insert(
+                Box::new(PanickingDropEngine {
+                    name: "evict-me".to_string(),
+                    drop_calls: drop_calls.clone(),
+                }),
+                0,
+            );
+            let mut keep_one = cache.take("keep-one").unwrap();
+            keep_one.last_used = Instant::now();
+            cache.restore(keep_one);
+        }
+
+        let worker_for_thread = worker.clone();
+        std::thread::Builder::new()
+            .name("gpu-worker-poison-proof".to_string())
+            .spawn(move || {
+                worker_for_thread
+                    .owner_thread_id
+                    .set(std::thread::current().id())
+                    .expect("test owner initialized once");
+                run_gpu_owner_entrypoint(&worker_for_thread, || {
+                    evict_idle_on_worker(&worker_for_thread, Duration::ZERO);
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(
+            drop_calls.load(Ordering::SeqCst),
+            0,
+            "eviction must contain a suspect engine before its CUDA-backed destructor executes"
+        );
+    }
+
+    #[test]
+    fn standalone_upscale_routes_engine_through_poison_safe_containment() {
+        let source = include_str!("gpu_worker.rs");
+        let standalone = source
+            .split("fn process_standalone_upscale")
+            .nth(1)
+            .unwrap()
+            .split("fn process_post_generation_upscale")
+            .next()
+            .unwrap();
+
+        assert!(
+            standalone.contains("run_upscale_engine_safely("),
+            "standalone upscale directly calls engine.upscale and unwinds through the suspect engine before the owner-level quarantine"
+        );
     }
 
     #[test]
