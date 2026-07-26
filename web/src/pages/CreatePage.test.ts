@@ -719,6 +719,20 @@ describe("CreatePage layout and behavior", () => {
     ).toBe("/models?tab=discover&type=video&kind=checkpoint&intent=sequence");
   });
 
+  it("does not treat a restored 19B dev checkpoint as sequence-capable before inventory loads", async () => {
+    useGenerateForm().state.value.model = "ltx-2-19b-dev:fp8";
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const sequence = wrapper
+      .findAll("[data-test='composer-mode'] button")
+      .find((button) => button.text() === "Sequence")!;
+    await sequence.trigger("click");
+
+    expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
+  });
+
   it("prepares a batch on the server and queues provenance on every sibling", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();

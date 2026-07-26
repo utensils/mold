@@ -154,5 +154,17 @@ describe("ChainJobCard retake controls", () => {
     );
     await failedWrapper.get("[data-test='chain-job-dismiss']").trigger("click");
     expect(failedWrapper.emitted("dismiss")).toBeTruthy();
+
+    const interrupted = job("cut");
+    interrupted.state = "interrupted";
+    const interruptedWrapper = mount(ChainJobCard, {
+      props: { job: interrupted },
+    });
+    expect(
+      interruptedWrapper.find("[data-test='chain-job-resume']").exists(),
+    ).toBe(true);
+    expect(
+      interruptedWrapper.find("[data-test='chain-job-dismiss']").exists(),
+    ).toBe(false);
   });
 });

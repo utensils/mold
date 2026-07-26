@@ -89,13 +89,15 @@ pub fn compute_limits(model: &str, family: &str, quant: &str, free_vram_bytes: u
     let recommended = cap;
 
     const MAX_STAGES: u32 = 16;
-    let has_spatial_upscaler = mold_core::manifest::find_manifest(model).is_some_and(|manifest| {
-        manifest
-            .files
-            .iter()
-            .any(|file| file.component == mold_core::manifest::ModelComponent::SpatialUpscaler)
-    });
-    let sequence = sequence_support(model, family, has_spatial_upscaler);
+    let canonical_model = mold_core::manifest::resolve_model_name(model);
+    let has_spatial_upscaler =
+        mold_core::manifest::find_manifest(&canonical_model).is_some_and(|manifest| {
+            manifest
+                .files
+                .iter()
+                .any(|file| file.component == mold_core::manifest::ModelComponent::SpatialUpscaler)
+        });
+    let sequence = sequence_support(&canonical_model, family, has_spatial_upscaler);
     ChainLimits {
         model: model.to_string(),
         frames_per_clip_cap: cap,
@@ -179,6 +181,16 @@ mod tests {
                 .is_some_and(|reason| reason.contains("two-stage")),
             "the UI needs an actionable pipeline-specific reason",
         );
+    }
+
+    #[test]
+    fn ltx2_dev_legacy_alias_keeps_two_stage_sequence_gate() {
+        let limits = compute_limits("ltx-2.3-22b-dev-fp8", "ltx2", "fp8", 0);
+        assert!(!limits.supports_sequence);
+        assert!(limits
+            .sequence_unsupported_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("two-stage")));
     }
 
     #[test]

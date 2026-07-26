@@ -517,7 +517,7 @@ const supportsChain = computed(() => {
   if (currentFamily.value === "ltx-video") return true;
   if (currentFamily.value !== "ltx2") return false;
 
-  return !model.includes("22b-dev");
+  return !model.includes("-dev");
 });
 
 const gpuListForPlacement = computed(

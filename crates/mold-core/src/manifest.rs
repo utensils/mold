@@ -3320,12 +3320,14 @@ pub fn resolve_model_name(input: &str) -> String {
     if input == "qwen-image-edit" {
         return "qwen-image-edit-2511:q8".to_string();
     }
-    // Legacy format: flux-dev-q4 -> flux-dev:q4
+    // Legacy format: flux-dev-q4 -> flux-dev:q4 and
+    // ltx-2.3-22b-dev-fp8 -> ltx-2.3-22b-dev:fp8.
     if let Some((base, suffix)) = input.rsplit_once('-') {
-        if suffix.starts_with('q')
+        let legacy_quant = (suffix.starts_with('q')
             && suffix.len() <= 3
-            && suffix[1..].chars().all(|c| c.is_ascii_digit())
-        {
+            && suffix[1..].chars().all(|c| c.is_ascii_digit()))
+            || matches!(suffix, "fp8" | "fp16" | "bf16");
+        if legacy_quant {
             return format!("{base}:{suffix}");
         }
     }
@@ -5303,6 +5305,10 @@ mod tests {
     fn resolve_name_legacy_format() {
         assert_eq!(resolve_model_name("flux-dev-q4"), "flux-dev:q4");
         assert_eq!(resolve_model_name("flux-dev-q8"), "flux-dev:q8");
+        assert_eq!(
+            resolve_model_name("ltx-2.3-22b-dev-fp8"),
+            "ltx-2.3-22b-dev:fp8"
+        );
     }
 
     #[test]

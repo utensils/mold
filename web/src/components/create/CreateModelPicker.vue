@@ -65,7 +65,7 @@ function onChange(event: Event) {
     <select
       class="mp__select"
       data-test="model-select"
-      :value="model"
+      :value="groups.length === 0 ? '' : model"
       aria-label="Model"
       @change="onChange"
     >

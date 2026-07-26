@@ -25,6 +25,9 @@ const active = computed(
 const resumable = computed(() =>
   ["failed", "interrupted", "cancelled"].includes(props.job.state),
 );
+const dismissible = computed(() =>
+  ["completed", "failed", "cancelled"].includes(props.job.state),
+);
 
 watch(
   () => props.job.state,
@@ -122,7 +125,7 @@ async function retake(stageIdx: number, mode: "cascade" | "splice") {
           {{ actionBusy === "cancel" ? "Cancelling…" : "Cancel" }}
         </button>
         <button
-          v-else
+          v-else-if="dismissible"
           data-test="chain-job-dismiss"
           class="rounded border border-ce px-2 py-1 text-xs text-rebate"
           @click="emit('dismiss')"
