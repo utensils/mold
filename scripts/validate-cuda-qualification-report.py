@@ -5,9 +5,11 @@ JSON Schema describes the wire shape; this validator enforces cross-field
 relationships that must never be inferred from a caller-set boolean.
 """
 
+import hashlib
 import json
 import re
 import sys
+from pathlib import Path
 
 
 def fail(message: str) -> None:
@@ -21,7 +23,7 @@ if len(sys.argv) != 2:
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 
-if report.get("schema_version") != "mold.cuda.sm86.qualification.v3":
+if report.get("schema_version") != "mold.cuda.sm86.qualification.v4":
     fail("unexpected schema_version")
 if not re.fullmatch(r"[0-9a-f]{40}", report.get("source_sha", "")):
     fail("invalid source_sha")
@@ -84,10 +86,30 @@ for name, media_kind in required_tests.items():
         if media_kind == "video" and result.get("frame_count", 0) < 1:
             fail(f"{name} has no decoded frames")
 
-if tests.get("sm86_ptx_image_smoke", {}).get("status") == "passed" and not tests[
-    "sm86_ptx_image_smoke"
-].get("cuda_force_ptx_jit"):
-    fail("sm86 PTX regression passed without CUDA_FORCE_PTX_JIT=1")
+ptx_result = tests.get("sm86_ptx_image_smoke", {})
+if ptx_result.get("status") == "passed":
+    if not ptx_result.get("embedded_ptx_module_loaded"):
+        fail("sm86 PTX regression passed without loading exact embedded PTX")
+    expected_probe_sha = ptx_result.get("embedded_ptx_probe_sha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_probe_sha):
+        fail("sm86 PTX regression lacks exact probe evidence checksum")
+    probe_path = Path(ptx_result.get("embedded_ptx_probe_path", ""))
+    if not probe_path.is_file():
+        fail("sm86 PTX regression probe evidence is missing")
+    actual_probe_sha = hashlib.sha256(probe_path.read_bytes()).hexdigest()
+    if actual_probe_sha != expected_probe_sha:
+        fail("sm86 PTX regression probe evidence checksum mismatch")
+    try:
+        probe = json.loads(probe_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        fail("sm86 PTX regression probe evidence is not valid JSON")
+    if (
+        probe.get("expected_target") != "sm_86"
+        or not probe.get("loaded")
+        or probe.get("artifact_sha256") != sm86.get("actual_sha256")
+        or not any(attempt.get("loaded") for attempt in probe.get("attempts", []))
+    ):
+        fail("sm86 PTX regression probe does not bind a loaded module to the artifact")
 
 if report.get("hardware_qualified"):
     if not report.get("provenance", {}).get("official_release_manifest_verified"):

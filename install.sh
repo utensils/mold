@@ -138,7 +138,7 @@ visible_compute_caps() {
     )" || return 1
 
     SELECTED_UUIDS="|"
-    printf '%s\n' "${SELECTORS}" | while IFS= read -r SELECTOR; do
+    while IFS= read -r SELECTOR; do
         if printf '%s\n' "${SELECTOR}" | grep -q '^MIG-'; then
             MATCHED_PARENTS="$(printf '%s\n' "${NORMALIZED_MIG_INVENTORY}" \
                 | awk -F',' -v selector="${SELECTOR}" '
@@ -178,7 +178,9 @@ visible_compute_caps() {
                 SELECTED_UUIDS="${SELECTED_UUIDS}${MATCH_UUID}|"
                 ;;
         esac
-    done
+    done <<EOF
+${SELECTORS}
+EOF
 }
 
 select_cuda_arch_for_caps() {

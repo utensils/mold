@@ -25,12 +25,37 @@ grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' <<<"$elf_header" \
 # Candle/cudarc embeds generated PTX as ordinary strings in the final Mold
 # executable. nvcc-created cubins can exist in intermediate archives but are
 # dead-stripped when no final symbol references them, so cuobjdump correctly
-# reports no device-code sections for the shipped artifact. Verify the exact
-# PTX target that the driver will JIT from the final executable itself.
+# reports no device-code sections for the shipped artifact.
+#
+# Published packages currently have a strict single-target policy. A future
+# fat-PTX package must add an explicit allowed target set here and corresponding
+# release routing/tests; silently accepting any additional target would make
+# the filename's compatibility claim untrue.
+allowed_ptx_targets="sm_${compute_cap}"
 embedded_strings="$scratch_dir/embedded-strings"
 strings -a "$binary" >"$embedded_strings"
-if ! grep -Eq "(^|[^[:alnum:]_])\\.target[[:space:]]+sm_${compute_cap}([^[:alnum:]_]|$)" "$embedded_strings"; then
-  echo "CUDA release binary does not embed exact sm_${compute_cap} PTX for driver JIT" >&2
+ptx_directives="$scratch_dir/ptx-directives"
+# The embedded SPA can contain unrelated JavaScript such as
+# `.target instanceof`. PTX architecture operands are the `sm_*` directives;
+# enumerate all of those and reject any malformed operand below.
+grep -Eo '\.target[[:space:]]+sm_[^[:space:][:cntrl:]]+' \
+  "$embedded_strings" >"$ptx_directives" || true
+if [[ ! -s "$ptx_directives" ]]; then
+  echo "CUDA release binary does not embed any PTX target directives" >&2
+  exit 1
+fi
+observed_ptx_targets="$scratch_dir/observed-ptx-targets"
+while IFS= read -r directive; do
+  target="$(awk '{ print $2 }' <<<"$directive")"
+  if [[ ! "$target" =~ ^sm_[0-9]+$ ]]; then
+    echo "CUDA release binary contains malformed PTX target directive: $directive" >&2
+    exit 1
+  fi
+  printf '%s\n' "$target"
+done <"$ptx_directives" | sort -u >"$observed_ptx_targets"
+observed_set="$(paste -sd, "$observed_ptx_targets")"
+if [[ "$observed_set" != "$allowed_ptx_targets" ]]; then
+  echo "CUDA release binary PTX target set is {$observed_set}; allowed set is {$allowed_ptx_targets}" >&2
   exit 1
 fi
 

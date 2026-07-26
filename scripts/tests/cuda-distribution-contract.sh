@@ -76,7 +76,11 @@ require_text "scripts/verify-cuda-release-binary.sh" \
 require_text "scripts/verify-cuda-release-binary.sh" \
   'strings -a "$binary"'
 require_text "scripts/verify-cuda-release-binary.sh" \
-  'does not embed exact sm_${compute_cap} PTX for driver JIT'
+  'CUDA release binary PTX target set is {$observed_set}; allowed set is {$allowed_ptx_targets}'
+require_text "scripts/probe-cuda-embedded-ptx.py" \
+  'CUDA_ERROR_INVALID_PTX'
+require_text "scripts/probe-cuda-embedded-ptx.py" \
+  '--expect-incompatible'
 if grep -Eq '^[^#]*cuobjdump[[:space:]]+--' "$repo_root/scripts/verify-cuda-release-binary.sh"; then
   fail "final CUDA binary verification must not require dead-stripped cuobjdump sections"
 fi
@@ -203,7 +207,10 @@ chmod +x "$verifier_bin/readelf" "$verifier_bin/ldd"
 cat >"$test_root/verified-mold" <<'EOF'
 #!/usr/bin/env bash
 # nvmlDeviceGetCount_v2
+# .target instanceof
 # .target sm_86
+# .target	sm_86
+# .target   sm_86
 [[ "${1:-}" == version ]]
 EOF
 cat >"$test_root/native-only-mold" <<'EOF'
@@ -219,7 +226,21 @@ for ptx_target in 85 89 860 86x; do
 [[ "\${1:-}" == version ]]
 EOF
 done
+cat >"$test_root/mixed-ptx-mold" <<'EOF'
+#!/usr/bin/env bash
+# nvmlDeviceGetCount_v2
+# .target sm_86
+# .target sm_89
+[[ "${1:-}" == version ]]
+EOF
+cat >"$test_root/malformed-ptx-mold" <<'EOF'
+#!/usr/bin/env bash
+# nvmlDeviceGetCount_v2
+# .target sm_86,
+[[ "${1:-}" == version ]]
+EOF
 chmod +x "$test_root/verified-mold" "$test_root/native-only-mold" \
+  "$test_root/mixed-ptx-mold" "$test_root/malformed-ptx-mold" \
   "$test_root"/wrong-ptx-*-mold
 
 PATH="$verifier_bin:$PATH" \
@@ -235,6 +256,40 @@ for ptx_target in 85 89 860 86x; do
     fail "CUDA verifier accepted wrong PTX target sm_${ptx_target} for sm_86"
   fi
 done
+if PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh "$test_root/mixed-ptx-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted mixed sm_86/sm_89 embedded PTX targets"
+fi
+if PATH="$verifier_bin:$PATH" \
+  scripts/verify-cuda-release-binary.sh "$test_root/malformed-ptx-mold" 86 >/dev/null 2>&1; then
+  fail "CUDA verifier accepted a malformed PTX target directive"
+fi
+
+cat >"$test_root/embedded-ptx-fixture" <<'EOF'
+fixture prefix
+.version 8.0
+.target sm_86
+.address_size 64
+.visible .entry exact_artifact_probe() {
+  ret;
+}
+fixture suffix
+EOF
+chmod +x "$test_root/embedded-ptx-fixture"
+probe_json="$(
+  scripts/probe-cuda-embedded-ptx.py \
+    "$test_root/embedded-ptx-fixture" 86 --extract-only
+)"
+jq -e '
+  .expected_target == "sm_86"
+  and .candidate_count == 1
+  and .candidates[0].ptx_sha256
+' <<<"$probe_json" >/dev/null \
+  || fail "embedded PTX probe did not extract the exact fixture module"
+if scripts/probe-cuda-embedded-ptx.py \
+  "$test_root/embedded-ptx-fixture" 89 --extract-only >/dev/null 2>&1; then
+  fail "embedded PTX probe accepted a target-mismatched fixture"
+fi
 
 if [[ -n "${MOLD_REAL_SM86_BINARY:-}" ]]; then
   PATH="${SYSTEM_PATH:-$PATH}" scripts/verify-cuda-release-binary.sh \

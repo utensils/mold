@@ -3,15 +3,25 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 runner="$repo_root/scripts/qualify-cuda-sm86.sh"
+ptx_probe="$repo_root/scripts/probe-cuda-embedded-ptx.py"
 schema="$repo_root/docs/qualification/cuda-sm86-report.schema.json"
 
 bash -n "$runner"
+[[ -x "$ptx_probe" ]] \
+  || { echo "embedded PTX probe is missing or not executable" >&2; exit 1; }
 help_text="$("$runner" --help)"
-grep -Fq 'sm86/PTX-JIT regression' <<<"$help_text"
-if grep -Fq 'sm89' <<<"$help_text"; then
-  echo "qualification help still claims sm89 can run on RTX 3090" >&2
+grep -Fq 'exact embedded sm86 PTX module' <<<"$help_text"
+if grep -Fq 'CUDA_FORCE_PTX_JIT=1' <<<"$help_text" \
+  || grep -Fq 'CUDA_FORCE_PTX_JIT=1' "$runner"; then
+  echo "qualification still forces every CUDA library through PTX JIT" >&2
   exit 1
 fi
+grep -Fq -- '--query-compute-apps=pid,gpu_uuid' "$runner" \
+  || { echo "qualification does not bind CUDA observations to an exact process PID" >&2; exit 1; }
+grep -Fq 'sm89 artifact is expected to fail on this sm86 hardware' <<<"$help_text" \
+  || { echo "qualification help omits the negative sm89 compatibility invariant" >&2; exit 1; }
+grep -Fq 'never as a positive smoke' <<<"$help_text" \
+  || { echo "qualification help does not reject positive sm89 qualification" >&2; exit 1; }
 jq -e '
   .properties.hardware_qualified.type == "boolean"
   and (.properties.tests.required | index("sm86_attention_image_smoke")) != null
@@ -20,6 +30,9 @@ jq -e '
   and (.properties.tests.required | index("sm86_chained_video_smoke")) != null
   and .properties.host.properties.devices.minItems == 1
   and .properties.artifacts.required == ["sm86"]
+  and .properties.schema_version.const == "mold.cuda.sm86.qualification.v4"
+  and (."$defs".test_result.required | index("embedded_ptx_module_loaded")) != null
+  and (."$defs".test_result.required | index("embedded_ptx_probe_sha256")) != null
   and (.allOf | length) > 0
   and (."$defs".test_result.allOf | length) > 0
 ' "$schema" >/dev/null
@@ -63,7 +76,7 @@ if output="$(
   exit 1
 fi
 grep -Fq 'unknown argument: --sm89-binary' <<<"$output" \
-  || { echo "runner still accepts the impossible sm89-on-3090 qualification input" >&2; exit 1; }
+  || { echo "positive runner accepts the impossible sm89-on-3090 input" >&2; exit 1; }
 [[ ! -e "$report" ]] \
   || { echo "runner wrote a report after rejecting fake artifact identity" >&2; exit 1; }
 
@@ -74,10 +87,88 @@ if "$repo_root/scripts/verify-png-artifact.py" \
   exit 1
 fi
 
+artifact_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+output_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+log_sha="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+probe_path="$test_root/embedded-ptx-probe.json"
+jq -n --arg artifact_sha "$artifact_sha" '{
+  expected_target: "sm_86",
+  artifact_sha256: $artifact_sha,
+  loaded: true,
+  attempts: [{loaded: true, cuda_result: 0}]
+}' >"$probe_path"
+probe_sha="$(sha256sum "$probe_path" | awk '{print $1}')"
+valid_report="$test_root/valid-report.json"
+jq -n \
+  --arg artifact_sha "$artifact_sha" \
+  --arg output_sha "$output_sha" \
+  --arg log_sha "$log_sha" \
+  --arg probe_path "$probe_path" \
+  --arg probe_sha "$probe_sha" '
+  def result($ptx):
+    {
+      status: "passed",
+      exit_code: 0,
+      selected_gpu_uuid: "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      cuda_work_observed: true,
+      media_decoded: true,
+      width: 256,
+      height: 256,
+      frame_count: 1,
+      output_sha256: $output_sha,
+      log_sha256: $log_sha,
+      embedded_ptx_module_loaded: $ptx,
+      embedded_ptx_probe_path: (if $ptx then $probe_path else "" end),
+      embedded_ptx_probe_sha256: (if $ptx then $probe_sha else "" end)
+    };
+  {
+    schema_version: "mold.cuda.sm86.qualification.v4",
+    source_sha: "0000000000000000000000000000000000000000",
+    release_tag: "v0.20.2",
+    hardware_qualified: true,
+    provenance: {official_release_manifest_verified: true},
+    host: {
+      devices: [{
+        uuid: "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        name: "NVIDIA GeForce RTX 3090",
+        compute_capability: "8.6"
+      }]
+    },
+    artifacts: {
+      sm86: {
+        cuda_target: "sm_86",
+        trusted_checksum_verified: true,
+        elf_target_verified: true,
+        ptx_target_verified: true,
+        source_identity_verified: true,
+        expected_sha256: $artifact_sha,
+        actual_sha256: $artifact_sha
+      }
+    },
+    tests: {
+      sm86_attention_image_smoke: result(false),
+      sm86_ptx_image_smoke: result(true),
+      sm86_video_smoke: result(false),
+      sm86_chained_video_smoke: result(false)
+    }
+  }' >"$valid_report"
+"$repo_root/scripts/validate-cuda-qualification-report.py" \
+  "$valid_report" >/dev/null \
+  || { echo "relational validator rejected bound PTX evidence" >&2; exit 1; }
+forged_report="$test_root/forged-report.json"
+jq '.tests.sm86_ptx_image_smoke.embedded_ptx_probe_sha256 =
+  "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' \
+  "$valid_report" >"$forged_report"
+if "$repo_root/scripts/validate-cuda-qualification-report.py" \
+  "$forged_report" >/dev/null 2>&1; then
+  echo "relational validator accepted forged PTX evidence" >&2
+  exit 1
+fi
+
 incomplete="$test_root/incomplete-true.json"
 cat >"$incomplete" <<'EOF'
 {
-  "schema_version": "mold.cuda.sm86.qualification.v3",
+  "schema_version": "mold.cuda.sm86.qualification.v4",
   "source_sha": "0000000000000000000000000000000000000000",
   "release_tag": "v0.20.2",
   "hardware_qualified": true,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://utensils.io/mold/schemas/cuda-sm86-qualification-v3.json",
+  "$id": "https://utensils.io/mold/schemas/cuda-sm86-qualification-v4.json",
   "title": "Mold CUDA sm86 distribution qualification report",
   "type": "object",
   "additionalProperties": false,
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "mold.cuda.sm86.qualification.v3"
+      "const": "mold.cuda.sm86.qualification.v4"
     },
     "source_sha": {
       "type": "string",
@@ -144,7 +144,9 @@
               },
               "then": {
                 "properties": {
-                  "cuda_force_ptx_jit": { "const": true }
+                  "embedded_ptx_module_loaded": { "const": true },
+                  "embedded_ptx_probe_path": { "type": "string", "minLength": 1 },
+                  "embedded_ptx_probe_sha256": { "$ref": "#/$defs/sha256" }
                 }
               }
             }
@@ -243,7 +245,9 @@
         "width",
         "height",
         "frame_count",
-        "cuda_force_ptx_jit"
+        "embedded_ptx_module_loaded",
+        "embedded_ptx_probe_path",
+        "embedded_ptx_probe_sha256"
       ],
       "properties": {
         "status": { "enum": ["passed", "failed", "not_run"] },
@@ -269,7 +273,12 @@
         "width": { "type": "integer", "minimum": 0 },
         "height": { "type": "integer", "minimum": 0 },
         "frame_count": { "type": "integer", "minimum": 0 },
-        "cuda_force_ptx_jit": { "type": "boolean" }
+        "embedded_ptx_module_loaded": { "type": "boolean" },
+        "embedded_ptx_probe_path": { "type": "string" },
+        "embedded_ptx_probe_sha256": {
+          "type": "string",
+          "pattern": "^$|^[0-9a-f]{64}$"
+        }
       },
       "allOf": [
         {

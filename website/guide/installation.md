@@ -67,6 +67,12 @@ JIT. Homogeneous 10.x and 12.x fleets use sm100 and sm120. Compute capability
 because no release tarball is qualified for their floor. Narrow
 `CUDA_VISIBLE_DEVICES` or build from source with verified targets.
 
+PTX compatibility is forward-only toward equal-or-higher device compute
+capabilities. An sm86 artifact can JIT on sm86 or sm89, but sm89 PTX cannot JIT
+backward on an RTX 3090 (sm86). The RTX 3090 distribution gate therefore
+requires a successful sm86 generation and treats the same-source sm89 failure
+as an expected incompatibility regression, not a successful smoke.
+
 `MOLD_VERSION` accepts any tag that exists on the
 [releases page](https://github.com/utensils/mold/releases) — for example
 `v0.8.0` to reproduce an older install. Without it the script follows the

@@ -19,8 +19,15 @@ downloads the exact official release provenance from GitHub; caller-supplied
 hashes are deliberately unsupported. A passing report requires the exact
 verified sm86 Linux artifact with exact embedded PTX, matching source identity,
 decoded 256x256 image/video/chained-video outputs, selected GPU UUID evidence,
-observed CUDA compute work, math attention, and an sm86/PTX-JIT regression
-generation smoke with CUDA_FORCE_PTX_JIT=1.
+observed CUDA compute work from the exact generation PID, math attention, and a
+successful CUDA Driver API load of an exact embedded sm86 PTX module followed
+by normal full-Mold generation.
+
+PTX is compatible only with equal-or-higher device compute capabilities. An
+sm89 artifact is expected to fail on this sm86 hardware and must be recorded as
+a separate negative incompatibility regression, never as a positive smoke.
+Process-wide CUDA_FORCE_PTX_JIT is not used because it also forces NVIDIA
+runtime libraries through JIT and can fail before Mold's own PTX is reached.
 
 This records evidence; it is not a cryptographic attestation service and does
 not provision hardware.
@@ -49,15 +56,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for command in curl ffprobe jq nvidia-smi python3 readelf realpath sha256sum timeout; do
+for command in curl ffprobe jq nvidia-smi pgrep python3 readelf realpath sha256sum timeout; do
   command -v "$command" >/dev/null \
     || { echo "required command is unavailable: $command" >&2; exit 69; }
 done
 [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || { echo "--release-tag must be an exact stable tag such as v0.20.2" >&2; exit 64; }
 [[ -n "$image_model" ]] || { echo "--image-model is required" >&2; exit 64; }
-[[ "$image_model" == flux* ]] \
-  || { echo "--image-model must be an installed FLUX-family model" >&2; exit 64; }
+[[ "$image_model" == flux* && "$image_model" != *:q[0-9]* ]] \
+  || {
+    echo "--image-model must be an installed non-GGUF FLUX-family model so --offload exercises Mold attention" >&2
+    exit 64
+  }
 [[ -n "$video_model" ]] || { echo "--video-model is required" >&2; exit 64; }
 [[ -f "$chain_script" ]] || { echo "chain script is missing: $chain_script" >&2; exit 66; }
 [[ -n "$report" ]] || { echo "--report is required" >&2; exit 64; }
@@ -149,41 +159,74 @@ run_smoke() {
   local binary="$2"
   local selected_uuid="$3"
   local media_kind="$4"
-  local force_ptx="$5"
+  local probe_embedded_ptx="$5"
   shift 5
   local output="$1"
   shift
   local log="$evidence_dir/${label}.log"
   local result="$scratch_dir/${label}.json"
+  local ptx_probe_path=""
+  local ptx_probe_sha256=""
+  local ptx_probe_exit=0
+  local embedded_ptx_module_loaded=false
   local -a env_args=(
     CUDA_VISIBLE_DEVICES="$selected_uuid"
     MOLD_ATTN=math
     MOLD_LOG=info
     MOLD_DB_DISABLE=1
   )
-  if [[ "$force_ptx" == true ]]; then
-    env_args+=(CUDA_FORCE_PTX_JIT=1)
-  fi
   local -a command=("$binary" "$@" --output "$output")
   local rendered_command
   printf -v rendered_command '%q ' env "${env_args[@]}" "${command[@]}"
+
+  if [[ "$probe_embedded_ptx" == true ]]; then
+    ptx_probe_path="$evidence_dir/${label}-embedded-ptx.json"
+    local rendered_probe
+    printf -v rendered_probe '%q ' env "CUDA_VISIBLE_DEVICES=$selected_uuid" \
+      "$repo_root/scripts/probe-cuda-embedded-ptx.py" "$binary" 86
+    rendered_command="${rendered_probe}&& ${rendered_command}"
+    set +e
+    timeout "$timeout_seconds" env "CUDA_VISIBLE_DEVICES=$selected_uuid" \
+      "$repo_root/scripts/probe-cuda-embedded-ptx.py" "$binary" 86 \
+      >"$ptx_probe_path" 2>&1
+    ptx_probe_exit=$?
+    set -e
+    if [[ "$ptx_probe_exit" -eq 0 ]] \
+      && jq -e '.expected_target == "sm_86" and .loaded == true' \
+        "$ptx_probe_path" >/dev/null; then
+      embedded_ptx_module_loaded=true
+    fi
+    ptx_probe_sha256="$(sha256sum "$ptx_probe_path" | awk '{print $1}')"
+  fi
 
   set +e
   timeout "$timeout_seconds" env "${env_args[@]}" "${command[@]}" >"$log" 2>&1 &
   local run_pid=$!
   local compute_observed=false
   while kill -0 "$run_pid" 2>/dev/null; do
+    local observed_pids="|${run_pid}|"
+    local child_pid
+    while IFS= read -r child_pid; do
+      [[ -n "$child_pid" ]] && observed_pids="${observed_pids}${child_pid}|"
+    done < <(pgrep -P "$run_pid" 2>/dev/null || true)
     if nvidia-smi \
-      --query-compute-apps=gpu_uuid \
+      --query-compute-apps=pid,gpu_uuid \
       --format=csv,noheader,nounits 2>/dev/null \
-      | grep -Fxq "$selected_uuid"; then
+      | awk -F', ' -v pids="$observed_pids" -v uuid="$selected_uuid" '
+          index(pids, "|" $1 "|") && $2 == uuid { found = 1 }
+          END { exit !found }
+        '; then
       compute_observed=true
     fi
     sleep 0.1
   done
   wait "$run_pid"
-  local exit_code=$?
+  local generation_exit_code=$?
   set -e
+  local exit_code="$generation_exit_code"
+  if [[ "$probe_embedded_ptx" == true && "$ptx_probe_exit" -ne 0 ]]; then
+    exit_code="$ptx_probe_exit"
+  fi
 
   local status=failed
   local media_decoded=false
@@ -215,7 +258,9 @@ run_smoke() {
   fi
   if [[ "$media_decoded" == true ]] \
     && { [[ "$media_kind" != image ]] \
-      || { grep -Fq "attention backend selected" "$log" && grep -Eiq "math" "$log"; }; }; then
+      || { grep -Fq "attention backend selected" "$log" && grep -Eiq "math" "$log"; }; } \
+    && { [[ "$probe_embedded_ptx" != true ]] \
+      || [[ "$embedded_ptx_module_loaded" == true ]]; }; then
     status=passed
   fi
 
@@ -237,7 +282,9 @@ run_smoke() {
     --argjson width "$width" \
     --argjson height "$height" \
     --argjson frame_count "$frame_count" \
-    --argjson cuda_force_ptx_jit "$force_ptx" \
+    --argjson embedded_ptx_module_loaded "$embedded_ptx_module_loaded" \
+    --arg embedded_ptx_probe_path "$ptx_probe_path" \
+    --arg embedded_ptx_probe_sha256 "$ptx_probe_sha256" \
     '{
       status: $status,
       exit_code: $exit_code,
@@ -248,12 +295,14 @@ run_smoke() {
       log_sha256: $log_sha256,
       selected_gpu_uuid: $selected_gpu_uuid,
       cuda_work_observed: $cuda_work_observed,
-      cuda_work_evidence: "nvidia-smi compute-app observation plus Mold CUDA-device log",
+      cuda_work_evidence: "exact generation PID and selected UUID observed together via nvidia-smi, plus Mold CUDA-device log",
       media_decoded: $media_decoded,
       width: $width,
       height: $height,
       frame_count: $frame_count,
-      cuda_force_ptx_jit: $cuda_force_ptx_jit
+      embedded_ptx_module_loaded: $embedded_ptx_module_loaded,
+      embedded_ptx_probe_path: $embedded_ptx_probe_path,
+      embedded_ptx_probe_sha256: $embedded_ptx_probe_sha256
     }' >"$result"
 }
 
@@ -262,11 +311,11 @@ uuid1="${device_uuids[1]:-${device_uuids[0]}}"
 run_smoke sm86_attention_image_smoke "$sm86_binary" "$uuid0" image false \
   "$evidence_dir/sm86_attention_image_smoke.png" \
   run "$image_model" "mold CUDA qualification calibration frame" \
-  --local --width 256 --height 256 --steps 12 --seed 424242
+  --local --offload --width 256 --height 256 --steps 12 --seed 424242
 run_smoke sm86_ptx_image_smoke "$sm86_binary" "$uuid1" image true \
   "$evidence_dir/sm86_ptx_image_smoke.png" \
   run "$image_model" "mold CUDA PTX JIT qualification frame" \
-  --local --width 256 --height 256 --steps 12 --seed 424243
+  --local --offload --width 256 --height 256 --steps 12 --seed 424243
 run_smoke sm86_video_smoke "$sm86_binary" "$uuid0" video false \
   "$evidence_dir/sm86_video_smoke.mp4" \
   run "$video_model" "mold CUDA qualification video" \
@@ -311,7 +360,7 @@ jq -n \
   --argjson tests "$tests_json" \
   --argjson hardware_qualified "$hardware_qualified" \
   '{
-    schema_version: "mold.cuda.sm86.qualification.v3",
+    schema_version: "mold.cuda.sm86.qualification.v4",
     source_sha: $source_sha,
     release_tag: $release_tag,
     started_at: $started_at,

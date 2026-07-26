@@ -242,6 +242,39 @@ assert_inventory_rejected "$mig_inventory" MIG-1 \
 assert_inventory_rejected "$mig_inventory" MIG-unknown \
   "matched 0 CUDA devices" "$mig_listing"
 
+# Exercise the helper directly so duplicate selectors must collapse to one
+# capability row, not merely happen to choose the same archive.
+visible_helper="$(
+  awk '
+    /^visible_compute_caps\(\) \{/ { capture = 1 }
+    capture { print }
+    capture && /^}/ { exit }
+  ' "$repo_root/install.sh"
+)"
+if grep -Fq 'printf '\''%s\n'\'' "${SELECTORS}" | while' "$repo_root/install.sh"; then
+  echo "visible selector dedupe still relies on pipeline-subshell mutation" >&2
+  exit 1
+fi
+eval "$visible_helper"
+duplicate_physical_caps="$(
+  CUDA_VISIBLE_DEVICES="0,GPU-00000000000000000000000000000000,0" \
+    visible_compute_caps "$mig_inventory" "$mig_listing"
+)"
+[[ "$duplicate_physical_caps" == "10.0" ]] \
+  || {
+    echo "duplicate physical selectors were not collapsed: $duplicate_physical_caps" >&2
+    exit 1
+  }
+duplicate_mig_parent_caps="$(
+  CUDA_VISIBLE_DEVICES="MIG-11111111-1111-1111-1111-111111111111,0" \
+    visible_compute_caps "$mig_inventory" "$mig_listing"
+)"
+[[ "$duplicate_mig_parent_caps" == "10.0" ]] \
+  || {
+    echo "duplicate MIG/physical parent selectors were not collapsed: $duplicate_mig_parent_caps" >&2
+    exit 1
+  }
+
 homogeneous_64=""
 for index in $(seq 0 63); do
   homogeneous_64="${homogeneous_64}${homogeneous_64:+
