@@ -1606,7 +1606,7 @@ async fn run_queue_dispatcher_with_tuning(
                     .job_registry
                     .set_target_gpu(&job_id, Some(worker.gpu.ordinal));
             }
-            match worker.job_tx.try_send(pending) {
+            match worker.try_send_job(Box::new(pending)) {
                 Ok(()) => {
                     dispatched = true;
                 }
@@ -1615,7 +1615,7 @@ async fn run_queue_dispatcher_with_tuning(
                     if preferred_gpu.is_none() {
                         let _ = state.job_registry.set_target_gpu(&job_id, None);
                     }
-                    gpu_job = Some(j);
+                    gpu_job = Some(*j);
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                         if skip.len() >= state.gpu_pool.worker_count().max(1) {
@@ -1635,7 +1635,7 @@ async fn run_queue_dispatcher_with_tuning(
                         gpu = worker.gpu.ordinal,
                         "GPU worker disconnected — retrying dispatch"
                     );
-                    gpu_job = Some(j);
+                    gpu_job = Some(*j);
                     if preferred_gpu.is_none() {
                         skip.push(worker.gpu.ordinal);
                     } else {
@@ -1803,7 +1803,7 @@ mod tests {
         channel_size: usize,
     ) -> (
         Arc<GpuWorker>,
-        std::sync::mpsc::Receiver<crate::gpu_pool::GpuJob>,
+        std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
     ) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(channel_size);
         let worker = Arc::new(GpuWorker {
@@ -1830,10 +1830,23 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: RwLock::new(None),
             job_tx,
         });
         (worker, job_rx)
+    }
+
+    fn recv_worker_job(
+        rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+        timeout: std::time::Duration,
+    ) -> Result<crate::gpu_pool::GpuJob, std::sync::mpsc::RecvTimeoutError> {
+        match rx.recv_timeout(timeout)? {
+            crate::gpu_pool::GpuWorkerCommand::Grant(job) => Ok(*job),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => {
+                panic!("unexpected worker shutdown command")
+            }
+        }
     }
 
     fn empty_test_state(config: mold_core::Config) -> crate::state::AppState {
@@ -2694,7 +2707,7 @@ mod tests {
             events: state.events.clone(),
             lease: None,
         };
-        worker.job_tx.send(filler_job).unwrap();
+        worker.send_job(filler_job).unwrap();
 
         let dispatcher = tokio::spawn(run_queue_dispatcher_with_tuning(
             job_rx,
@@ -2723,8 +2736,7 @@ mod tests {
         let _filler = worker_rx
             .recv()
             .expect("filler job should occupy the local channel");
-        let dispatched = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(1))
             .expect("queued job should dispatch once capacity is available");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
@@ -2775,8 +2787,7 @@ mod tests {
         worker.consecutive_failures.store(0, Ordering::SeqCst);
         *worker.degraded_until.write().unwrap() = None;
 
-        let dispatched = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(1))
             .expect("queued job should dispatch once a worker recovers");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
@@ -3114,8 +3125,7 @@ mod tests {
 
         let mut order = Vec::new();
         for _ in 0..4 {
-            let dispatched = worker_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+            let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(2))
                 .expect("worker should receive the dispatched job");
             order.push(dispatched.model);
         }
@@ -3191,8 +3201,7 @@ mod tests {
 
         let mut order = Vec::new();
         for _ in 0..3 {
-            let dispatched = worker_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+            let dispatched = recv_worker_job(&worker_rx, std::time::Duration::from_secs(2))
                 .expect("worker should receive the dispatched job");
             order.push(dispatched.model);
         }
@@ -3305,7 +3314,7 @@ mod tests {
         let drainer = std::thread::spawn(move || {
             let mut order = Vec::new();
             while order.len() < 10 {
-                match worker_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                match recv_worker_job(&worker_rx, std::time::Duration::from_secs(5)) {
                     Ok(j) => {
                         drain_worker.in_flight.fetch_sub(1, Ordering::SeqCst);
                         order.push(j.model);
@@ -3468,8 +3477,7 @@ mod tests {
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
-        let dispatched = rx1
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx1, std::time::Duration::from_secs(1))
             .expect("explicit placement should route to gpu 1");
         assert_eq!(dispatched.model, "flux-dev:q4");
         assert!(rx0.try_recv().is_err(), "gpu 0 should not receive the job");
@@ -3507,10 +3515,10 @@ mod tests {
         };
         let _position = queue.submit(job, 8).await.unwrap();
 
-        let (dispatched, ordinal) = match rx0.recv_timeout(std::time::Duration::from_secs(1)) {
+        let (dispatched, ordinal) = match recv_worker_job(&rx0, std::time::Duration::from_secs(1)) {
             Ok(job) => (job, 0),
             Err(_) => (
-                rx1.recv_timeout(std::time::Duration::from_secs(1))
+                recv_worker_job(&rx1, std::time::Duration::from_secs(1))
                     .expect("auto job should dispatch to one GPU"),
                 1,
             ),
@@ -3563,8 +3571,7 @@ mod tests {
 
         // Resume → the queued job dispatches.
         assert!(state.queue_pause.resume());
-        let dispatched = rx0
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx0, std::time::Duration::from_secs(1))
             .expect("resumed dispatcher should dispatch the queued job");
         assert_eq!(dispatched.model, "flux-dev:q4");
 
@@ -3614,8 +3621,7 @@ mod tests {
         );
 
         assert!(state.queue_pause.resume());
-        let dispatched = rx0
-            .recv_timeout(std::time::Duration::from_secs(1))
+        let dispatched = recv_worker_job(&rx0, std::time::Duration::from_secs(1))
             .expect("resume should release the held job");
         assert_eq!(dispatched.model, "flux-dev:q4");
 

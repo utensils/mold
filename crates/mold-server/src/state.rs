@@ -205,6 +205,14 @@ pub struct AppState {
     /// against server reality and dead-letter zombies whose SSE stream
     /// silently dropped.
     pub job_registry: SharedJobRegistry,
+    /// Serializes queue mutations with the scheduler's final lease claim.
+    ///
+    /// The registry's own lock protects each edit, but the scheduler also
+    /// needs pause state and its final worker send to be one transaction.
+    /// Mutation routes await this fence before returning, so a successful
+    /// response is an acknowledgement that no older plan can still grant the
+    /// pre-mutation state.
+    pub scheduler_mutation_fence: Arc<tokio::sync::Mutex<()>>,
     /// Dispatch pause gate toggled by `POST /api/queue/pause` /
     /// `POST /api/queue/resume`. The dispatch loops park on this at the top of
     /// each iteration; a job already running on a worker finishes untouched.
@@ -443,6 +451,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -482,6 +491,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -550,6 +560,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -591,6 +602,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -632,6 +644,7 @@ impl AppState {
             pull_lock: Arc::new(Mutex::new(())),
             queue,
             job_registry: JobRegistry::with_events(events.clone()),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(SharedPool::new())),
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),

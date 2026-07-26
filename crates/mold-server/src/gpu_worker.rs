@@ -1,4 +1,4 @@
-use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker};
+use crate::gpu_pool::{ActiveGeneration, GpuJob, GpuWorker, GpuWorkerCommand};
 use crate::model_cache::ModelResidency;
 use crate::queue::{
     apply_upscale_response_to_image_generation, build_sse_completion_message, clean_error_message,
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Returns the JoinHandle (caller should keep it alive).
 pub fn spawn_gpu_thread(
     worker: Arc<GpuWorker>,
-    job_rx: std::sync::mpsc::Receiver<GpuJob>,
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
     scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
     cache_idle_ttl: Duration,
 ) -> std::thread::JoinHandle<()> {
@@ -36,6 +36,11 @@ pub fn spawn_gpu_thread(
             let device_id = crate::scheduler::worker_device_id(&worker);
             let mut generation = 1_u64;
             'owner: loop {
+                if worker.shutdown_requested.load(Ordering::SeqCst)
+                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
+                {
+                    break;
+                }
                 if scheduler_tx
                     .send(crate::scheduler::WorkerEvent::Ready {
                         device_id: device_id.clone(),
@@ -46,22 +51,43 @@ pub fn spawn_gpu_thread(
                 {
                     break;
                 }
-                let job = loop {
+                let command = loop {
                     match job_rx.recv_timeout(Duration::from_secs(60)) {
-                        Ok(job) => break job,
+                        Ok(command) => break command,
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if worker.shutdown_requested.load(Ordering::SeqCst)
+                                || worker.fatal_cuda_error.load(Ordering::SeqCst)
+                            {
+                                break 'owner;
+                            }
                             evict_idle_on_worker(&worker, cache_idle_ttl);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break 'owner,
                     }
                 };
+                let job = match command {
+                    GpuWorkerCommand::Grant(job) => job,
+                    GpuWorkerCommand::Shutdown => break,
+                };
+                if worker.shutdown_requested.load(Ordering::SeqCst)
+                    || worker.fatal_cuda_error.load(Ordering::SeqCst)
+                {
+                    let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                        device_id: device_id.clone(),
+                        ordinal: worker.gpu.ordinal,
+                        worker_generation: generation,
+                        job,
+                        reason: crate::scheduler::LeaseRejection::FatalCuda,
+                    });
+                    break;
+                }
                 if let Some(fence) = job.lease.as_ref() {
                     if fence.device_id != device_id || fence.worker_generation != generation {
                         let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                             device_id: device_id.clone(),
                             ordinal: worker.gpu.ordinal,
                             worker_generation: generation,
-                            job: Box::new(job),
+                            job,
                             reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
                         });
                         continue;
@@ -75,7 +101,7 @@ pub fn spawn_gpu_thread(
                     });
                 }
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_job(&worker, job);
+                    process_job(&worker, *job, &scheduler_tx);
                 }));
                 if outcome.is_err() {
                     // A panic may have crossed arbitrary Candle/cudarc state.
@@ -208,7 +234,10 @@ pub(crate) fn ensure_worker_not_poisoned(
     worker: &GpuWorker,
     model_name: &str,
 ) -> anyhow::Result<()> {
-    if worker.poisoned.load(Ordering::SeqCst) {
+    if worker.poisoned.load(Ordering::SeqCst)
+        || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        || worker.shutdown_requested.load(Ordering::SeqCst)
+    {
         anyhow::bail!(fatal_cuda_user_message(model_name));
     }
     Ok(())
@@ -375,7 +404,11 @@ fn cuda_oom_user_message(
     (base, true)
 }
 
-fn process_job(worker: &GpuWorker, job: GpuJob) {
+fn process_job(
+    worker: &GpuWorker,
+    job: GpuJob,
+    scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+) {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
     let job_id = job.id.clone();
@@ -405,7 +438,10 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
     // Jobs may already be buffered in this worker's channel when a preceding
     // job kills the context. Fail them without touching CUDA, including jobs
     // explicitly pinned to this ordinal.
-    if worker.poisoned.load(Ordering::SeqCst) {
+    if worker.poisoned.load(Ordering::SeqCst)
+        || worker.fatal_cuda_error.load(Ordering::SeqCst)
+        || worker.shutdown_requested.load(Ordering::SeqCst)
+    {
         let err_msg = fatal_cuda_user_message(&model_name);
         if let Some(ref tx) = job.progress_tx {
             let _ = tx.send(SseMessage::Error(SseErrorEvent {
@@ -425,7 +461,12 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Mark the registry entry as running on this specific GPU. The /api/queue
     // listing now shows this row as `state: "running"` with `gpu: <ordinal>`.
-    job.registry.mark_running(&job_id, Some(ordinal));
+    // The V2 coordinator claims the row atomically before transport. Legacy
+    // single-dispatcher tests/adapters carry no lease and retain the old
+    // worker-side promotion until that adapter is removed.
+    if job.lease.is_none() {
+        job.registry.mark_running(&job_id, Some(ordinal));
+    }
 
     tracing::info!(gpu = ordinal, model = %model_name, "dispatched job");
 
@@ -492,6 +533,30 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
         if count_worker_failure {
             record_failure(worker);
         }
+        return;
+    }
+
+    // This is the first real allocation boundary: model readiness has
+    // completed, so host allocations owned by this lease now exist. The
+    // coordinator keeps the reservation charged until a memory sample whose
+    // collection began after this commit can reflect it.
+    if let Some(lease) = job.lease.as_ref() {
+        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::AllocationCommitted {
+            device_id: lease.device_id.clone(),
+            work_id: lease.work_id.clone(),
+            worker_generation: lease.worker_generation,
+        });
+    }
+
+    if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
+        let err_msg = error.to_string();
+        if let Some(ref tx) = job.progress_tx {
+            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                message: err_msg.clone(),
+            }));
+        }
+        let _ = job.result_tx.send(Err(err_msg));
+        worker.in_flight.fetch_sub(1, Ordering::SeqCst);
         return;
     }
 
@@ -584,6 +649,7 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
 
     // Run inference — cache mutex is FREE during this.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ensure_worker_not_poisoned(worker, &model_name)?;
         cached_engine.engine.generate(&job.request)
     }));
 
@@ -696,6 +762,16 @@ fn process_job(worker: &GpuWorker, job: GpuJob) {
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                 {
+                    if let Err(error) = ensure_worker_not_poisoned(worker, &model_name) {
+                        let err_msg = error.to_string();
+                        if let Some(ref tx) = job.progress_tx {
+                            let _ = tx.send(SseMessage::Error(SseErrorEvent {
+                                message: err_msg.clone(),
+                            }));
+                        }
+                        let _ = job.result_tx.send(Err(err_msg));
+                        return;
+                    }
                     let upscale_result = upscale_generated_image_on_worker(
                         worker,
                         &job,
@@ -1505,7 +1581,7 @@ mod tests {
     }
 
     fn single_worker_pool_with_parked(model: &str, load_sleep: Duration) -> Arc<GpuWorker> {
-        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(2);
+        let (job_tx, _job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(2);
         let mut cache = ModelCache::new(3);
         // Seed as Parked so `ensure_model_ready_sync` hits its reload path
         // and calls `engine.load()` — that's where the sleep widens the window.
@@ -1534,6 +1610,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: RwLock::new(None),
             job_tx,
         })
@@ -1574,9 +1651,45 @@ mod tests {
         }
     }
 
+    fn protocol_worker(
+        ordinal: usize,
+        fatal_cuda_error: Arc<AtomicBool>,
+    ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = Arc::new(GpuWorker {
+            gpu: DiscoveredGpu {
+                ordinal,
+                stable_id: Some(format!("cuda:{:032x}", ordinal + 1)),
+                raw_cuda_uuid: Some(((ordinal + 1) as u128).to_be_bytes()),
+                device_kind: Some(mold_inference::device::CudaDeviceKind::FullGpu),
+                identity_error: None,
+                backend: mold_core::GpuBackend::Cuda,
+                name: format!("protocol-test-{ordinal}"),
+                compute_capability: Some((8, 6)),
+                pci_bus_id: None,
+                total_vram_bytes: 24 << 30,
+                free_vram_bytes: 24 << 30,
+            },
+            model_cache: Arc::new(Mutex::new(ModelCache::new(1))),
+            resident_model: Arc::new(RwLock::new(None)),
+            active_generation: Arc::new(RwLock::new(None)),
+            model_load_lock: Arc::new(Mutex::new(())),
+            shared_pool: Arc::new(Mutex::new(SharedPool::new())),
+            in_flight: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            fatal_cuda_error,
+            fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
+            degraded_until: RwLock::new(None),
+            job_tx,
+        });
+        (worker, job_rx)
+    }
+
     #[test]
     fn worker_rejects_stale_generation_before_touching_inference() {
-        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuJob>(1);
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
         let worker = Arc::new(GpuWorker {
             gpu: DiscoveredGpu {
                 ordinal: 0,
@@ -1601,6 +1714,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: RwLock::new(None),
             job_tx,
         });
@@ -1622,8 +1736,7 @@ mod tests {
         let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
         let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
         worker
-            .job_tx
-            .send(GpuJob {
+            .send_job(GpuJob {
                 id: "stale".to_string(),
                 model: request.model.clone(),
                 request,
@@ -1663,7 +1776,7 @@ mod tests {
         // Wake the worker once after the coordinator receiver is gone. Its
         // rejection send fails and the next Ready publication terminates the
         // owner loop without ever entering `process_job`.
-        worker.job_tx.send(returned).unwrap();
+        worker.send_job(returned).unwrap();
         handle
             .join()
             .expect("worker exits when coordinator is gone");
@@ -1701,6 +1814,68 @@ mod tests {
             dropped_on.lock().unwrap().as_deref(),
             Some("gpu-worker-test")
         );
+    }
+
+    #[test]
+    fn shared_fatal_flag_rejects_transported_grant_before_accept_or_cuda() {
+        let fatal = Arc::new(AtomicBool::new(false));
+        let (worker, job_rx) = protocol_worker(1, fatal.clone());
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                worker_generation: 1,
+                ..
+            })
+        ));
+
+        fatal.store(true, Ordering::SeqCst);
+        let mut job = fake_upscale_job(Config::default(), "unused");
+        job.id = "buffered-after-sibling-fatal".to_string();
+        job.lease = Some(crate::scheduler::LeaseFence {
+            work_id: job.id.clone(),
+            device_id: crate::scheduler::worker_device_id(&worker),
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        });
+        worker.send_job(job).unwrap();
+
+        match event_rx.blocking_recv().expect("fatal rejection") {
+            crate::scheduler::WorkerEvent::Rejected {
+                reason: crate::scheduler::LeaseRejection::FatalCuda,
+                job,
+                ..
+            } => assert_eq!(job.id, "buffered-after-sibling-fatal"),
+            crate::scheduler::WorkerEvent::Accepted { .. } => {
+                panic!("fatal-fenced worker must not accept a transported grant")
+            }
+            _ => panic!("expected fatal rejection"),
+        }
+        handle.join().expect("fatal-fenced owner exits");
+    }
+
+    #[test]
+    fn owner_threads_join_cleanly_across_in_process_restart() {
+        for ordinal in 0..2 {
+            let (worker, job_rx) = protocol_worker(ordinal, Arc::new(AtomicBool::new(false)));
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let handle =
+                spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+            assert!(matches!(
+                event_rx.blocking_recv(),
+                Some(crate::scheduler::WorkerEvent::Ready { .. })
+            ));
+            worker.request_shutdown();
+            handle.join().expect("owner thread must join on shutdown");
+            assert!(
+                event_rx.blocking_recv().is_none(),
+                "owner must drop its coordinator sender before restart"
+            );
+        }
     }
 
     #[test]
@@ -1796,6 +1971,7 @@ mod tests {
         registry.register("buffered-job", request.model.clone());
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         process_job(
             &worker,
             GpuJob {
@@ -1813,6 +1989,7 @@ mod tests {
                 events: crate::events::EventBroadcaster::new(),
                 lease: None,
             },
+            &event_tx,
         );
 
         let result = match result_rx.await.unwrap() {

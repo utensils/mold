@@ -491,6 +491,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: RwLock::new(None),
             job_tx,
         })
@@ -1380,6 +1381,36 @@ mod tests {
             .unwrap();
         let body = json_body(resp).await;
         assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn queue_mutation_response_waits_for_scheduler_transaction_fence() {
+        let (state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        let fence = state.scheduler_mutation_fence.clone().lock_owned().await;
+        let app = app_with_state(state);
+
+        let mutation = tokio::spawn(async move {
+            app.oneshot(
+                Request::delete("/api/queue/aaaa")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !mutation.is_finished(),
+            "mutation route must not acknowledge before the scheduler fence"
+        );
+
+        drop(fence);
+        let response = tokio::time::timeout(Duration::from_secs(1), mutation)
+            .await
+            .expect("mutation must resume after the scheduler fence")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -3727,6 +3758,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -3794,6 +3826,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),
@@ -4064,6 +4097,7 @@ mod tests {
             pull_lock: Arc::new(tokio::sync::Mutex::new(())),
             queue,
             job_registry: crate::job_registry::JobRegistry::new(),
+            scheduler_mutation_fence: Arc::new(tokio::sync::Mutex::new(())),
             queue_pause: crate::queue::QueuePause::new(),
             shared_pool: Arc::new(std::sync::Mutex::new(
                 mold_inference::shared_pool::SharedPool::new(),

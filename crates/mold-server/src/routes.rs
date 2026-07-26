@@ -2492,6 +2492,11 @@ async fn patch_queue_job(
         }
     }
 
+    // A mutation response is also the scheduler acknowledgement: the final
+    // lease claim takes this same fence, so no plan built from the old lane or
+    // order can grant after this guard is acquired.
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+
     // Both edits are independent and additive — apply whichever the request
     // supplied. `target_gpu` only when the field was present (absent leaves the
     // lane untouched); `position` only when a reorder was requested.
@@ -2554,6 +2559,7 @@ async fn cancel_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     state.job_registry.cancel_queued(&id).map_err(|e| match e {
         crate::job_registry::QueuedJobCancelError::NotFound => {
             ApiError::queue_job_not_found(format!("queue job {id} not found"))
@@ -2590,6 +2596,7 @@ struct QueueCancelAllResponse {
     )
 )]
 async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     if state.queue_pause.pause() {
         state.events.publish(mold_core::ServerEvent::QueuePaused);
     }
@@ -2607,6 +2614,7 @@ async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> 
     )
 )]
 async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     if state.queue_pause.resume() {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
@@ -2626,6 +2634,7 @@ async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse>
     )
 )]
 async fn cancel_all_queue(State(state): State<AppState>) -> Json<QueueCancelAllResponse> {
+    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
     let cancelled = state.job_registry.cancel_all_queued();
     Json(QueueCancelAllResponse { cancelled })
 }

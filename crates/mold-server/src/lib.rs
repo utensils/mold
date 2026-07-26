@@ -125,7 +125,7 @@ pub async fn run_server(
     );
 
     let mut workers = Vec::new();
-    let mut _gpu_thread_handles = Vec::new();
+    let mut gpu_thread_handles = Vec::new();
     let (scheduler_worker_tx, scheduler_worker_rx) =
         tokio::sync::mpsc::unbounded_channel::<scheduler::WorkerEvent>();
 
@@ -152,6 +152,7 @@ pub async fn run_server(
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: fatal_cuda_error.clone(),
             fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: std::sync::RwLock::new(None),
             job_tx,
         });
@@ -162,7 +163,7 @@ pub async fn run_server(
             scheduler_worker_tx.clone(),
             cache_idle_ttl,
         );
-        _gpu_thread_handles.push(handle);
+        gpu_thread_handles.push(handle);
         workers.push(worker);
     }
 
@@ -447,22 +448,25 @@ pub async fn run_server(
     // Spawn queue worker: use multi-GPU dispatcher if GPUs are available,
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
-    match startup_mode {
-        StartupMode::GpuWorkers => {
-            tokio::spawn(scheduler::run_scheduler_coordinator(
-                job_rx,
-                scheduler_worker_rx,
-                worker_state,
-            ));
-        }
+    let scheduler_shutdown = tokio_util::sync::CancellationToken::new();
+    let uses_gpu_scheduler = startup_mode == StartupMode::GpuWorkers;
+    let generation_worker_handle = match startup_mode {
+        StartupMode::GpuWorkers => Some(tokio::spawn(scheduler::run_scheduler_coordinator(
+            job_rx,
+            scheduler_worker_rx,
+            worker_state,
+            scheduler_shutdown.clone(),
+        ))),
         StartupMode::CpuFallback => {
-            tokio::spawn(queue::run_queue_worker(job_rx, worker_state));
+            drop(scheduler_worker_rx);
+            Some(tokio::spawn(queue::run_queue_worker(job_rx, worker_state)))
         }
         StartupMode::Maintenance => {
             drop(job_rx);
             drop(scheduler_worker_rx);
+            None
         }
-    }
+    };
 
     // Background idle-TTL sweeper: reclaims parked engines that haven't been
     // touched for `MOLD_CACHE_IDLE_TTL_SECS` seconds. Abort handle bound to
@@ -727,6 +731,32 @@ pub async fn run_server(
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();
+    scheduler_shutdown.cancel();
+    if let Some(generation_worker_handle) = generation_worker_handle {
+        if !uses_gpu_scheduler {
+            // The CPU/legacy worker predates the coordinator cancellation
+            // protocol. Abort and await it explicitly so in-process restart never
+            // inherits a detached queue task.
+            generation_worker_handle.abort();
+        }
+        let _ = generation_worker_handle.await;
+    }
+    // Also issue shutdown from the owner even if the coordinator panicked
+    // before its normal teardown path.
+    for worker in &gpu_pool.workers {
+        worker.request_shutdown();
+    }
+    // The coordinator sends an explicit shutdown command to every idle owner
+    // and sets the shared flag for any owner finishing a current lease.
+    // Joining here makes an in-process server restart incapable of inheriting
+    // detached CUDA owner threads or contexts.
+    tokio::task::spawn_blocking(move || {
+        for handle in gpu_thread_handles {
+            let _ = handle.join();
+        }
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to join GPU owner threads: {error}"))?;
 
     if fatal_cuda_error.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::bail!("fatal CUDA context error; server restart required");

@@ -117,6 +117,18 @@ pub enum QueueReorderError {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchClaimError {
+    NotFound,
+    NotQueued,
+}
+
+#[derive(Debug)]
+pub(crate) enum DispatchAttemptError<T> {
+    Claim(DispatchClaimError, T),
+    Transport(T),
+}
+
 /// The registry itself. Construct via `JobRegistry::new` and share through
 /// `AppState`. All mutation is fire-and-forget — if the inner lock is
 /// poisoned (extremely unlikely in practice) we recover from the inner
@@ -298,6 +310,71 @@ impl JobRegistry {
                 model,
                 gpu,
             });
+        }
+    }
+
+    /// Claim a queued row for one scheduler grant.
+    ///
+    /// The scheduler holds `AppState::scheduler_mutation_fence` across this
+    /// claim and the nonblocking worker send. Queue mutation routes take the
+    /// same fence, so once this returns, cancel/reorder/retarget observes
+    /// `Running` and cannot race the transported grant.
+    pub(crate) fn dispatch_if_queued<T>(
+        &self,
+        id: &str,
+        gpu: usize,
+        payload: T,
+        send: impl FnOnce(T) -> Result<(), T>,
+    ) -> Result<Option<usize>, DispatchAttemptError<T>> {
+        let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+            return Err(DispatchAttemptError::Claim(
+                DispatchClaimError::NotFound,
+                payload,
+            ));
+        };
+        if entry.state != JobLifecycle::Queued {
+            return Err(DispatchAttemptError::Claim(
+                DispatchClaimError::NotQueued,
+                payload,
+            ));
+        }
+        let previous_target = entry.target_gpu;
+        if let Err(payload) = send(payload) {
+            return Err(DispatchAttemptError::Transport(payload));
+        }
+        entry.state = JobLifecycle::Running;
+        entry.gpu = Some(gpu);
+        entry.target_gpu = None;
+        let model = entry.model.clone();
+        drop(entries);
+        self.mark_mutated();
+        self.emit(ServerEvent::JobStarted {
+            id: id.to_string(),
+            model,
+            gpu: Some(gpu),
+        });
+        Ok(previous_target)
+    }
+
+    pub(crate) fn requeue_rejected_dispatch(&self, id: &str, target_gpu: Option<usize>) {
+        let restored = {
+            let mut entries = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+                .is_some_and(|entry| {
+                    if entry.state != JobLifecycle::Running {
+                        return false;
+                    }
+                    entry.state = JobLifecycle::Queued;
+                    entry.gpu = None;
+                    entry.target_gpu = target_gpu;
+                    true
+                })
+        };
+        if restored {
+            self.mark_mutated();
         }
     }
 
@@ -538,6 +615,38 @@ mod tests {
         let snap = reg.snapshot();
         assert_eq!(snap.entries[0].state, JobLifecycle::Running);
         assert_eq!(snap.entries[0].gpu, Some(1));
+    }
+
+    #[test]
+    fn atomic_dispatch_marks_running_only_after_transport_accepts() {
+        let reg = JobRegistry::new();
+        reg.register_with_target_gpu("a", "flux-dev:fp16", Some(2));
+
+        let previous_target = reg
+            .dispatch_if_queued("a", 1, "payload", |_| Ok(()))
+            .expect("transport accepted");
+
+        assert_eq!(previous_target, Some(2));
+        let entry = reg.entry("a").unwrap();
+        assert_eq!(entry.state, JobLifecycle::Running);
+        assert_eq!(entry.gpu, Some(1));
+        assert_eq!(entry.target_gpu, None);
+    }
+
+    #[test]
+    fn failed_atomic_dispatch_preserves_queued_state_and_target() {
+        let reg = JobRegistry::new();
+        reg.register_with_target_gpu("a", "flux-dev:fp16", Some(2));
+
+        let error = reg
+            .dispatch_if_queued("a", 1, "payload", Err)
+            .expect_err("transport rejected");
+
+        assert!(matches!(error, DispatchAttemptError::Transport("payload")));
+        let entry = reg.entry("a").unwrap();
+        assert_eq!(entry.state, JobLifecycle::Queued);
+        assert_eq!(entry.gpu, None);
+        assert_eq!(entry.target_gpu, Some(2));
     }
 
     #[test]

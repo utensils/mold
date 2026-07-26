@@ -128,8 +128,11 @@ pub struct GpuWorker {
     /// supervised servers restart after `run_server` returns an error.
     pub fatal_cuda_error: Arc<AtomicBool>,
     pub fatal_cuda_shutdown: Arc<tokio::sync::Notify>,
+    /// Explicit owner-thread shutdown. The command wakes an idle blocking
+    /// receiver; the flag also fences a grant that was already transported.
+    pub shutdown_requested: AtomicBool,
     pub degraded_until: RwLock<Option<Instant>>,
-    pub job_tx: std::sync::mpsc::SyncSender<GpuJob>,
+    pub job_tx: std::sync::mpsc::SyncSender<GpuWorkerCommand>,
 }
 
 /// Tracks the currently active generation on a GPU worker.
@@ -172,6 +175,59 @@ pub struct GpuJob {
     /// scheduler after the worker published the matching Ready generation.
     /// `None` exists only for legacy unit tests and the single-GPU adapter.
     pub lease: Option<crate::scheduler::LeaseFence>,
+}
+
+pub enum GpuWorkerCommand {
+    Grant(Box<GpuJob>),
+    Shutdown,
+}
+
+impl GpuWorker {
+    pub(crate) fn try_send_job(
+        &self,
+        job: Box<GpuJob>,
+    ) -> Result<(), std::sync::mpsc::TrySendError<Box<GpuJob>>> {
+        self.job_tx
+            .try_send(GpuWorkerCommand::Grant(job))
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Grant(job)) => {
+                    std::sync::mpsc::TrySendError::Full(job)
+                }
+                std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(job)) => {
+                    std::sync::mpsc::TrySendError::Disconnected(job)
+                }
+                std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown)
+                | std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Shutdown) => {
+                    unreachable!("try_send_job only transports Grant")
+                }
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_job(
+        &self,
+        job: GpuJob,
+    ) -> Result<(), std::sync::mpsc::SendError<Box<GpuJob>>> {
+        self.job_tx
+            .send(GpuWorkerCommand::Grant(Box::new(job)))
+            .map_err(|error| match error.0 {
+                GpuWorkerCommand::Grant(job) => std::sync::mpsc::SendError(job),
+                GpuWorkerCommand::Shutdown => unreachable!("send_job only transports Grant"),
+            })
+    }
+
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+        match self.job_tx.try_send(GpuWorkerCommand::Shutdown) {
+            Ok(())
+            | Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Shutdown))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Shutdown)) => {}
+            Err(std::sync::mpsc::TrySendError::Full(GpuWorkerCommand::Grant(_)))
+            | Err(std::sync::mpsc::TrySendError::Disconnected(GpuWorkerCommand::Grant(_))) => {
+                unreachable!("request_shutdown only transports Shutdown")
+            }
+        }
+    }
 }
 
 /// Pool of GPU workers with placement strategy.
@@ -501,7 +557,7 @@ mod tests {
     fn test_worker(
         ordinal: usize,
         total_vram_bytes: u64,
-    ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuJob>) {
+    ) -> (Arc<GpuWorker>, std::sync::mpsc::Receiver<GpuWorkerCommand>) {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel(2);
         let worker = Arc::new(GpuWorker {
             gpu: DiscoveredGpu {
@@ -527,6 +583,7 @@ mod tests {
             poisoned: AtomicBool::new(false),
             fatal_cuda_error: Arc::new(AtomicBool::new(false)),
             fatal_cuda_shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_requested: AtomicBool::new(false),
             degraded_until: RwLock::new(None),
             job_tx,
         });
