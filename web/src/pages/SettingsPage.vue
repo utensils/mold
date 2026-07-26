@@ -47,12 +47,16 @@ const emptyCredentialStatus = (): CatalogCredentialStatus => ({
 const saved = ref<CatalogCredentialStatus>(emptyCredentialStatus());
 const hfMasked = computed(() => saved.value.hf.masked);
 const civitaiMasked = computed(() => saved.value.civitai.masked);
-const hfEnvironmentManaged = computed(
-  () => saved.value.hf.source === "environment",
+const hfHasSavedOverride = computed(() => saved.value.hf.source === "server");
+const civitaiHasSavedOverride = computed(
+  () => saved.value.civitai.source === "server",
 );
-const civitaiEnvironmentManaged = computed(
-  () => saved.value.civitai.source === "environment",
-);
+const credentialSourceLabel = (source: "environment" | "server" | null) =>
+  source === "server"
+    ? "Saved override"
+    : source === "environment"
+      ? "Environment"
+      : "";
 
 // Draft inputs, only shown while entering/replacing a token.
 const hfDraft = ref("");
@@ -163,16 +167,15 @@ const version = computed(() => status.value?.version ?? "—");
         <div v-if="hfMasked && !editingHf" class="field" data-test="hf-saved">
           <code class="token-mask" data-test="hf-mask">{{ hfMasked }}</code>
           <button
-            v-if="!hfEnvironmentManaged"
             type="button"
             class="btn"
             data-test="replace-hf"
             @click="editingHf = true"
           >
-            Replace
+            {{ hfHasSavedOverride ? "Replace" : "Override" }}
           </button>
           <button
-            v-if="!hfEnvironmentManaged"
+            v-if="hfHasSavedOverride"
             type="button"
             class="btn btn--ghost"
             data-test="clear-hf"
@@ -180,7 +183,9 @@ const version = computed(() => status.value?.version ?? "—");
           >
             Clear
           </button>
-          <span v-if="hfEnvironmentManaged" class="env-badge">Environment</span>
+          <span class="env-badge" data-test="hf-source">{{
+            credentialSourceLabel(saved.hf.source)
+          }}</span>
         </div>
         <div v-else class="field">
           <input
@@ -193,7 +198,6 @@ const version = computed(() => status.value?.version ?? "—");
             class="input"
           />
           <button
-            v-if="!civitaiEnvironmentManaged"
             type="button"
             class="btn"
             data-test="save-hf"
@@ -225,15 +229,15 @@ const version = computed(() => status.value?.version ?? "—");
             civitaiMasked
           }}</code>
           <button
-            v-if="!civitaiEnvironmentManaged"
             type="button"
             class="btn"
             data-test="replace-civitai"
             @click="editingCivitai = true"
           >
-            Replace
+            {{ civitaiHasSavedOverride ? "Replace" : "Override" }}
           </button>
           <button
+            v-if="civitaiHasSavedOverride"
             type="button"
             class="btn btn--ghost"
             data-test="clear-civitai"
@@ -241,9 +245,9 @@ const version = computed(() => status.value?.version ?? "—");
           >
             Clear
           </button>
-          <span v-if="civitaiEnvironmentManaged" class="env-badge"
-            >Environment</span
-          >
+          <span class="env-badge" data-test="civitai-source">{{
+            credentialSourceLabel(saved.civitai.source)
+          }}</span>
         </div>
         <div v-else class="field">
           <input
@@ -277,7 +281,8 @@ const version = computed(() => status.value?.version ?? "—");
 
       <p class="settings__note">
         Tokens are stored privately on this server and used only for catalog
-        discovery and downloads. Environment variables take precedence.
+        discovery and downloads. Saved tokens override environment defaults;
+        clear an override to use the environment value again.
       </p>
     </CardSurface>
 

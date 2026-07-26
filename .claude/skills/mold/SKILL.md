@@ -855,6 +855,10 @@ Metrics include: HTTP request rates/latency, generation duration, queue depth, m
 | `MOLD_EXPAND_BATCH_PROMPT`            | unset                             | Custom batch-variation system prompt template                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `HF_TOKEN`                            | unset                             | HuggingFace token for gated models                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
+For the web server, `HF_TOKEN` and `CIVITAI_TOKEN` are defaults. A credential
+saved in web Settings overrides the matching environment value until the saved
+override is cleared.
+
 ## Inference Modes
 
 1. **Remote** (default): connects to `mold serve` via HTTP

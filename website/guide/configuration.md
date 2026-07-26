@@ -225,9 +225,10 @@ Environment variables take precedence over config file values.
 
 ### Auth
 
-| Variable   | Default | Description                        |
-| ---------- | ------- | ---------------------------------- |
-| `HF_TOKEN` | —       | HuggingFace token for gated models |
+| Variable        | Default | Description                                                                             |
+| --------------- | ------- | --------------------------------------------------------------------------------------- |
+| `HF_TOKEN`      | —       | Default Hugging Face token for gated models; web Settings can override it until cleared |
+| `CIVITAI_TOKEN` | —       | Default Civitai token for gated models; web Settings can override it until cleared      |
 
 ### Gallery Metadata Database
 

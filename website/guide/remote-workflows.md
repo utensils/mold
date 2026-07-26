@@ -69,9 +69,10 @@ SDK or manage login, ACLs, MagicDNS, or certificates. See the
 1. `mold pull` models on the GPU host, not from every client machine.
 2. Keep the server running so models stay warm between requests.
 3. Use `mold ps` to confirm the client can reach the server.
-4. Set `HF_TOKEN` / `CIVITAI_TOKEN` on the server for gated models, or open
-   that server's web Settings and save its owner-only catalog credentials
-   there. For remote catalog searches and pulls, the desktop can also send its
+4. Set default `HF_TOKEN` / `CIVITAI_TOKEN` values on the server for gated
+   models, or open that server's web Settings and save owner-only catalog
+   credential overrides there. Clearing a saved override returns to the server
+   default. For remote catalog searches and pulls, the desktop can also send its
    local token as a request-scoped fallback when the server has no working
    token; the server's own credential remains first.
    The iPhone has no separate token editor or forwarding store, so its selected

@@ -193,6 +193,54 @@ describe("SettingsPage", () => {
     ).toBe(true);
   });
 
+  it("lets a server-saved token override an environment fallback and clear back to it", async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation(async (input, init) => {
+      const environment = {
+        hf: {
+          configured: true,
+          source: "environment",
+          masked: "hf_••••base",
+        },
+        civitai: { configured: false, source: null, masked: null },
+      };
+      const override = {
+        hf: {
+          configured: true,
+          source: "server",
+          masked: "hf_••••ride",
+        },
+        civitai: { configured: false, source: null, masked: null },
+      };
+      return {
+        ok: true,
+        json: async () => {
+          if (String(input).endsWith("/profiles"))
+            return { profiles: ["default"], active: "default" };
+          if (init?.method === "PUT") return override;
+          return environment;
+        },
+      } as Response;
+    });
+
+    const wrapper = mount(SettingsPage);
+    await flushPromises();
+    expect(wrapper.get('[data-test="hf-source"]').text()).toBe("Environment");
+    await wrapper.get('[data-test="replace-hf"]').trigger("click");
+    await wrapper.get("input[name=hf_token]").setValue("hf_user_override");
+    await wrapper.get('[data-test="save-hf"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-test="hf-mask"]').text()).toBe("hf_••••ride");
+    expect(wrapper.get('[data-test="hf-source"]').text()).toBe(
+      "Saved override",
+    );
+
+    await wrapper.get('[data-test="clear-hf"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-test="hf-mask"]').text()).toBe("hf_••••base");
+    expect(wrapper.get('[data-test="hf-source"]').text()).toBe("Environment");
+  });
+
   it("keeps the token in the field when the server rejects the save", async () => {
     const wrapper = mount(SettingsPage);
     await flushPromises();

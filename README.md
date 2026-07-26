@@ -113,6 +113,7 @@ Settings exposes the serving engine's complete configuration and profile
 surface with search, per-key provenance, environment-override locks, typed
 editors, and individual reset controls; prompt-expansion preferences are
 available there alongside appearance and server-owned catalog credentials.
+Saved catalog tokens override host environment defaults until they are cleared.
 
 ## Desktop app
 
