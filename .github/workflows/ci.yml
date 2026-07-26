@@ -74,10 +74,17 @@ jobs:
               - 'nix/**'
               - 'packaging/**'
               - 'crates/mold-cli/Cargo.toml'
+              - 'crates/mold-cli/src/commands/lambda.rs'
+              - 'crates/mold-cli/src/commands/runpod.rs'
+              - 'crates/mold-core/src/cuda_distribution.rs'
+              - 'crates/mold-server/Cargo.toml'
               - 'desktop/src-tauri/Cargo.toml'
+              - 'desktop/src-tauri/src/runpod.rs'
               - 'release-plz.toml'
               - 'website/deployment/docker.md'
+              - 'website/deployment/nixos.md'
               - 'website/guide/installation.md'
+              - '.github/workflows/desktop-distribution.yml'
               - '.github/workflows/release.yml'
               - 'scripts/release/**'
               - 'scripts/verify-cuda-release-binary.sh'
@@ -88,6 +95,7 @@ jobs:
               - 'scripts/verify-png-artifact.py'
               - 'scripts/tests/ci-coverage-disk-guard.sh'
               - 'scripts/tests/cuda-distribution-contract.sh'
+              - 'scripts/tests/cuda-ptx-parser-contract.py'
               - 'scripts/tests/install-cuda-arch.sh'
               - 'scripts/tests/cuda-qualification-contract.sh'
               - 'scripts/qualify-cuda-sm86.sh'
@@ -111,6 +119,8 @@ jobs:
         run: bash scripts/tests/docker-web-context.sh
       - name: Test CUDA distribution contract
         run: bash scripts/tests/cuda-distribution-contract.sh
+      - name: Test embedded PTX parser contract
+        run: python3 scripts/tests/cuda-ptx-parser-contract.py
       - name: Test installer CUDA architecture selection
         run: bash scripts/tests/install-cuda-arch.sh
       - name: Test deferred CUDA qualification contract

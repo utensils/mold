@@ -15,6 +15,22 @@ require_text() {
     || fail "$file is missing: $text"
 }
 
+require_ci_release_path() {
+  local path="$1"
+  local block
+
+  block="$(
+    awk '
+      $0 == "            release:" { in_release = 1; next }
+      in_release && /^            [[:alnum:]_-]+:$/ { exit }
+      in_release { print }
+    ' "$repo_root/.github/workflows/ci.yml"
+  )"
+  [[ -n "$block" ]] || fail ".github/workflows/ci.yml has no release path classifier"
+  grep -Fq -- "- '${path}'" <<<"$block" \
+    || fail ".github/workflows/ci.yml release classifier is missing: $path"
+}
+
 require_release_job_text() {
   local job="$1"
   local text="$2"
@@ -136,6 +152,12 @@ provenance_checksum_line="$(
 
 for phase_g_path in \
   .github/workflows/desktop-distribution.yml \
+  website/deployment/nixos.md \
+  crates/mold-cli/src/commands/lambda.rs \
+  crates/mold-cli/src/commands/runpod.rs \
+  desktop/src-tauri/src/runpod.rs \
+  crates/mold-core/src/cuda_distribution.rs \
+  crates/mold-server/Cargo.toml \
   scripts/verify-cuda-release-binary.sh \
   scripts/probe-cuda-embedded-ptx.py \
   scripts/create-release-provenance.sh \
@@ -147,7 +169,7 @@ for phase_g_path in \
   scripts/tests/cuda-ptx-parser-contract.py \
   scripts/tests/install-cuda-arch.sh \
   scripts/tests/cuda-qualification-contract.sh; do
-  require_text ".github/workflows/ci.yml" "- '${phase_g_path}'"
+  require_ci_release_path "$phase_g_path"
 done
 
 require_text "flake.nix" 'mold-sm86 = mkMold "86";'

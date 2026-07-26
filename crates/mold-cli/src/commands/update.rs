@@ -61,11 +61,22 @@ fn is_newer(current: &str, remote: &str) -> bool {
 fn detect_asset_name() -> Result<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
+    let cuda_arch = match (os, arch) {
+        ("linux", "x86_64") => Some(detect_cuda_arch()?),
+        _ => None,
+    };
+    detect_asset_name_for_platform(os, arch, cuda_arch.as_deref())
+}
 
+fn detect_asset_name_for_platform(os: &str, arch: &str, cuda_arch: Option<&str>) -> Result<String> {
     match (os, arch) {
         ("macos", "aarch64") => Ok("mold-aarch64-apple-darwin.tar.gz".to_string()),
         ("linux", "x86_64") => {
-            let cuda_arch = detect_cuda_arch()?;
+            let cuda_arch = cuda_arch
+                .context("Linux x86_64 release selection requires an injected CUDA architecture")?;
+            if !is_release_arch(cuda_arch) {
+                bail!("unsupported CUDA release architecture: {cuda_arch}");
+            }
             Ok(format!(
                 "mold-x86_64-unknown-linux-gnu-cuda-{cuda_arch}.tar.gz"
             ))
@@ -659,13 +670,27 @@ mod tests {
     // ── Platform detection ──────────────────────────────────────────────
 
     #[test]
-    fn test_detect_asset_name_current_platform() {
-        let name = detect_asset_name();
-        // This test just verifies it returns a valid result on the current platform
+    fn test_detect_asset_name_current_platform_without_gpu_probe() {
+        let injected_cuda_arch =
+            cfg!(all(target_os = "linux", target_arch = "x86_64")).then_some("sm89");
+        let name = detect_asset_name_for_platform(
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            injected_cuda_arch,
+        );
         assert!(name.is_ok(), "detect_asset_name failed: {name:?}");
         let name = name.unwrap();
         assert!(name.starts_with("mold-"));
         assert!(name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn linux_asset_detection_is_hermetic_and_requires_an_injected_arch() {
+        assert_eq!(
+            detect_asset_name_for_platform("linux", "x86_64", Some("sm86")).unwrap(),
+            "mold-x86_64-unknown-linux-gnu-cuda-sm86.tar.gz"
+        );
+        assert!(detect_asset_name_for_platform("linux", "x86_64", None).is_err());
     }
 
     // ── Tarball extraction ──────────────────────────────────────────────
