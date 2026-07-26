@@ -60,7 +60,10 @@ persistent configuration because ordinals are process-local. Maintenance mode
 keeps inventory, telemetry, downloads, and settings available but rejects
 generation and model-load requests.
 Use `mold gpu list`, `mold gpu disable <ID>`, and `mold gpu enable <ID>` for
-runtime administration. Busy devices drain their current generation before
+runtime administration when `/api/capabilities.devices.lifecycle` is true.
+That flag is true only while authoritative scheduler V2 owns live GPU workers;
+legacy, observe, CPU-fallback, and maintenance runtimes are read-only and
+reject lifecycle mutation. Busy devices drain their current generation before
 disabling; startup-excluded devices require a restart.
 Scheduler admission uses each device's sampled free VRAM rather than total
 capacity and freezes a concrete per-component execution plan before dispatch.

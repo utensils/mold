@@ -1,14 +1,52 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   parseQueueListing,
+  predictedCompletionUnixMs,
   reduceQueuePlanEvent,
   setQueueDevicePin,
+  type QueuePlan,
   type QueueListing,
 } from "./queuePlan";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("queue plan contract", () => {
+  const plan = (finish: number | null): QueuePlan => ({
+    plan_version: 1,
+    state_version: 1,
+    optimizer_state: "optimized",
+    dirty_since_unix_ms: null,
+    next_replan_at_unix_ms: null,
+    work_items: [
+      {
+        work_id: "job-1",
+        parent_id: "job-1",
+        work_kind: "generation",
+        priority_class: "user",
+        queue_rank: 0,
+        bypass_count: 0,
+        estimated_finish_unix_ms: finish,
+        estimate_confidence: "low",
+      },
+    ],
+  });
+
+  it("keeps a plan with no finite finish estimate unknown", () => {
+    expect(predictedCompletionUnixMs(plan(null), 50_000)).toBeNull();
+    expect(
+      predictedCompletionUnixMs(
+        { ...plan(null), work_items: [] },
+        50_000,
+      ),
+    ).toBeNull();
+    expect(predictedCompletionUnixMs(plan(Number.NaN), 50_000)).toBeNull();
+  });
+
+  it("clamps a known finish to now without inventing an unknown estimate", () => {
+    expect(predictedCompletionUnixMs(plan(40_000), 50_000)).toBe(50_000);
+    expect(predictedCompletionUnixMs(plan(60_000), 50_000)).toBe(60_000);
+  });
+
   it("preserves legacy queue responses without a plan", () => {
     const listing = parseQueueListing({
       entries: [

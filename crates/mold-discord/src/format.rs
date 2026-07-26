@@ -14,6 +14,12 @@ const COLOR_SUCCESS: u32 = 0x57F287; // green
 const COLOR_INFO: u32 = 0x5865F2; // blurple
 const COLOR_WARNING: u32 = 0xFEE75C; // yellow
 const COLOR_ERROR: u32 = 0xED4245; // red
+const DISCORD_EMBED_TITLE_MAX: usize = 256;
+const DISCORD_EMBED_DESCRIPTION_MAX: usize = 4096;
+const DISCORD_EMBED_FIELD_NAME_MAX: usize = 256;
+const DISCORD_EMBED_FIELD_VALUE_MAX: usize = 1024;
+const DISCORD_EMBED_FIELDS_MAX: usize = 25;
+const DISCORD_EMBED_TOTAL_MAX: usize = 6000;
 
 /// Format an SSE progress event into a human-readable status line.
 pub fn format_progress(event: &SseProgressEvent) -> String {
@@ -266,6 +272,20 @@ pub fn format_server_status_with_devices(
     devices: Option<&mold_core::DeviceState>,
     queue: Option<&mold_core::QueueListingWire>,
 ) -> EmbedData {
+    format_server_status_pages(status, devices, queue)
+        .into_iter()
+        .next()
+        .expect("status formatting always emits at least one page")
+}
+
+/// Discord caps every field and every embed independently. A 64-device host
+/// cannot fit in one legal embed, so status is deterministically paginated as
+/// one embed per follow-up message.
+pub fn format_server_status_pages(
+    status: &ServerStatus,
+    devices: Option<&mold_core::DeviceState>,
+    queue: Option<&mold_core::QueueListingWire>,
+) -> Vec<EmbedData> {
     let uptime = format_duration_secs(status.uptime_secs);
     let version = match (&status.git_sha, &status.build_date) {
         (Some(sha), Some(date)) => format!("{} ({sha}, {date})", status.version),
@@ -289,7 +309,7 @@ pub fn format_server_status_with_devices(
     ];
 
     if let Some(devices) = devices.filter(|state| !state.devices.is_empty()) {
-        let summary = devices
+        let lines = devices
             .devices
             .iter()
             .map(|device| {
@@ -313,14 +333,21 @@ pub fn format_server_status_with_devices(
                 } else {
                     device.backend.as_str().to_ascii_uppercase()
                 };
-                format!(
-                    "GPU {ordinal} · {} · {kind} · `{}` · {state} · {used}/{total}MB",
-                    device.name, device.id
+                truncate_chars(
+                    &format!(
+                        "GPU {ordinal} · {} · {kind} · `{}` · {state} · {used}/{total}MB",
+                        device.name, device.id
+                    ),
+                    360,
                 )
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        fields.push(("Devices".to_string(), summary, false));
+            .collect::<Vec<_>>();
+        for (index, chunk) in chunk_lines(&lines, DISCORD_EMBED_FIELD_VALUE_MAX)
+            .into_iter()
+            .enumerate()
+        {
+            fields.push((format!("Devices {}", index + 1), chunk, false));
+        }
     } else if let Some(gpus) = status.gpus.as_ref().filter(|gpus| !gpus.is_empty()) {
         let mut groups: Vec<(&str, usize, u64, u64)> = Vec::new();
         for gpu in gpus {
@@ -383,16 +410,126 @@ pub fn format_server_status_with_devices(
         ));
     }
 
-    EmbedData {
-        title: "Server Status".to_string(),
-        description: String::new(),
+    paginate_embed_fields(
+        "Server Status",
+        "",
         fields,
-        color: if status.busy {
+        if status.busy {
             COLOR_WARNING
         } else {
             COLOR_INFO
         },
+    )
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
     }
+    if max <= 3 {
+        return value.chars().take(max).collect();
+    }
+    format!("{}...", value.chars().take(max - 3).collect::<String>())
+}
+
+fn chunk_lines(lines: &[String], max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in lines {
+        for line_chunk in split_chars(line, max_chars) {
+            let separator = usize::from(!current.is_empty());
+            if current.chars().count() + separator + line_chunk.chars().count() > max_chars {
+                chunks.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&line_chunk);
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn split_chars(value: &str, max_chars: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec!["—".into()];
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn paginate_embed_fields(
+    title: &str,
+    description: &str,
+    fields: Vec<(String, String, bool)>,
+    color: u32,
+) -> Vec<EmbedData> {
+    let title = truncate_chars(title, DISCORD_EMBED_TITLE_MAX);
+    let description = truncate_chars(description, DISCORD_EMBED_DESCRIPTION_MAX);
+    let mut normalized = Vec::new();
+    for (name, value, inline) in fields {
+        let name = truncate_chars(&name, DISCORD_EMBED_FIELD_NAME_MAX);
+        let chunks = split_chars(&value, DISCORD_EMBED_FIELD_VALUE_MAX);
+        let chunk_count = chunks.len();
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let chunk_name = if chunk_count == 1 {
+                name.clone()
+            } else {
+                truncate_chars(
+                    &format!("{name} ({}/{chunk_count})", index + 1),
+                    DISCORD_EMBED_FIELD_NAME_MAX,
+                )
+            };
+            normalized.push((chunk_name, chunk, inline && chunk_count == 1));
+        }
+    }
+
+    let mut pages: Vec<Vec<(String, String, bool)>> = vec![Vec::new()];
+    // Reserve the maximum title width so adding "(N/M)" after pagination
+    // cannot push an otherwise-full page over Discord's aggregate cap.
+    let mut page_chars = DISCORD_EMBED_TITLE_MAX + description.chars().count();
+    for field in normalized {
+        let field_chars = field.0.chars().count() + field.1.chars().count();
+        let current = pages.last_mut().expect("status page exists");
+        if !current.is_empty()
+            && (current.len() >= DISCORD_EMBED_FIELDS_MAX
+                || page_chars + field_chars > DISCORD_EMBED_TOTAL_MAX)
+        {
+            pages.push(Vec::new());
+            page_chars = DISCORD_EMBED_TITLE_MAX;
+        }
+        page_chars += field_chars;
+        pages.last_mut().expect("status page exists").push(field);
+    }
+
+    let page_count = pages.len();
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(index, fields)| EmbedData {
+            title: if page_count == 1 {
+                title.clone()
+            } else {
+                truncate_chars(
+                    &format!("{title} ({}/{page_count})", index + 1),
+                    DISCORD_EMBED_TITLE_MAX,
+                )
+            },
+            description: if index == 0 {
+                description.clone()
+            } else {
+                String::new()
+            },
+            fields,
+            color,
+        })
+        .collect()
 }
 
 /// Format an expand result into embed data.
@@ -1008,6 +1145,114 @@ mod tests {
             .iter()
             .any(|(k, v, _)| k == "Models Loaded" && v == "None"));
         assert_eq!(embed.color, COLOR_WARNING);
+    }
+
+    #[test]
+    fn sixty_four_device_status_paginates_within_every_discord_embed_limit() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec!["flux-dev:q8".into()],
+            busy: false,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 60,
+            hostname: Some("fleet".into()),
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(64),
+            queue_capacity: Some(256),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let mut inventory = mold_core::DeviceState {
+            devices: (0..64)
+                .map(|ordinal| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": format!("cuda:{ordinal:032x}"),
+                        "backend": "cuda",
+                        "ordinal": ordinal,
+                        "device_kind": "full_gpu",
+                        "nvml_uuid": null,
+                        "physical_uuid": null,
+                        "mig_uuid": null,
+                        "mig_parent_uuid": null,
+                        "mig_profile": null,
+                        "name": format!("Synthetic accelerator {ordinal}"),
+                        "pci_bus_id": null,
+                        "compute_capability": "10.0",
+                        "memory": {
+                            "total_bytes": 192_u64 * 1024 * 1024 * 1024,
+                            "used_bytes": ordinal as u64 * 1024 * 1024,
+                            "mold_used_bytes": null,
+                            "other_used_bytes": null
+                        },
+                        "telemetry": {
+                            "utilization_percent": ordinal,
+                            "temperature_c": null,
+                            "power_w": null
+                        },
+                        "desired_enabled": true,
+                        "admin_state": "enabled",
+                        "health": "healthy",
+                        "activity": "idle",
+                        "schedulable": true,
+                        "unschedulable_reason": null,
+                        "loaded_models": [],
+                        "active_work_id": null,
+                        "planned_work_ids": []
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            plan_version: 7,
+        };
+        inventory.devices[1].desired_enabled = false;
+        inventory.devices[1].admin_state = mold_core::DeviceAdminState::Disabled;
+        inventory.devices[2].desired_enabled = false;
+        inventory.devices[2].admin_state = mold_core::DeviceAdminState::Draining;
+        inventory.devices[3].health = mold_core::DeviceHealth::Unavailable;
+        inventory.devices[3].schedulable = false;
+        inventory.devices[4].device_kind = mold_core::DeviceKind::Mig;
+        inventory.devices[4].mig_profile = Some("1g.23gb".into());
+
+        let pages = format_server_status_pages(&status, Some(&inventory), None);
+        assert!(pages.len() > 1, "64 detailed devices must paginate");
+        let all_values = pages
+            .iter()
+            .flat_map(|page| page.fields.iter().map(|(_, value, _)| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for ordinal in 0..64 {
+            assert!(
+                all_values.contains(&format!("GPU {ordinal} ·")),
+                "GPU {ordinal} missing from Discord pages"
+            );
+        }
+        assert!(all_values.contains("disabled"));
+        assert!(all_values.contains("finishing current work"));
+        assert!(all_values.contains("unavailable"));
+        assert!(all_values.contains("MIG 1g.23gb"));
+
+        for page in &pages {
+            assert!(page.title.chars().count() <= DISCORD_EMBED_TITLE_MAX);
+            assert!(page.description.chars().count() <= DISCORD_EMBED_DESCRIPTION_MAX);
+            assert!(page.fields.len() <= DISCORD_EMBED_FIELDS_MAX);
+            let total = page.title.chars().count()
+                + page.description.chars().count()
+                + page
+                    .fields
+                    .iter()
+                    .map(|(name, value, _)| {
+                        assert!(name.chars().count() <= DISCORD_EMBED_FIELD_NAME_MAX);
+                        assert!(value.chars().count() <= DISCORD_EMBED_FIELD_VALUE_MAX);
+                        name.chars().count() + value.chars().count()
+                    })
+                    .sum::<usize>();
+            assert!(total <= DISCORD_EMBED_TOTAL_MAX, "{total}");
+        }
     }
 
     #[test]

@@ -1453,6 +1453,11 @@ mod tests {
             workers: vec![worker.clone()],
         });
         install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
         let id = worker.gpu.stable_id.as_deref().unwrap();
         let mut events = state.events.subscribe();
 
@@ -1471,6 +1476,82 @@ mod tests {
             events.try_recv().is_err(),
             "the request response is authoritative; the coordinator owns semantic events"
         );
+    }
+
+    #[tokio::test]
+    async fn device_lifecycle_is_unavailable_without_authoritative_v2_ownership() {
+        use crate::dispatch_mode::DispatchMode;
+
+        for (label, mode, authoritative, observes) in [
+            ("legacy", DispatchMode::Legacy, false, false),
+            ("observe", DispatchMode::Observe, false, true),
+            ("maintenance", DispatchMode::V2, false, false),
+        ] {
+            let worker = gpu_worker_stub(0);
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()],
+            });
+            install_worker_registry(&mut state);
+            state
+                .device_registry
+                .set_desired_enabled(worker.gpu.stable_id.as_deref().unwrap(), false)
+                .unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tx,
+                mode,
+                authoritative,
+                observes,
+            );
+            let id = worker.gpu.stable_id.as_deref().unwrap();
+            let app = app_with_state(state);
+
+            let inventory = app
+                .clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(inventory.status(), StatusCode::OK, "{label}");
+            let inventory = json_body(inventory).await;
+            assert_ne!(
+                inventory["devices"][0]["admin_state"], "disabled",
+                "{label} must not report a live worker disabled"
+            );
+            assert_eq!(
+                inventory["devices"][0]["schedulable"], true,
+                "{label} still dispatches through the live worker"
+            );
+
+            let legacy_status = app
+                .clone()
+                .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(legacy_status.status(), StatusCode::OK, "{label}");
+            let legacy_status = json_body(legacy_status).await;
+            assert_eq!(
+                legacy_status["gpus"].as_array().map(Vec::len),
+                Some(1),
+                "{label} must not hide a worker it still dispatches through"
+            );
+
+            let patch = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(patch.status(), StatusCode::CONFLICT, "{label}");
+            assert_eq!(
+                json_body(patch).await["code"],
+                "DEVICE_LIFECYCLE_UNAVAILABLE",
+                "{label}"
+            );
+        }
     }
 
     #[tokio::test]

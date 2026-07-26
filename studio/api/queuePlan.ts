@@ -139,11 +139,14 @@ export function reduceQueuePlanEvent(
 export function predictedCompletionUnixMs(
   plan: QueuePlan | null,
   nowUnixMs = Date.now(),
-): number {
-  return Math.max(
-    nowUnixMs,
-    ...(plan?.work_items
+): number | null {
+  const finiteFinishes =
+    plan?.work_items
       .map((item) => item.estimated_finish_unix_ms)
-      .filter((value): value is number => typeof value === "number") ?? []),
-  );
+      .filter(
+        (value): value is number =>
+          typeof value === "number" && Number.isFinite(value),
+      ) ?? [];
+  if (finiteFinishes.length === 0) return null;
+  return Math.max(nowUnixMs, ...finiteFinishes);
 }

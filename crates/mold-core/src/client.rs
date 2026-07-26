@@ -6,8 +6,8 @@ use crate::chain_job::{
 use crate::error::MoldError;
 use crate::types::{
     DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
-    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerCapabilities,
+    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -795,6 +795,11 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Alias used by clients that preflight optional administrative actions.
+    pub async fn capabilities(&self) -> Result<crate::ServerCapabilities> {
+        self.server_capabilities().await
+    }
+
     /// Enable or disable one stable device. The server may return a draining
     /// or starting state while the owner transition completes.
     pub async fn set_device_enabled(
@@ -1491,6 +1496,25 @@ mod tests {
         );
         assert_eq!(devices.devices[0].device_kind, crate::DeviceKind::FullGpu);
         assert_eq!(devices.devices[0].memory.used_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn capabilities_defaults_missing_device_lifecycle_to_unavailable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "gallery": { "can_delete": true },
+                "catalog": { "available": false, "families": [], "sort": [] }
+            })))
+            .mount(&server)
+            .await;
+
+        let capabilities = MoldClient::new(&server.uri()).capabilities().await.unwrap();
+        assert!(!capabilities.devices.lifecycle);
     }
 
     #[tokio::test]

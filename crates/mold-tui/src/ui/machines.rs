@@ -44,6 +44,30 @@ fn kv_owned(
     ])
 }
 
+fn device_state_label(
+    admin_state: mold_core::DeviceAdminState,
+    health: mold_core::DeviceHealth,
+) -> String {
+    if admin_state == mold_core::DeviceAdminState::Draining {
+        "finishing current work".to_string()
+    } else if health != mold_core::DeviceHealth::Healthy {
+        health.as_str().to_string()
+    } else {
+        admin_state.as_str().to_string()
+    }
+}
+
+fn device_kind_label(device: &mold_core::DeviceInfo) -> String {
+    if device.device_kind == mold_core::DeviceKind::Mig {
+        format!(
+            "MIG {}",
+            device.mig_profile.as_deref().unwrap_or("profile unknown")
+        )
+    } else {
+        device.backend.as_str().to_ascii_uppercase()
+    }
+}
+
 /// Render the Machines workspace.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let [list_area, detail_area] = Layout::default()
@@ -1027,6 +1051,67 @@ mod tests {
             disk_label(213_909_504_000, 994_662_584_320),
             "199.2 GB free of 926.4 GB"
         );
+    }
+
+    #[test]
+    fn device_labels_cover_disabled_draining_unavailable_and_mig() {
+        assert_eq!(
+            device_state_label(
+                mold_core::DeviceAdminState::Disabled,
+                mold_core::DeviceHealth::Healthy
+            ),
+            "disabled"
+        );
+        assert_eq!(
+            device_state_label(
+                mold_core::DeviceAdminState::Draining,
+                mold_core::DeviceHealth::Healthy
+            ),
+            "finishing current work"
+        );
+        assert_eq!(
+            device_state_label(
+                mold_core::DeviceAdminState::Enabled,
+                mold_core::DeviceHealth::Unavailable
+            ),
+            "unavailable"
+        );
+        let device: mold_core::DeviceInfo = serde_json::from_value(serde_json::json!({
+            "id": "cuda:mig",
+            "backend": "cuda",
+            "ordinal": 4,
+            "device_kind": "mig",
+            "nvml_uuid": null,
+            "physical_uuid": "GPU-parent",
+            "mig_uuid": "MIG-child",
+            "mig_parent_uuid": "GPU-parent",
+            "mig_profile": "1g.10gb",
+            "name": "MIG",
+            "pci_bus_id": null,
+            "compute_capability": "9.0",
+            "memory": {
+                "total_bytes": null,
+                "used_bytes": null,
+                "mold_used_bytes": null,
+                "other_used_bytes": null
+            },
+            "telemetry": {
+                "utilization_percent": null,
+                "temperature_c": null,
+                "power_w": null
+            },
+            "desired_enabled": true,
+            "admin_state": "enabled",
+            "health": "healthy",
+            "activity": "idle",
+            "schedulable": true,
+            "unschedulable_reason": null,
+            "loaded_models": [],
+            "active_work_id": null,
+            "planned_work_ids": []
+        }))
+        .unwrap();
+        assert_eq!(device_kind_label(&device), "MIG 1g.10gb");
     }
 
     #[test]

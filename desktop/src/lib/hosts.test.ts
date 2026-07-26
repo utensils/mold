@@ -74,6 +74,21 @@ describe("pickAutoHost", () => {
     expect(pickAutoHost([slow, fast])?.id).toBe("fast");
   });
 
+  it("prefers a known completion estimate over an unknown one on a depth tie", () => {
+    const unknown = host({
+      id: "local",
+      kind: "local",
+      queueDepth: 2,
+      predictedCompletionMs: null,
+    });
+    const known = host({
+      id: "known",
+      queueDepth: 2,
+      predictedCompletionMs: 20_000,
+    });
+    expect(pickAutoHost([unknown, known])?.id).toBe("known");
+  });
+
   it("does not starve an idle planless host in a mixed-version fleet", () => {
     const plannedBusy = host({
       id: "planned-busy",

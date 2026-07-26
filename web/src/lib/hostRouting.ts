@@ -78,6 +78,8 @@ export function pickAutoHost<T extends RoutableHost>(
     if (depth(h) > depth(best)) return best;
     const hFinish = h.predictedCompletionMs;
     const bestFinish = best.predictedCompletionMs;
+    if (hFinish != null && bestFinish == null) return h;
+    if (hFinish == null && bestFinish != null) return best;
     if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
       return hFinish < bestFinish ? h : best;
     if (isOrigin(h) && !isOrigin(best)) return h;

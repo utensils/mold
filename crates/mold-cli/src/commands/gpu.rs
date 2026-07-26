@@ -98,6 +98,10 @@ pub async fn list(json: bool) -> Result<()> {
 
 pub async fn set(selector: &str, enabled: bool) -> Result<()> {
     let client = MoldClient::from_env();
+    set_enabled_with_client(&client, selector, enabled).await
+}
+
+async fn set_enabled_with_client(client: &MoldClient, selector: &str, enabled: bool) -> Result<()> {
     let capabilities = client
         .server_capabilities()
         .await
@@ -218,5 +222,62 @@ mod tests {
         mig.admin_state = DeviceAdminState::Draining;
         assert!(format_device_line(&mig).contains("MIG 1g.10gb"));
         assert!(format_device_line(&mig).contains("finishing current work"));
+
+        let mut disabled = device("cuda:disabled", 1);
+        disabled.desired_enabled = false;
+        disabled.admin_state = DeviceAdminState::Disabled;
+        assert!(format_device_line(&disabled).contains("disabled"));
+
+        let mut unavailable = device("cuda:unavailable", 2);
+        unavailable.health = DeviceHealth::Unavailable;
+        unavailable.schedulable = false;
+        assert!(format_device_line(&unavailable).contains("unavailable"));
+    }
+
+    #[test]
+    fn lifecycle_mutation_is_capability_gated() {
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        capabilities.dispatch.active_mode = Some("legacy".into());
+        let error = require_lifecycle(&capabilities).unwrap_err().to_string();
+        assert!(error.contains("authoritative scheduler V2 is inactive"));
+        assert!(error.contains("legacy"));
+
+        capabilities.devices.lifecycle = true;
+        assert!(require_lifecycle(&capabilities).is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_capability_refusal_never_reads_devices_or_sends_patch() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/capabilities$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "gallery": { "can_delete": true },
+                "catalog": { "available": false, "families": [], "sort": [] },
+                "devices": { "available": true, "lifecycle": false },
+                "dispatch": {
+                    "modes": ["legacy", "observe", "v2"],
+                    "active_mode": "legacy",
+                    "v2_authoritative": false,
+                    "observes_v2_decisions": false
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path_regex(r"^/api/devices(?:/.*)?$"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let error = set_enabled_with_client(&MoldClient::new(&server.uri()), "0", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("authoritative scheduler V2 is inactive"));
     }
 }

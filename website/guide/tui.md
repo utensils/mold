@@ -304,6 +304,10 @@ Disabling a busy GPU removes it from future scheduling immediately but lets
 its current stage finish before the owner thread exits. Enabling it starts a
 fresh owner thread. If every GPU is disabled, the server remains available
 for settings, telemetry, downloads, and other maintenance work.
+Live disable is hidden and ignored unless the selected host advertises both
+`devices.lifecycle` and authoritative V2 dispatch. A persistently-disabled,
+startup-selected device may still offer **Enable on restart** when the host
+advertises `devices.restart_enable`.
 
 ### Connecting a machine
 

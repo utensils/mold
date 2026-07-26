@@ -2328,11 +2328,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     // One registry snapshot backs both the additive device API and legacy
     // status projections. It reads only the 1 Hz telemetry cache and worker
     // atomics/locks; status never shells out or queries CUDA.
-    let resources = state.resources.latest();
-    let devices =
-        state
-            .device_registry
-            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let devices = current_device_state(&state);
     let gpu_statuses =
         crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(&devices);
     let has_gpus = !gpu_statuses.is_empty();
@@ -2439,16 +2435,38 @@ pub(crate) fn current_device_state(state: &AppState) -> DeviceState {
         state
             .device_registry
             .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
-    annotate_restart_required(&state, &mut snapshot);
-    if let Some(plan) = state.scheduled_work.latest_plan() {
-        snapshot.plan_version = plan.plan_version;
+    let authoritative_v2 = state.scheduled_work.v2_authoritative();
+    if !authoritative_v2 {
+        // Legacy and observe modes keep their restart-time workers as the
+        // runtime authority. A persisted V2 preference must never make an
+        // actively dispatching legacy worker appear disabled.
         for device in &mut snapshot.devices {
-            device.planned_work_ids = plan
-                .work_items
-                .iter()
-                .filter(|work| work.planned_device_id.as_deref() == Some(device.id.as_str()))
-                .map(|work| work.work_id.clone())
-                .collect();
+            let live_worker = device
+                .ordinal
+                .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal));
+            if let Some(worker) = live_worker {
+                let healthy = !worker.poisoned.load(std::sync::atomic::Ordering::Acquire)
+                    && !worker
+                        .fatal_cuda_error
+                        .load(std::sync::atomic::Ordering::Acquire);
+                device.admin_state = mold_core::DeviceAdminState::Enabled;
+                device.schedulable = healthy;
+                device.unschedulable_reason = (!healthy).then(|| "device_unavailable".into());
+            }
+        }
+    }
+    annotate_restart_required(state, &mut snapshot);
+    if authoritative_v2 {
+        if let Some(plan) = state.scheduled_work.latest_plan() {
+            snapshot.plan_version = plan.plan_version;
+            for device in &mut snapshot.devices {
+                device.planned_work_ids = plan
+                    .work_items
+                    .iter()
+                    .filter(|work| work.planned_device_id.as_deref() == Some(device.id.as_str()))
+                    .map(|work| work.work_id.clone())
+                    .collect();
+            }
         }
     }
     snapshot

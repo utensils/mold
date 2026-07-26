@@ -361,6 +361,9 @@ pub(crate) struct MachinesState {
     pub queue: Option<(String, mold_core::QueueListingWire)>,
     /// Stable-ID device inventory for the selected remote host.
     pub devices: Option<(String, mold_core::DeviceState)>,
+    /// Feature gates for the selected remote host. Missing/failed probes keep
+    /// optional administrative controls hidden.
+    pub capabilities: Option<(String, mold_core::ServerCapabilities)>,
     /// Job selection inside the detail pane's queue lanes.
     pub queue_selected: usize,
     /// Stable device selection inside the detail pane.
@@ -435,6 +438,7 @@ impl MachinesState {
     fn on_selection_changed(&mut self) {
         self.queue = None;
         self.devices = None;
+        self.capabilities = None;
         self.queue_selected = 0;
         self.device_selected = 0;
     }
@@ -679,6 +683,29 @@ impl MachinesState {
         }
     }
 
+    pub fn apply_capabilities(
+        &mut self,
+        host_id: String,
+        capabilities: Option<mold_core::ServerCapabilities>,
+    ) {
+        let selected_id = match self.selected_row() {
+            MachineRowId::Host(id) => id,
+            MachineRowId::Local => return,
+        };
+        if selected_id == host_id {
+            self.capabilities = capabilities.map(|value| (host_id, value));
+        }
+    }
+
+    pub fn selected_device_lifecycle_mutable(&self) -> bool {
+        let MachineRowId::Host(selected_id) = self.selected_row() else {
+            return false;
+        };
+        self.capabilities
+            .as_ref()
+            .is_some_and(|(host_id, value)| host_id == &selected_id && value.devices.lifecycle)
+    }
+
     pub fn selected_device(&self) -> Option<&mold_core::DeviceInfo> {
         let MachineRowId::Host(selected_id) = self.selected_row() else {
             return None;
@@ -723,6 +750,13 @@ impl MachinesState {
             .is_some_and(|(host_id, _)| host_id == id)
         {
             self.devices = None;
+        }
+        if self
+            .capabilities
+            .as_ref()
+            .is_some_and(|(host_id, _)| host_id == id)
+        {
+            self.capabilities = None;
         }
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
@@ -972,14 +1006,21 @@ pub(crate) async fn set_local_device_enabled(
 /// Fetch the queue listing for one host and report back.
 pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender<BackgroundEvent>) {
     let client = client_for_host(&entry);
-    let queue = client.list_queue().await.ok();
-    let devices = client.devices().await.ok();
+    let (queue, devices, capabilities) =
+        tokio::join!(client.list_queue(), client.devices(), client.capabilities());
     let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
         host_id: host_id.clone(),
-        queue,
+        queue: queue.ok(),
     });
-    let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: host_id.clone(),
+        devices: devices.ok(),
+    });
+    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+        host_id,
+        capabilities: capabilities.ok(),
+    });
 }
 
 /// Run the connect-flow test fetch and report back.
@@ -1031,6 +1072,22 @@ pub(crate) async fn set_host_device_enabled(
     tx: mpsc::UnboundedSender<BackgroundEvent>,
 ) {
     let client = client_for_host(&entry);
+    let capabilities = match client.capabilities().await {
+        Ok(capabilities) if capabilities.devices.lifecycle => capabilities,
+        Ok(_) => {
+            let _ = tx.send(BackgroundEvent::Error(
+                "Device lifecycle controls are unavailable on this server".into(),
+            ));
+            return;
+        }
+        Err(error) => {
+            let _ = tx.send(BackgroundEvent::Error(format!(
+                "Capability check failed before device update: {error:#}"
+            )));
+            return;
+        }
+    };
+    debug_assert!(capabilities.devices.lifecycle);
     match client.set_device_enabled(&device_id, enabled).await {
         Ok(devices) => {
             let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
@@ -1527,6 +1584,52 @@ mod tests {
         assert!(st.queue.is_some());
         st.select_next();
         assert!(st.queue.is_none(), "stale queue must not leak across rows");
+        assert!(
+            st.capabilities.is_none(),
+            "stale capabilities must not leak across rows"
+        );
+    }
+
+    #[test]
+    fn lifecycle_actions_require_the_selected_hosts_capability() {
+        let mut st = state_with_hosts(2);
+        st.select_next();
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        st.apply_capabilities("h0".into(), Some(capabilities.clone()));
+        assert!(!st.selected_device_lifecycle_mutable());
+
+        capabilities.devices.lifecycle = true;
+        st.apply_capabilities("h1".into(), Some(capabilities.clone()));
+        assert!(
+            !st.selected_device_lifecycle_mutable(),
+            "a stale response for another host cannot expose controls"
+        );
+        st.apply_capabilities("h0".into(), Some(capabilities));
+        assert!(st.selected_device_lifecycle_mutable());
+    }
+
+    #[test]
+    fn device_inventory_supports_sixty_four_entries_and_lifecycle_shapes() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        let mut devices = (0..64)
+            .map(|ordinal| test_device(&format!("cuda:{ordinal:032x}"), ordinal))
+            .collect::<Vec<_>>();
+        devices[1].admin_state = mold_core::DeviceAdminState::Disabled;
+        devices[2].admin_state = mold_core::DeviceAdminState::Draining;
+        devices[3].health = mold_core::DeviceHealth::Unavailable;
+        devices[4].device_kind = mold_core::DeviceKind::Mig;
+        devices[4].mig_profile = Some("1g.10gb".into());
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices,
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.devices.as_ref().unwrap().1.devices.len(), 64);
+        st.device_selected = 63;
+        assert_eq!(st.selected_device().unwrap().ordinal, Some(63));
     }
 
     #[test]

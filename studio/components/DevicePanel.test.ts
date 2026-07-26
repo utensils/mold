@@ -42,7 +42,7 @@ function device(index: number, patch: Partial<DeviceInfo> = {}): DeviceInfo {
 }
 
 describe("DevicePanel", () => {
-  for (const count of [1, 2, 8]) {
+  for (const count of [1, 2, 8, 64]) {
     it(`renders all ${count} devices without a cardinality ceiling`, () => {
       const wrapper = mount(DevicePanel, {
         props: { devices: Array.from({ length: count }, (_, i) => device(i)) },

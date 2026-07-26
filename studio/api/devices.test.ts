@@ -87,10 +87,14 @@ describe("device API", () => {
       }),
     );
 
-    const result = await listDevices({
-      baseUrl: "https://beast.tailnet.example",
-      apiKey: "durable-secret",
-    });
+    const controller = new AbortController();
+    const result = await listDevices(
+      {
+        baseUrl: "https://beast.tailnet.example",
+        apiKey: "durable-secret",
+      },
+      controller.signal,
+    );
 
     expect(result.devices).toHaveLength(2);
     expect(result.devices[0]?.restart_required).toBe(false);
@@ -103,6 +107,7 @@ describe("device API", () => {
     expect(url).toBe("https://beast.tailnet.example/api/devices");
     expect(String(url)).not.toContain("durable-secret");
     expect((init?.headers as Headers).get("x-api-key")).toBe("durable-secret");
+    expect(init?.signal).toBe(controller.signal);
   });
 
   it("rejects a host whose devices response lacks the additive contract", async () => {

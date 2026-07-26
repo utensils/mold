@@ -923,6 +923,10 @@ mold discord
 - `/admin block @user` — temporarily block a user from generating (requires Manage Server)
 - `/admin unblock @user` — unblock a previously blocked user (requires Manage Server)
 
+`/status` reports every runtime-visible GPU/MIG device. Large fleets are split
+into deterministic follow-up embeds so each field, embed, and message remains
+within Discord limits; no device is silently dropped at 64-device scale.
+
 ### Environment Variables
 
 | Variable                     | Default                 | Description                                                     |

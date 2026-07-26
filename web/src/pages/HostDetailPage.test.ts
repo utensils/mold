@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { nextTick, ref } from "vue";
+import { nextTick, reactive, ref } from "vue";
 import type {
   HostCapabilities,
   HostStatus,
@@ -56,6 +56,8 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   setDeviceEnabled,
 }));
 const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
+const hostCapabilitiesCall = vi.hoisted(() => vi.fn());
+const hostQueueCall = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/toasts", () => ({
   toast: vi.fn(),
@@ -64,10 +66,10 @@ vi.mock("../lib/toasts", () => ({
 }));
 vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
-const routeHolder = { id: "origin" };
+const routeHolder = reactive({ id: "origin" });
 
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ params: { id: routeHolder.id } }),
+  useRoute: () => ({ params: routeHolder }),
   useRouter: () => ({ push: routerPush }),
   RouterLink: {
     name: "RouterLink",
@@ -78,8 +80,8 @@ vi.mock("vue-router", () => ({
 
 vi.mock("../components/machines/hostClient", () => ({
   useHostPoll: () => poll,
-  hostCapabilities: () => Promise.resolve(caps),
-  hostQueue: () => Promise.resolve({ entries: queueEntries }),
+  hostCapabilities: (...args: unknown[]) => hostCapabilitiesCall(...args),
+  hostQueue: (...args: unknown[]) => hostQueueCall(...args),
   setHostDeviceEnabled: () =>
     Promise.resolve({ devices: poll.devices.value ?? [], plan_version: 0 }),
   hostModels: () => Promise.resolve(models),
@@ -232,6 +234,12 @@ beforeEach(() => {
   requestConfirm.mockReset().mockResolvedValue(true);
   requestText.mockReset().mockResolvedValue("Render box");
   subscribeToDeviceSnapshots.mockClear();
+  hostCapabilitiesCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve(caps));
+  hostQueueCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve({ entries: queueEntries }));
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     devices: ref<DeviceInfo[] | null>(null),
@@ -263,6 +271,117 @@ describe("HostDetailPage — telemetry", () => {
     expect(target).toEqual({ baseUrl: host.url, apiKey: "host-key" });
     refresh();
     expect(poll.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts queue refresh and SSE without waiting for a stalled capability probe", async () => {
+    hostCapabilitiesCall.mockImplementation(() => new Promise(() => {}));
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+
+    expect(hostQueueCall).toHaveBeenCalledTimes(1);
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels and rebinds capabilities, queue polling, and SSE on route changes", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "first-key" });
+    const second = addHost({
+      url: "192.168.1.21:7680",
+      name: "Second",
+      apiKey: "second-key",
+    });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    routeHolder.id = second.id;
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: second.id,
+        url: second.url,
+        apiKey: "second-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: second.id, apiKey: "second-key" }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: second.url,
+      apiKey: "second-key",
+    });
+  });
+
+  it("cancels and rebinds the same host when its URL or API key rotates", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "old-key" });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    updateHost(first.id, {
+      url: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+  });
+
+  it("aborts the active host session and SSE subscription on unmount", async () => {
+    const w = await mountDetail();
+    const capabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const queueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+    const sseSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+
+    w.unmount();
+    wrapper = null;
+
+    expect(capabilitySignal.aborted).toBe(true);
+    expect(queueSignal.aborted).toBe(true);
+    expect(sseSignal.aborted).toBe(true);
   });
 
   it("maps the resource snapshot into the telemetry card", async () => {

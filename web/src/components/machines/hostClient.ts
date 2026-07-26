@@ -10,7 +10,7 @@
  * current additive fields (`instance_id`, `models_disk`, `queue_paused`, queue
  * capabilities).
  */
-import { onBeforeUnmount, ref, type Ref } from "vue";
+import { isRef, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type {
   DownloadsListingWire,
   ModelInfoExtended,
@@ -89,8 +89,14 @@ export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
 
 /** Current servers expose the authoritative full device inventory here.
  * Callers deliberately treat a failed probe as an older-server fallback. */
-export function hostDevices(host: HostEntry): Promise<DeviceListResponse> {
-  return listDevices({ baseUrl: host.url, apiKey: host.apiKey ?? null });
+export function hostDevices(
+  host: HostEntry,
+  signal?: AbortSignal,
+): Promise<DeviceListResponse> {
+  return listDevices(
+    { baseUrl: host.url, apiKey: host.apiKey ?? null },
+    signal,
+  );
 }
 
 export function setHostDeviceEnabled(
@@ -243,7 +249,7 @@ export interface HostPollOptions {
  * the UI can dim it rather than blank out (spec §08 G4).
  */
 export function useHostPoll(
-  host: HostEntry,
+  host: HostEntry | Readonly<Ref<HostEntry | null>>,
   options: HostPollOptions = {},
 ): HostPoll {
   const intervalMs = options.intervalMs ?? 5000;
@@ -259,19 +265,35 @@ export function useHostPoll(
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let controller: AbortController | null = null;
+  const currentHost = () => (isRef(host) ? host.value : host);
+  const isCurrentTarget = (target: HostEntry) => {
+    const current = currentHost();
+    return (
+      current?.id === target.id &&
+      current.url === target.url &&
+      current.apiKey === target.apiKey
+    );
+  };
 
   async function refresh(): Promise<void> {
     controller?.abort();
     controller = new AbortController();
     const signal = controller.signal;
+    const target = currentHost();
+    if (!target) {
+      online.value = false;
+      loading.value = false;
+      return;
+    }
     try {
       const [nextStatus, nextResources, nextDevices] = await Promise.all([
-        hostStatus(host, signal),
+        hostStatus(target, signal),
         options.withResources
-          ? hostResources(host, signal).catch(() => null)
+          ? hostResources(target, signal).catch(() => null)
           : Promise.resolve(null),
-        hostDevices(host).catch(() => null),
+        hostDevices(target, signal).catch(() => null),
       ]);
+      if (signal.aborted || !isCurrentTarget(target)) return;
       status.value = nextStatus;
       deviceState.value = nextDevices;
       devices.value = nextDevices?.devices ?? null;
@@ -303,6 +325,17 @@ export function useHostPoll(
     controller = null;
   }
 
+  if (isRef(host)) {
+    watch(
+      host,
+      () => {
+        controller?.abort();
+        loading.value = true;
+        void refresh();
+      },
+      { flush: "sync" },
+    );
+  }
   void tick();
   onBeforeUnmount(stop);
 

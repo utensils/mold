@@ -1560,6 +1560,10 @@ Request:
 
 Semantics:
 
+- available only when authoritative V2 owns the live workers; legacy,
+  observe, CPU-fallback, and maintenance runtimes advertise
+  `devices.lifecycle=false` and return typed `409
+  DEVICE_LIFECYCLE_UNAVAILABLE` without persisting a preference;
 - idempotent;
 - `200` when the requested stable state is already reached;
 - `202` with current state when draining or starting asynchronously;
@@ -1768,6 +1772,9 @@ Discord is read-only:
 - report all devices and aggregate queue status;
 - show the actual completion device when useful;
 - do not expose enable/disable commands.
+- paginate large fleets as one embed per response/follow-up so every field
+  stays within 1024 characters, every embed stays within 25 fields and 6000
+  total characters, and all 64 synthetic devices remain present.
 
 ## 15. Telemetry
 

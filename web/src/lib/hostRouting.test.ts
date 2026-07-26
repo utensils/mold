@@ -72,6 +72,18 @@ describe("pickAutoHost", () => {
     expect(picked?.id).toBe("fast");
   });
 
+  it("prefers a known completion estimate over an unknown one on a depth tie", () => {
+    const picked = pickAutoHost([
+      host({
+        id: ORIGIN_HOST_ID,
+        queueDepth: 2,
+        predictedCompletionMs: null,
+      }),
+      host({ id: "known", queueDepth: 2, predictedCompletionMs: 20_000 }),
+    ]);
+    expect(picked?.id).toBe("known");
+  });
+
   it("does not starve an idle planless host in a mixed-version fleet", () => {
     const picked = pickAutoHost([
       host({

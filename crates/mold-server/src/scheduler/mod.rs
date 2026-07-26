@@ -4176,6 +4176,13 @@ mod tests {
             ])),
             Arc::new(None),
         ));
+        // This fixture exercises lifecycle events emitted by the authoritative
+        // coordinator. Production installs this handle before the coordinator
+        // starts; the maintenance default deliberately projects live legacy
+        // workers as enabled and read-only.
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work =
+            ScheduledWorkHandle::for_mode(scheduled_tx, crate::dispatch_mode::DispatchMode::V2);
         let mut receiver = state.events.subscribe();
         let mut coordinator = Coordinator::with_preparer_and_memory(
             state,

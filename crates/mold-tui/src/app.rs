@@ -115,6 +115,11 @@ pub enum BackgroundEvent {
         host_id: String,
         devices: Option<mold_core::DeviceState>,
     },
+    /// Per-host feature gates for the selected Machines row.
+    HostCapabilitiesUpdate {
+        host_id: String,
+        capabilities: Option<mold_core::ServerCapabilities>,
+    },
     /// Result of the connect-a-machine test fetch.
     MachineConnectTested {
         url: String,
@@ -3583,7 +3588,8 @@ impl App {
             }
             Action::MachinesToggleDevice
                 if self.active_view == View::Machines
-                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail
+                    && self.machines.selected_device_lifecycle_mutable() =>
             {
                 let Some(device) = self.machines.selected_device().cloned() else {
                     return;
@@ -6126,6 +6132,12 @@ impl App {
                 }
                 BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
                     self.machines.apply_devices(host_id, devices);
+                }
+                BackgroundEvent::HostCapabilitiesUpdate {
+                    host_id,
+                    capabilities,
+                } => {
+                    self.machines.apply_capabilities(host_id, capabilities);
                 }
                 BackgroundEvent::MachineConnectTested {
                     url,
