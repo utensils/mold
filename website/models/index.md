@@ -3,6 +3,13 @@
 mold supports 11 model families spanning different architectures, quality levels,
 and VRAM requirements — including both image and video generation.
 
+::: tip Community models from Civitai
+The models documented here are not the limit. Open **Models → Discover** in
+Mold Studio and choose **Civitai** (or **All**) to browse and install compatible
+community checkpoints and LoRAs. See the
+[Model Discovery Catalog](/docs/catalog) for details.
+:::
+
 ## Choosing a Model
 
 | Need              | Recommended                      | Why                                                    |

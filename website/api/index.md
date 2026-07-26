@@ -1,6 +1,8 @@
 # Server API
 
-When running `mold serve`, you get a REST API for remote image generation.
+When running `mold serve`, the same engine behind Mold's CLI becomes a REST API
+with SSE progress. This keeps shell scripts, agents, native apps, browser
+clients, and custom integrations on one generation contract.
 
 ## Endpoints
 

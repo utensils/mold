@@ -1,5 +1,9 @@
 # Remote Workflows
 
+Mold's CLI-native design keeps remote work as scriptable as local work: change
+the target host without changing the generation command, whether the caller is
+a person, shell script, CI job, or agent.
+
 One of mold's best deployment patterns is simple:
 
 - run `mold serve` on the GPU machine

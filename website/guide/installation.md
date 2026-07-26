@@ -10,8 +10,9 @@
   App Store listing. See the [iPhone App guide](/guide/iphone) for supported
   workflows and host setup.
 
-The command-line installation below installs the Mold engine/server used by
-both native apps.
+Mold is CLI-native. The command-line installation below installs the primary
+Mold interface and the same engine/server used by both native apps, scripts,
+agents, and custom API clients.
 
 ## One-Line Install (recommended)
 

@@ -1,5 +1,10 @@
 # CLI Reference
 
+The CLI is Mold's native interface and the contract from which its richer
+clients grow. Commands are designed for direct use, shell composition, scripts,
+CI jobs, and agent tool calls, with pipe-friendly media I/O and machine-readable
+forms where automation needs them.
+
 ## `mold run`
 
 Generate images or video from prompts.

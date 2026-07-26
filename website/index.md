@@ -5,9 +5,9 @@ hero:
   name: mold
   text: AI Image Generation on Your GPU
   tagline:
-    'CUDA on Linux. Metal on macOS. FLUX, SD3.5, SDXL, SD 1.5, Z-Image, Flux.2
-    Klein, Qwen-Image, Qwen-Image-Edit, LTX Video & more — no cloud, no Python,
-    no fuss.'
+    'CLI-native and built for people, scripts, and agents. CUDA on Linux, Metal
+    on macOS, and the same local engine behind desktop, web, TUI, iPhone, REST,
+    SSE, and MCP.'
   image:
     src: /logo-transparent.png
     alt: mold logo
@@ -28,10 +28,11 @@ hero:
 features:
   - icon:
       src: /icons/terminal.svg
-    title: One Command
+    title: CLI-Native
     details:
-      'mold run "a cat" — that''s it. Auto-downloads the model, generates an
-      image, saves to disk.'
+      'mold run "a cat" — that''s it. Predictable stdin, stdout, files, exit
+      behavior, and machine-readable output make the same workflows natural for
+      terminals, shell pipelines, CI, and agents.'
   - icon:
       src: /icons/grid.svg
     title: 11 Model Families
@@ -93,6 +94,26 @@ features:
       Use mold from OpenClaw as a workspace skill while your GPU server runs
       elsewhere. Point `MOLD_HOST` at the server and generate from agent flows.
 ---
+
+## Born in the terminal, flexible everywhere
+
+Mold began as a single-binary command-line tool and the CLI remains its stable
+foundation. Every core workflow can be run by a person, composed in a shell
+pipeline, automated in CI, or called by an agent. `mold serve`, REST/SSE, MCP,
+and the desktop, web, TUI, and iPhone clients all extend that same engine and
+contract.
+
+## Mold Studio for desktop
+
+Create locally on Apple Silicon or NVIDIA, or connect every Mold machine you
+use. The native desktop app keeps generation, a unified multi-host Library,
+model discovery, live downloads, queues, telemetry, and RunPod in one focused
+workspace.
+
+[![Mold Studio desktop app generating an owl](/screenshots/mold-studio-desktop.png)](/guide/desktop)
+
+**[Download for macOS (Apple Silicon)](https://github.com/utensils/mold/releases/latest/download/Mold-macos-arm64.dmg)**
+· **[Explore the desktop app](/guide/desktop)**
 
 ## Quick Example
 
