@@ -3956,7 +3956,9 @@ pub struct DeviceState {
 pub struct DeviceCapabilities {
     /// `GET /api/devices` is present.
     pub available: bool,
-    /// Runtime enable/disable lifecycle mutation is present.
+    /// Runtime enable/disable lifecycle mutation is currently authoritative.
+    /// This is `true` only while scheduler V2 owns dispatch; legacy, observe,
+    /// maintenance, and otherwise unavailable runtimes report `false`.
     pub lifecycle: bool,
 }
 
@@ -3993,7 +3995,8 @@ pub struct ServerCapabilities {
     #[serde(default)]
     pub queue: QueueCapabilities,
     /// Absent on older servers. Missing means the read-only device resource
-    /// and lifecycle controls are unavailable.
+    /// and lifecycle controls are unavailable. `devices.lifecycle` is a
+    /// runtime authority flag, not merely endpoint presence.
     #[serde(default)]
     pub devices: DeviceCapabilities,
     /// Absent on older servers. Dispatch mode changes require a restart.

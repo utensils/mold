@@ -3024,7 +3024,7 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
         },
         devices: mold_core::DeviceCapabilities {
             available: true,
-            lifecycle: false,
+            lifecycle: state.scheduled_work.v2_authoritative(),
         },
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),

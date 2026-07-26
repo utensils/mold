@@ -1018,7 +1018,7 @@ mod tests {
         let startup_selection = crate::startup_device_selection(&selected, &registry);
         assert!(
             startup_selection.enabled.is_empty(),
-            "persisted-disabled devices must not construct startup GPU owners or contexts"
+            "persisted-disabled devices must not construct startup GPU owners"
         );
         assert_eq!(
             startup_selection
@@ -1046,7 +1046,7 @@ mod tests {
         pool.workers
             .install_factory(
                 crate::gpu_pool::WorkerFactory {
-                    devices: crate::v2_lifecycle_devices(&selected),
+                    devices: startup_selection.v2_factory_devices,
                     shared_pool: Arc::new(Mutex::new(
                         mold_inference::shared_pool::SharedPool::new(),
                     )),
@@ -1104,7 +1104,11 @@ mod tests {
         assert_eq!(enabled["desired_enabled"], true);
         assert_eq!(enabled["admin_state"], "starting");
 
-        let (ready_id, ready_epoch) = match scheduler_rx.recv().await.unwrap() {
+        let ready = tokio::time::timeout(Duration::from_secs(1), scheduler_rx.recv())
+            .await
+            .expect("re-enabled target must publish Ready without hanging")
+            .expect("re-enabled target owner channel must remain open");
+        let (ready_id, ready_epoch) = match ready {
             crate::scheduler::WorkerEvent::Ready {
                 device_id,
                 owner_epoch,
@@ -1113,6 +1117,7 @@ mod tests {
             _ => panic!("re-enabled target must publish epoch-qualified Ready"),
         };
         assert_eq!(ready_id, GPU_1);
+        assert!(ready_epoch > 0);
         let workers = pool.worker_snapshot();
         assert_eq!(workers.len(), 1);
         assert_eq!(crate::scheduler::worker_device_id(&workers[0]), GPU_1);
@@ -2282,7 +2287,13 @@ mod tests {
 
     #[tokio::test]
     async fn capabilities_reports_queue_controls_available() {
-        let app = app_empty();
+        let (scheduled_tx, _scheduled_rx) = tokio::sync::mpsc::channel(1);
+        let mut state = AppState::for_tests();
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            scheduled_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let app = app_with_state(state);
         let resp = app
             .oneshot(
                 Request::get("/api/capabilities")
@@ -2297,7 +2308,60 @@ mod tests {
         assert_eq!(body["queue"]["can_cancel_all"], true);
         assert_eq!(body["queue"]["can_reorder"], true);
         assert_eq!(body["devices"]["available"], true);
-        assert_eq!(body["devices"]["lifecycle"], false);
+        assert_eq!(body["devices"]["lifecycle"], true);
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_device_lifecycle_false_without_authoritative_v2() {
+        let cases = [
+            (
+                "legacy",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Legacy,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "observe",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::Observe,
+                    false,
+                    true,
+                ),
+            ),
+            (
+                "maintenance",
+                crate::scheduler::ScheduledWorkHandle::for_runtime(
+                    tokio::sync::mpsc::channel(1).0,
+                    crate::dispatch_mode::DispatchMode::V2,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "unavailable",
+                crate::scheduler::ScheduledWorkHandle::default(),
+            ),
+        ];
+
+        for (label, scheduled_work) in cases {
+            let mut state = AppState::for_tests();
+            state.scheduled_work = scheduled_work;
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{label}");
+            let body = json_body(response).await;
+            assert_eq!(body["devices"]["lifecycle"], false, "{label}");
+        }
     }
 
     /// Clients feature-detect server-side catalog sorting against this

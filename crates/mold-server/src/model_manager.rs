@@ -1389,6 +1389,14 @@ mod tests {
 
     impl IsolatedModelEnvironment {
         fn new(home: &std::path::Path) -> Self {
+            Self::with_models_dir_override(home, true)
+        }
+
+        fn without_models_dir_override(home: &std::path::Path) -> Self {
+            Self::with_models_dir_override(home, false)
+        }
+
+        fn with_models_dir_override(home: &std::path::Path, set_models_dir: bool) -> Self {
             const CLEARED_KEYS: &[&str] = &[
                 "MOLD_TRANSFORMER_PATH",
                 "MOLD_VAE_PATH",
@@ -1407,8 +1415,8 @@ mod tests {
             let lock = crate::test_support::env_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut previous = Vec::with_capacity(CLEARED_KEYS.len() + 3);
-            for key in ["MOLD_HOME", "HF_HOME", "HF_HUB_CACHE"] {
+            let mut previous = Vec::with_capacity(CLEARED_KEYS.len() + 4);
+            for key in ["MOLD_HOME", "MOLD_MODELS_DIR", "HF_HOME", "HF_HUB_CACHE"] {
                 previous.push((key, std::env::var_os(key)));
             }
             for &key in CLEARED_KEYS {
@@ -1416,6 +1424,11 @@ mod tests {
             }
             unsafe {
                 std::env::set_var("MOLD_HOME", home);
+                if set_models_dir {
+                    std::env::set_var("MOLD_MODELS_DIR", home);
+                } else {
+                    std::env::remove_var("MOLD_MODELS_DIR");
+                }
                 std::env::set_var("HF_HOME", home.join("hf-home"));
                 std::env::set_var("HF_HUB_CACHE", home.join("hf-home/hub"));
                 for key in CLEARED_KEYS {
@@ -1442,14 +1455,19 @@ mod tests {
         }
     }
 
-    fn force_explicit_companion_paths(models_dir: &std::path::Path, companion: &str) {
-        // `mold_core::download` intentionally caches the process-wide managed
-        // model directory in a OnceLock. Marking this test-local companion as
-        // an incomplete pull prevents manifest discovery from consulting that
-        // cache and makes ModelPaths resolve the explicit Config.models entry.
-        let marker = mold_core::download::pulling_marker_path_in(models_dir, companion);
-        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        std::fs::write(marker, b"test fixture").unwrap();
+    fn materialize_manifest_companion(
+        models_dir: &std::path::Path,
+        companion: &str,
+        config: &mold_core::Config,
+    ) -> mold_core::ModelPaths {
+        let manifest = mold_core::manifest::find_manifest(companion).unwrap();
+        for file in &manifest.files {
+            let path = models_dir.join(mold_core::manifest::storage_path(manifest, file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"test fixture").unwrap();
+            mold_core::download::write_sha256_marker(&path, "test").unwrap();
+        }
+        mold_core::ModelPaths::resolve(companion, config).unwrap()
     }
 
     #[test]
@@ -3228,7 +3246,7 @@ mod tests {
     fn resolve_intent_picks_flux_vae_companion_when_primary_is_transformer_only() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _environment = IsolatedModelEnvironment::new(models_dir);
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path = models_dir
             .join("cv-994561/flux/civitai/994561/realHornyProV3_realHornyProV3Unet.safetensors");
@@ -3262,7 +3280,7 @@ mod tests {
     fn resolve_intent_preserves_flux_schnell_subfamily() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _environment = IsolatedModelEnvironment::new(models_dir);
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path = models_dir
             .join("cv-1153358/flux/civitai/1153358/agfluxSchnell_realistic23.safetensors");
@@ -3299,7 +3317,7 @@ mod tests {
     fn resolve_intent_applies_flux_dev_subfamily_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _environment = IsolatedModelEnvironment::new(models_dir);
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let primary_path =
             models_dir.join("cv-2319074/flux/civitai/2319074/jibMixFlux_v12SRPO.safetensors");
@@ -3343,45 +3361,36 @@ mod tests {
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
         std::fs::File::create(&primary_path).unwrap();
 
-        let runtime_dir = models_dir.join("qwen-image-runtime");
-        let vae_path = runtime_dir.join("vae/diffusion_pytorch_model.safetensors");
-        let te_path = runtime_dir.join("text_encoder/model-00001-of-00004.safetensors");
-        let tok_path = runtime_dir.join("tokenizer/tokenizer.json");
-        for path in [&vae_path, &te_path, &tok_path] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::File::create(path).unwrap();
-        }
-
-        let mut config = mold_core::Config {
+        let config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        config.models.insert(
-            "qwen-image-runtime".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(vae_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                text_encoder_files: Some(vec![te_path.to_string_lossy().into_owned()]),
-                text_tokenizer: Some(tok_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        force_explicit_companion_paths(models_dir, "qwen-image-runtime");
+        let companion_paths =
+            materialize_manifest_companion(models_dir, "qwen-image-runtime", &config);
+        let vae_path = companion_paths.vae;
+        let text_encoder_files = companion_paths.text_encoder_files;
+        let tokenizer_path = companion_paths.text_tokenizer;
 
         let mut entry = flux_unet_only_catalog_entry("2110043", "qwenImage_fp8.safetensors");
         entry.family = mold_catalog::families::Family::QwenImage;
         entry.companions = vec!["qwen-image-runtime".into()];
         let intent = mold_catalog::synthesis::synthesize_intent(&entry, models_dir).unwrap();
         let cfg = resolve_intent_to_paths("cv:2110043", &intent, &config).unwrap();
+        let expected_text_encoder_files = text_encoder_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
 
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
         assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
         assert_eq!(
             cfg.text_encoder_files.as_deref(),
-            Some(vec![te_path.to_string_lossy().into_owned()].as_slice())
+            Some(expected_text_encoder_files.as_slice())
         );
-        assert_eq!(cfg.text_tokenizer.as_deref(), tok_path.to_str());
+        assert_eq!(
+            cfg.text_tokenizer.as_deref(),
+            tokenizer_path.as_deref().and_then(std::path::Path::to_str)
+        );
     }
 
     #[test]
@@ -3395,44 +3404,12 @@ mod tests {
         std::fs::create_dir_all(primary_path.parent().unwrap()).unwrap();
         std::fs::File::create(&primary_path).unwrap();
 
-        let runtime_dir = models_dir.join("wuerstchen-runtime");
-        let decoder_path = runtime_dir.join("decoder/diffusion_pytorch_model.safetensors");
-        let vae_path = runtime_dir.join("vqgan/diffusion_pytorch_model.safetensors");
-        let clip_path = runtime_dir.join("text_encoder/model.safetensors");
-        let clip_tok_path = runtime_dir.join("tokenizer/tokenizer.json");
-        let clip_g_path = runtime_dir.join("prior/text_encoder/model.safetensors");
-        let clip_g_tok_path = runtime_dir.join("prior/tokenizer/tokenizer.json");
-        for path in [
-            &decoder_path,
-            &vae_path,
-            &clip_path,
-            &clip_tok_path,
-            &clip_g_path,
-            &clip_g_tok_path,
-        ] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::File::create(path).unwrap();
-        }
-
-        let mut config = mold_core::Config {
+        let config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        config.models.insert(
-            "wuerstchen-runtime".into(),
-            mold_core::ModelConfig {
-                family: Some("companion".into()),
-                transformer: Some(decoder_path.to_string_lossy().into_owned()),
-                decoder: Some(decoder_path.to_string_lossy().into_owned()),
-                vae: Some(vae_path.to_string_lossy().into_owned()),
-                clip_encoder: Some(clip_path.to_string_lossy().into_owned()),
-                clip_tokenizer: Some(clip_tok_path.to_string_lossy().into_owned()),
-                clip_encoder_2: Some(clip_g_path.to_string_lossy().into_owned()),
-                clip_tokenizer_2: Some(clip_g_tok_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        force_explicit_companion_paths(models_dir, "wuerstchen-runtime");
+        let companion_paths =
+            materialize_manifest_companion(models_dir, "wuerstchen-runtime", &config);
 
         let mut entry = flux_unet_only_catalog_entry("unused", "prior.safetensors");
         entry.id = mold_catalog::entry::CatalogId::from("hf:example/wuerstchen-prior");
@@ -3446,12 +3423,42 @@ mod tests {
         let cfg = resolve_intent_to_paths("hf:example/wuerstchen-prior", &intent, &config).unwrap();
 
         assert_eq!(cfg.transformer.as_deref(), primary_path.to_str());
-        assert_eq!(cfg.decoder.as_deref(), decoder_path.to_str());
-        assert_eq!(cfg.vae.as_deref(), vae_path.to_str());
-        assert_eq!(cfg.clip_encoder.as_deref(), clip_path.to_str());
-        assert_eq!(cfg.clip_tokenizer.as_deref(), clip_tok_path.to_str());
-        assert_eq!(cfg.clip_encoder_2.as_deref(), clip_g_path.to_str());
-        assert_eq!(cfg.clip_tokenizer_2.as_deref(), clip_g_tok_path.to_str());
+        assert_eq!(
+            cfg.decoder.as_deref(),
+            companion_paths
+                .decoder
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(cfg.vae.as_deref(), companion_paths.vae.to_str());
+        assert_eq!(
+            cfg.clip_encoder.as_deref(),
+            companion_paths
+                .clip_encoder
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_tokenizer.as_deref(),
+            companion_paths
+                .clip_tokenizer
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_encoder_2.as_deref(),
+            companion_paths
+                .clip_encoder_2
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
+        assert_eq!(
+            cfg.clip_tokenizer_2.as_deref(),
+            companion_paths
+                .clip_tokenizer_2
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+        );
     }
 
     #[test]
@@ -3464,7 +3471,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _environment = IsolatedModelEnvironment::new(models_dir);
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let mut config = mold_core::Config {
             models_dir: models_dir.to_string_lossy().into_owned(),
@@ -3625,7 +3632,7 @@ mod tests {
     fn cv_id_resolves_when_files_arrive_after_initial_request() {
         let dir = tempfile::tempdir().unwrap();
         let models_dir = dir.path();
-        let _environment = IsolatedModelEnvironment::new(models_dir);
+        let _environment = IsolatedModelEnvironment::without_models_dir_override(models_dir);
 
         let entry =
             flux_unet_only_catalog_entry("994561", "realHornyProV3_realHornyProV3Unet.safetensors");

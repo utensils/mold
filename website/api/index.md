@@ -86,8 +86,9 @@ servers advertise the accepted catalog sort values in
 `catalog.sort` (`downloads`, `recent`, `rating`), queue controls as
 `queue.can_pause`, `queue.can_cancel_all`, and `queue.can_reorder`, and
 server-assisted DNS-SD as `discovery.can_browse`, and the read-only device
-resource as `devices.available` (`devices.lifecycle` remains false until
-runtime enable/disable controls are available). Clients must only request
+resource as `devices.available`. `devices.lifecycle` is true only when
+scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and
+unavailable runtimes report false. Clients must only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.

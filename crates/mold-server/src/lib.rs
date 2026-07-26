@@ -218,8 +218,12 @@ fn startup_plan(
 }
 
 struct StartupDeviceSelection<'a> {
+    /// Owners created immediately at startup.
     enabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
     persisted_disabled: Vec<&'a mold_inference::device::DiscoveredGpu>,
+    /// Complete startup-selected inventory retained by V2 so a persisted-
+    /// disabled device can be enabled without restarting the server.
+    v2_factory_devices: std::collections::BTreeMap<String, mold_inference::device::DiscoveredGpu>,
 }
 
 fn startup_device_selection<'a>(
@@ -234,6 +238,7 @@ fn startup_device_selection<'a>(
     StartupDeviceSelection {
         enabled,
         persisted_disabled,
+        v2_factory_devices: v2_lifecycle_devices(selected),
     }
 }
 
@@ -339,6 +344,7 @@ pub async fn run_server(
         );
     }
     let startup_devices = startup_device_selection.enabled;
+    let v2_factory_devices = startup_device_selection.v2_factory_devices;
 
     let startup = startup_plan(
         &gpu_selection,
@@ -431,12 +437,11 @@ pub async fn run_server(
         workers: workers.into(),
     });
     if startup.start_v2_coordinator {
-        let devices = v2_lifecycle_devices(&selected);
         gpu_pool
             .workers
             .install_factory(
                 gpu_pool::WorkerFactory {
-                    devices,
+                    devices: v2_factory_devices,
                     shared_pool: shared_pool.clone(),
                     fatal_cuda_error: fatal_cuda_error.clone(),
                     fatal_cuda_shutdown: fatal_cuda_shutdown.clone(),
@@ -1129,7 +1134,7 @@ fn build_cors_layer() -> Result<CorsLayer> {
 mod tests {
     use super::{
         build_cors_layer, classify_startup_mode, startup_device_selection, startup_plan,
-        trace_request_path, v2_lifecycle_devices, GpuOwnerThreads, StartupMode,
+        trace_request_path, GpuOwnerThreads, StartupMode,
     };
     use crate::auth::{inject_auth_state, require_api_key, ApiKeySet};
     use crate::device_registry::{DeviceRegistry, StaticDeviceDiscovery};
@@ -1451,11 +1456,50 @@ mod tests {
         // V2 retains the complete startup-selected inventory for dynamic
         // re-enable even though neither disabled device owns a worker.
         assert_eq!(
-            v2_lifecycle_devices(&all)
+            startup_selection
+                .v2_factory_devices
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([GPU_0, GPU_1])
+        );
+    }
+
+    #[test]
+    fn v2_factory_input_retains_disabled_selected_devices_not_just_startup_owners() {
+        const ENABLED_GPU: &str = "cuda:00000000000000000000000000000000";
+        const DISABLED_GPU: &str = "cuda:11111111111111111111111111111111";
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        mold_db::DevicePreferences::new(&db)
+            .set(DISABLED_GPU, false)
+            .unwrap();
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::default()),
+            Arc::new(Some(db)),
+        );
+        let selected = vec![
+            discovered_gpu(0, ENABLED_GPU),
+            discovered_gpu(1, DISABLED_GPU),
+        ];
+
+        let startup_inputs = startup_device_selection(&selected, &registry);
+        assert_eq!(
+            startup_inputs
+                .enabled
+                .iter()
+                .filter_map(|gpu| gpu.stable_id.as_deref())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ENABLED_GPU]),
+            "only enabled devices may construct startup owners"
+        );
+        assert_eq!(
+            startup_inputs
+                .v2_factory_devices
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ENABLED_GPU, DISABLED_GPU]),
+            "the V2 factory must retain the full startup-selected inventory"
         );
     }
 
