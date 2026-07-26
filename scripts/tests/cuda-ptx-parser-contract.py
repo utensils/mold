@@ -492,6 +492,48 @@ last line */
         )
         self.assert_probe_and_verifier_reject(fixture, 86)
 
+    def test_version_requires_integer_major_and_minor_operands(self) -> None:
+        invalid_operands = (
+            "8",
+            ".8",
+            "8.",
+            "8.0.1",
+            "8..0",
+            "8.0suffix",
+            "+8.0",
+            "-8.0",
+        )
+        for index, operand in enumerate(invalid_operands):
+            with self.subTest(operand=operand):
+                fixture = self.fixture(
+                    f"malformed-version-boundary-{index}",
+                    f"""
+.version {operand}
+.target sm_86
+.address_size 64
+.visible .entry malformed_version() {{ ret; }}
+""",
+                )
+                inventory = self.probe_module.extract_entry_modules(
+                    fixture.read_bytes()
+                )
+                self.assertEqual(len(inventory["malformed_modules"]), 1)
+                self.assertEqual(
+                    inventory["malformed_modules"][0]["reason"],
+                    "malformed version directive",
+                )
+                self.assert_probe_and_verifier_reject(fixture, 86)
+
+    def test_version_accepts_spacing_and_crlf_with_major_minor(self) -> None:
+        fixture = self.fixture(
+            "version-spacing-crlf",
+            "\t.version\t8.0   \r\n"
+            "\t.target sm_86\r\n"
+            "\t.address_size 64\r\n"
+            "\t.visible .entry real() { ret; }\r\n",
+        )
+        self.assert_probe_and_verifier_accept(fixture, 86)
+
 
 if __name__ == "__main__":
     unittest.main()

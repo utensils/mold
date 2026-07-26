@@ -26,7 +26,7 @@ INCOMPATIBLE_RESULTS = {
     CUDA_ERROR_INVALID_PTX,
 }
 VERSION_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.version\b([^\r\n]*)")
-VERSION_OPERAND_RE = re.compile(rb"^[ \t]+[0-9]+(?:\.[0-9]+)?[ \t]*$")
+VERSION_OPERAND_RE = re.compile(rb"^[ \t]+[0-9]+\.[0-9]+[ \t]*$")
 TARGET_DIRECTIVE_RE = re.compile(rb"(?m)^[ \t]*\.target[ \t]+([^\r\n]+)")
 TARGET_ARCHITECTURE_RE = re.compile(rb"sm_([0-9]+)")
 TARGET_PLATFORM_OPTIONS = {
