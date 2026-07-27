@@ -218,7 +218,11 @@ impl LocalExpander {
         let tokenizer = Tokenizer::from_file(&self.tokenizer_path)
             .map_err(|e| anyhow::anyhow!("failed to load expand tokenizer: {e}"))?;
 
-        self.progress.stage_done(&stage_name, load_start.elapsed());
+        self.progress.phase_done(
+            crate::ProgressPhase::ModelLoad,
+            &stage_name,
+            load_start.elapsed(),
+        );
 
         // Tokenize prompt
         let encoding = tokenizer
@@ -299,6 +303,11 @@ impl LocalExpander {
         let output = tokenizer
             .decode(&generated_tokens, true)
             .map_err(|e| anyhow::anyhow!("failed to decode generated tokens: {e}"))?;
+        self.progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Prompt expansion",
+            gen_start.elapsed(),
+        );
 
         // Clear KV cache and drop model weights to free their allocations
         // while preserving the live context shared with the diffusion engine.

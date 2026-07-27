@@ -153,6 +153,26 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum GpuAction {
+    /// List all runtime-visible devices.
+    List {
+        /// Output the stable-ID device inventory as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop assigning new work to a device; active work drains first.
+    Disable {
+        /// Opaque stable ID (preferred) or current display ordinal.
+        device: String,
+    },
+    /// Return a disabled or draining device to service.
+    Enable {
+        /// Opaque stable ID (preferred) or current display ordinal.
+        device: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum RunpodAction {
     /// Check RunPod auth, endpoint, and account info
     Doctor,
@@ -563,20 +583,6 @@ pub enum JobsAction {
         yes: bool,
     },
     Gc,
-}
-
-#[derive(Subcommand)]
-enum GpuAction {
-    /// List every runtime-visible device and lifecycle state
-    List {
-        /// Output the stable device API response as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop assigning work and disable after the current lease finishes
-    Disable { device: String },
-    /// Enable a device and start a fresh owner thread when needed
-    Enable { device: String },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -1229,7 +1235,7 @@ Examples:
     #[command(after_long_help = "Use 'mold unload' to free GPU memory when idle.")]
     Ps,
 
-    /// Inspect and control server GPU lifecycle
+    /// Inspect and administer server compute devices
     Gpu {
         #[command(subcommand)]
         action: GpuAction,

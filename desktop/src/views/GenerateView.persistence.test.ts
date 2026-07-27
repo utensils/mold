@@ -12,7 +12,8 @@ import type { ModelEntry } from "../lib/api/types";
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 const apiJson = vi.fn();
 const apiJsonTo = vi.fn();
-vi.mock("../lib/api/client", () => ({
+vi.mock("../lib/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api/client")>()),
   apiJson: (...args: unknown[]) => apiJson(...args),
   apiJsonTo: (...args: unknown[]) => apiJsonTo(...args),
   apiFetch: vi.fn(),

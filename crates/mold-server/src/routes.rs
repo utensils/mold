@@ -189,6 +189,7 @@ use crate::queue::clean_error_message;
     paths(
         generate,
         generate_stream,
+        generate_placement_preview,
         expand_prompt,
         list_models,
         crate::catalog_api::list_loras,
@@ -221,6 +222,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
         crate::routes_chain_jobs::create_chain_job,
+        crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
         crate::routes_chain_jobs::chain_job_events,
@@ -234,6 +236,11 @@ use crate::queue::clean_error_message;
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
+        mold_core::GenerationPlacementPreviewRequest,
+        mold_core::GenerationPlacementPreview,
+        mold_core::GenerationPlacementCandidate,
+        mold_core::ChainStagePlacementCandidate,
+        crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
         mold_core::ImageData,
@@ -315,6 +322,10 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/estimate", post(generate_estimate))
+        .route(
+            "/api/generate/placement-preview",
+            post(generate_placement_preview),
+        )
         .route("/api/generate/stream", post(generate_stream))
         .route(
             "/api/generate/chain",
@@ -328,6 +339,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chain-jobs",
             post(crate::routes_chain_jobs::create_chain_job)
                 .get(crate::routes_chain_jobs::list_chain_jobs),
+        )
+        .route(
+            "/api/chain-jobs/placement-preview",
+            post(crate::routes_chain_jobs::preview_chain_job_placement),
         )
         .route(
             "/api/chain-jobs/:id",
@@ -1672,6 +1687,91 @@ async fn generate_estimate(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/generate/placement-preview",
+    tag = "generation",
+    request_body = mold_core::GenerationPlacementPreviewRequest,
+    responses(
+        (status = 200, description = "Read-only scheduler placement projection", body = mold_core::GenerationPlacementPreview)
+    )
+)]
+async fn generate_placement_preview(
+    State(state): State<AppState>,
+    Json(preview): Json<mold_core::GenerationPlacementPreviewRequest>,
+) -> Json<mold_core::GenerationPlacementPreview> {
+    Json(placement_preview_for_request(&state, preview.request, preview.copies).await)
+}
+
+pub(crate) async fn placement_preview_for_request(
+    state: &AppState,
+    request: GenerateRequest,
+    copies: u32,
+) -> mold_core::GenerationPlacementPreview {
+    let plan = state.scheduled_work.latest_plan();
+    let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
+        version: 1,
+        authoritative: false,
+        state_version: plan.as_ref().map_or(0, |plan| plan.state_version),
+        plan_version: plan.as_ref().map_or(0, |plan| plan.plan_version),
+        outcome: outcome.to_string(),
+        reason: Some(reason),
+        candidate: None,
+        stage_candidates: Vec::new(),
+    };
+    if !(1..=64).contains(&copies) {
+        let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
+        response.authoritative = true;
+        return response;
+    }
+    let has_post_upscale = request
+        .upscale_model
+        .as_deref()
+        .is_some_and(|model| !model.trim().is_empty());
+    let has_local_expansion = request.expand == Some(true)
+        && state
+            .config
+            .read()
+            .await
+            .expand
+            .clone()
+            .with_env_overrides()
+            .is_local();
+    if has_local_expansion || has_post_upscale {
+        return unavailable(
+            "unsupported",
+            "exact utility CPU/GPU placement plans are not available on this server".to_string(),
+        );
+    }
+    if !state.scheduled_work.v2_authoritative()
+        || !state.scheduled_work.placement_preview_available()
+    {
+        return unavailable(
+            "unsupported",
+            "authoritative scheduler placement preview is unavailable".to_string(),
+        );
+    }
+    let prepared =
+        match crate::variant_dependencies::prepare_execution_inputs_existing_only(state, &request)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let mut response = unavailable("infeasible", error);
+                response.authoritative = true;
+                return response;
+            }
+        };
+    match state
+        .scheduled_work
+        .preview_placement(request, copies, prepared)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => unavailable("temporarily_unavailable", error),
+    }
+}
+
 async fn model_components(
     State(state): State<AppState>,
     Path(model): Path<String>,
@@ -2328,11 +2428,7 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     // One registry snapshot backs both the additive device API and legacy
     // status projections. It reads only the 1 Hz telemetry cache and worker
     // atomics/locks; status never shells out or queries CUDA.
-    let resources = state.resources.latest();
-    let devices =
-        state
-            .device_registry
-            .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
+    let devices = current_device_state(&state);
     let gpu_statuses =
         crate::device_registry::DeviceRegistry::legacy_gpu_status_from_snapshot(&devices);
     let has_gpus = !gpu_statuses.is_empty();
@@ -2430,13 +2526,47 @@ async fn server_status(State(state): State<AppState>) -> Json<ServerStatus> {
     )
 )]
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceState> {
+    Json(current_device_state(&state))
+}
+
+pub(crate) fn current_device_state(state: &AppState) -> DeviceState {
     let resources = state.resources.latest();
     let mut snapshot =
         state
             .device_registry
             .snapshot(&state.gpu_pool, resources.as_ref(), &state.job_registry);
-    annotate_restart_required(&state, &mut snapshot);
-    Json(snapshot)
+    let authoritative_v2 = state.scheduled_work.v2_authoritative();
+    if !authoritative_v2 {
+        // Legacy and observe modes keep their restart-time workers as the
+        // runtime authority. A persisted V2 preference must never make an
+        // actively dispatching legacy worker appear disabled.
+        for device in &mut snapshot.devices {
+            let live_worker = device
+                .ordinal
+                .and_then(|ordinal| state.gpu_pool.worker_by_ordinal(ordinal));
+            if live_worker.is_some() {
+                // Only administrative ownership rolls back outside
+                // authoritative V2. Health, cooldowns, routing eligibility,
+                // and their reason remain the registry's authority.
+                device.admin_state = mold_core::DeviceAdminState::Enabled;
+            }
+        }
+    }
+    annotate_restart_required(state, &mut snapshot);
+    if authoritative_v2 {
+        if let Some(plan) = state.scheduled_work.latest_plan() {
+            snapshot.plan_version = plan.plan_version;
+            for device in &mut snapshot.devices {
+                device.planned_work_ids = plan
+                    .work_items
+                    .iter()
+                    .filter(|work| work.planned_device_id.as_deref() == Some(device.id.as_str()))
+                    .map(|work| work.work_id.clone())
+                    .collect();
+            }
+        }
+    }
+    snapshot
 }
 
 fn annotate_restart_required(state: &AppState, snapshot: &mut DeviceState) {
@@ -2602,13 +2732,6 @@ async fn patch_device(
         .into_iter()
         .find(|device| device.id == device_id)
         .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
-    state
-        .events
-        .publish(mold_core::ServerEvent::DeviceStateChanged {
-            device_id: device.id.clone(),
-            desired_enabled: device.desired_enabled,
-            admin_state: device.admin_state,
-        });
     if let Some(owner_epoch) = started_epoch {
         match state
             .gpu_pool
@@ -2689,7 +2812,9 @@ async fn health() -> impl IntoResponse {
     )
 )]
 async fn list_queue(State(state): State<AppState>) -> Json<crate::job_registry::QueueListing> {
-    Json(state.job_registry.snapshot())
+    let mut listing = state.job_registry.snapshot();
+    listing.plan = state.scheduled_work.latest_plan();
+    Json(listing)
 }
 
 /// Wrap any present JSON value (including `null`) in `Some`, so a field using
@@ -2712,6 +2837,12 @@ struct QueuePatchRequest {
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<usize>)]
     target_gpu: Option<Option<usize>>,
+    /// Preferred stable device ID. Absent leaves the pin unchanged; `null`
+    /// means Auto. Stable IDs are the durable API and take the place of
+    /// ordinal pins for new clients.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    hard_pinned_device_id: Option<Option<String>>,
     /// New 0-based index for the job among the queued jobs. Clamped into range
     /// (a large value sends it to the back). Absent means no reorder.
     #[serde(default)]
@@ -2747,6 +2878,31 @@ async fn patch_queue_job(
             )));
         }
     }
+    let stable_target_gpu = match req.hard_pinned_device_id.as_ref() {
+        Some(Some(id)) => {
+            let state_now = current_device_state(&state);
+            let device = state_now
+                .devices
+                .iter()
+                .find(|device| device.id == *id)
+                .ok_or_else(|| {
+                    ApiError::validation(format!("device {id} is not visible on this server"))
+                })?;
+            Some(Some(device.ordinal.ok_or_else(|| {
+                ApiError::validation(format!("device {id} has no schedulable worker ordinal"))
+            })?))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
+    if let (Some(legacy), Some(stable)) = (req.target_gpu, stable_target_gpu) {
+        if legacy != stable {
+            return Err(ApiError::validation(
+                "target_gpu and hard_pinned_device_id resolve to different devices",
+            ));
+        }
+    }
+    let resolved_target_gpu = stable_target_gpu.or(req.target_gpu);
 
     // A mutation response is also the scheduler acknowledgement: the final
     // lease claim takes this same fence, so no plan built from the old lane or
@@ -2756,7 +2912,7 @@ async fn patch_queue_job(
     // Both edits are independent and additive — apply whichever the request
     // supplied. `target_gpu` only when the field was present (absent leaves the
     // lane untouched); `position` only when a reorder was requested.
-    if let Some(target_gpu) = req.target_gpu {
+    if let Some(target_gpu) = resolved_target_gpu {
         state
             .job_registry
             .set_target_gpu(&id, target_gpu)
@@ -3071,15 +3227,28 @@ async fn server_capabilities(State(state): State<AppState>) -> Json<mold_core::S
             can_pause: true,
             can_cancel_all: true,
             can_reorder: true,
+            stable_device_pins: true,
+            cooperative_cancellation: false,
+            server_batch: false,
         },
-        devices: mold_core::DeviceCapabilities {
-            available: true,
-            lifecycle: state.scheduled_work.v2_authoritative(),
-            restart_enable: !state.scheduled_work.v2_authoritative(),
-        },
+        devices: device_capabilities(&state.scheduled_work),
         dispatch: dispatch_capabilities(&state.scheduled_work),
         expand: Some(expand),
     })
+}
+
+fn device_capabilities(
+    handle: &crate::scheduler::ScheduledWorkHandle,
+) -> mold_core::DeviceCapabilities {
+    let v2_authoritative = handle.v2_authoritative();
+    mold_core::DeviceCapabilities {
+        available: true,
+        lifecycle: v2_authoritative,
+        restart_enable: !v2_authoritative,
+        stable_pins: true,
+        planned_lanes: v2_authoritative,
+        learned_eta: v2_authoritative,
+    }
 }
 
 fn dispatch_capabilities(
@@ -3093,6 +3262,8 @@ fn dispatch_capabilities(
         active_mode: Some(handle.dispatch_mode().as_str().to_string()),
         v2_authoritative: handle.v2_authoritative(),
         observes_v2_decisions: handle.observes_v2_decisions(),
+        request_placement_preview: handle.v2_authoritative()
+            && handle.placement_preview_available(),
     }
 }
 
@@ -4270,12 +4441,12 @@ fn snapshot_to_sse(snap: &ResourceSnapshot) -> SseEvent {
 }
 
 /// `GET /api/events` — SSE stream of server-wide [`mold_core::ServerEvent`]s:
-/// job lifecycle (queued/started/ended, mirrored off the job registry) and
-/// gallery mutations (added/removed). One connection observes the whole
-/// server, so clients don't need a held stream per job to know when the
-/// gallery changed. Deltas only — bootstrap current state from
-/// `GET /api/queue` + `GET /api/gallery` after subscribing. Event name:
-/// `event`. Feature-detect via `capabilities.events.available`.
+/// job lifecycle, gallery mutations, queue replans, and semantic device
+/// lifecycle/health transitions. One connection observes the whole server.
+/// Deltas only — bootstrap or repair gaps from `GET /api/queue`,
+/// `GET /api/devices`, and `GET /api/gallery`. Raw utilization/memory
+/// telemetry remains on `/api/resources/stream`. Event name: `event`.
+/// Feature-detect via `capabilities.events.available`.
 #[utoipa::path(
     get,
     path = "/api/events",
@@ -4521,6 +4692,10 @@ mod tests {
         assert_eq!(legacy.active_mode.as_deref(), Some("legacy"));
         assert!(!legacy.v2_authoritative);
         assert!(!legacy.observes_v2_decisions);
+        let legacy_devices = device_capabilities(&legacy_handle);
+        assert!(!legacy_devices.lifecycle);
+        assert!(!legacy_devices.planned_lanes);
+        assert!(!legacy_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let observe_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -4531,6 +4706,10 @@ mod tests {
         assert_eq!(observe.active_mode.as_deref(), Some("observe"));
         assert!(!observe.v2_authoritative);
         assert!(observe.observes_v2_decisions);
+        let observe_devices = device_capabilities(&observe_handle);
+        assert!(!observe_devices.lifecycle);
+        assert!(!observe_devices.planned_lanes);
+        assert!(!observe_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let v2_handle = crate::scheduler::ScheduledWorkHandle::for_mode(
@@ -4542,6 +4721,10 @@ mod tests {
         assert!(v2.v2_authoritative);
         assert!(!v2.observes_v2_decisions);
         assert_eq!(v2.modes, ["legacy", "observe", "v2"]);
+        let v2_devices = device_capabilities(&v2_handle);
+        assert!(v2_devices.lifecycle);
+        assert!(v2_devices.planned_lanes);
+        assert!(v2_devices.learned_eta);
 
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let maintenance = crate::scheduler::ScheduledWorkHandle::for_runtime(

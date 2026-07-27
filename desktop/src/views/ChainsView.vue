@@ -218,7 +218,10 @@ async function render() {
   if (!canRender.value) return;
   rendering.value = true;
   try {
-    await chains.create(chainFormToRequest(form), selectedRoute.value?.target ?? null);
+    const request = chainFormToRequest(form);
+    const route = await hosts.resolveFeasibleRoute(selectedRoute.value?.hostId ?? null, request);
+    if (!route) throw new Error("No selected machine can run this sequence.");
+    await chains.create(request, route.target);
     toasts.push("Chain queued");
   } catch (err) {
     toasts.push(String(err), "error");

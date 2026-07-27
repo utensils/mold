@@ -52,7 +52,7 @@ use crate::device::{
 use crate::engine::{gpu_dtype, seeded_randn};
 use crate::img_utils::{decode_source_image, NormalizeRange};
 use crate::ltx_video::latent_upsampler::LatentUpsampler;
-use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent};
+use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase};
 use crate::vae_tiling::is_cuda_oom;
 use crate::weight_loader::{
     load_fp8_safetensors_with_callback, load_safetensors_with_progress_callback,
@@ -458,7 +458,16 @@ impl Ltx2RuntimeSession {
         })
     }
 
+    #[cfg(test)]
     pub fn prepare(&mut self, plan: &Ltx2GeneratePlan) -> Result<NativePreparedRun> {
+        self.prepare_with_progress(plan, None)
+    }
+
+    pub fn prepare_with_progress(
+        &mut self,
+        plan: &Ltx2GeneratePlan,
+        progress: Option<&ProgressCallback>,
+    ) -> Result<NativePreparedRun> {
         let prepare_total_start = Instant::now();
         let mut stage1_shape = derive_stage1_render_shape(
             plan.width,
@@ -527,6 +536,12 @@ impl Ltx2RuntimeSession {
                 )?,
                 &prepared_device,
             )?;
+            emit_phase_done(
+                progress,
+                ProgressPhase::PromptEncode,
+                "Encoding prompt (Gemma)",
+                prompt_encode_start.elapsed(),
+            );
             log_timing("prepare.prompt_pair", prompt_encode_start);
             let alt_prompt_start = Instant::now();
             let debug_alt_prompt = match alt_prompt_env.clone() {
@@ -2304,6 +2319,13 @@ fn render_real_distilled_av(
     }
     drop(video);
     drop(vae);
+    let decode_elapsed = decode_start.elapsed();
+    emit_phase_done(
+        progress,
+        ProgressPhase::Vae,
+        "Decoding video frames",
+        decode_elapsed,
+    );
     log_timing("distilled.decode_video", decode_start);
     let audio_render_start = Instant::now();
     let audio_track = maybe_render_native_audio_track(plan, audio_latents.as_ref(), device, dtype)?;
@@ -2646,6 +2668,13 @@ fn render_real_two_stage_av(
     }
     drop(video);
     drop(vae);
+    let decode_elapsed = decode_start.elapsed();
+    emit_phase_done(
+        progress,
+        ProgressPhase::Vae,
+        "Decoding video frames",
+        decode_elapsed,
+    );
     log_timing("two_stage.decode_video", decode_start);
     let audio_render_start = Instant::now();
     let audio_track = if let Some(conditioned_audio) = conditioned_audio.as_ref() {
@@ -4619,6 +4648,21 @@ fn emit_info(progress: Option<&ProgressCallback>, message: String) {
     }
 }
 
+fn emit_phase_done(
+    progress: Option<&ProgressCallback>,
+    phase: ProgressPhase,
+    name: &str,
+    elapsed: std::time::Duration,
+) {
+    if let Some(callback) = progress {
+        callback(ProgressEvent::PhaseDone {
+            phase,
+            name: name.to_string(),
+            elapsed,
+        });
+    }
+}
+
 fn ltx2_video_activation_budget(plan: &Ltx2GeneratePlan) -> u64 {
     let dtype = DType::BF16;
     let base = activation_bytes(
@@ -5420,7 +5464,9 @@ mod tests {
     use crate::ltx2::text::prompt_encoder::{
         build_embeddings_processor, ConnectorSpec, NativePromptEncoder,
     };
-    use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressEvent};
+    use crate::progress::{
+        InferenceCancellationToken, ProgressCallback, ProgressEvent, ProgressPhase,
+    };
     use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
 
     fn req(model: &str, format: OutputFormat, enable_audio: Option<bool>) -> GenerateRequest {
@@ -6001,7 +6047,14 @@ mod tests {
         let plan = build_plan(&req, preset, conditioning);
 
         let mut session = runtime_session();
-        let prepared = session.prepare(&plan).unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let progress: ProgressCallback = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+        });
+        let prepared = session
+            .prepare_with_progress(&plan, Some(&progress))
+            .unwrap();
 
         assert_eq!(prepared.video_pixel_shape.frames, 97);
         assert_eq!(prepared.video_pixel_shape.width, 608);
@@ -6027,9 +6080,27 @@ mod tests {
         );
 
         let rendered = session
-            .render_native_video(&plan, &prepared, None, None)
+            .render_native_video(&plan, &prepared, Some(&progress), None)
             .unwrap();
         assert_eq!(rendered.frames.len(), 97);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::PhaseDone {
+                phase: ProgressPhase::PromptEncode,
+                ..
+            }
+        )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProgressEvent::PhaseDone {
+                    phase: ProgressPhase::Vae,
+                    ..
+                }
+            )),
+            "placeholder rendering must not invent a VAE timing sample"
+        );
         assert_eq!(rendered.frames[0].dimensions(), (1216, 704));
         assert!(rendered.has_audio);
         assert_eq!(rendered.audio_sample_rate, Some(48_000));

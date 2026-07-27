@@ -90,6 +90,10 @@ pushed screen opened from the header.
   downloads, loaded models, and installed models (all using catalog display
   names rather than opaque `cv:` / `hf:` ids), with rename, retry, select,
   unload, open-in-Models, and forget actions.
+  Current V2 hosts also expose every GPU/MIG device and its queue lane. Device
+  lifecycle controls are shown only when the host advertises
+  `devices.lifecycle`; disabling a busy device leaves its current work running
+  and shows the draining state until completion.
 - **Settings** persists the Mold Studio theme families (Mold or Safelight) and
   System, Dark, or Light appearance. Fresh installs start with Safelight +
   System; valid saved choices remain authoritative. Its default-on Photos
@@ -107,6 +111,13 @@ Prepared expansion always snapshots the selected remote host ID, endpoint,
 Keychain-provided key, and server instance. Batch N requires exactly N non-empty
 prompts before its inline review workspace appears; edits and specifically named
 stale work remain local until explicit approval, refresh, collapse, or discard.
+After source preprocessing, Create performs one read-only placement preview for
+the finalized sibling shape (`batch_size: 1`, `copies: N`) on that exact frozen
+route. A URL, Keychain key, or instance change, an authoritative infeasible
+result, a malformed response, or any non-legacy HTTP failure preserves the
+reviewed work and queues nothing. Only a strictly valid version-1
+non-authoritative `unsupported` result or a missing legacy endpoint
+(`404`/`405`) may retain compatible routing without an authoritative plan.
 Create generation queues and stale reasons resolve opaque catalog IDs through
 the selected host's inventory for display, while requests and saved provenance
 retain the stable ID.

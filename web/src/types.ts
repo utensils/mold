@@ -113,11 +113,15 @@ export interface ServerCapabilities {
     available?: boolean;
     lifecycle?: boolean;
     restart_enable?: boolean;
+    stable_pins?: boolean;
+    planned_lanes?: boolean;
+    learned_eta?: boolean;
   };
   dispatch?: {
     active_mode?: string | null;
     v2_authoritative?: boolean;
     observes_v2_decisions?: boolean;
+    request_placement_preview?: boolean;
   };
   queue?: {
     can_pause?: boolean;
@@ -315,6 +319,7 @@ export interface QueueEntry {
 
 export interface QueueListing {
   entries: QueueEntry[];
+  plan?: import("@studio/api/queuePlan").QueuePlan | null;
 }
 
 export type SseProgressEvent =

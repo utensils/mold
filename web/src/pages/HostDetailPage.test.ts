@@ -1,6 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { nextTick, ref } from "vue";
+import { nextTick, reactive, ref } from "vue";
 import type {
   HostCapabilities,
   HostStatus,
@@ -11,14 +11,15 @@ import type {
   QueueEntry,
   ResourceSnapshot,
 } from "../types";
-import { addHost, getHost } from "../lib/hostRegistry";
+import { addHost, getHost, updateHost } from "../lib/hostRegistry";
 import HostDetailPage from "./HostDetailPage.vue";
-import type { DeviceInfo } from "@studio/api/devices";
+import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 // Mutable fixtures the hostClient mock reads at call time.
 let poll: {
   status: ReturnType<typeof ref<HostStatus | null>>;
   devices: ReturnType<typeof ref<DeviceInfo[] | null>>;
+  deviceState: ReturnType<typeof ref<DeviceListResponse | null>>;
   resources: ReturnType<typeof ref<ResourceSnapshot | null>>;
   online: ReturnType<typeof ref<boolean>>;
   lastSeen: ReturnType<typeof ref<number | null>>;
@@ -54,17 +55,21 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
   setDeviceEnabled,
 }));
+const subscribeToDeviceSnapshots = vi.hoisted(() => vi.fn());
+const hostCapabilitiesCall = vi.hoisted(() => vi.fn());
+const hostQueueCall = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/toasts", () => ({
   toast: vi.fn(),
   requestConfirm,
   requestText,
 }));
+vi.mock("../lib/deviceEvents", () => ({ subscribeToDeviceSnapshots }));
 
-const routeHolder = { id: "origin" };
+const routeHolder = reactive({ id: "origin" });
 
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ params: { id: routeHolder.id } }),
+  useRoute: () => ({ params: routeHolder }),
   useRouter: () => ({ push: routerPush }),
   RouterLink: {
     name: "RouterLink",
@@ -75,8 +80,10 @@ vi.mock("vue-router", () => ({
 
 vi.mock("../components/machines/hostClient", () => ({
   useHostPoll: () => poll,
-  hostCapabilities: () => Promise.resolve(caps),
-  hostQueue: () => Promise.resolve({ entries: queueEntries }),
+  hostCapabilities: (...args: unknown[]) => hostCapabilitiesCall(...args),
+  hostQueue: (...args: unknown[]) => hostQueueCall(...args),
+  setHostDeviceEnabled: () =>
+    Promise.resolve({ devices: poll.devices.value ?? [], plan_version: 0 }),
   hostModels: () => Promise.resolve(models),
   hostDownloads: () => Promise.resolve(downloadsListing),
   // Wrappers defer reading the vi.fns until call time (the factory is hoisted
@@ -189,6 +196,14 @@ function queued(id: string, position: number): QueueEntry {
 }
 
 let wrapper: ReturnType<typeof mount> | null = null;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 async function mountDetail() {
   wrapper = mount(HostDetailPage);
   await flushPromises();
@@ -226,9 +241,17 @@ beforeEach(() => {
   routerPush.mockClear();
   requestConfirm.mockReset().mockResolvedValue(true);
   requestText.mockReset().mockResolvedValue("Render box");
+  subscribeToDeviceSnapshots.mockClear();
+  hostCapabilitiesCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve(caps));
+  hostQueueCall
+    .mockReset()
+    .mockImplementation(() => Promise.resolve({ entries: queueEntries }));
   poll = {
     status: ref<HostStatus | null>(makeStatus()),
     devices: ref<DeviceInfo[] | null>(null),
+    deviceState: ref<DeviceListResponse | null>(null),
     resources: ref<ResourceSnapshot | null>(makeResources()),
     online: ref(true),
     lastSeen: ref<number | null>(Date.now()),
@@ -245,6 +268,185 @@ afterEach(() => {
 });
 
 describe("HostDetailPage — telemetry", () => {
+  it("subscribes with the viewed host key and refreshes authoritative state", async () => {
+    const host = getHost(routeHolder.id)!;
+    updateHost(routeHolder.id, { apiKey: "host-key" });
+    await mountDetail();
+
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+    const [target, _signal, refresh] =
+      subscribeToDeviceSnapshots.mock.calls[0]!;
+    expect(target).toEqual({ baseUrl: host.url, apiKey: "host-key" });
+    refresh();
+    expect(poll.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts queue refresh and SSE without waiting for a stalled capability probe", async () => {
+    hostCapabilitiesCall.mockImplementation(() => new Promise(() => {}));
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+
+    expect(hostQueueCall).toHaveBeenCalledTimes(1);
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(1);
+  });
+
+  it("threads the active session signal through interval and SSE reloads", async () => {
+    vi.useFakeTimers();
+    try {
+      wrapper = mount(HostDetailPage);
+      await nextTick();
+      await Promise.resolve();
+      const sessionSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+      const refresh = subscribeToDeviceSnapshots.mock
+        .calls[0]![2] as () => void;
+
+      hostQueueCall.mockClear();
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+
+      hostQueueCall.mockClear();
+      refresh();
+      await Promise.resolve();
+      expect(hostQueueCall).toHaveBeenCalledWith(
+        expect.objectContaining({ id: routeHolder.id }),
+        sessionSignal,
+      );
+      expect(sessionSignal.aborted).toBe(false);
+    } finally {
+      wrapper?.unmount();
+      wrapper = null;
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores an older same-host queue response after a newer event refresh", async () => {
+    const older = deferred<{ entries: QueueEntry[] }>();
+    const newer = deferred<{ entries: QueueEntry[] }>();
+    hostQueueCall
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await Promise.resolve();
+
+    newer.resolve({ entries: [queued("newer", 0)] });
+    await flushPromises();
+    older.resolve({ entries: [queued("older", 0)] });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("flux-newer");
+    expect(wrapper.text()).not.toContain("flux-older");
+  });
+
+  it("cancels and rebinds capabilities, queue polling, and SSE on route changes", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "first-key" });
+    const second = addHost({
+      url: "192.168.1.21:7680",
+      name: "Second",
+      apiKey: "second-key",
+    });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    routeHolder.id = second.id;
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: second.id,
+        url: second.url,
+        apiKey: "second-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: second.id, apiKey: "second-key" }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: second.url,
+      apiKey: "second-key",
+    });
+  });
+
+  it("cancels and rebinds the same host when its URL or API key rotates", async () => {
+    const first = getHost(routeHolder.id)!;
+    updateHost(first.id, { apiKey: "old-key" });
+    await mountDetail();
+    const firstSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+    const firstCapabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const firstQueueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+
+    updateHost(first.id, {
+      url: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+    await nextTick();
+    await flushPromises();
+
+    expect(firstSignal.aborted).toBe(true);
+    expect(firstCapabilitySignal.aborted).toBe(true);
+    expect(firstQueueSignal.aborted).toBe(true);
+    expect(hostCapabilitiesCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(hostQueueCall).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: first.id,
+        url: "http://render-box.internal:7680",
+        apiKey: "rotated-key",
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(subscribeToDeviceSnapshots).toHaveBeenCalledTimes(2);
+    expect(subscribeToDeviceSnapshots.mock.calls[1]![0]).toEqual({
+      baseUrl: "http://render-box.internal:7680",
+      apiKey: "rotated-key",
+    });
+  });
+
+  it("aborts the active host session and SSE subscription on unmount", async () => {
+    const w = await mountDetail();
+    const capabilitySignal = hostCapabilitiesCall.mock
+      .calls[0]![1] as AbortSignal;
+    const queueSignal = hostQueueCall.mock.calls[0]![1] as AbortSignal;
+    const sseSignal = subscribeToDeviceSnapshots.mock
+      .calls[0]![1] as AbortSignal;
+
+    w.unmount();
+    wrapper = null;
+
+    expect(capabilitySignal.aborted).toBe(true);
+    expect(queueSignal.aborted).toBe(true);
+    expect(sseSignal.aborted).toBe(true);
+  });
+
   it("maps the resource snapshot into the telemetry card", async () => {
     const w = await mountDetail();
     expect(w.get('[data-test="machine-detail-title"]').text()).toBe("Studio");
@@ -446,7 +648,7 @@ describe("HostDetailPage — queue", () => {
 
     const w = await mountDetail();
 
-    expect(w.findAll('[data-test="device-row"]')).toHaveLength(8);
+    expect(w.findAll('[data-test="device-card"]')).toHaveLength(8);
     expect(w.text()).toContain("Finishing current work");
     expect(w.text()).toContain("disabled");
     expect(w.text()).toContain("Starting");
@@ -511,10 +713,10 @@ describe("HostDetailPage — queue", () => {
     const pending = w.get('[data-test="device-toggle-2"]');
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    expect(w.findAll('[data-test="device-row"]')[2]!.text()).toContain(
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).toContain(
       "Restart required",
     );
-    expect(w.findAll('[data-test="device-row"]')[2]!.text()).not.toContain(
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).not.toContain(
       "unavailable",
     );
   });

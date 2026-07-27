@@ -207,7 +207,8 @@ fn map_models_key(key: &KeyEvent) -> Action {
 /// whichever pane holds focus (host list or queue lanes — the dispatcher
 /// routes by `MachinesFocus`), Tab toggles panes, Enter sets the sticky
 /// generation target, and the row actions are `c` connect / `d` forget /
-/// `r` refresh / `x` cancel-queued-job (detail focus).
+/// `r` refresh / `x` cancel-queued-job (detail focus). `[` / `]` select a
+/// stable device and `e` toggles its desired enabled state.
 fn map_machines_key(key: &KeyEvent) -> Action {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => Action::Up,
@@ -220,6 +221,8 @@ fn map_machines_key(key: &KeyEvent) -> Action {
         KeyCode::Char('r') => Action::MachinesRefresh,
         KeyCode::Char('x') => Action::MachinesCancelJob,
         KeyCode::Char('g') => Action::MachinesNextDevice,
+        KeyCode::Char('[') => Action::MachinesDevicePrev,
+        KeyCode::Char(']') => Action::MachinesDeviceNext,
         KeyCode::Char('e') => Action::MachinesToggleDevice,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Esc => Action::SwitchView(View::Create),
@@ -676,6 +679,8 @@ mod tests {
             (KeyCode::Char('r'), Action::MachinesRefresh),
             (KeyCode::Char('x'), Action::MachinesCancelJob),
             (KeyCode::Char('g'), Action::MachinesNextDevice),
+            (KeyCode::Char('['), Action::MachinesDevicePrev),
+            (KeyCode::Char(']'), Action::MachinesDeviceNext),
             (KeyCode::Char('e'), Action::MachinesToggleDevice),
             (KeyCode::Char('q'), Action::Quit),
             (KeyCode::Esc, Action::SwitchView(View::Create)),

@@ -1,17 +1,122 @@
 <script setup lang="ts">
+import { onBeforeUnmount, ref, watch } from "vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { listDevices, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
+import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import ConfigRowItem from "./ConfigRowItem.vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import PlacementSection from "./PlacementSection.vue";
-import DeviceSettingsPanel from "./DeviceSettingsPanel.vue";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
+import { useConnectionStore } from "../../stores/connection";
 import { schemaFor } from "../../lib/settingsSchema";
 import type { ConfigRow } from "../../lib/api/types";
+import { subscribeToDeviceSnapshots } from "../../lib/api/deviceEvents";
+import { fetchServerCapabilities } from "../../lib/api/serverCapabilities";
 
 defineProps<{ filter?: ((row: ConfigRow) => boolean) | undefined }>();
 
 const config = useSettingsConfigStore();
 const toasts = useToastStore();
+const connection = useConnectionStore();
+const devices = ref<DeviceInfo[]>([]);
+const plan = ref<QueuePlan | null>(null);
+const mutatingDeviceId = ref<string | null>(null);
+const lifecycleMutable = ref(false);
+const restartEnable = ref(false);
+let deviceEventsAbort: AbortController | null = null;
+let deviceRequestGeneration = 0;
+
+function target() {
+  return connection.baseUrl ? { baseUrl: connection.baseUrl, apiKey: connection.apiKey } : null;
+}
+
+async function loadDevices() {
+  const apiTarget = target();
+  const generation = ++deviceRequestGeneration;
+  if (!apiTarget) {
+    devices.value = [];
+    plan.value = null;
+    lifecycleMutable.value = false;
+    restartEnable.value = false;
+    return;
+  }
+  const isCurrent = () => {
+    const current = target();
+    return (
+      generation === deviceRequestGeneration &&
+      current?.baseUrl === apiTarget.baseUrl &&
+      current.apiKey === apiTarget.apiKey
+    );
+  };
+  const [deviceResult, queueResult, capabilityResult] = await Promise.allSettled([
+    listDevices(apiTarget),
+    listQueue(apiTarget),
+    fetchServerCapabilities(apiTarget),
+  ]);
+  if (!isCurrent()) return;
+  if (deviceResult.status === "fulfilled") devices.value = deviceResult.value.devices;
+  if (queueResult.status === "fulfilled") plan.value = queueResult.value.plan;
+  lifecycleMutable.value =
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value.devices?.lifecycle === true &&
+    capabilityResult.value.dispatch?.v2_authoritative === true;
+  restartEnable.value =
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value.devices?.restart_enable === true;
+}
+
+async function toggleDevice(deviceId: string, enabled: boolean) {
+  const apiTarget = target();
+  if (!apiTarget) return;
+  mutatingDeviceId.value = deviceId;
+  try {
+    const accepted = await setDeviceEnabled(apiTarget, deviceId, enabled);
+    devices.value = devices.value.map((device) => (device.id === accepted.id ? accepted : device));
+    await loadDevices();
+  } catch (error) {
+    toasts.push(`Device state was not changed: ${String(error)}`, "error");
+  } finally {
+    mutatingDeviceId.value = null;
+  }
+}
+
+async function unpinWork(workId: string) {
+  const apiTarget = target();
+  if (!apiTarget) return;
+  try {
+    await setQueueDevicePin(apiTarget, workId, null);
+    await loadDevices();
+  } catch (error) {
+    toasts.push(`Queue pin was not changed: ${String(error)}`, "error");
+  }
+}
+
+watch(
+  [() => connection.baseUrl, () => connection.apiKey],
+  () => {
+    deviceEventsAbort?.abort();
+    deviceEventsAbort = null;
+    const apiTarget = target();
+    if (!apiTarget) {
+      void loadDevices();
+      return;
+    }
+    // Establish an authoritative snapshot even when this is an older server
+    // without `/api/events`; onOpen and relevant deltas repair it thereafter.
+    void loadDevices();
+    deviceEventsAbort = new AbortController();
+    subscribeToDeviceSnapshots(apiTarget, deviceEventsAbort.signal, () => {
+      void loadDevices();
+    });
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  deviceRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 
 async function save(row: ConfigRow, value: ConfigRow["value"]) {
   const error = await config.save(row.key, value);
@@ -25,8 +130,19 @@ async function reset(row: ConfigRow) {
 
 <template>
   <div>
+    <DevicePanel
+      v-if="!filter && devices.length"
+      class="mb-5"
+      :devices="devices"
+      :plan="plan"
+      :mutable="lifecycleMutable"
+      :restart-enable="restartEnable"
+      show-controls
+      :busy-device-id="mutatingDeviceId"
+      @unpin="unpinWork"
+      @toggle="toggleDevice"
+    />
     <ConfigSettingRow schema-key="server_port" />
-    <DeviceSettingsPanel v-if="!filter" class="mt-5" />
     <PlacementSection v-if="!filter" class="mt-5" />
     <p class="mt-4 mb-1 text-caption text-ink-3">
       Everything the engine exposes that has no curated control — including keys added by newer

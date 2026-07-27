@@ -7,6 +7,7 @@
 //! jobs or querying CUDA on an HTTP request.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use mold_core::{
@@ -111,8 +112,10 @@ impl DeviceDiscoveryAdapter for StaticDeviceDiscovery {
 pub struct DeviceRegistry {
     discovery: Arc<dyn DeviceDiscoveryAdapter>,
     explicit_preferences: RwLock<BTreeMap<String, bool>>,
+    transient_unavailable: RwLock<BTreeSet<String>>,
     metadata_db: Arc<Option<mold_db::MetadataDb>>,
     transient_ids: Mutex<HashMap<String, String>>,
+    mutation_sequence: AtomicU64,
 }
 
 impl DeviceRegistry {
@@ -142,8 +145,10 @@ impl DeviceRegistry {
         Self {
             discovery,
             explicit_preferences: RwLock::new(explicit_preferences),
+            transient_unavailable: RwLock::new(BTreeSet::new()),
             metadata_db,
             transient_ids: Mutex::new(HashMap::new()),
+            mutation_sequence: AtomicU64::new(0),
         }
     }
 
@@ -157,7 +162,17 @@ impl DeviceRegistry {
     /// Foundation for Phase C lifecycle mutation. Phase A has no route that
     /// calls this method, but DB-disabled mode already behaves correctly:
     /// changes remain process-local and log that they will not persist.
-    pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<()> {
+    /// Persist a device preference and return whether its effective value
+    /// changed. The write lock spans persistence so concurrent callers cannot
+    /// both publish the same logical transition.
+    pub fn set_desired_enabled(&self, device_id: &str, enabled: bool) -> anyhow::Result<bool> {
+        let mut preferences = self
+            .explicit_preferences
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if preferences.get(device_id).copied().unwrap_or(true) == enabled {
+            return Ok(false);
+        }
         if let Some(db) = self.metadata_db.as_ref().as_ref() {
             mold_db::DevicePreferences::new(db).set(device_id, enabled)?;
         } else {
@@ -167,11 +182,9 @@ impl DeviceRegistry {
                 "metadata DB disabled; device preference will not persist"
             );
         }
-        self.explicit_preferences
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(device_id.to_string(), enabled);
-        Ok(())
+        preferences.insert(device_id.to_string(), enabled);
+        self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
     }
 
     pub fn discovered_device(&self, device_id: &str) -> Option<DiscoveredDevice> {
@@ -192,6 +205,38 @@ impl DeviceRegistry {
 
     pub fn has_devices(&self) -> bool {
         !self.discovery.devices().is_empty()
+    }
+
+    pub fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence.load(Ordering::SeqCst)
+    }
+
+    /// Record a scheduler transport/start failure in the authoritative device
+    /// projection. Returns true only for a real health transition.
+    pub fn mark_unavailable(&self, device_id: &str) -> bool {
+        let changed = self
+            .transient_unavailable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(device_id.to_string());
+        if changed {
+            self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
+    }
+
+    /// Clear a transient scheduler failure when the worker announces Ready.
+    /// Returns true only for a real health transition.
+    pub fn mark_available(&self, device_id: &str) -> bool {
+        let changed = self
+            .transient_unavailable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(device_id);
+        if changed {
+            self.mutation_sequence.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
     }
 
     pub fn snapshot(
@@ -269,6 +314,10 @@ impl DeviceRegistry {
             .explicit_preferences
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let transient_unavailable = self
+            .transient_unavailable
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let devices = discovered
             .into_iter()
             .map(|device| {
@@ -296,6 +345,12 @@ impl DeviceRegistry {
                     device.visible_ordinal == Some(worker.gpu.ordinal)
                         && device.backend == worker.gpu.backend
                 });
+                let active = worker.is_some_and(|status| {
+                    !matches!(
+                        status.state,
+                        GpuWorkerState::Idle | GpuWorkerState::Degraded
+                    )
+                });
                 let admin_state = if !device.startup_allowed {
                     DeviceAdminState::StartupExcluded
                 } else if pool.workers.is_starting(&id)
@@ -310,6 +365,8 @@ impl DeviceRegistry {
                     DeviceAdminState::Draining
                 } else if desired_enabled {
                     DeviceAdminState::Enabled
+                } else if active {
+                    DeviceAdminState::Draining
                 } else {
                     DeviceAdminState::Disabled
                 };
@@ -322,6 +379,8 @@ impl DeviceRegistry {
                             .load(std::sync::atomic::Ordering::SeqCst)
                         {
                             DeviceHealth::Poisoned
+                        } else if transient_unavailable.contains(&id) {
+                            DeviceHealth::Unavailable
                         } else if worker_ref.is_degraded() {
                             DeviceHealth::Degraded
                         } else {
@@ -713,7 +772,9 @@ mod tests {
             DeviceRegistry::new(Arc::new(StaticDeviceDiscovery::default()), Arc::new(None));
         let id = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+        assert_eq!(registry.mutation_sequence(), 0);
         registry.set_desired_enabled(id, false).unwrap();
+        assert_eq!(registry.mutation_sequence(), 1);
         assert_eq!(
             registry
                 .explicit_preferences
@@ -722,6 +783,13 @@ mod tests {
                 .get(id)
                 .copied(),
             Some(false)
+        );
+
+        registry.set_desired_enabled(id, false).unwrap();
+        assert_eq!(
+            registry.mutation_sequence(),
+            1,
+            "repeating the same preference is not a semantic mutation"
         );
     }
 
@@ -817,6 +885,37 @@ mod tests {
         assert_eq!(
             state.devices[0].unschedulable_reason.as_deref(),
             Some("device_startup_excluded")
+        );
+    }
+
+    #[test]
+    fn transient_worker_unavailability_is_authoritative_until_ready() {
+        let id = "cuda:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let registry = DeviceRegistry::new(
+            Arc::new(StaticDeviceDiscovery::new(vec![discovered(Some(id), true)])),
+            Arc::new(None),
+        );
+        let pool = GpuPool {
+            workers: vec![worker(0)].into(),
+        };
+        let jobs = crate::job_registry::JobRegistry::new();
+
+        assert_eq!(
+            registry.snapshot(&pool, None, &jobs).devices[0].health,
+            DeviceHealth::Healthy
+        );
+        assert!(registry.mark_unavailable(id));
+        let unavailable = registry.snapshot(&pool, None, &jobs);
+        assert_eq!(unavailable.devices[0].health, DeviceHealth::Unavailable);
+        assert!(!unavailable.devices[0].schedulable);
+        assert!(
+            !registry.mark_unavailable(id),
+            "idempotent transitions stay silent"
+        );
+        assert!(registry.mark_available(id));
+        assert_eq!(
+            registry.snapshot(&pool, None, &jobs).devices[0].health,
+            DeviceHealth::Healthy
         );
     }
 

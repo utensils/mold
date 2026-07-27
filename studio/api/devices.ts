@@ -254,8 +254,11 @@ export function parseDeviceListResponse(value: unknown): DeviceListResponse {
 
 export async function listDevices(
   target: ApiTarget,
+  signal?: AbortSignal,
 ): Promise<DeviceListResponse> {
-  const value = await apiJsonTo<unknown>(target, "/api/devices");
+  const value = await apiJsonTo<unknown>(target, "/api/devices", {
+    signal: signal ?? null,
+  });
   return parseDeviceListResponse(value);
 }
 

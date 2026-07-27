@@ -91,7 +91,12 @@ scheduler V2 is the authoritative runtime; legacy, observe, maintenance, and
 unavailable runtimes report false. Those runtimes advertise
 `devices.restart_enable` instead: clients may offer **Enable on restart** only
 for a device whose persisted preference is disabled. Live controls must also
-require `dispatch.v2_authoritative`. Clients must only request
+require `dispatch.v2_authoritative`. Stable pin support is advertised as
+`devices.stable_pins`; versioned lanes and learned ETA are advertised as
+`devices.planned_lanes` and `devices.learned_eta` only while V2 is
+authoritative. Dispatch rollout is exposed as `dispatch.active_mode`,
+`dispatch.v2_authoritative`, and `dispatch.observes_v2_decisions`. Clients must
+only request
 `GET /api/discovery/peers` when that discovery flag is true. Older servers may
 omit these fields; clients must treat missing arrays as empty and missing
 booleans as `false`.
@@ -453,7 +458,9 @@ metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 
 `GET /api/queue` returns queued and running generation jobs. Running jobs carry
 their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
-can render one lane per GPU plus an automatic lane.
+can render one lane per GPU plus an automatic lane. Current authoritative V2
+servers also return a nullable `plan` with versioned stable-device lanes,
+estimated start/finish times, confidence, and the next tentative replan time.
 
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
@@ -461,10 +468,13 @@ Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 ```bash
 curl -X PATCH http://localhost:7680/api/queue/00000000-0000-0000-0000-000000000000 \
   -H "Content-Type: application/json" \
-  -d '{"target_gpu":0,"position":1}'
+  -d '{"hard_pinned_device_id":"cuda:0123...","position":1}'
 ```
 
 Set `target_gpu` to `null` to return the queued job to automatic placement.
+`hard_pinned_device_id` accepts the opaque ID from `/api/devices`; send `null`
+to return to Auto. If both ordinal and stable-ID pins are supplied, they must
+name the same device.
 Omitting either field leaves it unchanged. `position` is clamped to the current
 queued range, so a large value sends a job to the back. Reordering changes real
 dispatch priority, not only the listing returned by `GET /api/queue`.
@@ -581,11 +591,11 @@ RunPod's proxy has a 100-second timeout. Use the SSE streaming endpoint for long
 
 ## `/api/events`
 
-`GET /api/events` is a single SSE stream of **server-wide** lifecycle events —
-every generation job's queued/started/ended transitions plus gallery
-additions and removals — so a client can keep its gallery and queue views
-live over one connection instead of holding a stream per job. Frames use the
-event name `event` with an internally tagged JSON payload:
+`GET /api/events` is a single SSE stream of **server-wide** lifecycle events:
+generation jobs, gallery changes, versioned queue replans, and semantic device
+lifecycle/health transitions. Raw utilization and memory telemetry remain on
+`GET /api/resources/stream`. Frames use the event name `event` with an
+internally tagged JSON payload:
 
 ```text
 event: event
@@ -606,17 +616,21 @@ data: {"type":"gallery_removed","filename":"mold-flux-dev-q4-1752300000000.png"}
 
 Event semantics:
 
-| `type`            | Meaning                                                                                                                                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `job_queued`      | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
-| `job_started`     | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
-| `job_ended`       | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
-| `gallery_added`   | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
-| `gallery_removed` | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `type`                 | Meaning                                                                                                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job_queued`           | A generation was accepted into the queue (`id`, `model`).                                                                                                                                         |
+| `job_started`          | A worker began the job. `gpu` is the ordinal on multi-GPU servers, omitted on single-GPU.                                                                                                         |
+| `job_ended`            | The job left the queue for **any** reason — completed, errored, or cancelled. Use the per-job stream for outcomes; `gallery_added` is the durable success signal.                                 |
+| `gallery_added`        | A new output landed on disk. `image` carries the full gallery row when the metadata DB recorded it (insert it directly); when the DB is disabled `image` is omitted — refetch `GET /api/gallery`. |
+| `gallery_removed`      | An output was deleted via `DELETE /api/gallery/image/:name`.                                                                                                                                      |
+| `queue_plan_changed`   | The scheduler published a newer versioned queue plan. Replace tentative lanes only when `plan_version` advances.                                                                                  |
+| `device_state_changed` | Device administration, worker health, or activity changed. Treat the payload as a hint and refetch `GET /api/devices`; telemetry-only samples do not emit this event.                             |
 
 The stream carries **deltas only** — there is no initial snapshot. Subscribe
-first, then bootstrap current state from `GET /api/queue` and
-`GET /api/gallery` so nothing lands in the gap. Feature-detect with
+first, then bootstrap current state from `GET /api/queue`, `GET /api/devices`,
+and `GET /api/gallery`. Refetch those authoritative snapshots after every
+reconnect because lagged broadcast frames are intentionally not replayed.
+Feature-detect with
 `GET /api/capabilities` (`"events": {"available": true}`); servers older than
 this endpoint omit the field. Keep-alive pings arrive every 15 s.
 

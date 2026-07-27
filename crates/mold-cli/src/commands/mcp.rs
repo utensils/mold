@@ -466,6 +466,8 @@ impl McpServer {
             .server_status()
             .await
             .map_err(|e| format!("failed to read server status: {e}"))?;
+        let devices = self.client.devices().await.ok();
+        let queue = self.client.list_queue().await.ok();
 
         let mut lines = vec![
             format!("mold server {}", status.version),
@@ -473,13 +475,32 @@ impl McpServer {
             format!("loaded models: {}", status.models_loaded.join(", ")),
             format!("uptime: {}s", status.uptime_secs),
         ];
-        if let Some(hostname) = status.hostname {
+        if let Some(hostname) = &status.hostname {
             lines.push(format!("host: {hostname}"));
         }
-        if let Some(memory) = status.memory_status {
-            lines.push(memory);
+        if let Some(memory) = &status.memory_status {
+            lines.push(memory.clone());
         }
-        if let Some(gpus) = status.gpus {
+        if let Some(device_state) = devices.as_ref().filter(|state| !state.devices.is_empty()) {
+            for device in &device_state.devices {
+                lines.push(format!(
+                    "device {} (gpu {}): {} ({:?}/{:?}){}",
+                    device.id,
+                    device
+                        .ordinal
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    device.name,
+                    device.admin_state,
+                    device.health,
+                    device
+                        .loaded_models
+                        .first()
+                        .map(|model| format!(", loaded {model}"))
+                        .unwrap_or_default()
+                ));
+            }
+        } else if let Some(gpus) = &status.gpus {
             for gpu in gpus {
                 lines.push(format!(
                     "gpu {}: {} ({:?}){}",
@@ -487,6 +508,7 @@ impl McpServer {
                     gpu.name,
                     gpu.state,
                     gpu.loaded_model
+                        .as_ref()
                         .map(|m| format!(", loaded {m}"))
                         .unwrap_or_default()
                 ));
@@ -495,8 +517,45 @@ impl McpServer {
         if let Some(depth) = status.queue_depth {
             lines.push(format!("queue depth: {depth}"));
         }
+        if let Some(plan) = queue.as_ref().and_then(|queue| queue.plan.as_ref()) {
+            lines.push(format!(
+                "queue plan: v{} state={} optimizer={} next_replan={}",
+                plan.plan_version,
+                plan.state_version,
+                plan.optimizer_state,
+                plan.next_replan_at_unix_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            for item in &plan.work_items {
+                lines.push(format!(
+                    "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
+                    item.work_id,
+                    item.activity_phase,
+                    item.planned_device_id.as_deref().unwrap_or("unassigned"),
+                    item.lane_order
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "—".into()),
+                    item.blocked_reason
+                        .as_ref()
+                        .map(|reason| reason.as_str())
+                        .unwrap_or("none"),
+                    item.estimated_finish_unix_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                    item.estimate_confidence,
+                ));
+            }
+        }
 
-        Ok(text_result(lines.join("\n")))
+        Ok(json!({
+            "content": [{ "type": "text", "text": lines.join("\n") }],
+            "structuredContent": {
+                "status": status,
+                "devices": devices.map(|state| state.devices).unwrap_or_default(),
+                "queue": queue,
+            }
+        }))
     }
 
     async fn resolve_loras(

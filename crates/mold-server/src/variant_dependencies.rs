@@ -81,9 +81,15 @@ async fn ensure_downloaded(
     filename: &str,
     subdir: &str,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    policy: DependencyMaterializationPolicy,
 ) -> Result<PathBuf, String> {
     if let Some(path) = mold_core::download::cached_file_path(repo, filename, Some(subdir)) {
         return Ok(path);
+    }
+    if policy == DependencyMaterializationPolicy::ExistingOnly {
+        return Err(format!(
+            "required local dependency '{filename}' from '{repo}' is not installed"
+        ));
     }
 
     let key = DownloadKey {
@@ -394,6 +400,13 @@ struct DependencyContext<'a> {
     state: Option<&'a AppState>,
     work_id: &'a str,
     progress: Option<&'a tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    policy: DependencyMaterializationPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DependencyMaterializationPolicy {
+    Admission,
+    ExistingOnly,
 }
 
 struct VariantSelection<'a> {
@@ -435,6 +448,7 @@ async fn materialize_t5(
             variant.hf_filename,
             "shared/t5-gguf",
             context.progress,
+            context.policy,
         )
         .await?
     };
@@ -514,6 +528,7 @@ async fn materialize_qwen3(
                 variant.hf_filename,
                 subdir,
                 context.progress,
+                context.policy,
             )
             .await?,
         ]
@@ -558,6 +573,7 @@ async fn materialize_qwen2(
         variant.hf_filename,
         "shared/qwen2-vl-gguf",
         context.progress,
+        context.policy,
     )
     .await?;
     if family != "qwen-image-edit" {
@@ -712,6 +728,7 @@ async fn prepare_inputs_for_devices(
     config: &Config,
     devices: Vec<DeviceFact>,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    policy: DependencyMaterializationPolicy,
 ) -> Result<PreparedExecutionInputs, String> {
     let paths = ModelPaths::resolve(&request.model, config)
         .ok_or_else(|| format!("model '{}' has no concrete local artifacts", request.model))?;
@@ -775,6 +792,7 @@ async fn prepare_inputs_for_devices(
         state,
         work_id,
         progress,
+        policy,
     };
     for device in devices {
         let mut selected_paths = paths.clone();
@@ -877,7 +895,37 @@ pub async fn prepare_execution_inputs(
     if devices.is_empty() {
         devices = worker_device_facts_from_startup_sample(state);
     }
-    prepare_inputs_for_devices(Some(state), work_id, request, &config, devices, progress).await
+    prepare_inputs_for_devices(
+        Some(state),
+        work_id,
+        request,
+        &config,
+        devices,
+        progress,
+        DependencyMaterializationPolicy::Admission,
+    )
+    .await
+}
+
+pub async fn prepare_execution_inputs_existing_only(
+    state: &AppState,
+    request: &GenerateRequest,
+) -> Result<PreparedExecutionInputs, String> {
+    let config = state.config.read().await.clone();
+    let mut devices = resource_device_facts(state);
+    if devices.is_empty() {
+        devices = worker_device_facts_from_startup_sample(state);
+    }
+    prepare_inputs_for_devices(
+        Some(state),
+        "placement-preview",
+        request,
+        &config,
+        devices,
+        None,
+        DependencyMaterializationPolicy::ExistingOnly,
+    )
+    .await
 }
 
 /// Forced-local counterpart to server preparation. It shares variant
@@ -888,7 +936,16 @@ pub async fn prepare_local_execution_inputs(
     request: &GenerateRequest,
     devices: Vec<DeviceFact>,
 ) -> Result<PreparedExecutionInputs, String> {
-    prepare_inputs_for_devices(None, "local", request, config, devices, None).await
+    prepare_inputs_for_devices(
+        None,
+        "local",
+        request,
+        config,
+        devices,
+        None,
+        DependencyMaterializationPolicy::Admission,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -933,6 +990,40 @@ mod tests {
         assert!(
             choose_largest_fitting(variants, 4_000_000_000, |v| (v.tag, v.size_bytes)).is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn existing_only_dependency_check_never_starts_a_download() {
+        let repo = format!(
+            "mold-preview-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let before = downloads()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let error = ensure_downloaded(
+            None,
+            "placement-preview",
+            &repo,
+            "missing.safetensors",
+            "preview-test",
+            None,
+            DependencyMaterializationPolicy::ExistingOnly,
+        )
+        .await
+        .expect_err("preview must reject a missing dependency");
+        let after = downloads()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+
+        assert!(error.contains("is not installed"));
+        assert_eq!(after, before, "preview must not register a download");
     }
 
     #[test]

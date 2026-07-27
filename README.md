@@ -59,6 +59,12 @@ GPU startup defaults to `all`. `--gpus` / `MOLD_GPUS` also accepts `none`
 persistent configuration because ordinals are process-local. Maintenance mode
 keeps inventory, telemetry, downloads, and settings available but rejects
 generation and model-load requests.
+Use `mold gpu list`, `mold gpu disable <ID>`, and `mold gpu enable <ID>` for
+runtime administration when `/api/capabilities.devices.lifecycle` is true.
+That flag is true only while authoritative scheduler V2 owns live GPU workers;
+legacy, observe, CPU-fallback, and maintenance runtimes are read-only and
+reject lifecycle mutation. Busy devices drain their current generation before
+disabling; startup-excluded devices require a restart.
 Scheduler admission uses each device's sampled free VRAM rather than total
 capacity and freezes a concrete per-component execution plan before dispatch.
 Explicit CPU/device placement is a hard constraint; missing devices and
@@ -66,6 +72,22 @@ cross-GPU component pins fail instead of falling back. `mold run --local
 --batch N` uses the same deterministic assignment core across every GPU
 selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
 selection.
+
+Web, desktop, and iPhone preview each finalized ordinary-generation request on
+candidate hosts before queueing. The read-only preview preserves the sibling
+count without reserving a GPU or loading weights, redacts prompt/media content,
+and keeps prepared work pinned to the same endpoint, key, and server instance.
+A strict non-authoritative `unsupported` response or legacy `404`/`405` keeps
+backward-compatible routing; infeasible, malformed, authentication, upgrade,
+and server failures queue nothing. Exact chain and local prompt-expansion/
+post-generation-upscale utility previewing is deliberately deferred rather
+than guessed.
+
+Scheduler V2 learns cold load, warm reload, and execution time separately, so
+ETA planning adds the applicable setup cost exactly once. Machine detail,
+status, TUI, CLI, MCP, and Discord surfaces report every device; interactive
+device buttons appear only for authoritative live lifecycle control, with the
+supported restart-enable recovery shown for read-only dispatch modes.
 
 `MOLD_DISPATCH_MODE=legacy` remains the default server dispatch owner until
 the Phase A–E cutover gates pass. Set `MOLD_DISPATCH_MODE=v2` explicitly to

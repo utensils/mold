@@ -18,7 +18,7 @@ import type { HostEntry } from "../../lib/hostRegistry";
 const props = defineProps<{ host: HostEntry; primary?: boolean }>();
 const emit = defineEmits<{ open: [id: string] }>();
 
-const poll = useHostPoll(props.host);
+const poll = useHostPoll(computed(() => props.host));
 
 const showSkeleton = computed(() => poll.loading.value && !poll.status.value);
 const offline = computed(() => !showSkeleton.value && !poll.online.value);

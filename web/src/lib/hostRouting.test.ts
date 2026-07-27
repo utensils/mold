@@ -8,6 +8,7 @@ import {
   pickAutoHost,
   pickMostCapableHost,
   resolveRoute,
+  sameHostRoute,
   unionModels,
   type RoutableHost,
 } from "./hostRouting";
@@ -45,6 +46,60 @@ function model(
   } as ModelInfoExtended;
 }
 
+describe("sameHostRoute", () => {
+  const origin = {
+    hostId: ORIGIN_HOST_ID,
+    label: "this server",
+    target: { baseUrl: "http://origin:7680" },
+    instanceId: "origin-a",
+  };
+  const remote = {
+    hostId: "studio",
+    label: "Studio",
+    target: { baseUrl: "http://studio:7680", apiKey: "key-a" },
+    instanceId: "studio-a",
+  };
+
+  it.each([
+    ["null to null", null, null, true],
+    ["null to origin", null, origin, true],
+    ["frozen origin to null", origin, null, false],
+    ["matching origin", origin, { ...origin }, true],
+    [
+      "changed origin instance",
+      origin,
+      { ...origin, instanceId: "origin-b" },
+      false,
+    ],
+    [
+      "matching remote",
+      remote,
+      { ...remote, target: { ...remote.target } },
+      true,
+    ],
+    [
+      "changed remote URL",
+      remote,
+      { ...remote, target: { ...remote.target, baseUrl: "http://other:7680" } },
+      false,
+    ],
+    [
+      "changed remote key",
+      remote,
+      { ...remote, target: { ...remote.target, apiKey: "key-b" } },
+      false,
+    ],
+    [
+      "changed remote instance",
+      remote,
+      { ...remote, instanceId: "studio-b" },
+      false,
+    ],
+  ])("%s", (_case, frozen, current, expected) => {
+    expect(sameHostRoute(frozen, current)).toBe(expected);
+  });
+});
+
 describe("pickAutoHost", () => {
   it("returns null when nothing is ready", () => {
     expect(
@@ -62,6 +117,50 @@ describe("pickAutoHost", () => {
       host({ id: "c", queueDepth: 5 }),
     ]);
     expect(picked?.id).toBe("b");
+  });
+
+  it("uses predicted completion to refine equal queue depths", () => {
+    const picked = pickAutoHost([
+      host({ id: "slow", queueDepth: 2, predictedCompletionMs: 20_000 }),
+      host({ id: "fast", queueDepth: 2, predictedCompletionMs: 10_000 }),
+    ]);
+    expect(picked?.id).toBe("fast");
+  });
+
+  it("ranks predicted completion before raw queue depth when both plans are known", () => {
+    const picked = pickAutoHost([
+      host({
+        id: "shallow-slow",
+        queueDepth: 1,
+        predictedCompletionMs: 60_000,
+      }),
+      host({ id: "deeper-fast", queueDepth: 2, predictedCompletionMs: 10_000 }),
+    ]);
+    expect(picked?.id).toBe("deeper-fast");
+  });
+
+  it("prefers a known completion estimate over an unknown one on a depth tie", () => {
+    const picked = pickAutoHost([
+      host({
+        id: ORIGIN_HOST_ID,
+        queueDepth: 2,
+        predictedCompletionMs: null,
+      }),
+      host({ id: "known", queueDepth: 2, predictedCompletionMs: 20_000 }),
+    ]);
+    expect(picked?.id).toBe("known");
+  });
+
+  it("does not starve an idle planless host in a mixed-version fleet", () => {
+    const picked = pickAutoHost([
+      host({
+        id: "planned-busy",
+        queueDepth: 4,
+        predictedCompletionMs: 10_000,
+      }),
+      host({ id: "planless-idle", queueDepth: 0, predictedCompletionMs: null }),
+    ]);
+    expect(picked?.id).toBe("planless-idle");
   });
 
   it("treats an unknown queue depth as busiest", () => {
@@ -225,6 +324,7 @@ describe("resolveRoute", () => {
     expect(route).toEqual({
       hostId: "studio",
       label: "Studio",
+      instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });

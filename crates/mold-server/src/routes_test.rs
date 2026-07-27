@@ -742,14 +742,10 @@ mod tests {
         assert_eq!(body["admin_state"], "disabled");
         assert!(pool.workers.is_empty());
         assert!(!registry.desired_enabled(id));
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            mold_core::ServerEvent::DeviceStateChanged {
-                device_id,
-                desired_enabled: false,
-                admin_state: mold_core::DeviceAdminState::Disabled,
-            } if device_id == id
-        ));
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
 
         let generation = app
             .oneshot(
@@ -1446,6 +1442,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn device_patch_leaves_semantic_event_publication_to_the_coordinator() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::V2,
+        );
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let mut events = state.events.subscribe();
+
+        let response = app_with_state(state)
+            .oneshot(
+                Request::patch(format!("/api/devices/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
+    }
+
+    #[tokio::test]
+    async fn device_lifecycle_is_unavailable_without_authoritative_v2_ownership() {
+        use crate::dispatch_mode::DispatchMode;
+
+        for (label, mode, authoritative, observes) in [
+            ("legacy", DispatchMode::Legacy, false, false),
+            ("observe", DispatchMode::Observe, false, true),
+            ("maintenance", DispatchMode::V2, false, false),
+        ] {
+            let worker = gpu_worker_stub(0);
+            let mut state = AppState::with_engine(MockEngine::ready());
+            state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+                workers: vec![worker.clone()].into(),
+            });
+            install_worker_registry(&mut state);
+            state
+                .device_registry
+                .set_desired_enabled(worker.gpu.stable_id.as_deref().unwrap(), false)
+                .unwrap();
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+                tx,
+                mode,
+                authoritative,
+                observes,
+            );
+            let id = worker.gpu.stable_id.as_deref().unwrap();
+            let app = app_with_state(state);
+
+            let inventory = app
+                .clone()
+                .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(inventory.status(), StatusCode::OK, "{label}");
+            let inventory = json_body(inventory).await;
+            assert_ne!(
+                inventory["devices"][0]["admin_state"], "disabled",
+                "{label} must not report a live worker disabled"
+            );
+            assert_eq!(
+                inventory["devices"][0]["desired_enabled"], false,
+                "{label} keeps the persisted preference visible"
+            );
+            assert_eq!(
+                inventory["devices"][0]["schedulable"], false,
+                "{label} must not rewrite registry routing eligibility"
+            );
+            assert_eq!(
+                inventory["devices"][0]["unschedulable_reason"], "device_draining",
+                "{label} must not clear the registry reason"
+            );
+
+            let patch = app
+                .oneshot(
+                    Request::patch(format!("/api/devices/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"enabled":false}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(patch.status(), StatusCode::CONFLICT, "{label}");
+            assert_eq!(
+                json_body(patch).await["code"],
+                "DEVICE_LIFECYCLE_MODE_CONFLICT",
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_device_projection_preserves_degraded_health_and_routing_exclusion() {
+        let worker = gpu_worker_stub(0);
+        worker.consecutive_failures.store(3, Ordering::SeqCst);
+        *worker.degraded_until.write().unwrap() =
+            Some(std::time::Instant::now() + Duration::from_secs(60));
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        install_worker_registry(&mut state);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_mode(
+            tx,
+            crate::dispatch_mode::DispatchMode::Legacy,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "degraded");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_device_projection_preserves_transient_unavailability() {
+        let worker = gpu_worker_stub(0);
+        let id = worker.gpu.stable_id.clone().unwrap();
+        let mut state = AppState::with_engine(MockEngine::ready());
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker].into(),
+        });
+        install_worker_registry(&mut state);
+        assert!(state.device_registry.mark_unavailable(&id));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.scheduled_work = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            tx,
+            crate::dispatch_mode::DispatchMode::Observe,
+            false,
+            true,
+        );
+
+        let response = app_with_state(state)
+            .oneshot(Request::get("/api/devices").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let inventory = json_body(response).await;
+
+        assert_eq!(inventory["devices"][0]["admin_state"], "enabled");
+        assert_eq!(inventory["devices"][0]["health"], "unavailable");
+        assert_eq!(inventory["devices"][0]["schedulable"], false);
+        assert_eq!(
+            inventory["devices"][0]["unschedulable_reason"],
+            "device_unavailable"
+        );
+    }
+
+    #[tokio::test]
     async fn device_api_uses_cached_telemetry_and_legacy_status_keeps_shape() {
         let worker = gpu_worker_stub(0);
         let cache = worker.model_cache.clone();
@@ -1638,6 +1803,7 @@ mod tests {
         let app = app_with_state(state);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
@@ -1829,6 +1995,70 @@ mod tests {
         let body = json_body(resp).await;
         assert_eq!(body["id"], "aaaa");
         assert!(body.get("target_gpu").is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_queue_accepts_matching_pin_shapes_and_rejects_a_mismatch() {
+        let worker = gpu_worker_stub(0);
+        let mut state = AppState::with_engine_and_queue(MockEngine::ready()).0;
+        state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        install_worker_registry(&mut state);
+        state.job_registry.register("aaaa", "flux-dev:fp16");
+        let id = worker.gpu.stable_id.as_deref().unwrap();
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "hard_pinned_device_id": id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": null,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let response = app
+            .oneshot(
+                Request::patch("/api/queue/aaaa")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "hard_pinned_device_id": id,
+                            "target_gpu": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["target_gpu"], 0);
     }
 
     #[tokio::test]
@@ -2494,6 +2724,9 @@ mod tests {
         assert_eq!(body["devices"]["available"], true);
         assert_eq!(body["devices"]["lifecycle"], true);
         assert_eq!(body["devices"]["restart_enable"], false);
+        assert_eq!(body["devices"]["stable_pins"], true);
+        assert_eq!(body["devices"]["planned_lanes"], true);
+        assert_eq!(body["devices"]["learned_eta"], true);
     }
 
     #[tokio::test]
@@ -2547,6 +2780,9 @@ mod tests {
             let body = json_body(response).await;
             assert_eq!(body["devices"]["lifecycle"], false, "{label}");
             assert_eq!(body["devices"]["restart_enable"], true, "{label}");
+            assert_eq!(body["devices"]["stable_pins"], true, "{label}");
+            assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
+            assert_eq!(body["devices"]["learned_eta"], false, "{label}");
         }
     }
 
@@ -4201,6 +4437,62 @@ mod tests {
             spec["paths"]["/api/devices"]["get"].is_object(),
             "spec should document GET /api/devices"
         );
+        assert!(
+            spec["paths"]["/api/devices/{id}"]["patch"].is_object(),
+            "spec should document PATCH /api/devices/{{id}}"
+        );
+        assert!(
+            spec["paths"]["/api/generate/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/generate/placement-preview"
+        );
+        assert!(
+            spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/chain-jobs/placement-preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_fails_closed_for_utility_stages() {
+        let state = AppState::for_tests();
+        let base = r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#;
+
+        let mut expansion: GenerateRequest = serde_json::from_str(base).unwrap();
+        expansion.expand = Some(true);
+        let expansion_preview =
+            crate::routes::placement_preview_for_request(&state, expansion, 2).await;
+        assert!(!expansion_preview.authoritative);
+        assert_eq!(expansion_preview.outcome, "unsupported");
+        assert!(expansion_preview.candidate.is_none());
+        assert!(expansion_preview.stage_candidates.is_empty());
+        assert!(expansion_preview
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("utility CPU/GPU"));
+
+        let mut upscale: GenerateRequest = serde_json::from_str(base).unwrap();
+        upscale.upscale_model = Some("real-esrgan-x4plus:fp16".into());
+        let upscale_preview =
+            crate::routes::placement_preview_for_request(&state, upscale, 2).await;
+        assert!(!upscale_preview.authoritative);
+        assert_eq!(upscale_preview.outcome, "unsupported");
+        assert!(upscale_preview.candidate.is_none());
+        assert!(upscale_preview.stage_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_validates_copies_before_capability_fallback() {
+        let state = AppState::for_tests();
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 0).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.reason.unwrap().contains("between 1 and 64"));
     }
 
     // ── /api/docs ────────────────────────────────────────────────────────────
@@ -5820,6 +6112,18 @@ mod tests {
         );
         assert_eq!(
             crate::rate_limit::classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/generate/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/chain-jobs/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/devices/cuda:0123456789abcdef", &Method::PATCH,),
             Some(RouteTier::Generation)
         );
 

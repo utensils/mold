@@ -1058,9 +1058,11 @@ impl SDXLEngine {
                 // denoise loop stays at its natural precision.
                 let encoded = encoded.to_dtype(dtype)?;
 
-                self.base
-                    .progress
-                    .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::Vae,
+                    "Encoding source image (VAE)",
+                    encode_start.elapsed(),
+                );
                 Ok(encoded)
             },
         )?;
@@ -1130,17 +1132,21 @@ impl SDXLEngine {
                 let encode_l_start = Instant::now();
                 let tokens_l = Self::tokenize(tokenizer_l, prompt, max_len, clip_device)?;
                 let text_emb_l = clip_l.forward(&tokens_l)?;
-                self.base
-                    .progress
-                    .stage_done("Encoding prompt (CLIP-L)", encode_l_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP-L)",
+                    encode_l_start.elapsed(),
+                );
 
                 self.base.progress.stage_start("Encoding prompt (CLIP-G)");
                 let encode_g_start = Instant::now();
                 let tokens_g = Self::tokenize(tokenizer_g, prompt, max_len, clip_device)?;
                 let text_emb_g = clip_g.forward(&tokens_g)?;
-                self.base
-                    .progress
-                    .stage_done("Encoding prompt (CLIP-G)", encode_g_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP-G)",
+                    encode_g_start.elapsed(),
+                );
 
                 let text_embeddings = Tensor::cat(&[&text_emb_l, &text_emb_g], D::Minus1)?;
 
@@ -1505,9 +1511,11 @@ impl SDXLEngine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         // VAE dropped here
         let output_metadata = build_output_metadata(req, seed, Some(sched));
@@ -1721,7 +1729,7 @@ impl SDXLEngine {
 
         self.base
             .progress
-            .stage_done("VAE decode", vae_start.elapsed());
+            .phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 8. Encode to image format
         let output_metadata = build_output_metadata(req, seed, Some(sched));

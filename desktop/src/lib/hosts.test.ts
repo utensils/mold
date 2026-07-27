@@ -60,6 +60,63 @@ describe("pickAutoHost", () => {
     expect(pickAutoHost([local, busy, idle])?.id).toBe("idle");
   });
 
+  it("uses predicted completion to refine equal queue depths", () => {
+    const fast = host({
+      id: "fast",
+      queueDepth: 2,
+      predictedCompletionMs: 10_000,
+    });
+    const slow = host({
+      id: "slow",
+      queueDepth: 2,
+      predictedCompletionMs: 20_000,
+    });
+    expect(pickAutoHost([slow, fast])?.id).toBe("fast");
+  });
+
+  it("ranks predicted completion before raw queue depth when both plans are known", () => {
+    const shallowSlow = host({
+      id: "shallow-slow",
+      queueDepth: 1,
+      predictedCompletionMs: 60_000,
+    });
+    const deeperFast = host({
+      id: "deeper-fast",
+      queueDepth: 2,
+      predictedCompletionMs: 10_000,
+    });
+    expect(pickAutoHost([shallowSlow, deeperFast])?.id).toBe("deeper-fast");
+  });
+
+  it("prefers a known completion estimate over an unknown one on a depth tie", () => {
+    const unknown = host({
+      id: "local",
+      kind: "local",
+      queueDepth: 2,
+      predictedCompletionMs: null,
+    });
+    const known = host({
+      id: "known",
+      queueDepth: 2,
+      predictedCompletionMs: 20_000,
+    });
+    expect(pickAutoHost([unknown, known])?.id).toBe("known");
+  });
+
+  it("does not starve an idle planless host in a mixed-version fleet", () => {
+    const plannedBusy = host({
+      id: "planned-busy",
+      queueDepth: 4,
+      predictedCompletionMs: 10_000,
+    });
+    const planlessIdle = host({
+      id: "planless-idle",
+      queueDepth: 0,
+      predictedCompletionMs: null,
+    });
+    expect(pickAutoHost([plannedBusy, planlessIdle])?.id).toBe("planless-idle");
+  });
+
   it("prefers the local host on a queue-depth tie", () => {
     const local = host({ id: "local", kind: "local", queueDepth: 1 });
     const remote = host({ id: "remote", queueDepth: 1 });

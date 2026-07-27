@@ -376,7 +376,11 @@ impl SD3Engine {
                 let (context_cond, y_cond) = triple_encoder.encode(prompt, device, dtype)?;
                 let (context_uncond, y_uncond) =
                     triple_encoder.encode(negative_prompt, device, dtype)?;
-                progress.stage_done("Encoding prompt (SD3 triple)", encode_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (SD3 triple)",
+                    encode_start.elapsed(),
+                );
 
                 let pair = if is_quantized {
                     (
@@ -890,9 +894,11 @@ impl SD3Engine {
             // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
             // Use the posterior mean so img2img remains deterministic.
             let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             // Drop VAE to free VRAM for transformer (will reload for decode)
             drop(autoencoder);
@@ -1089,9 +1095,11 @@ impl SD3Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
@@ -1295,7 +1303,11 @@ impl SD3Engine {
                     // SD3 VAE encode scaling: reverse of decode's x / 1.5305 + 0.0609.
                     // Use the posterior mean so img2img remains deterministic.
                     let encoded = ((dist.mode()? - 0.0609)? * 1.5305)?;
-                    progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                    progress.phase_done(
+                        crate::ProgressPhase::Vae,
+                        "Encoding source image (VAE)",
+                        encode_start.elapsed(),
+                    );
 
                     // Drop VAE to free VRAM for transformer reload
                     drop(autoencoder);
@@ -1457,7 +1469,11 @@ impl SD3Engine {
             let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
             let img = img.i(0)?;
 
-            progress.stage_done("VAE decode", vae_decode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "VAE decode",
+                vae_decode_start.elapsed(),
+            );
 
             let output_metadata = build_output_metadata(req, seed, None);
             let image_bytes = encode_image(

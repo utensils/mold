@@ -805,6 +805,27 @@ fn optimizer_scores_future_makespan_for_every_candidate() {
 }
 
 #[test]
+fn future_ready_at_is_a_hard_start_boundary_not_only_a_lateness_hint() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("dependent", 0, vec![candidate("gpu-0", 0)]).with_ready_at(5_000)],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert!(plan.immediate_leases.is_empty());
+    let dependent = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.assignments)
+        .find(|assignment| assignment.work_id == WorkId::from("dependent"))
+        .expect("future dependent assignment");
+    assert_eq!(dependent.estimated_start_ms, 5_000);
+    assert_eq!(dependent.estimated_finish_ms, 16_000);
+}
+
+#[test]
 fn heterogeneous_single_future_assignment_matches_exhaustive_finish_oracle() {
     for gpu_0_run_ms in [100, 500, 1_500] {
         for gpu_1_run_ms in [100, 500, 1_500] {
@@ -913,6 +934,72 @@ fn ineligible_work_keeps_its_precise_reason_after_openings_fill() {
     assert_eq!(
         plan.blocked_reason(&WorkId::from("bad-pin")),
         Some(&BlockedReason::HardPinUnavailable)
+    );
+}
+
+#[test]
+fn hard_pins_preserve_each_device_lifecycle_block_reason() {
+    let cases = [
+        (
+            DeviceSnapshot::idle("gpu-disabled", 24 * GIB)
+                .with_admin_state(DeviceAdminState::Disabled),
+            BlockedReason::DeviceDisabled,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-draining", 24 * GIB)
+                .with_admin_state(DeviceAdminState::Draining),
+            BlockedReason::DeviceDraining,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-startup-excluded", 24 * GIB)
+                .with_admin_state(DeviceAdminState::StartupExcluded),
+            BlockedReason::DeviceStartupExcluded,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-degraded", 24 * GIB).with_health(DeviceHealth::Degraded),
+            BlockedReason::DeviceDegraded,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-unavailable", 24 * GIB)
+                .with_health(DeviceHealth::Unavailable),
+            BlockedReason::DeviceUnavailable,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-poisoned", 24 * GIB).with_health(DeviceHealth::Poisoned),
+            BlockedReason::DeviceUnavailable,
+        ),
+    ];
+
+    for (device, expected) in cases {
+        let device_id = device.id.clone();
+        let plan = Planner::default()
+            .plan(&snapshot(
+                vec![device],
+                vec![work("blocked", 0, vec![candidate(device_id.as_str(), 1)])
+                    .with_hard_device(device_id)],
+                8,
+            ))
+            .expect("valid plan");
+        assert_eq!(
+            plan.blocked_reason(&WorkId::from("blocked")),
+            Some(&expected)
+        );
+    }
+}
+
+#[test]
+fn one_work_exceeding_host_headroom_is_not_reported_as_aggregate_contention() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("too-large", 0, vec![candidate("gpu-0", 9)])],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("too-large")),
+        Some(&BlockedReason::InsufficientHostRam)
     );
 }
 

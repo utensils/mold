@@ -858,9 +858,11 @@ impl WuerstchenEngine {
         // Scale from VQ-GAN latent space to decoder latent space (inverse of decode scaling)
         let encoded = (&encoded / VQGAN_SCALE)?;
 
-        self.base
-            .progress
-            .stage_done("Encoding source image (VQ-GAN)", encode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding source image (VQ-GAN)",
+            encode_start.elapsed(),
+        );
 
         let start_step = crate::img2img::img2img_start_index(decoder_steps, strength);
 
@@ -1246,9 +1248,11 @@ impl WuerstchenEngine {
         Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.base
-            .progress
-            .stage_done("VQ-GAN decode", decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VQ-GAN decode",
+            decode_start.elapsed(),
+        );
 
         // Use actual tensor dims — VQ-GAN output may differ from requested dims
         // due to the 42x compression rounding in the cascade.
@@ -1473,9 +1477,11 @@ impl WuerstchenEngine {
         Self::debug_tensor_stats("image_postprocess", &img);
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
-        self.base
-            .progress
-            .stage_done("VQ-GAN decode", decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VQ-GAN decode",
+            decode_start.elapsed(),
+        );
 
         // 5. Encode to image format
         // Use actual tensor dims — VQ-GAN output may differ from requested dims

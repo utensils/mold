@@ -44,6 +44,30 @@ fn kv_owned(
     ])
 }
 
+fn device_summary_state_label(
+    admin_state: mold_core::DeviceAdminState,
+    health: mold_core::DeviceHealth,
+) -> String {
+    if admin_state == mold_core::DeviceAdminState::Draining {
+        "finishing current work".to_string()
+    } else if health != mold_core::DeviceHealth::Healthy {
+        health.as_str().to_string()
+    } else {
+        admin_state.as_str().to_string()
+    }
+}
+
+fn device_kind_label(device: &mold_core::DeviceInfo) -> String {
+    if device.device_kind == mold_core::DeviceKind::Mig {
+        format!(
+            "MIG {}",
+            device.mig_profile.as_deref().unwrap_or("profile unknown")
+        )
+    } else {
+        device.backend.as_str().to_ascii_uppercase()
+    }
+}
+
 /// Render the Machines workspace.
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let [list_area, detail_area] = Layout::default()
@@ -377,6 +401,21 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         theme.dim().add_modifier(Modifier::BOLD),
     )));
     let listing = st.queue.as_ref().filter(|(id, _)| id == host_id);
+    if let Some(plan) = listing.and_then(|(_, listing)| listing.plan.as_ref()) {
+        if let Some(deadline) = plan.next_replan_at_unix_ms {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Tentative plan · replans in {}s",
+                    deadline.saturating_sub(now).div_ceil(1000)
+                ),
+                theme.dim(),
+            )));
+        }
+    }
     match listing {
         Some((_, listing)) if !listing.entries.is_empty() => {
             let now_ms = std::time::SystemTime::now()
@@ -403,6 +442,12 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                         job.position,
                     )
                 };
+                let plan_detail = listing.plan.as_ref().and_then(|plan| {
+                    plan.work_items
+                        .iter()
+                        .find(|work| work.parent_id == job.id)
+                        .map(queue_plan_detail)
+                });
                 let style = if selected {
                     theme.list_selected()
                 } else if job.state == "running" {
@@ -411,6 +456,9 @@ fn build_host_detail(app: &App, host_id: &str, lines: &mut Vec<Line>) {
                     theme.dim()
                 };
                 lines.push(Line::from(Span::styled(text, style)));
+                if let Some(detail) = plan_detail.filter(|detail| !detail.is_empty()) {
+                    lines.push(Line::from(Span::styled(format!("  {detail}"), theme.dim())));
+                }
             }
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
@@ -437,63 +485,65 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         lines.push(Line::from(Span::styled("— none visible.", app.theme.dim())));
         return;
     }
-    for (index, device) in state.devices.iter().enumerate() {
-        let selected =
-            app.machines.focus == MachinesFocus::Detail && index == app.machines.device_selected;
-        let marker = if selected { "›" } else { " " };
-        let ordinal = device
-            .ordinal
-            .map(|ordinal| format!("GPU {ordinal}"))
-            .unwrap_or_else(|| match device.backend {
-                mold_core::GpuBackend::Cuda => "CUDA".to_string(),
-                mold_core::GpuBackend::Metal => "METAL".to_string(),
-            });
-        let state = device_state_label(device);
-        let style = if selected {
-            app.theme.list_selected()
-        } else if device.restart_required
-            || device.admin_state == mold_core::DeviceAdminState::Draining
-        {
-            app.theme.warning()
-        } else if device_uses_error_style(device) {
-            app.theme.error()
-        } else {
-            Style::default().fg(app.theme.text)
-        };
+    let index = app
+        .machines
+        .device_selected
+        .min(state.devices.len().saturating_sub(1));
+    let device = &state.devices[index];
+    lines.push(Line::from(Span::styled(
+        format!("Device {} of {}", index + 1, state.devices.len()),
+        app.theme.dim(),
+    )));
+    let selected = app.machines.focus == MachinesFocus::Detail;
+    let marker = if selected { "›" } else { " " };
+    let ordinal = device
+        .ordinal
+        .map(|ordinal| format!("GPU {ordinal}"))
+        .unwrap_or_else(|| match device.backend {
+            mold_core::GpuBackend::Cuda => "CUDA".to_string(),
+            mold_core::GpuBackend::Metal => "METAL".to_string(),
+        });
+    let state = device_state_label(device);
+    let kind = device_kind_label(device);
+    let style = if selected {
+        app.theme.list_selected()
+    } else if device.restart_required || device.admin_state == mold_core::DeviceAdminState::Draining
+    {
+        app.theme.warning()
+    } else if device_uses_error_style(device) {
+        app.theme.error()
+    } else {
+        Style::default().fg(app.theme.text)
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{marker} {ordinal} · {} · {kind} · {state}", device.name),
+        style,
+    )));
+    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
+        (Some(used), Some(total)) => vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2)),
+        (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
+        _ => "VRAM unavailable".to_string(),
+    };
+    let utilization = device
+        .telemetry
+        .utilization_percent
+        .map(|value| format!(" · {value:.0}%"))
+        .unwrap_or_default();
+    lines.push(Line::from(Span::styled(
+        format!("  {vram}{utilization} · {}", short_device_id(&device.id)),
+        app.theme.dim(),
+    )));
+    if let Some(active) = &device.active_work_id {
         lines.push(Line::from(Span::styled(
-            format!("{marker} {ordinal} · {} · {state}", device.name),
-            style,
+            format!("  active {active}"),
+            app.theme.warning(),
         )));
-        let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
-            (Some(used), Some(total)) => {
-                vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2))
-            }
-            (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
-            _ => "VRAM unavailable".to_string(),
-        };
-        let utilization = device
-            .telemetry
-            .utilization_percent
-            .map(|value| format!(" · {value:.0}%"))
-            .unwrap_or_default();
+    }
+    if !device.loaded_models.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {vram}{utilization} · {}", short_device_id(&device.id)),
+            format!("  loaded {}", device.loaded_models.join(", ")),
             app.theme.dim(),
         )));
-        if selected {
-            if let Some(active) = &device.active_work_id {
-                lines.push(Line::from(Span::styled(
-                    format!("  active {active}"),
-                    app.theme.warning(),
-                )));
-            }
-            if !device.loaded_models.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("  loaded {}", device.loaded_models.join(", ")),
-                    app.theme.dim(),
-                )));
-            }
-        }
     }
     let action = device_action_label(
         app.machines.selected_device_restart_required(),
@@ -509,23 +559,11 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
     }
 }
 
-fn device_state_label(device: &mold_core::DeviceInfo) -> &'static str {
-    use mold_core::{DeviceAdminState, DeviceHealth};
+fn device_state_label(device: &mold_core::DeviceInfo) -> String {
     if device.restart_required {
-        return "Restart required";
+        return "Restart required".to_string();
     }
-    match device.admin_state {
-        DeviceAdminState::StartupExcluded => "startup excluded",
-        DeviceAdminState::Starting => "starting",
-        DeviceAdminState::Draining => "finishing current work",
-        DeviceAdminState::Disabled => "disabled",
-        DeviceAdminState::Enabled => match device.health {
-            DeviceHealth::Healthy => "enabled",
-            DeviceHealth::Degraded => "degraded",
-            DeviceHealth::Unavailable => "unavailable",
-            DeviceHealth::Poisoned => "poisoned",
-        },
-    }
+    device_summary_state_label(device.admin_state, device.health)
 }
 
 fn device_uses_error_style(device: &mold_core::DeviceInfo) -> bool {
@@ -554,6 +592,37 @@ fn short_device_id(id: &str) -> String {
     } else {
         format!("{}…{}", &id[..11], &id[id.len() - 6..])
     }
+}
+
+fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
+    let mut parts = vec![work.activity_phase.to_string().replace('_', " ")];
+    if let Some(device) = &work.planned_device_id {
+        parts.push(format!(
+            "{} lane {}",
+            short_device_id(device),
+            work.lane_order
+                .map(|order| order.to_string())
+                .unwrap_or_else(|| "—".to_string())
+        ));
+    }
+    if let Some(finish) = work.estimated_finish_unix_ms {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        parts.push(format!("~{}s", finish.saturating_sub(now).div_ceil(1000)));
+    }
+    parts.push(format!("{} confidence", work.estimate_confidence));
+    if let Some(reason) = work
+        .blocked_reason
+        .as_ref()
+        .map(mold_core::QueueBlockedReason::as_str)
+        .or(work.assignment_reason.as_deref())
+        .or(work.reason.as_deref())
+    {
+        parts.push(reason.replace('_', " "));
+    }
+    parts.join(" · ")
 }
 
 // ── Pure formatting helpers (contract-tested) ───────────────────────
@@ -969,6 +1038,30 @@ mod tests {
     }
 
     #[test]
+    fn queue_plan_detail_keeps_phase_lane_eta_confidence_and_reason_together() {
+        let finish = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_000;
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            planned_device_id: Some("cuda:0123456789abcdef".into()),
+            lane_order: Some(2),
+            estimated_finish_unix_ms: Some(finish),
+            estimate_confidence: mold_core::QueueEstimateConfidence::Medium,
+            blocked_reason: Some(mold_core::QueueBlockedReason::InsufficientVram),
+            ..Default::default()
+        });
+
+        assert!(detail.contains("blocked"));
+        assert!(detail.contains("lane 2"));
+        assert!(detail.contains('~'));
+        assert!(detail.contains("medium confidence"));
+        assert!(detail.contains("insufficient vram"));
+    }
+
+    #[test]
     fn queue_elapsed_label_scales_units() {
         assert_eq!(queue_elapsed_label(0, 12_000), "12s");
         assert_eq!(queue_elapsed_label(0, 90_000), "1m");
@@ -984,6 +1077,67 @@ mod tests {
             disk_label(213_909_504_000, 994_662_584_320),
             "199.2 GB free of 926.4 GB"
         );
+    }
+
+    #[test]
+    fn device_labels_cover_disabled_draining_unavailable_and_mig() {
+        assert_eq!(
+            device_summary_state_label(
+                mold_core::DeviceAdminState::Disabled,
+                mold_core::DeviceHealth::Healthy
+            ),
+            "disabled"
+        );
+        assert_eq!(
+            device_summary_state_label(
+                mold_core::DeviceAdminState::Draining,
+                mold_core::DeviceHealth::Healthy
+            ),
+            "finishing current work"
+        );
+        assert_eq!(
+            device_summary_state_label(
+                mold_core::DeviceAdminState::Enabled,
+                mold_core::DeviceHealth::Unavailable
+            ),
+            "unavailable"
+        );
+        let device: mold_core::DeviceInfo = serde_json::from_value(serde_json::json!({
+            "id": "cuda:mig",
+            "backend": "cuda",
+            "ordinal": 4,
+            "device_kind": "mig",
+            "nvml_uuid": null,
+            "physical_uuid": "GPU-parent",
+            "mig_uuid": "MIG-child",
+            "mig_parent_uuid": "GPU-parent",
+            "mig_profile": "1g.10gb",
+            "name": "MIG",
+            "pci_bus_id": null,
+            "compute_capability": "9.0",
+            "memory": {
+                "total_bytes": null,
+                "used_bytes": null,
+                "mold_used_bytes": null,
+                "other_used_bytes": null
+            },
+            "telemetry": {
+                "utilization_percent": null,
+                "temperature_c": null,
+                "power_w": null
+            },
+            "desired_enabled": true,
+            "admin_state": "enabled",
+            "health": "healthy",
+            "activity": "idle",
+            "schedulable": true,
+            "unschedulable_reason": null,
+            "loaded_models": [],
+            "active_work_id": null,
+            "planned_work_ids": []
+        }))
+        .unwrap();
+        assert_eq!(device_kind_label(&device), "MIG 1g.10gb");
     }
 
     #[test]

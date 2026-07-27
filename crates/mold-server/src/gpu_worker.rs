@@ -13,9 +13,108 @@ use mold_core::{
 };
 use mold_inference::device;
 use sha2::{Digest, Sha256};
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    /// Activation time accumulated by model-ready calls on one GPU owner
+    /// thread during the current lease.
+    static LEASE_LOAD_MS: Cell<u64> = const { Cell::new(0) };
+    static LEASE_PHASE_TIMINGS: RefCell<mold_scheduler::EstimatePhaseTimings> =
+        const { RefCell::new(mold_scheduler::EstimatePhaseTimings {
+            cold_load_ms: None,
+            warm_reload_ms: None,
+            prompt_encode_ms: None,
+            denoise_ms: None,
+            vae_ms: None,
+            upscale_ms: None,
+        }) };
+}
+
+fn reset_lease_load_ms() {
+    LEASE_LOAD_MS.set(0);
+    LEASE_PHASE_TIMINGS
+        .with(|timings| *timings.borrow_mut() = mold_scheduler::EstimatePhaseTimings::default());
+}
+
+fn add_lease_load_ms(elapsed: Duration) {
+    let millis = u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    LEASE_LOAD_MS.set(LEASE_LOAD_MS.get().saturating_add(millis));
+}
+
+fn take_lease_load_ms() -> Option<u64> {
+    let millis = LEASE_LOAD_MS.replace(0);
+    (millis > 0).then_some(millis)
+}
+
+fn add_phase_sample(slot: &mut Option<u64>, elapsed: Duration) {
+    let millis = u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    *slot = Some(slot.unwrap_or_default().saturating_add(millis));
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelLoadDisposition {
+    Unchanged,
+    Cold,
+    WarmReload,
+}
+
+fn record_model_load_timing(disposition: ModelLoadDisposition, elapsed: Duration) {
+    if disposition == ModelLoadDisposition::Unchanged {
+        return;
+    }
+    add_lease_load_ms(elapsed);
+    LEASE_PHASE_TIMINGS.with(|timings| {
+        let mut timings = timings.borrow_mut();
+        match disposition {
+            ModelLoadDisposition::Cold => {
+                add_phase_sample(&mut timings.cold_load_ms, elapsed);
+            }
+            ModelLoadDisposition::WarmReload => {
+                add_phase_sample(&mut timings.warm_reload_ms, elapsed);
+            }
+            ModelLoadDisposition::Unchanged => {}
+        }
+    });
+}
+
+fn record_phase_timing(event: &mold_inference::ProgressEvent) {
+    LEASE_PHASE_TIMINGS.with(|timings| {
+        let mut timings = timings.borrow_mut();
+        match event {
+            mold_inference::ProgressEvent::PhaseDone {
+                phase,
+                elapsed,
+                name: _,
+            } => match phase {
+                mold_inference::ProgressPhase::ModelLoad => {}
+                mold_inference::ProgressPhase::PromptEncode => {
+                    add_phase_sample(&mut timings.prompt_encode_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::Vae => {
+                    add_phase_sample(&mut timings.vae_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::Upscale => {
+                    add_phase_sample(&mut timings.upscale_ms, *elapsed)
+                }
+            },
+            mold_inference::ProgressEvent::DenoiseStep { elapsed, .. } => {
+                add_phase_sample(&mut timings.denoise_ms, *elapsed);
+            }
+            _ => {}
+        }
+    });
+}
+
+fn take_lease_phase_timings(_load_ms: Option<u64>) -> mold_scheduler::EstimatePhaseTimings {
+    LEASE_PHASE_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()))
+}
 
 pub enum LegacyOwnerEvent {
     FollowupReady(Box<crate::scheduler::ScheduledOwnerWork>),
@@ -417,11 +516,14 @@ fn run_gpu_owner_loop(
             work_id: fence.work_id.clone(),
             plan_version: fence.plan_version,
         });
+        reset_lease_load_ms();
         #[cfg(test)]
         pause_after_acceptance_for_test(&fence.work_id);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_owner_work(worker, *grant, &scheduler_tx);
+            process_owner_work(worker, *grant, &scheduler_tx)
         }));
+        let load_ms = take_lease_load_ms();
+        let phase_timings = take_lease_phase_timings(load_ms);
         worker.release_in_flight();
         if outcome.is_err() {
             // A panic may have crossed arbitrary Candle/cudarc state.
@@ -434,6 +536,10 @@ fn run_gpu_owner_loop(
             ordinal: worker.gpu.ordinal,
             owner_epoch: worker.owner_epoch,
             worker_generation: generation,
+            successful: matches!(&outcome, Ok(true))
+                && !worker.poisoned.load(Ordering::SeqCst)
+                && !worker.fatal_cuda_error.load(Ordering::SeqCst),
+            phase_timings,
         });
         if outcome.is_err()
             || worker.shutdown_requested.load(Ordering::SeqCst)
@@ -620,41 +726,44 @@ fn process_owner_work(
     worker: &GpuWorker,
     grant: LeaseGrant,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
-) {
+) -> bool {
     if let Err(error) = ensure_owner_thread(worker) {
         grant.work.reject(error.to_string());
-        return;
+        return false;
     }
     match grant.work {
         OwnerWork::Generation(mut job) => {
             job.lease = Some(grant.fence);
-            process_job(worker, *job, scheduler_tx);
+            process_job(worker, *job, scheduler_tx)
         }
         OwnerWork::PromptExpansion(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_prompt_expansion(worker, *job);
+            process_prompt_expansion(worker, *job)
         }
         OwnerWork::PostUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_post_generation_upscale(worker, *job);
+            process_post_generation_upscale(worker, *job)
         }
         OwnerWork::StandaloneUpscale(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_standalone_upscale(worker, *job);
+            process_standalone_upscale(worker, *job)
         }
         OwnerWork::AdminModelLoad(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
             let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
+            let successful = result.is_ok();
             let _ = job.result_tx.send(result);
+            successful
         }
         OwnerWork::AdminModelUnload(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            process_admin_unload(worker, *job);
+            process_admin_unload(worker, *job)
         }
         #[cfg(test)]
         OwnerWork::Probe { run, .. } => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
             run();
+            true
         }
     }
 }
@@ -670,16 +779,25 @@ fn process_legacy_owner_work(
     }
     match grant.work {
         OwnerWork::Generation(job) => {
-            process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
+            let _ =
+                process_job_with_sink(worker, *job, GenerationEventSink::Legacy(owner_event_tx));
         }
-        OwnerWork::PromptExpansion(job) => process_prompt_expansion(worker, *job),
-        OwnerWork::PostUpscale(job) => process_post_generation_upscale(worker, *job),
-        OwnerWork::StandaloneUpscale(job) => process_standalone_upscale(worker, *job),
+        OwnerWork::PromptExpansion(job) => {
+            let _ = process_prompt_expansion(worker, *job);
+        }
+        OwnerWork::PostUpscale(job) => {
+            let _ = process_post_generation_upscale(worker, *job);
+        }
+        OwnerWork::StandaloneUpscale(job) => {
+            let _ = process_standalone_upscale(worker, *job);
+        }
         OwnerWork::AdminModelLoad(job) => {
             let result = load_blocking(worker, &job.model, &job.config).map_err(|e| e.to_string());
             let _ = job.result_tx.send(result);
         }
-        OwnerWork::AdminModelUnload(job) => process_admin_unload(worker, *job),
+        OwnerWork::AdminModelUnload(job) => {
+            let _ = process_admin_unload(worker, *job);
+        }
         #[cfg(test)]
         OwnerWork::Probe { run, .. } => run(),
     }
@@ -697,7 +815,7 @@ fn commit_utility_allocation(
     });
 }
 
-fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
+fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::ExpandResult> {
         ensure_worker_not_poisoned(worker, &job.settings.model)?;
         #[cfg(feature = "expand")]
@@ -707,7 +825,7 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
                 || mold_core::GpuSelector::Ordinal(worker.gpu.ordinal),
                 |id| mold_core::GpuSelector::Identifier(id.clone()),
             );
-            let expander = mold_inference::expand::LocalExpander::from_config(
+            let mut expander = mold_inference::expand::LocalExpander::from_config(
                 &job.config,
                 Some(&job.settings.model),
             )
@@ -716,6 +834,18 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
             })?
             .with_gpu_selection(mold_core::GpuSelection::Specific(vec![selector]))
             .with_preferred_gpu(Some(worker.gpu.ordinal));
+            expander.set_on_progress(Box::new(|event| {
+                if let mold_inference::ProgressEvent::PhaseDone {
+                    phase: mold_inference::ProgressPhase::ModelLoad,
+                    elapsed,
+                    ..
+                } = &event
+                {
+                    record_model_load_timing(ModelLoadDisposition::Cold, *elapsed);
+                } else {
+                    record_phase_timing(&event);
+                }
+            }));
             expander.expand(&job.prompt, &job.expand_config)
         }
         #[cfg(not(feature = "expand"))]
@@ -733,23 +863,26 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) {
             "prompt expansion fatally poisoned its owner context"
         );
     }
+    let successful = result.is_ok();
     let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+    successful
 }
 
-fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
+fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::UpscaleResponse> {
         ensure_worker_not_poisoned(worker, &job.model)?;
+        let load_started = Instant::now();
         let mut engine = mold_inference::create_upscale_engine(
             job.model.clone(),
             job.weights_path,
             mold_inference::LoadStrategy::Eager,
             worker.gpu.ordinal,
         )?;
-        if let Some(progress_tx) = job.progress_tx {
-            engine.set_on_progress(Box::new(move |event| {
-                let _ = progress_tx.send(SseMessage::Progress(event.into()));
-            }));
-        }
+        record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
+        let progress_tx = job.progress_tx;
+        engine.set_on_progress(Box::new(move |event| {
+            handle_standalone_upscale_progress(event, progress_tx.as_ref());
+        }));
         run_upscale_engine_safely(worker, engine, &job.request)
     })();
     if result
@@ -762,10 +895,22 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) {
             "standalone upscale fatally poisoned its owner context"
         );
     }
+    let successful = result.is_ok();
     let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
+    successful
 }
 
-fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) {
+fn handle_standalone_upscale_progress(
+    event: mold_inference::ProgressEvent,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) {
+    record_phase_timing(&event);
+    if let Some(progress_tx) = progress_tx {
+        let _ = progress_tx.send(SseMessage::Progress(event.into()));
+    }
+}
+
+fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) -> bool {
     let cleanup = GenerationCleanup::new(&job.generation);
     #[cfg(test)]
     pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PrePostUpscale);
@@ -791,6 +936,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     {
         quarantine_poisoned_worker(worker);
     }
+    let successful = result.is_ok();
     let (image, original, error) = settle_post_generation_upscale(job.image, result);
     if let Some(error) = error {
         tracing::warn!(
@@ -801,26 +947,27 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     }
     finish_generation_success(*job.generation, job.response, image, original);
     drop(cleanup);
+    successful
 }
 
-fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) {
+fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
     if let Err(error) =
         ensure_worker_not_poisoned(worker, job.model.as_deref().unwrap_or("active model"))
     {
         let _ = job.result_tx.send(Err(error.to_string()));
-        return;
+        return false;
     }
     if job.evict_cached {
         let Some(model) = job.model.as_deref() else {
             let _ = job
                 .result_tx
                 .send(Err("cached eviction requires a model name".to_string()));
-            return;
+            return false;
         };
-        let _ = job
-            .result_tx
-            .send(evict_cached_model_blocking(worker, model).map_err(|error| error.to_string()));
-        return;
+        let result = evict_cached_model_blocking(worker, model).map_err(|error| error.to_string());
+        let successful = result.is_ok();
+        let _ = job.result_tx.send(result);
+        return successful;
     }
     if let Some(expected) = job.model.as_deref() {
         let resident = worker
@@ -830,12 +977,13 @@ fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) {
             .clone();
         if resident.as_deref() != Some(expected) {
             let _ = job.result_tx.send(Ok(None));
-            return;
+            return true;
         }
     }
-    let _ = job
-        .result_tx
-        .send(unload_blocking(worker).map_err(|error| error.to_string()));
+    let result = unload_blocking(worker).map_err(|error| error.to_string());
+    let successful = result.is_ok();
+    let _ = job.result_tx.send(result);
+    successful
 }
 
 /// Evict parked engines on the worker thread that owns their device context.
@@ -1328,6 +1476,7 @@ fn upscale_generated_image_on_worker(
             name: format!("Loading upscaler {model_name}"),
         }));
     }
+    let load_started = Instant::now();
     let mut engine = mold_inference::create_upscale_engine(
         model_name.clone(),
         weights_path,
@@ -1335,12 +1484,14 @@ fn upscale_generated_image_on_worker(
         worker.gpu.ordinal,
     )
     .map_err(|e| format!("failed to load upscaler: {e}"))?;
-    if let Some(ref tx) = job.progress_tx {
-        let tx = tx.clone();
-        engine.set_on_progress(Box::new(move |event| {
+    record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
+    let progress_tx = job.progress_tx.clone();
+    engine.set_on_progress(Box::new(move |event| {
+        record_phase_timing(&event);
+        if let Some(tx) = &progress_tx {
             let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }));
-    }
+        }
+    }));
     let req = mold_core::UpscaleRequest {
         model: model_name,
         image: img.data.clone(),
@@ -1406,8 +1557,8 @@ fn process_job(
     worker: &GpuWorker,
     job: GpuJob,
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
-) {
-    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx));
+) -> bool {
+    process_job_with_sink(worker, job, GenerationEventSink::V2(scheduler_tx))
 }
 
 enum GenerationEventSink<'a> {
@@ -1449,7 +1600,11 @@ impl GenerationEventSink<'_> {
     }
 }
 
-fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: GenerationEventSink<'_>) {
+fn process_job_with_sink(
+    worker: &GpuWorker,
+    job: GpuJob,
+    event_sink: GenerationEventSink<'_>,
+) -> bool {
     let model_name = job.model.clone();
     let ordinal = worker.gpu.ordinal;
     let job_id = job.id.clone();
@@ -1475,12 +1630,12 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     if job.result_tx.is_closed() {
         tracing::debug!(gpu = ordinal, model = %model_name, "skipping dispatched job — client disconnected");
-        return;
+        return false;
     }
 
     // Mark the registry entry as running on this specific GPU. The /api/queue
@@ -1507,7 +1662,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     // Ensure model is loaded on this GPU.
@@ -1566,7 +1721,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
         if count_worker_failure {
             record_failure(worker);
         }
-        return;
+        return false;
     }
     worker.set_resident_execution_fingerprint(
         job.execution_plan
@@ -1590,7 +1745,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             }));
         }
         let _ = job.result_tx.send(Err(err_msg));
-        return;
+        return false;
     }
 
     // Set active generation state.
@@ -1614,7 +1769,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
             "skipping generation after model readiness — client disconnected"
         );
         clear_active_generation(worker);
-        return;
+        return false;
     }
 
     // Take-and-restore: remove engine from cache, release lock during inference.
@@ -1632,16 +1787,17 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
         }
         let _ = job.result_tx.send(Err(err_msg));
         clear_active_generation(worker);
-        return;
+        return false;
     };
 
     // Set progress callback if SSE streaming.
-    if let Some(ref progress_tx) = job.progress_tx {
-        let tx = progress_tx.clone();
-        cached_engine.engine.set_on_progress(Box::new(move |event| {
+    let progress_tx = job.progress_tx.clone();
+    cached_engine.engine.set_on_progress(Box::new(move |event| {
+        record_phase_timing(&event);
+        if let Some(tx) = &progress_tx {
             let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }));
-    }
+        }
+    }));
 
     // RSS sample taken just before inference; the post-inference sample below
     // logs the per-job delta so RAM growth can be attributed to a specific
@@ -1769,7 +1925,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                     }));
                 }
                 let _ = job.result_tx.send(Err(err_msg));
-                return;
+                return false;
             }
 
             // Extract the primary image (or video thumbnail).
@@ -1817,9 +1973,10 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                             image: img,
                         })),
                     );
-                    match event_sink.followup_ready(work) {
+                    let followup_started = match event_sink.followup_ready(work) {
                         Ok(()) => {
                             std::mem::forget(cleanup);
+                            true
                         }
                         Err(work) => {
                             work.work.reject(
@@ -1827,14 +1984,16 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                                     .to_string(),
                             );
                             std::mem::forget(cleanup);
+                            false
                         }
-                    }
-                    return;
+                    };
+                    return followup_started;
                 }
             }
 
             finish_generation_success(job, response, img, None);
             drop(cleanup);
+            true
         }
         Ok(Err(e)) => {
             tracing::warn!(gpu = ordinal, model = %model_name, "Generation failed: {e}");
@@ -1870,6 +2029,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                 }));
             }
             let _ = job.result_tx.send(Err(err_msg));
+            false
         }
         Err(panic_payload) => {
             tracing::error!(gpu = ordinal, model = %model_name, "Inference panicked");
@@ -1887,6 +2047,7 @@ fn process_job_with_sink(worker: &GpuWorker, job: GpuJob, event_sink: Generation
                 }));
             }
             let _ = job.result_tx.send(Err(err_msg));
+            false
         }
     }
 }
@@ -2065,6 +2226,7 @@ fn ensure_model_ready_sync_inner_guarded(
     request_has_lora: bool,
     planned_load: Option<PlannedLoadContract<'_>>,
 ) -> anyhow::Result<()> {
+    let started = Instant::now();
     let result = ensure_model_ready_sync_inner(
         worker,
         model_name,
@@ -2079,7 +2241,9 @@ fn ensure_model_ready_sync_inner_guarded(
         quarantine_poisoned_worker(worker);
         contain_worker_cache(worker);
     }
-    result
+    result.map(|disposition| {
+        record_model_load_timing(disposition, started.elapsed());
+    })
 }
 
 fn ensure_model_ready_sync_inner(
@@ -2089,7 +2253,7 @@ fn ensure_model_ready_sync_inner(
     hint: Option<crate::model_manager::ActivationHint>,
     request_has_lora: bool,
     planned_load: Option<PlannedLoadContract<'_>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ModelLoadDisposition> {
     let planned_mode = planned_load.map(|planned| planned.mode);
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let load_request = planned_load.map(|planned| planned.request);
@@ -2115,7 +2279,7 @@ fn ensure_model_ready_sync_inner(
     // Already loaded?
     if let Some(entry) = cache.get(model_name) {
         if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
-            return Ok(());
+            return Ok(ModelLoadDisposition::Unchanged);
         }
     }
 
@@ -2294,7 +2458,7 @@ fn ensure_model_ready_sync_inner(
                 cache.insert_loaded(model_name.to_string(), engine, vram)
             };
             drop(evicted);
-            return Ok(());
+            return Ok(ModelLoadDisposition::Cold);
         }
 
         // Take the engine out and reload it.
@@ -2323,7 +2487,7 @@ fn ensure_model_ready_sync_inner(
             cache.insert_loaded(model_name.to_string(), engine, vram)
         };
         drop(evicted);
-        return Ok(());
+        return Ok(ModelLoadDisposition::WarmReload);
     }
 
     // Not in cache — need to create from scratch.
@@ -2448,7 +2612,7 @@ fn ensure_model_ready_sync_inner(
     };
     drop(evicted);
 
-    Ok(())
+    Ok(ModelLoadDisposition::Cold)
 }
 
 fn cached_engine_requires_reconstruction(
@@ -4969,6 +5133,155 @@ mod tests {
     }
 
     #[test]
+    fn owner_completion_carries_observed_stage_timings() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        assert!(worker.try_claim_in_flight());
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "timed-probe".into(),
+                    device_id,
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::Probe {
+                    id: "timed-probe".into(),
+                    kind: mold_scheduler::WorkKind::Generation,
+                    run: Box::new(|| {
+                        record_model_load_timing(
+                            ModelLoadDisposition::Cold,
+                            Duration::from_millis(11),
+                        );
+                        record_model_load_timing(
+                            ModelLoadDisposition::WarmReload,
+                            Duration::from_millis(12),
+                        );
+                        for (phase, name, millis) in [
+                            (
+                                mold_inference::ProgressPhase::PromptEncode,
+                                "Encoding prompt (T5)",
+                                13,
+                            ),
+                            (mold_inference::ProgressPhase::Vae, "VAE decode", 15),
+                            (mold_inference::ProgressPhase::Upscale, "Upscaling", 16),
+                        ] {
+                            record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                                phase,
+                                name: name.into(),
+                                elapsed: Duration::from_millis(millis),
+                            });
+                        }
+                        for millis in [6, 8] {
+                            record_phase_timing(&mold_inference::ProgressEvent::DenoiseStep {
+                                step: 1,
+                                total: 2,
+                                elapsed: Duration::from_millis(millis),
+                            });
+                        }
+                        // Display copy must never be interpreted as execution
+                        // evidence, even when it contains phase-like words.
+                        for name in ["Loading VAE", "Loading upscaler", "Denoising"] {
+                            record_phase_timing(&mold_inference::ProgressEvent::StageDone {
+                                name: name.into(),
+                                elapsed: Duration::from_secs(99),
+                            });
+                        }
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        let timings = match event_rx.blocking_recv() {
+            Some(crate::scheduler::WorkerEvent::Completed { phase_timings, .. }) => phase_timings,
+            _ => panic!("worker must publish completion phase evidence"),
+        };
+        assert_eq!(timings.cold_load_ms, Some(11));
+        assert_eq!(timings.warm_reload_ms, Some(12));
+        assert_eq!(timings.prompt_encode_ms, Some(13));
+        assert_eq!(timings.denoise_ms, Some(14));
+        assert_eq!(timings.vae_ms, Some(15));
+        assert_eq!(timings.upscale_ms, Some(16));
+
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        worker.request_shutdown();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn standalone_upscale_records_typed_phase_with_and_without_sse_subscriber() {
+        let _ = take_lease_phase_timings(None);
+        handle_standalone_upscale_progress(
+            mold_inference::ProgressEvent::PhaseDone {
+                phase: mold_inference::ProgressPhase::Upscale,
+                name: "Upscaling".into(),
+                elapsed: Duration::from_millis(17),
+            },
+            None,
+        );
+        assert_eq!(take_lease_phase_timings(None).upscale_ms, Some(17));
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_standalone_upscale_progress(
+            mold_inference::ProgressEvent::PhaseDone {
+                phase: mold_inference::ProgressPhase::Upscale,
+                name: "Upscaling".into(),
+                elapsed: Duration::from_millis(19),
+            },
+            Some(&progress_tx),
+        );
+        assert_eq!(take_lease_phase_timings(None).upscale_ms, Some(19));
+        assert!(matches!(
+            progress_rx.try_recv(),
+            Ok(SseMessage::Progress(_))
+        ));
+    }
+
+    #[test]
+    fn typed_load_disposition_never_double_counts_setup() {
+        let _ = take_lease_phase_timings(None);
+        record_model_load_timing(ModelLoadDisposition::WarmReload, Duration::from_millis(7));
+        let warm = take_lease_phase_timings(Some(99));
+        assert_eq!(warm.cold_load_ms, None);
+        assert_eq!(warm.warm_reload_ms, Some(7));
+
+        record_model_load_timing(ModelLoadDisposition::Cold, Duration::from_millis(11));
+        let cold = take_lease_phase_timings(Some(99));
+        assert_eq!(cold.cold_load_ms, Some(11));
+        assert_eq!(cold.warm_reload_ms, None);
+
+        record_model_load_timing(ModelLoadDisposition::Unchanged, Duration::from_millis(13));
+        let unchanged = take_lease_phase_timings(Some(99));
+        assert_eq!(unchanged.cold_load_ms, None);
+        assert_eq!(unchanged.warm_reload_ms, None);
+    }
+
+    #[test]
     fn owner_returns_invalidated_generation_before_acceptance_or_cleanup() {
         let root = tempfile::tempdir().unwrap();
         for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
@@ -5083,6 +5396,8 @@ mod tests {
                         ordinal: 0,
                         owner_epoch: 0,
                         worker_generation: 0,
+                        successful: false,
+                        phase_timings: mold_scheduler::EstimatePhaseTimings::default(),
                     })
             ),
             None => panic!("owner event channel closed"),

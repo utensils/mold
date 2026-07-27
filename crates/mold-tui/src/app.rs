@@ -3564,6 +3564,18 @@ impl App {
             Action::MachinesNextDevice if self.active_view == View::Machines => {
                 self.machines.select_next_device();
             }
+            Action::MachinesDevicePrev
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_prev_device();
+            }
+            Action::MachinesDeviceNext
+                if self.active_view == View::Machines
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
+            {
+                self.machines.select_next_device();
+            }
             Action::MachinesToggleDevice
                 if self.active_view == View::Machines
                     && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
@@ -11980,6 +11992,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn machines_small_detail_reaches_device_sixty_three_and_queue() {
+        let mut app = make_settings_test_app();
+        app.active_view = View::Machines;
+        app.machines
+            .registry
+            .add(machines_test_host("hal9000"))
+            .unwrap();
+        app.machines.select_next();
+        app.machines.focus = crate::hosts::MachinesFocus::Detail;
+        app.machines.apply_status(
+            "hal9000".into(),
+            Some(Box::new(mold_core::ServerStatus {
+                version: "0.20.2".into(),
+                git_sha: None,
+                build_date: None,
+                models_loaded: vec![],
+                busy: false,
+                current_generation: None,
+                gpu_info: None,
+                uptime_secs: 60,
+                hostname: Some("hal9000".into()),
+                memory_status: None,
+                gpus: None,
+                queue_depth: Some(1),
+                queue_capacity: Some(64),
+                queue_paused: Some(false),
+                instance_id: Some("instance-64".into()),
+                models_disk: None,
+            })),
+        );
+        let devices = (0..64)
+            .map(|ordinal| mold_core::DeviceInfo {
+                id: format!("cuda:{ordinal:032x}"),
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: Some(ordinal),
+                device_kind: mold_core::DeviceKind::FullGpu,
+                nvml_uuid: None,
+                physical_uuid: None,
+                mig_uuid: None,
+                mig_parent_uuid: None,
+                mig_profile: None,
+                name: format!("Synthetic accelerator {ordinal}"),
+                pci_bus_id: None,
+                compute_capability: Some("10.0".into()),
+                memory: mold_core::DeviceMemoryInfo {
+                    total_bytes: Some(24 * 1024_u64.pow(3)),
+                    used_bytes: Some(ordinal as u64 * 1024),
+                    mold_used_bytes: None,
+                    other_used_bytes: None,
+                },
+                telemetry: mold_core::DeviceTelemetry {
+                    utilization_percent: Some(ordinal as u8),
+                    temperature_c: None,
+                    power_w: None,
+                },
+                desired_enabled: true,
+                restart_required: false,
+                admin_state: mold_core::DeviceAdminState::Enabled,
+                health: mold_core::DeviceHealth::Healthy,
+                activity: mold_core::DeviceActivity::Idle,
+                schedulable: true,
+                unschedulable_reason: None,
+                loaded_models: vec![],
+                active_work_id: None,
+                planned_work_ids: vec![],
+            })
+            .collect();
+        app.machines.apply_devices(
+            "hal9000".into(),
+            Some(mold_core::DeviceState {
+                devices,
+                plan_version: 1,
+            }),
+        );
+        app.machines.apply_queue(
+            "hal9000".into(),
+            Some(mold_core::QueueListingWire {
+                entries: vec![mold_core::QueueJobEntryWire {
+                    id: "queued-64".into(),
+                    model: "queue-visible-model".into(),
+                    state: "queued".into(),
+                    started_at_unix_ms: 0,
+                    position: 0,
+                    gpu: None,
+                    target_gpu: None,
+                    seed_pinned: None,
+                    metadata: None,
+                }],
+                plan: None,
+            }),
+        );
+
+        for _ in 0..63 {
+            app.dispatch_action(Action::MachinesDeviceNext);
+        }
+        assert_eq!(app.machines.device_selected, 63);
+
+        let text = render_view_to_string(&mut app, 100, 20);
+        assert!(
+            text.contains("Synthetic accelerator 63"),
+            "selected device must be visible in a small detail pane:\n{text}"
+        );
+        assert!(
+            text.contains("Queue") && text.contains("queue-visible-model"),
+            "queue detail must remain reachable below a large device inventory:\n{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn machines_status_shortcuts_advertise_the_key_map() {
         let mut app = make_settings_test_app();
         app.active_view = View::Machines;
@@ -12237,6 +12358,7 @@ mod tests {
                         metadata: None,
                     },
                 ],
+                plan: None,
             }),
         );
 

@@ -52,6 +52,7 @@ pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;
 pub use progress::{
     is_inference_cancelled, InferenceCancellationToken, InferenceCancelled, ProgressEvent,
+    ProgressPhase,
 };
 pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;

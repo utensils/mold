@@ -154,6 +154,7 @@ function installApi(): void {
     }
     if (path === "/api/capabilities") {
       return Promise.resolve({
+        events: { available: true },
         devices: { available: true, lifecycle: true, restart_enable: false },
         dispatch: { active_mode: "v2", v2_authoritative: true },
       });
@@ -184,6 +185,44 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function raceDevice(name: string) {
+  return {
+    id: `cuda:${name}`,
+    backend: "cuda",
+    ordinal: 0,
+    device_kind: "full_gpu",
+    nvml_uuid: name,
+    physical_uuid: name,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    restart_required: false,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
 }
 
 let wrapper: VueWrapper | null = null;
@@ -219,6 +258,10 @@ describe("MobileHostDetail remote host data", () => {
       retry: true,
     });
     expect(stream("/api/downloads/stream").options).toMatchObject({
+      target: studioTarget,
+      retry: true,
+    });
+    expect(stream("/api/events").options).toMatchObject({
       target: studioTarget,
       retry: true,
     });
@@ -312,6 +355,66 @@ describe("MobileHostDetail remote host data", () => {
         .attributes("aria-valuenow"),
     ).toBe("25");
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
+  });
+
+  it("ignores older same-host queue and device refetches after a newer event refresh", async () => {
+    const view = await mountDetail();
+    const olderQueue = deferred<unknown>();
+    const newerQueue = deferred<unknown>();
+    const olderDevices = deferred<unknown>();
+    const newerDevices = deferred<unknown>();
+    let queueCall = 0;
+    let deviceCall = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/queue") return queueCall++ === 0 ? olderQueue.promise : newerQueue.promise;
+      if (path === "/api/devices")
+        return deviceCall++ === 0 ? olderDevices.promise : newerDevices.promise;
+      return existingApi(requestTarget, path);
+    });
+    const deviceEvents = stream("/api/events");
+    const invalidate = () =>
+      deviceEvents.options.onEvent("message", JSON.stringify({ type: "queue_plan_changed" }));
+    invalidate();
+    invalidate();
+
+    newerQueue.resolve({
+      entries: [
+        {
+          id: "newer-job",
+          model: "newer-model",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 0,
+        },
+      ],
+    });
+    newerDevices.resolve({
+      devices: [raceDevice("NEW DEVICE")],
+      plan_version: 3,
+    });
+    await flushPromises();
+    olderQueue.resolve({
+      entries: [
+        {
+          id: "older-job",
+          model: "older-model",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+      ],
+    });
+    olderDevices.resolve({
+      devices: [raceDevice("OLD DEVICE")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(view.text()).toContain("newer-model");
+    expect(view.text()).not.toContain("older-model");
+    expect(view.text()).toContain("NEW DEVICE");
+    expect(view.text()).not.toContain("OLD DEVICE");
   });
 
   it("renders every status GPU before the resource stream produces a snapshot", async () => {
@@ -494,7 +597,7 @@ describe("MobileHostDetail remote host data", () => {
     const pending = view.get("[data-test='device-toggle-1']");
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    const row = view.get("[data-test='device-row']");
+    const row = view.get("[data-test='device-card']");
     expect(row.text()).toContain("Restart required");
     expect(row.text()).not.toContain("unavailable");
   });
@@ -620,17 +723,20 @@ describe("MobileHostDetail host switching", () => {
     const view = await mountDetail();
     const oldResources = stream("/api/resources/stream");
     const oldDownloads = stream("/api/downloads/stream");
+    const oldDeviceEvents = stream("/api/events");
 
     await view.setProps({ host: renderBox });
     await flushPromises();
 
     expect(oldResources.options.signal.aborted).toBe(true);
     expect(oldDownloads.options.signal.aborted).toBe(true);
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/status");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/models");
     expect(apiJsonTo).toHaveBeenCalledWith(renderTarget, "/api/queue");
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(false);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(false);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(false);
 
     oldResources.options.onEvent(
       "snapshot",
@@ -664,6 +770,26 @@ describe("MobileHostDetail host switching", () => {
     wrapper = null;
     expect(stream("/api/resources/stream", renderTarget).options.signal.aborted).toBe(true);
     expect(stream("/api/downloads/stream", renderTarget).options.signal.aborted).toBe(true);
+    expect(stream("/api/events", renderTarget).options.signal.aborted).toBe(true);
+  });
+
+  it("restarts every authoritative source when the same host rotates credentials", async () => {
+    const view = await mountDetail();
+    const oldDeviceEvents = stream("/api/events");
+    const rotated = { ...studio, apiKey: "rotated-secret" };
+
+    await view.setProps({ host: rotated });
+    await flushPromises();
+
+    expect(oldDeviceEvents.options.signal.aborted).toBe(true);
+    expect(stream("/api/events").options.target).toEqual({
+      baseUrl: studio.baseUrl,
+      apiKey: "rotated-secret",
+    });
+    expect(apiJsonTo).toHaveBeenCalledWith(
+      { baseUrl: studio.baseUrl, apiKey: "rotated-secret" },
+      "/api/devices",
+    );
   });
 
   it("ignores a late status response from the previously selected host", async () => {

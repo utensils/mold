@@ -5,14 +5,10 @@ import CardSurface from "@ui/components/CardSurface.vue";
 import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
-import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import {
-  canMutateDevice,
-  deviceActionLabel,
-  deviceLifecycleMessage,
-  deviceStateLabel,
-} from "@studio/lib/deviceLifecycle";
+import { setDeviceEnabled } from "@studio/api/devices";
 import CatalogDetailDrawer from "../components/models/CatalogDetailDrawer.vue";
 import DownloadsTray from "../components/models/DownloadsTray.vue";
 import HostQueuePanel from "../components/machines/HostQueuePanel.vue";
@@ -25,6 +21,7 @@ import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../lib/api/gpuStatus";
 import { installedModelToEntry } from "../lib/catalogDetail";
 import { sseStream } from "../lib/api/sse";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
 import { formatGB, formatUptime, percent, vramLevel } from "../lib/format";
 import { inferBackendFromGpuName } from "../lib/hosts";
 import {
@@ -70,9 +67,6 @@ function modelAccessibilityLabel(model: ModelEntry): string {
 const hostId = computed(() => String(route.params.id ?? ""));
 const host = computed(() => hosts.all.find((h) => h.id === hostId.value) ?? null);
 const telemetry = computed(() => hosts.telemetry[hostId.value]);
-const devices = computed(() => telemetry.value?.devices ?? null);
-const deviceCapabilities = computed(() => hosts.capabilities[hostId.value] ?? null);
-const deviceMutations = ref(new Set<string>());
 
 // ── Live telemetry (this host's resources stream) ─────────────────────────
 
@@ -113,6 +107,7 @@ function startResourceStream(reset = false) {
 // ── Live queue (this host's server queue via the jobs store) ──────────────
 
 let queueTimer: ReturnType<typeof setInterval> | null = null;
+let deviceEventsAbort: AbortController | null = null;
 
 function tickQueue() {
   const current = host.value;
@@ -124,6 +119,15 @@ function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
   tickQueue();
   queueTimer = setInterval(tickQueue, 5_000);
+}
+
+function startDeviceEvents() {
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
+  const target = hostTarget();
+  if (!target) return;
+  deviceEventsAbort = new AbortController();
+  subscribeToDeviceSnapshots(target, deviceEventsAbort.signal, tickQueue);
 }
 
 let statusAbort: AbortController | null = null;
@@ -187,6 +191,7 @@ watch(
       recentlyUnloaded.value.clear();
     }
     startResourceStream(hostChanged);
+    startDeviceEvents();
     void fetchStatus(hostChanged);
     startQueuePolling();
     startReadyServices();
@@ -211,6 +216,8 @@ watch(
 onUnmounted(() => {
   resourceAbort?.abort();
   resourceAbort = null;
+  deviceEventsAbort?.abort();
+  deviceEventsAbort = null;
   statusAbort?.abort();
   statusAbort = null;
   if (queueTimer) clearInterval(queueTimer);
@@ -247,7 +254,41 @@ const installedModels = computed(() => hostModels.installedOn(hostId.value));
 const modelLabel = (name: string) => modelDisplayNameForId(name, hostModels.modelsOn(hostId.value));
 
 const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
+const mutatingDeviceId = ref<string | null>(null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
+
+async function toggleDeviceById(deviceId: string, enabled: boolean) {
+  const target = hostTarget();
+  if (!target) return;
+  mutatingDeviceId.value = deviceId;
+  try {
+    await setDeviceEnabled(target, deviceId, enabled);
+    await hosts.refresh();
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Couldn't ${enabled ? "enable" : "disable"} device: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  } finally {
+    mutatingDeviceId.value = null;
+  }
+}
+
+async function unpinWork(workId: string) {
+  const target = hostTarget();
+  if (!target) return;
+  try {
+    await setQueueDevicePin(target, workId, null);
+    tickQueue();
+  } catch (error) {
+    toasts.push(
+      `Queue pin was not changed: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+  }
+}
 
 // ── Loaded-model chips: per-host unload ───────────────────────────────────
 
@@ -354,30 +395,6 @@ const isTarget = computed(() => (appPrefs.settings?.generateTargetHost ?? null) 
 
 function toggleTarget() {
   void appPrefs.update({ generateTargetHost: isTarget.value ? null : hostId.value });
-}
-
-async function toggleDevice(device: DeviceInfo) {
-  const target = hostTarget();
-  if (!target || !canMutateDevice(device, deviceCapabilities.value)) return;
-  const enabled = !device.desired_enabled;
-  deviceMutations.value = new Set(deviceMutations.value).add(device.id);
-  try {
-    await setDeviceEnabled(
-      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
-      device.id,
-      enabled,
-    );
-    await hosts.refresh();
-  } catch (error) {
-    toasts.push(
-      `Could not ${enabled ? "enable" : "disable"} ${device.name}: ${String(error)}`,
-      "error",
-    );
-  } finally {
-    const next = new Set(deviceMutations.value);
-    next.delete(device.id);
-    deviceMutations.value = next;
-  }
 }
 
 const renameOpen = ref(false);
@@ -638,43 +655,6 @@ async function forget() {
               <p v-else class="text-caption text-ink-3">No live telemetry from this host yet.</p>
             </CardSurface>
 
-            <CardSurface v-if="devices !== null" large data-test="device-controls">
-              <div class="mb-3 flex items-center gap-2">
-                <h2 class="edge-code">GPU DEVICES</h2>
-                <div class="border-edge h-px flex-1 border-t" />
-              </div>
-              <p class="mb-2 text-caption text-ink-3" data-test="device-lifecycle-note">
-                {{ deviceLifecycleMessage(deviceCapabilities) }}
-              </p>
-              <div class="flex flex-col divide-y divide-edge">
-                <div
-                  v-for="device in devices"
-                  :key="device.id"
-                  class="flex min-h-11 items-center gap-3 py-2"
-                  data-test="device-row"
-                >
-                  <div class="min-w-0 flex-1">
-                    <div class="truncate text-body font-medium text-ink">{{ device.name }}</div>
-                    <div class="edge-code mt-0.5">
-                      {{ device.ordinal == null ? device.backend : `GPU ${device.ordinal}` }}
-                      · {{ deviceStateLabel(device) }}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    class="rounded-control border border-edge px-3 py-1.5 text-caption font-semibold text-ink transition-colors hover:border-edge-strong disabled:opacity-40"
-                    :data-test="`device-toggle-${device.ordinal ?? device.id}`"
-                    :disabled="
-                      !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
-                    "
-                    @click="toggleDevice(device)"
-                  >
-                    {{ deviceActionLabel(device, deviceCapabilities) }}
-                  </button>
-                </div>
-              </div>
-            </CardSurface>
-
             <!-- Downloads on this host -->
             <CardSurface large :padded="false">
               <div class="flex items-center gap-2 px-4 pt-4">
@@ -685,6 +665,23 @@ async function forget() {
                 </RouterLink>
               </div>
               <DownloadsTray :host-id="hostId" data-test="host-downloads" class="mt-2" />
+            </CardSurface>
+
+            <CardSurface large>
+              <DevicePanel
+                :devices="queueSnapshot?.devices ?? []"
+                :plan="queueSnapshot?.plan ?? null"
+                :mutable="
+                  queueSnapshot?.devices !== null &&
+                  hosts.capabilities[hostId]?.devices?.lifecycle === true &&
+                  hosts.capabilities[hostId]?.dispatch?.v2_authoritative === true
+                "
+                :restart-enable="hosts.capabilities[hostId]?.devices?.restart_enable === true"
+                show-controls
+                :busy-device-id="mutatingDeviceId"
+                @unpin="unpinWork"
+                @toggle="toggleDeviceById"
+              />
             </CardSurface>
 
             <!-- Queue — the whole server queue (other clients' jobs included),

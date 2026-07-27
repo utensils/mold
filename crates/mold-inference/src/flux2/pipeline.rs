@@ -826,7 +826,11 @@ impl Flux2Engine {
                 progress.stage_start("Encoding prompt (Qwen3)");
                 let encode_start = Instant::now();
                 let txt_emb = Self::encode_and_stack(encoder, prompt, target_device, target_dtype)?;
-                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (Qwen3)",
+                    encode_start.elapsed(),
+                );
                 Ok(txt_emb)
             },
         )?;
@@ -1185,9 +1189,11 @@ impl Flux2Engine {
                 gpu_dtype,
             )?;
             let encoded = vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let prepared = crate::img2img::prepare_flow_match_img2img(
                 &encoded,
@@ -1323,9 +1329,11 @@ impl Flux2Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
@@ -1526,7 +1534,11 @@ impl Flux2Engine {
                 loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let prepared = crate::img2img::prepare_flow_match_img2img(
                 &encoded,
@@ -1642,7 +1654,11 @@ impl Flux2Engine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
-        progress.stage_done("VAE decode", vae_decode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 9. Convert candle tensor to image bytes

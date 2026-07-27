@@ -178,6 +178,8 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             "POST",
             "/api/generate"
             | "/api/generate/stream"
+            | "/api/generate/placement-preview"
+            | "/api/chain-jobs/placement-preview"
             | "/api/expand"
             | "/api/upscale"
             | "/api/upscale/stream",
@@ -306,6 +308,14 @@ mod tests {
         );
         assert_eq!(
             classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/generate/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            classify_route("/api/chain-jobs/placement-preview", &Method::POST),
             Some(RouteTier::Generation)
         );
         assert_eq!(

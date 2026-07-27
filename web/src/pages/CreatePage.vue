@@ -54,6 +54,7 @@ import {
 import { mergeStyleNegative, styleHint } from "../lib/stylePresets";
 import {
   activeCanvasJob,
+  resolveChainRequest,
   useGenerateStream,
   type Job,
 } from "../composables/useGenerateStream";
@@ -74,7 +75,7 @@ import { useStatusPoll } from "../composables/useStatusPoll";
 import { useHostRouting } from "../composables/useHostRouting";
 import { generationCapabilitiesForFamily } from "../lib/generateCapabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/modelName";
-import type { HostRoute } from "../lib/hostRouting";
+import { sameHostRoute, type HostRoute } from "../lib/hostRouting";
 import type {
   ChainRequestWire,
   ChainStageWire,
@@ -182,7 +183,7 @@ interface PreparedWebBatch {
     ReturnType<typeof decideGenerateRequestRouting>,
     { kind: "reject" }
   >;
-  route: HostRoute | null;
+  route: HostRoute;
 }
 const preparedBatch = ref<PreparedWebBatch | null>(null);
 
@@ -190,16 +191,15 @@ function cloneRoute(route: HostRoute | null): HostRoute | null {
   return route ? { ...route, target: { ...route.target } } : null;
 }
 
+function normalizeSubmitRoute(route: HostRoute | null): HostRoute | null {
+  return route?.hostId === "origin" ? null : route;
+}
+
 function sameRoute(
   frozen: HostRoute | null,
   current: HostRoute | null,
 ): boolean {
-  if (!frozen || !current) return frozen === current;
-  return (
-    frozen.hostId === current.hostId &&
-    frozen.target.baseUrl === current.target.baseUrl &&
-    frozen.target.apiKey === current.target.apiKey
-  );
+  return sameHostRoute(frozen, current);
 }
 
 function preparedStaleReasons(batch: PreparedWebBatch): string[] {
@@ -222,9 +222,7 @@ function preparedStaleReasons(batch: PreparedWebBatch): string[] {
     reasons.push(
       "The Run on selection changed after these variations were prepared.",
     );
-  const currentRoute = routing.multiHost.value
-    ? routing.resolve(batch.model)
-    : null;
+  const currentRoute = routing.resolve(batch.model);
   if (!sameRoute(batch.route, currentRoute))
     reasons.push(
       `${batch.route?.label ?? "This server"} is no longer the prepared generation route.`,
@@ -248,9 +246,7 @@ function quickStaleReasons(snapshot: QuickPreparedExpansion): string[] {
     reasons.push(
       "The Run on selection changed after this prompt was expanded.",
     );
-  const currentRoute = routing.multiHost.value
-    ? routing.resolve(snapshot.model)
-    : null;
+  const currentRoute = routing.resolve(snapshot.model);
   if (!sameRoute(snapshot.route, currentRoute))
     reasons.push(
       `${snapshot.route?.label ?? "This server"} is no longer the prepared generation route.`,
@@ -1009,6 +1005,21 @@ function resolveSubmitRoute(): HostRoute | null | false {
   return route;
 }
 
+async function resolveFeasibleSubmitRoute(
+  request: GenerateRequestWire,
+  copies = 1,
+): Promise<HostRoute | null | false> {
+  const route = await routing.resolveFeasible(request, copies);
+  if (!route) {
+    toast(
+      "error",
+      "No selected machine has the model and required components for this print.",
+    );
+    return false;
+  }
+  return route;
+}
+
 async function onSubmit(allowStaleQuick = false) {
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
@@ -1021,7 +1032,7 @@ async function onSubmit(allowStaleQuick = false) {
       return;
     }
   }
-  const route =
+  let route =
     quick && !allowStaleQuick ? cloneRoute(quick.route) : resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
@@ -1029,6 +1040,41 @@ async function onSubmit(allowStaleQuick = false) {
   if (decision.kind === "reject") {
     toast("error", decision.reason);
     return;
+  }
+  const currentRequest = form.toRequest(currentModel.value);
+  if (quick && !allowStaleQuick) {
+    const feasible = route
+      ? decision.kind === "chain"
+        ? await routing.revalidateFeasibleChain(
+            route,
+            resolveChainRequest(currentRequest, decision),
+          )
+        : await routing.revalidateFeasible(route, currentRequest)
+      : await resolveFeasibleSubmitRoute(currentRequest);
+    if (feasible === false) return;
+    if (!sameRoute(route, feasible)) {
+      toast(
+        "error",
+        "The prepared machine is no longer the feasible route for this print. Re-expand or choose Generate anyway.",
+      );
+      return;
+    }
+    route = feasible;
+  } else {
+    const feasible =
+      decision.kind === "chain"
+        ? await routing.resolveFeasibleChain(
+            resolveChainRequest(currentRequest, decision),
+          )
+        : await routing.resolveFeasible(currentRequest);
+    if (!feasible) {
+      toast(
+        "error",
+        "No selected machine has the model and required components for this print.",
+      );
+      return;
+    }
+    route = feasible;
   }
   const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
@@ -1039,7 +1085,32 @@ async function onSubmit(allowStaleQuick = false) {
     if (preparedSource.mask) req.mask_image = preparedSource.mask.base64;
     else delete req.mask_image;
   }
-  stream.submit(req, decision, route);
+  const finalizedRoute = route
+    ? decision.kind === "chain"
+      ? await routing.revalidateFeasibleChain(
+          route,
+          resolveChainRequest(req, decision),
+        )
+      : await routing.revalidateFeasible(route, req)
+    : decision.kind === "chain"
+      ? await routing.resolveFeasibleChain(resolveChainRequest(req, decision))
+      : await routing.resolveFeasible(req);
+  if (!finalizedRoute) {
+    toast(
+      "error",
+      "No selected machine has an authoritative route for this finalized print.",
+    );
+    return;
+  }
+  if (!sameRoute(route, finalizedRoute)) {
+    toast(
+      "error",
+      "The finalized source request is no longer feasible on the selected machine. Nothing was queued.",
+    );
+    return;
+  }
+  route = finalizedRoute;
+  stream.submit(req, decision, normalizeSubmitRoute(route));
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);
@@ -1076,9 +1147,11 @@ async function onSubmitScript(script: ChainScriptToml) {
     enable_audio: script.chain.enable_audio,
   };
   try {
-    const route = routing.resolve(script.chain.model);
+    const route = await routing.resolveFeasibleChain(req);
     if (!route) {
-      throw new Error("The selected sequence host is unavailable.");
+      throw new Error(
+        "No selected machine has the model and required components for this sequence.",
+      );
     }
     const { job_id } = await createChainJob(req, route.target);
     submittedChainJobHostId.value = route.hostId;
@@ -1108,8 +1181,7 @@ function validateExpandedPrompts(
 
 async function onExpand() {
   if (form.state.value.batchSize > 1) {
-    const route = resolveSubmitRoute();
-    if (route === false || !validateSubmit()) return;
+    if (!validateSubmit()) return;
     const decision = chainDecision.value;
     if (decision.kind === "reject") {
       toast("error", decision.reason);
@@ -1121,6 +1193,21 @@ async function onExpand() {
     const model = form.state.value.model;
     const selectedHostPolicy = routing.targetId.value;
     const baseRequest = form.toRequest(currentModel.value);
+    const route =
+      decision.kind === "chain"
+        ? await routing.resolveFeasibleChain(
+            resolveChainRequest(baseRequest, decision),
+            count,
+          )
+        : await routing.resolveFeasible(baseRequest, count);
+    if (!route) {
+      toast(
+        "error",
+        "No selected machine can run every prepared variation with the required components.",
+      );
+      return;
+    }
+    const submitRoute = normalizeSubmitRoute(route);
     const style = styleHint(form.state.value.stylePreset ?? "");
     composerError.value = null;
     try {
@@ -1132,7 +1219,7 @@ async function onExpand() {
           ...(style ? { style } : {}),
         },
         undefined,
-        route?.target,
+        submitRoute?.target,
       );
       variations.value = validateExpandedPrompts(response.expanded, count);
       preparedBatch.value = {
@@ -1144,7 +1231,7 @@ async function onExpand() {
         selectedHostPolicy,
         baseRequest,
         decision,
-        route: cloneRoute(route),
+        route: cloneRoute(route)!,
       };
     } catch (error) {
       composerError.value =
@@ -1259,8 +1346,23 @@ async function queueVariations() {
       "Every prepared variation needs a prompt before queueing.";
     return;
   }
-  variations.value = [];
-  preparedBatch.value = null;
+  const revalidated =
+    prepared.decision.kind === "chain"
+      ? await routing.revalidateFeasibleChain(
+          prepared.route,
+          resolveChainRequest(prepared.baseRequest, prepared.decision),
+          list.length,
+        )
+      : await routing.revalidateFeasible(
+          prepared.route,
+          prepared.baseRequest,
+          list.length,
+        );
+  if (!revalidated || !sameRoute(prepared.route, revalidated)) {
+    composerError.value =
+      "The prepared machine can no longer run this complete batch. Nothing was queued; your reviewed variations are preserved.";
+    return;
+  }
   for (const [index, prompt] of list.entries()) {
     // Each variation already carries the style extras, so it is the final
     // prompt — override the base request's prompt rather than re-appending.
@@ -1277,9 +1379,11 @@ async function queueVariations() {
         batch_count: list.length,
       },
       prepared.decision,
-      prepared.route,
+      normalizeSubmitRoute(revalidated),
     );
   }
+  variations.value = [];
+  preparedBatch.value = null;
 }
 
 // ── Source image handling (preserved) ─────────────────────────────────

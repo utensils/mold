@@ -499,6 +499,8 @@ pub async fn run_server(
     let (job_tx, job_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
     let queue_handle = QueueHandle::new(job_tx);
     let (scheduled_work_tx, scheduled_work_rx) = tokio::sync::mpsc::channel(queue_size.max(1));
+    let (placement_preview_tx, placement_preview_rx) =
+        tokio::sync::mpsc::channel(queue_size.max(1));
 
     // ── Create AppState ────────────────────────────────────────────────────
     let mut state = if startup.start_gpu_workers {
@@ -617,6 +619,12 @@ pub async fn run_server(
         startup.start_v2_coordinator,
         startup.observe_v2_decisions,
     );
+    if startup.start_v2_coordinator {
+        state.scheduled_work = state
+            .scheduled_work
+            .clone()
+            .with_placement_preview(placement_preview_tx);
+    }
     state.metadata_db = metadata_db;
     state.device_registry = device_registry;
 
@@ -739,6 +747,7 @@ pub async fn run_server(
         Some(tokio::spawn(scheduler::run_scheduler_coordinator(
             job_rx,
             scheduled_work_rx,
+            placement_preview_rx,
             scheduler_worker_rx,
             worker_state,
             scheduler_shutdown.clone(),

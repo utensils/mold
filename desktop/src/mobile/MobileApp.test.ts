@@ -15,6 +15,8 @@ const {
   applySourceFitPreprocess,
   expandPrompt,
   startCatalogDownload,
+  previewChainPlacement,
+  previewGenerationPlacement,
 } = vi.hoisted(() => ({
   invoke: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -25,6 +27,8 @@ const {
   applySourceFitPreprocess: vi.fn(),
   expandPrompt: vi.fn(),
   startCatalogDownload: vi.fn(),
+  previewChainPlacement: vi.fn(),
+  previewGenerationPlacement: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -45,6 +49,30 @@ vi.mock("../lib/gallery/media", async (importOriginal) => ({
   streamableMediaUrl,
   evictMedia,
 }));
+vi.mock("@studio/api/generationPlacement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/generationPlacement")>()),
+  previewChainPlacement,
+  previewGenerationPlacement,
+}));
+
+function plannedPlacement() {
+  return {
+    version: 1,
+    authoritative: true,
+    state_version: 1,
+    plan_version: 1,
+    outcome: "planned",
+    candidate: {
+      device_id: "cuda:0",
+      execution_fingerprint: "test",
+      predicted_start_after_ms: 0,
+      predicted_completion_after_ms: 100,
+      setup_ms: 0,
+      setup_kind: "warm",
+      estimate_confidence: "high",
+    },
+  };
+}
 // Keep the real reconciliation logic but collapse its re-attach poll interval
 // so tests never wait out the production cadence.
 vi.mock("./mobileGenerationRecovery", async (importOriginal) => {
@@ -62,6 +90,7 @@ import MobileApp from "./MobileApp.vue";
 import MobileLoraControls from "./MobileLoraControls.vue";
 import MobileTemplates from "./MobileTemplates.vue";
 import { useMobileDownloadsStore } from "./mobileDownloads";
+import { ApiError } from "../lib/api/client";
 
 installMemoryLocalStorage();
 
@@ -218,6 +247,8 @@ beforeEach(() => {
     }),
   );
   startCatalogDownload.mockReset().mockResolvedValue("expansion-job");
+  previewChainPlacement.mockReset().mockResolvedValue(plannedPlacement());
+  previewGenerationPlacement.mockReset().mockResolvedValue(plannedPlacement());
   objectUrlSequence = 0;
   URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlSequence}`);
   URL.revokeObjectURL = vi.fn();
@@ -267,6 +298,14 @@ describe("MobileApp sequence generation", () => {
       return Promise.reject(new Error(`Unexpected API path: ${path}`));
     });
 
+    previewChainPlacement.mockResolvedValueOnce({
+      version: 1,
+      authoritative: false,
+      state_version: 1,
+      plan_version: 1,
+      outcome: "unsupported",
+      candidate: null,
+    });
     wrapper = mountMobileApp();
     await flushPromises();
     const prompts = wrapper.findAll("[data-test='mobile-sequence-clip'] textarea");
@@ -275,6 +314,7 @@ describe("MobileApp sequence generation", () => {
     await wrapper.get("[data-test='mobile-generate-sequence']").trigger("click");
     await flushPromises();
 
+    expect(previewChainPlacement).toHaveBeenCalledWith(target, expect.anything());
     expect(apiJsonTo).toHaveBeenCalledWith(
       target,
       "/api/chain-jobs",
@@ -1024,6 +1064,11 @@ describe("MobileApp generation queue", () => {
     await developPrepared.trigger("click");
     await flushPromises();
 
+    expect(previewGenerationPlacement).toHaveBeenCalledWith(
+      target,
+      expect.objectContaining({ batch_size: 1 }),
+      3,
+    );
     expect(wrapper.findAll("[data-test='mobile-generation-job']")).toHaveLength(3);
     expect(document.activeElement).toBe(fieldControl("Prompt").element);
     expect(wrapper.get("[data-test='mobile-develop-button']").text()).toBe(
@@ -1048,6 +1093,111 @@ describe("MobileApp generation queue", () => {
     expect(openStreams.map((stream) => stream.options.body.batch_index)).toEqual([1, 2]);
     expect(openStreams.map((stream) => stream.options.body.batch_count)).toEqual([3, 3]);
   });
+
+  it.each([
+    ["quick Batch 1", 1],
+    ["prepared Batch N", 2],
+  ])(
+    "does not submit %s when placement returns after the same URL/key has a new instance",
+    async (_label, count) => {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await fieldControl("Prompt").setValue("identity-fenced storm");
+      if (count === 1) {
+        await wrapper.get("[data-test='mobile-prompt-expand']").trigger("click");
+        await flushPromises();
+      } else {
+        await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+        await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+        await flushPromises();
+      }
+
+      const preview = deferred<ReturnType<typeof plannedPlacement>>();
+      previewGenerationPlacement.mockReturnValueOnce(preview.promise);
+      if (count === 1) {
+        await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+      } else {
+        await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+      }
+      await vi.waitFor(() => expect(previewGenerationPlacement).toHaveBeenCalledTimes(1));
+      expect(previewGenerationPlacement).toHaveBeenCalledWith(
+        target,
+        expect.objectContaining({ batch_size: 1 }),
+        count,
+      );
+
+      apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+        if (path === "/api/status") {
+          return Promise.resolve({ ...status, instance_id: "replacement-instance" });
+        }
+        if (path === "/api/models") return Promise.resolve([model]);
+        if (path === "/api/gallery") return Promise.resolve([print]);
+        return Promise.reject(new Error(`Unexpected API path: ${path}`));
+      });
+      window.dispatchEvent(new Event("pageshow"));
+      await flushPromises();
+      preview.resolve(plannedPlacement());
+      await flushPromises();
+
+      expect(openStreams).toHaveLength(0);
+      expect(wrapper.text()).toContain("connection details changed while checking placement");
+    },
+  );
+
+  it.each([
+    [
+      "authoritative infeasible",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "infeasible",
+        candidate: null,
+        reason: "insufficient_vram",
+      },
+    ],
+    ["null", null],
+    ["malformed", {}],
+    [
+      "contradictory unsupported",
+      {
+        version: 1,
+        authoritative: true,
+        state_version: 2,
+        plan_version: 2,
+        outcome: "unsupported",
+      },
+    ],
+    ["HTTP 401", new ApiError("unauthorized", 401)],
+    ["HTTP 403", new ApiError("forbidden", 403)],
+    ["HTTP 426", new ApiError("upgrade", 426)],
+    ["HTTP 500", new ApiError("failed", 500)],
+  ])(
+    "preserves prepared Batch N and opens zero streams for %s placement",
+    async (_case, result) => {
+      wrapper = mountMobileApp();
+      await flushPromises();
+      await wrapper.get("[data-test='mobile-batch-increment']").trigger("click");
+      await fieldControl("Prompt").setValue("preserved storm pair");
+      await wrapper.get("[data-test='mobile-develop-button']").trigger("click");
+      await flushPromises();
+      if (result instanceof Error) {
+        previewGenerationPlacement.mockRejectedValueOnce(result);
+      } else {
+        previewGenerationPlacement.mockResolvedValueOnce(result);
+      }
+
+      await wrapper.get("[data-test='mobile-develop-prepared']").trigger("click");
+      await flushPromises();
+
+      expect(openStreams).toHaveLength(0);
+      expect(wrapper.find("[data-test='mobile-prepared-expansion']").exists()).toBe(true);
+      expect(
+        wrapper.get("[data-test='mobile-develop-prepared']").attributes("disabled"),
+      ).toBeUndefined();
+    },
+  );
 
   it("identifies a failed middle prepared sibling by variation and reviewed prompt", async () => {
     wrapper = mountMobileApp();

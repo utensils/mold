@@ -20,6 +20,7 @@ mod prompt_history;
 mod reconcile;
 mod record;
 pub mod scan;
+mod scheduler_estimates;
 pub mod settings;
 
 pub use db::MetadataDb;
@@ -30,6 +31,7 @@ pub use path::{canonical_dir, canonical_dir_string};
 pub use prompt_history::{HistoryEntry, PromptHistory};
 pub use reconcile::ReconcileStats;
 pub use record::{GenerationRecord, RecordSource};
+pub use scheduler_estimates::{SchedulerEstimateRecord, SchedulerEstimates};
 pub use settings::{resolve_active_profile, Settings, ValueType, DEFAULT_PROFILE};
 
 use std::path::PathBuf;

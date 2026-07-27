@@ -5,6 +5,7 @@ import { useAppPrefsStore } from "../../stores/appPrefs";
 import { useConnectionStore } from "../../stores/connection";
 import { useGenerationStore } from "../../stores/generation";
 import { useHostsStore } from "../../stores/hosts";
+import { useJobsStore } from "../../stores/jobs";
 import { useToastStore } from "../../stores/toasts";
 import { apiJson } from "../../lib/api/client";
 import { gpuSnapshotsFromWorkers } from "../../lib/api/gpuStatus";
@@ -20,6 +21,7 @@ const conn = useConnectionStore();
 const appPrefs = useAppPrefsStore();
 const generation = useGenerationStore();
 const hosts = useHostsStore();
+const jobs = useJobsStore();
 const snapshot = ref<ResourceSnapshot | null>(null);
 const status = ref<ServerStatus | null>(null);
 const open = ref(false);
@@ -76,6 +78,33 @@ const vramPct = computed(() => (gpus.value.length ? percent(vramUsed.value, vram
 const vramCritical = computed(() =>
   gpus.value.some((g) => vramLevel(g.vram_used, g.vram_total) === "critical"),
 );
+const stableDevices = computed(() => {
+  const host = displayHost.value;
+  return host ? (jobs.queues[host.id]?.devices ?? []) : [];
+});
+const queuePlan = computed(() => {
+  const host = displayHost.value;
+  return host ? (jobs.queues[host.id]?.plan ?? null) : null;
+});
+const replanLabel = computed(() => {
+  const deadline = queuePlan.value?.next_replan_at_unix_ms;
+  if (deadline == null) return null;
+  return `tentative · replans in ${Math.max(0, Math.ceil((deadline - Date.now()) / 1000))}s`;
+});
+function stableDeviceForOrdinal(ordinal: number) {
+  return stableDevices.value.find((device) => device.ordinal === ordinal) ?? null;
+}
+function shortDeviceId(id: string) {
+  const tail = id.split(":").at(-1) ?? id;
+  return tail.length > 10 ? `…${tail.slice(-8)}` : tail;
+}
+function deviceState(ordinal: number) {
+  const device = stableDeviceForOrdinal(ordinal);
+  if (!device) return null;
+  if (device.admin_state === "draining") return "finishing current work";
+  if (device.health !== "healthy") return device.health;
+  return device.activity === "idle" ? device.admin_state : device.activity;
+}
 /** Halide when idle/latent, safelight while a job develops, stop past 92%. */
 const vramTone = computed(() => {
   if (vramCritical.value) return "danger";
@@ -254,6 +283,9 @@ onUnmounted(() => {
           >
         </span>
       </div>
+      <div v-if="replanLabel" class="mb-2 edge-code text-ink-3" data-test="replan-countdown">
+        {{ replanLabel }}
+      </div>
 
       <template v-if="gpus.length">
         <div
@@ -267,6 +299,16 @@ onUnmounted(() => {
             <span class="min-w-0 truncate text-caption text-ink-2" :title="g.name">{{
               g.name
             }}</span>
+          </div>
+          <div
+            v-if="stableDeviceForOrdinal(g.ordinal)"
+            class="mb-1 flex min-w-0 items-center justify-between gap-2"
+            data-test="stable-device-state"
+          >
+            <code class="min-w-0 truncate text-[10px] text-ink-3">
+              {{ shortDeviceId(stableDeviceForOrdinal(g.ordinal)!.id) }}
+            </code>
+            <span class="edge-code">{{ deviceState(g.ordinal) }}</span>
           </div>
           <ProgressBar
             :value="percent(g.vram_used, g.vram_total)"

@@ -1,12 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import {
-  canMutateDevice,
-  deviceActionLabel,
-  deviceLifecycleMessage,
-  deviceStateLabel,
-} from "@studio/lib/deviceLifecycle";
+import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
+import DevicePanel from "@studio/components/DevicePanel.vue";
+import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
@@ -14,6 +11,8 @@ import { openExternal } from "../lib/openExternal";
 import type { Theme, ThemeFamily } from "../lib/theme";
 import { mobileHostTarget, type MobileHost } from "./hosts";
 import type { MobileSettings } from "./settings";
+import { subscribeToDeviceSnapshots } from "../lib/api/deviceEvents";
+import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 
 const PRIVACY_POLICY_URL = "https://utensils.io/mold/privacy";
 
@@ -51,23 +50,40 @@ function openPrivacyPolicy(): void {
 const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
+const plan = ref<QueuePlan | null>(null);
 const deviceError = ref("");
+let deviceEventsAbort: AbortController | null = null;
+let deviceRequestGeneration = 0;
 
 async function loadDevices(): Promise<void> {
-  if (!props.host) {
+  const host = props.host;
+  const generation = ++deviceRequestGeneration;
+  if (!host) {
     devices.value = null;
+    plan.value = null;
     return;
   }
+  const isCurrent = () =>
+    generation === deviceRequestGeneration &&
+    props.host?.id === host.id &&
+    props.host.baseUrl === host.baseUrl &&
+    props.host.apiKey === host.apiKey;
   try {
-    const target = mobileHostTarget(props.host);
-    const value = await apiJsonTo<unknown>(target, "/api/devices");
-    const capabilities = await apiJsonTo<ServerCapabilities>(target, "/api/capabilities").catch(
-      () => null,
-    );
-    devices.value = parseDeviceListResponse(value).devices;
-    deviceCapabilities.value = capabilities;
+    const target = mobileHostTarget(host);
+    const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
+      apiJsonTo<unknown>(target, "/api/devices"),
+      fetchServerCapabilities(target),
+      listQueue(target),
+    ]);
+    if (!isCurrent()) return;
+    if (deviceResult.status !== "fulfilled") throw deviceResult.reason;
+    devices.value = parseDeviceListResponse(deviceResult.value).devices;
+    deviceCapabilities.value =
+      capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
+    plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
     deviceError.value = "";
   } catch {
+    if (!isCurrent()) return;
     // Older hosts do not expose runtime lifecycle controls.
     devices.value = null;
     deviceCapabilities.value = null;
@@ -90,7 +106,48 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
   }
 }
 
-watch(() => props.host?.id, loadDevices, { immediate: true });
+async function toggleDeviceById(deviceId: string, enabled: boolean): Promise<void> {
+  const device = devices.value?.find((candidate) => candidate.id === deviceId);
+  if (!device || enabled === device.desired_enabled) return;
+  await toggleDevice(device);
+}
+
+async function unpinWork(workId: string): Promise<void> {
+  if (!props.host) return;
+  try {
+    await setQueueDevicePin(mobileHostTarget(props.host), workId, null);
+    await loadDevices();
+  } catch (error) {
+    deviceError.value = describeTransportError(error, props.host.name);
+  }
+}
+
+watch(
+  () => [props.host?.id, props.host?.baseUrl, props.host?.apiKey] as const,
+  () => {
+    deviceEventsAbort?.abort();
+    deviceEventsAbort = null;
+    if (!props.host) {
+      void loadDevices();
+      return;
+    }
+    // Do not make initial rendering depend on SSE support. The stream's
+    // onOpen callback refetches again to close the subscribe/bootstrap gap.
+    void loadDevices();
+    deviceEventsAbort = new AbortController();
+    subscribeToDeviceSnapshots(
+      mobileHostTarget(props.host),
+      deviceEventsAbort.signal,
+      () => void loadDevices(),
+    );
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  deviceRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 </script>
 
 <template>
@@ -210,31 +267,22 @@ watch(() => props.host?.id, loadDevices, { immediate: true });
     >
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-devices-title">GPU devices</h2>
-        <p>{{ deviceLifecycleMessage(deviceCapabilities) }}</p>
       </div>
+      <DevicePanel
+        v-if="devices.length"
+        :devices="devices"
+        :plan="plan"
+        :mutable="
+          deviceCapabilities?.devices?.lifecycle === true &&
+          deviceCapabilities?.dispatch?.v2_authoritative === true
+        "
+        :restart-enable="deviceCapabilities?.devices?.restart_enable === true"
+        show-controls
+        :busy-device-id="[...deviceMutations][0] ?? null"
+        @unpin="unpinWork"
+        @toggle="toggleDeviceById"
+      />
       <p v-if="deviceError" class="status-line error-text" role="alert">{{ deviceError }}</p>
-      <ul class="mobile-data-list">
-        <li v-for="device in devices" :key="device.id" data-test="device-row">
-          <div>
-            <strong>{{ device.name }}</strong>
-            <span>
-              {{ device.ordinal == null ? device.backend.toUpperCase() : `GPU ${device.ordinal}` }}
-              · {{ deviceStateLabel(device) }}
-            </span>
-          </div>
-          <button
-            type="button"
-            class="secondary-button"
-            :data-test="`mobile-settings-device-toggle-${device.ordinal ?? device.id}`"
-            :disabled="
-              !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
-            "
-            @click="toggleDevice(device)"
-          >
-            {{ deviceActionLabel(device, deviceCapabilities) }}
-          </button>
-        </li>
-      </ul>
     </section>
 
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-about-title">

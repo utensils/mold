@@ -1145,6 +1145,290 @@ pub struct QueueJobEntryWire {
     pub metadata: Option<Box<OutputMetadata>>,
 }
 
+/// Confidence attached to a learned scheduler ETA.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueueEstimateConfidence {
+    #[default]
+    Low,
+    Medium,
+    High,
+    Unknown(String),
+}
+
+impl QueueEstimateConfidence {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueEstimateConfidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueEstimateConfidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueEstimateConfidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// Typed reason that a scheduler work unit cannot currently advance.
+///
+/// `reason` remains on [`QueueWorkItem`] as a backward-compatible display
+/// alias. New clients should prefer this field so assignment and blocking
+/// causes cannot be confused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueBlockedReason {
+    DeviceDisabled,
+    DeviceDraining,
+    DeviceStartupExcluded,
+    DeviceUnavailable,
+    DeviceDegraded,
+    HardPinUnavailable,
+    BackendUnsupported,
+    ModelNotInstalled,
+    InsufficientVram,
+    InsufficientHostRam,
+    AggregateHostRamReserved,
+    ExecutionPlanIncompatible,
+    DependencyWait,
+    WarmWait,
+    QueuePaused,
+    MaintenanceMode,
+    Cancelling,
+    NoSchedulableDevice,
+    NoIdleDevice,
+    LowerPriorityOpening,
+    Unknown(String),
+}
+
+impl QueueBlockedReason {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::DeviceDisabled => "device_disabled",
+            Self::DeviceDraining => "device_draining",
+            Self::DeviceStartupExcluded => "device_startup_excluded",
+            Self::DeviceUnavailable => "device_unavailable",
+            Self::DeviceDegraded => "device_degraded",
+            Self::HardPinUnavailable => "hard_pin_unavailable",
+            Self::BackendUnsupported => "backend_unsupported",
+            Self::ModelNotInstalled => "model_not_installed",
+            Self::InsufficientVram => "insufficient_vram",
+            Self::InsufficientHostRam => "insufficient_host_ram",
+            Self::AggregateHostRamReserved => "aggregate_host_ram_reserved",
+            Self::ExecutionPlanIncompatible => "execution_plan_incompatible",
+            Self::DependencyWait => "dependency_wait",
+            Self::WarmWait => "warm_wait",
+            Self::QueuePaused => "queue_paused",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::Cancelling => "cancelling",
+            Self::NoSchedulableDevice => "no_schedulable_device",
+            Self::NoIdleDevice => "no_idle_device",
+            Self::LowerPriorityOpening => "lower_priority_opening",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueueBlockedReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueBlockedReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device_disabled" => Self::DeviceDisabled,
+            "device_draining" => Self::DeviceDraining,
+            "device_startup_excluded" => Self::DeviceStartupExcluded,
+            "device_unavailable" => Self::DeviceUnavailable,
+            "device_degraded" => Self::DeviceDegraded,
+            "hard_pin_unavailable" => Self::HardPinUnavailable,
+            "backend_unsupported" => Self::BackendUnsupported,
+            "model_not_installed" => Self::ModelNotInstalled,
+            "insufficient_vram" => Self::InsufficientVram,
+            "insufficient_host_ram" => Self::InsufficientHostRam,
+            "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
+            "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
+            "dependency_wait" => Self::DependencyWait,
+            "warm_wait" => Self::WarmWait,
+            "queue_paused" => Self::QueuePaused,
+            "maintenance_mode" => Self::MaintenanceMode,
+            "cancelling" => Self::Cancelling,
+            "no_schedulable_device" => Self::NoSchedulableDevice,
+            "no_idle_device" => Self::NoIdleDevice,
+            "lower_priority_opening" => Self::LowerPriorityOpening,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// Truthful scheduler-owned phase for a projected work unit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueueActivityPhase {
+    #[default]
+    Queued,
+    Blocked,
+    WarmWait,
+    Dispatching,
+    Active,
+    Cpu,
+    Unknown(String),
+}
+
+impl QueueActivityPhase {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::WarmWait => "warm_wait",
+            Self::Dispatching => "dispatching",
+            Self::Active => "active",
+            Self::Cpu => "cpu",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueActivityPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueActivityPhase {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueActivityPhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "queued" => Self::Queued,
+            "blocked" => Self::Blocked,
+            "warm_wait" => Self::WarmWait,
+            "dispatching" => Self::Dispatching,
+            "active" => Self::Active,
+            "cpu" => Self::Cpu,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueBatchPartition {
+    /// One-based partition/sibling index.
+    pub index: u32,
+    pub count: u32,
+    /// Number of generation outputs owned by this work unit.
+    pub size: u32,
+}
+
+/// One internal scheduler unit in the additive queue-plan projection.
+///
+/// Strings are used for extensible scheduler states/reasons so an older
+/// client can continue rendering a plan after a server adds a work kind.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueWorkItem {
+    pub work_id: String,
+    pub parent_id: String,
+    pub work_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_partition: Option<QueueBatchPartition>,
+    pub priority_class: String,
+    pub queue_rank: u64,
+    pub bypass_count: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_pinned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_order: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_start_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_finish_unix_ms: Option<u64>,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub estimate_confidence: QueueEstimateConfidence,
+    /// Backward-compatible display alias. For queued work this contains the
+    /// block, warm-wait, or assignment reason used by pre-Phase-E clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub blocked_reason: Option<QueueBlockedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_wait_deadline_unix_ms: Option<u64>,
+    #[serde(default)]
+    #[schema(value_type = String)]
+    pub activity_phase: QueueActivityPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_fingerprint: Option<String>,
+}
+
+/// Versioned scheduler plan appended to `GET /api/queue`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueuePlan {
+    pub plan_version: u64,
+    pub state_version: u64,
+    pub optimizer_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_since_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_replan_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub work_items: Vec<QueueWorkItem>,
+}
+
 /// Whole-queue listing returned by `GET /api/queue` — the client-side twin of
 /// mold-server's `job_registry::QueueListing`. The server wraps the rows in
 /// an object (not a bare array) so the response can grow extra fields without
@@ -1153,6 +1437,10 @@ pub struct QueueJobEntryWire {
 pub struct QueueListingWire {
     #[serde(default)]
     pub entries: Vec<QueueJobEntryWire>,
+    /// Absent on legacy servers and before the V2 coordinator has produced
+    /// its first plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<QueuePlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -1676,6 +1964,15 @@ pub struct RamSnapshot {
 pub enum GpuBackend {
     Cuda,
     Metal,
+}
+
+impl GpuBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3812,6 +4109,15 @@ pub struct QueueCapabilities {
     pub can_cancel_all: bool,
     #[serde(default)]
     pub can_reorder: bool,
+    /// Queue pins may use opaque stable device IDs.
+    #[serde(default)]
+    pub stable_device_pins: bool,
+    /// Server can cooperatively cancel already-running work.
+    #[serde(default)]
+    pub cooperative_cancellation: bool,
+    /// Server accepts one atomic batch request instead of client siblings.
+    #[serde(default)]
+    pub server_batch: bool,
 }
 
 /// Prompt-expansion backend category. The API intentionally reports the
@@ -3870,6 +4176,18 @@ pub struct DeviceMutationRequest {
     pub enabled: bool,
 }
 
+impl DeviceAdminState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupExcluded => "startup_excluded",
+            Self::Starting => "starting",
+            Self::Enabled => "enabled",
+            Self::Draining => "draining",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
 /// Transient device health. Health is never persisted as a user preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -3878,6 +4196,17 @@ pub enum DeviceHealth {
     Degraded,
     Unavailable,
     Poisoned,
+}
+
+impl DeviceHealth {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Poisoned => "poisoned",
+        }
+    }
 }
 
 /// Current worker activity, orthogonal to administrative and health state.
@@ -3968,6 +4297,15 @@ pub struct DeviceCapabilities {
     /// even though live lifecycle mutation is not authoritative.
     #[serde(default)]
     pub restart_enable: bool,
+    /// Queue pins may use stable device IDs.
+    #[serde(default)]
+    pub stable_pins: bool,
+    /// Queue snapshots include versioned per-device lanes.
+    #[serde(default)]
+    pub planned_lanes: bool,
+    /// ETAs may be backed by persisted runtime observations.
+    #[serde(default)]
+    pub learned_eta: bool,
 }
 
 /// Restart-time GPU dispatch rollout state.
@@ -3982,6 +4320,10 @@ pub struct DispatchCapabilities {
     pub v2_authoritative: bool,
     /// Legacy owns dispatch while read-only V2 decisions are recorded.
     pub observes_v2_decisions: bool,
+    /// The server can run the authoritative scheduler against an exact,
+    /// read-only request preview without reserving or enqueueing work.
+    #[serde(default)]
+    pub request_placement_preview: bool,
 }
 
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
@@ -4191,6 +4533,58 @@ pub struct GenerationMemoryEstimate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreviewRequest {
+    pub request: GenerateRequest,
+    #[serde(default = "default_preview_copies")]
+    pub copies: u32,
+}
+
+fn default_preview_copies() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementCandidate {
+    pub device_id: String,
+    pub execution_fingerprint: String,
+    pub predicted_start_after_ms: u64,
+    pub predicted_completion_after_ms: u64,
+    pub setup_ms: u64,
+    pub setup_kind: String,
+    #[schema(value_type = String)]
+    pub estimate_confidence: QueueEstimateConfidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainStagePlacementCandidate {
+    pub stage_index: u32,
+    /// Zero-based sibling index for repeated ordinary-generation work. Absent
+    /// for a once-per-parent stage such as local prompt expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_index: Option<u32>,
+    #[serde(flatten)]
+    pub candidate: GenerationPlacementCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreview {
+    pub version: u32,
+    pub authoritative: bool,
+    pub state_version: u64,
+    pub plan_version: u64,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<GenerationPlacementCandidate>,
+    /// Exact per-stage assignments for every work item in an ordinary
+    /// generation DAG. Durable-chain previews remain unsupported until the
+    /// server can freeze the chain runner's per-device stage plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_candidates: Vec<ChainStagePlacementCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelComponentStatus {
     pub kind: String,
     pub name: String,
@@ -4384,6 +4778,11 @@ pub enum ServerEvent {
     /// New-job dispatch resumed via `POST /api/queue/resume`. Emitted only on
     /// the paused→resumed transition.
     QueueResumed,
+    /// The V2 scheduler published a newer versioned plan. Clients replace
+    /// their tentative lanes only when `plan_version` advances.
+    QueuePlanChanged {
+        plan: Box<QueuePlan>,
+    },
     /// A machine-wide device lifecycle preference or runtime state changed.
     DeviceStateChanged {
         device_id: String,
@@ -4463,6 +4862,21 @@ mod server_event_tests {
         assert!(serde_json::to_string(&multi)
             .unwrap()
             .contains(r#""gpu":1"#));
+    }
+
+    #[test]
+    fn plan_and_device_events_are_additive_snake_case_contracts() {
+        let event = ServerEvent::QueuePlanChanged {
+            plan: Box::new(QueuePlan {
+                plan_version: 4,
+                state_version: 7,
+                optimizer_state: "optimized".into(),
+                ..QueuePlan::default()
+            }),
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "queue_plan_changed");
+        assert_eq!(json["plan"]["plan_version"], 4);
     }
 
     #[test]
@@ -4686,5 +5100,90 @@ mod downloads_types_tests {
         let s = serde_json::to_string(&evt).unwrap();
         assert!(s.contains("\"type\":\"progress\""), "wire: {s}");
         assert!(s.contains("\"bytes_done\":2000000"), "wire: {s}");
+    }
+}
+
+#[cfg(test)]
+mod queue_plan_wire_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_reasons_round_trip_without_collapsing_distinct_causes() {
+        let expected = [
+            "device_disabled",
+            "device_draining",
+            "device_startup_excluded",
+            "device_unavailable",
+            "device_degraded",
+            "hard_pin_unavailable",
+            "backend_unsupported",
+            "model_not_installed",
+            "insufficient_vram",
+            "insufficient_host_ram",
+            "aggregate_host_ram_reserved",
+            "execution_plan_incompatible",
+            "dependency_wait",
+            "warm_wait",
+            "queue_paused",
+            "maintenance_mode",
+            "cancelling",
+            "no_schedulable_device",
+            "no_idle_device",
+            "lower_priority_opening",
+        ];
+
+        for wire in expected {
+            let parsed: QueueBlockedReason =
+                serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn future_blocked_reason_retains_its_exact_wire_value() {
+        let parsed: QueueBlockedReason =
+            serde_json::from_value(serde_json::json!("thermal_throttle")).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::json!("thermal_throttle")
+        );
+    }
+
+    #[test]
+    fn future_phase_and_confidence_retain_their_exact_wire_values() {
+        let phase: QueueActivityPhase =
+            serde_json::from_value(serde_json::json!("thermal_wait")).unwrap();
+        let confidence: QueueEstimateConfidence =
+            serde_json::from_value(serde_json::json!("calibrating")).unwrap();
+
+        assert_eq!(phase.as_str(), "thermal_wait");
+        assert_eq!(confidence.as_str(), "calibrating");
+        assert_eq!(
+            serde_json::to_value(phase).unwrap(),
+            serde_json::json!("thermal_wait")
+        );
+        assert_eq!(
+            serde_json::to_value(confidence).unwrap(),
+            serde_json::json!("calibrating")
+        );
+    }
+
+    #[test]
+    fn legacy_reason_only_queue_item_remains_readable() {
+        let parsed: QueueWorkItem = serde_json::from_value(serde_json::json!({
+            "work_id": "job-1",
+            "parent_id": "job-1",
+            "work_kind": "generation",
+            "priority_class": "user",
+            "queue_rank": 4,
+            "bypass_count": 0,
+            "estimate_confidence": "low",
+            "reason": "insufficient_vram"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.reason.as_deref(), Some("insufficient_vram"));
+        assert_eq!(parsed.blocked_reason, None);
+        assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
     }
 }

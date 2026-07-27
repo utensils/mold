@@ -135,7 +135,10 @@ function installApi(
     if (path === "/api/models") return Promise.resolve(models);
     if (path === "/api/queue") return Promise.resolve({ entries: queueEntries });
     if (path === "/api/capabilities")
-      return Promise.resolve({ queue: { can_pause: true, can_cancel_all: true } });
+      return Promise.resolve({
+        queue: { can_pause: true, can_cancel_all: true },
+        events: { available: true },
+      });
     return Promise.reject(new Error(`unexpected ${path}`));
   });
 }
@@ -274,19 +277,20 @@ describe("HostDetailView GPU lifecycle controls", () => {
   };
 
   it("allows live disable only for an authoritative Scheduler V2 host", async () => {
-    listDevices.mockResolvedValue({ devices: [DEVICE], plan_version: 1 });
+    const lifecycleDevices = [
+      DEVICE,
+      {
+        ...DEVICE,
+        id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ordinal: 1,
+        admin_state: "startup_excluded" as const,
+        desired_enabled: false,
+        schedulable: false,
+      },
+    ];
+    listDevices.mockResolvedValue({ devices: lifecycleDevices, plan_version: 1 });
     const wrapper = await mountView(undefined, undefined, {
-      devices: [
-        DEVICE,
-        {
-          ...DEVICE,
-          id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          ordinal: 1,
-          admin_state: "startup_excluded",
-          desired_enabled: false,
-          schedulable: false,
-        },
-      ],
+      devices: lifecycleDevices,
       capabilities: authoritative,
     });
 
@@ -364,8 +368,8 @@ describe("HostDetailView GPU lifecycle controls", () => {
     const pending = wrapper.get("[data-test='device-toggle-2']");
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).toContain("Restart required");
-    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).not.toContain("unavailable");
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).toContain("Restart required");
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).not.toContain("unavailable");
   });
 
   it("treats older hosts with missing lifecycle capabilities as unsupported", async () => {
@@ -714,6 +718,7 @@ describe("HostDetailView models", () => {
     ).toHaveLength(1);
 
     const firstResourceStream = lastStream();
+    const firstDeviceStream = lastStream("/api/events");
     firstResourceStream.options.onEvent(
       "snapshot",
       JSON.stringify({
@@ -763,15 +768,16 @@ describe("HostDetailView models", () => {
     expect(sseCalls.filter((call) => call.path === "/api/resources/stream")).toHaveLength(
       resourceStreamCount,
     );
-    // Two status readers per fetch round (the view's models-disk poll and the
-    // queue snapshot's paused/gpus join): mount = 2, the ready-flip = 2 more.
+    // The view status request and queue snapshot run at mount and ready-flip;
+    // the device-event onOpen adds one authoritative queue/device snapshot.
     // The error flip in between must add none.
-    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(4);
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/status")).toHaveLength(5);
 
     remote.apiKey = "rotated-key";
     await flushPromises();
 
     expect(firstResourceStream.options.signal.aborted).toBe(true);
+    expect(firstDeviceStream.options.signal.aborted).toBe(true);
     expect(lastStream().options.target).toEqual({
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
@@ -780,6 +786,20 @@ describe("HostDetailView models", () => {
       baseUrl: "http://hal9000:7680",
       apiKey: "rotated-key",
     });
+    expect(lastStream("/api/events").options.target).toEqual({
+      baseUrl: "http://hal9000:7680",
+      apiKey: "rotated-key",
+    });
+
+    const queueReads = apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue").length;
+    lastStream("/api/events").options.onEvent(
+      "message",
+      JSON.stringify({ type: "device_state_changed" }),
+    );
+    await flushPromises();
+    expect(apiJsonTo.mock.calls.filter((call) => call[1] === "/api/queue")).toHaveLength(
+      queueReads + 1,
+    );
   });
 });
 

@@ -75,18 +75,21 @@ impl Planner {
             // accepted set. Any feasible augmenting path can only keep or
             // increase that set's cost, so adding the new work's cheapest idle
             // edge is a sound lower bound. Keep host RAM first in `Cost`.
-            if minimum_immediate_host_ram(item, candidates, &device_map).is_some_and(
-                |minimum_host_ram| {
-                    final_matching
-                        .total_host_ram_bytes
-                        .checked_add(minimum_host_ram)
-                        .is_none_or(|minimum_total| {
-                            minimum_total > snapshot.host_memory.headroom_bytes
-                        })
-                },
-            ) {
-                blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
-                continue;
+            if let Some(minimum_host_ram) =
+                minimum_immediate_host_ram(item, candidates, &device_map)
+            {
+                if minimum_host_ram > snapshot.host_memory.headroom_bytes {
+                    blocked.insert(item.id.clone(), BlockedReason::InsufficientHostRam);
+                    continue;
+                }
+                if final_matching
+                    .total_host_ram_bytes
+                    .checked_add(minimum_host_ram)
+                    .is_none_or(|minimum_total| minimum_total > snapshot.host_memory.headroom_bytes)
+                {
+                    blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
+                    continue;
+                }
             }
             let prepared_work =
                 prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config);
@@ -334,9 +337,10 @@ fn prepare_work(
     let mut immediate_candidates = all_candidates
         .iter()
         .filter(|candidate| {
-            devices
-                .get(&candidate.placement.device_id)
-                .is_some_and(|device| device.is_idle())
+            work.ready_at_ms <= now_ms
+                && devices
+                    .get(&candidate.placement.device_id)
+                    .is_some_and(|device| device.is_idle())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -357,7 +361,8 @@ fn prepare_work(
                 let ready_at = match device.activity {
                     DeviceActivity::Idle => now_ms,
                     DeviceActivity::Busy => device.available_at_ms?,
-                };
+                }
+                .max(work.ready_at_ms);
                 let finish = ready_at
                     .saturating_add(candidate.placement.warm_setup_ms)
                     .saturating_add(candidate.placement.predicted_run_ms);
@@ -444,11 +449,23 @@ fn classify_no_candidate(
     devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
 ) -> BlockedReason {
     if let Some(hard_device_id) = &work.hard_device_id {
-        if !devices
-            .get(hard_device_id)
-            .is_some_and(|device| device.is_schedulable())
-        {
+        let Some(device) = devices.get(hard_device_id) else {
             return BlockedReason::HardPinUnavailable;
+        };
+        match device.admin_state {
+            crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
+            crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
+            crate::DeviceAdminState::StartupExcluded => {
+                return BlockedReason::DeviceStartupExcluded;
+            }
+            crate::DeviceAdminState::Enabled => {}
+        }
+        match device.health {
+            crate::DeviceHealth::Degraded => return BlockedReason::DeviceDegraded,
+            crate::DeviceHealth::Unavailable | crate::DeviceHealth::Poisoned => {
+                return BlockedReason::DeviceUnavailable;
+            }
+            crate::DeviceHealth::Healthy => {}
         }
     }
     if let Some(backend) = work.backend_requirement {
@@ -1008,8 +1025,13 @@ fn evaluate_schedule(
                 .all_candidates
                 .iter()
                 .min_by(|left, right| {
-                    projected_finish(left, &availability, &warm)
-                        .cmp(&projected_finish(right, &availability, &warm))
+                    projected_finish(left, work.ready_at_ms, &availability, &warm)
+                        .cmp(&projected_finish(
+                            right,
+                            work.ready_at_ms,
+                            &availability,
+                            &warm,
+                        ))
                         .then_with(|| {
                             left.placement
                                 .incremental_host_ram_bytes
@@ -1028,9 +1050,11 @@ fn evaluate_schedule(
         let Some(placement) = selected else {
             continue;
         };
-        let start = *availability
+        let start = availability
             .get(&placement.device_id)
-            .unwrap_or(&(u64::MAX / 4));
+            .copied()
+            .unwrap_or(u64::MAX / 4)
+            .max(work.ready_at_ms);
         let is_warm = warm
             .get(&placement.device_id)
             .is_some_and(|fingerprints| fingerprints.contains(&placement.execution_fingerprint));
@@ -1090,12 +1114,15 @@ fn evaluate_schedule(
 
 fn projected_finish(
     candidate: &MatchCandidate,
+    ready_at_ms: u64,
     availability: &BTreeMap<DeviceId, u64>,
     warm: &BTreeMap<DeviceId, BTreeSet<crate::ExecutionFingerprint>>,
 ) -> (u64, u64) {
-    let start = *availability
+    let start = availability
         .get(&candidate.placement.device_id)
-        .unwrap_or(&(u64::MAX / 4));
+        .copied()
+        .unwrap_or(u64::MAX / 4)
+        .max(ready_at_ms);
     let setup = if warm
         .get(&candidate.placement.device_id)
         .is_some_and(|fingerprints| {

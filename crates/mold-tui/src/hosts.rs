@@ -521,6 +521,18 @@ impl MachinesState {
         }
     }
 
+    pub fn select_prev_device(&mut self) {
+        let id = self.selected_machine_id();
+        let len = self
+            .devices
+            .get(&id)
+            .map(|state| state.devices.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.device_selected = (self.device_selected + len - 1) % len;
+        }
+    }
+
     pub fn apply_devices(&mut self, host_id: String, devices: Option<DeviceState>) {
         match devices {
             Some(devices) => {
@@ -673,6 +685,8 @@ impl MachinesState {
                 self.queue_selected = 0;
             }
         }
+        self.capabilities.remove(id);
+        self.device_feedback.remove(id);
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
         }
@@ -921,10 +935,20 @@ pub(crate) async fn set_local_device_enabled(
 /// Fetch the queue listing for one host and report back.
 pub(crate) async fn fetch_host_queue(entry: HostEntry, tx: mpsc::UnboundedSender<BackgroundEvent>) {
     let client = client_for_host(&entry);
-    let queue = client.list_queue().await.ok();
+    let (queue, devices, capabilities) =
+        tokio::join!(client.list_queue(), client.devices(), client.capabilities());
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
-        queue,
+        host_id: host_id.clone(),
+        queue: queue.ok(),
+    });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
+        host_id: host_id.clone(),
+        devices: devices.ok(),
+    });
+    let _ = tx.send(BackgroundEvent::HostCapabilitiesUpdate {
+        host_id,
+        capabilities: capabilities.ok(),
     });
 }
 
@@ -960,10 +984,13 @@ pub(crate) async fn cancel_host_job(
         let _ = tx.send(BackgroundEvent::Error(format!("Cancel failed: {e:#}")));
     }
     let queue = client.list_queue().await.ok();
+    let devices = client.devices().await.ok();
+    let host_id = entry.id;
     let _ = tx.send(BackgroundEvent::HostQueueUpdate {
-        host_id: entry.id,
+        host_id: host_id.clone(),
         queue,
     });
+    let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
 }
 
 #[cfg(test)]
@@ -1170,6 +1197,66 @@ mod tests {
         assert!(st.select_next());
         assert_eq!(st.selected_row(), MachineRowId::Host("h0".into()));
         assert!(!st.select_next(), "selection clamps at the last row");
+    }
+
+    fn test_device(id: &str, ordinal: usize) -> mold_core::DeviceInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": "cuda",
+            "ordinal": ordinal,
+            "device_kind": "full_gpu",
+            "nvml_uuid": null,
+            "physical_uuid": null,
+            "mig_uuid": null,
+            "mig_parent_uuid": null,
+            "mig_profile": null,
+            "name": format!("GPU {ordinal}"),
+            "pci_bus_id": null,
+            "compute_capability": null,
+            "memory": {
+                "total_bytes": null,
+                "used_bytes": null,
+                "mold_used_bytes": null,
+                "other_used_bytes": null
+            },
+            "telemetry": {
+                "utilization_percent": null,
+                "temperature_c": null,
+                "power_w": null
+            },
+            "desired_enabled": true,
+            "admin_state": "enabled",
+            "health": "healthy",
+            "activity": "idle",
+            "schedulable": true,
+            "unschedulable_reason": null,
+            "loaded_models": [],
+            "active_work_id": null,
+            "planned_work_ids": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stable_device_selection_is_independent_and_clamped() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0), test_device("cuda:second", 1)],
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
+        st.select_next_device();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:second");
+        st.select_next_device();
+        assert_eq!(st.device_selected, 0);
+        st.select_prev_device();
+        assert_eq!(st.device_selected, 1);
+        st.select_prev_device();
+        assert_eq!(st.selected_device().unwrap().id, "cuda:first");
     }
 
     #[test]
@@ -1389,6 +1476,60 @@ mod tests {
         assert!(st.queue.is_some());
         st.select_next();
         assert!(st.queue.is_none(), "stale queue must not leak across rows");
+        assert!(
+            !st.capabilities.contains_key("h1"),
+            "the selected host must not inherit another host's capabilities"
+        );
+    }
+
+    #[test]
+    fn lifecycle_actions_require_the_selected_hosts_device_and_capability() {
+        let mut st = state_with_hosts(2);
+        st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0)],
+                plan_version: 1,
+            }),
+        );
+        let mut capabilities = mold_core::ServerCapabilities::default();
+        st.apply_capabilities("h0".into(), Some(capabilities.clone()));
+        assert!(!st.can_mutate_selected_device());
+
+        capabilities.devices.lifecycle = true;
+        capabilities.dispatch.v2_authoritative = true;
+        st.apply_capabilities("h1".into(), Some(capabilities.clone()));
+        assert!(
+            !st.can_mutate_selected_device(),
+            "a stale response for another host cannot expose controls"
+        );
+        st.apply_capabilities("h0".into(), Some(capabilities));
+        assert!(st.can_mutate_selected_device());
+    }
+
+    #[test]
+    fn device_inventory_supports_sixty_four_entries_and_lifecycle_shapes() {
+        let mut st = state_with_hosts(1);
+        st.select_next();
+        let mut devices = (0..64)
+            .map(|ordinal| test_device(&format!("cuda:{ordinal:032x}"), ordinal))
+            .collect::<Vec<_>>();
+        devices[1].admin_state = mold_core::DeviceAdminState::Disabled;
+        devices[2].admin_state = mold_core::DeviceAdminState::Draining;
+        devices[3].health = mold_core::DeviceHealth::Unavailable;
+        devices[4].device_kind = mold_core::DeviceKind::Mig;
+        devices[4].mig_profile = Some("1g.10gb".into());
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices,
+                plan_version: 1,
+            }),
+        );
+        assert_eq!(st.devices.get("h0").unwrap().devices.len(), 64);
+        st.device_selected = 63;
+        assert_eq!(st.selected_device().unwrap().ordinal, Some(63));
     }
 
     #[test]

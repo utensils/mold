@@ -2,10 +2,11 @@ import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
-const { apiJsonTo, openExternalMock, setDeviceEnabled } = vi.hoisted(() => ({
+const { apiJsonTo, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(() => ({
   apiJsonTo: vi.fn(),
   openExternalMock: vi.fn(),
   setDeviceEnabled: vi.fn(),
+  subscribeMock: vi.fn(),
 }));
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
@@ -16,14 +17,26 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
   setDeviceEnabled,
 }));
+vi.mock("../lib/api/deviceEvents", () => ({
+  subscribeToDeviceSnapshots: subscribeMock,
+}));
 
 beforeEach(() => {
   openExternalMock.mockClear();
   apiJsonTo.mockReset();
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
+  subscribeMock.mockReset();
 });
 
 describe("MobileSettingsView", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((next) => {
+      resolve = next;
+    });
+    return { promise, resolve };
+  }
+
   it("offers accessible theme choices and emits immediate updates", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {
@@ -116,6 +129,7 @@ describe("MobileSettingsView", () => {
         power_w: null,
       },
       desired_enabled: true,
+      restart_required: false,
       admin_state: "enabled",
       health: "healthy",
       activity: "idle",
@@ -160,7 +174,7 @@ describe("MobileSettingsView", () => {
       expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(true),
     );
 
-    await wrapper.get("[data-test='mobile-settings-device-toggle-0']").trigger("click");
+    await wrapper.get("[data-test='device-toggle-0']").trigger("click");
     await vi.waitFor(() => expect(apiJsonTo).toHaveBeenCalledTimes(4));
 
     expect(setDeviceEnabled).toHaveBeenCalledWith(
@@ -169,7 +183,112 @@ describe("MobileSettingsView", () => {
       false,
     );
     await vi.waitFor(() =>
-      expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable"),
+      expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable"),
     );
+    expect(subscribeMock).toHaveBeenCalledWith(
+      { baseUrl: host.baseUrl, apiKey: host.apiKey },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+
+    wrapper.unmount();
+    const signal = subscribeMock.mock.calls[0]?.[1] as AbortSignal;
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("ignores an older same-host device bootstrap after an event refresh", async () => {
+    const host = {
+      id: "studio-id",
+      name: "Studio",
+      baseUrl: "http://studio:7680",
+      apiKey: "secret",
+      hostname: "studio",
+      version: "0.20.2",
+      online: true,
+    };
+    const enabled = {
+      ...deviceWireForRace(),
+      desired_enabled: true,
+      admin_state: "enabled",
+      schedulable: true,
+    };
+    const disabled = {
+      ...enabled,
+      desired_enabled: false,
+      admin_state: "disabled",
+      schedulable: false,
+      unschedulable_reason: "device_disabled",
+    };
+    const older = deferred<unknown>();
+    const newer = deferred<unknown>();
+    let deviceCall = 0;
+    apiJsonTo.mockImplementation((_target, path) => {
+      if (path === "/api/devices") return deviceCall++ === 0 ? older.promise : newer.promise;
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          devices: { available: true, lifecycle: true, restart_enable: false },
+          dispatch: { active_mode: "v2", v2_authoritative: true },
+        });
+      if (path === "/api/queue") return Promise.resolve({ entries: [], plan: null });
+      throw new Error(`unexpected ${path}`);
+    });
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        hostCount: 1,
+        appVersion: "0.20.2",
+        host,
+      },
+    });
+    await vi.waitFor(() => expect(subscribeMock).toHaveBeenCalledOnce());
+    const refresh = subscribeMock.mock.calls[0]?.[2] as () => void;
+    refresh();
+    newer.resolve({ devices: [disabled], plan_version: 2 });
+    await vi.waitFor(() =>
+      expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable"),
+    );
+    older.resolve({ devices: [enabled], plan_version: 1 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable");
   });
 });
+
+function deviceWireForRace() {
+  return {
+    id: "cuda:race",
+    backend: "cuda",
+    ordinal: 0,
+    device_kind: "full_gpu",
+    nvml_uuid: "GPU-race",
+    physical_uuid: "GPU-race",
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name: "Race GPU",
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    restart_required: false,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
+}

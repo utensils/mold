@@ -795,6 +795,11 @@ impl MoldClient {
         Ok(resp)
     }
 
+    /// Alias used by clients that preflight optional administrative actions.
+    pub async fn capabilities(&self) -> Result<crate::ServerCapabilities> {
+        self.server_capabilities().await
+    }
+
     /// Enable or disable one stable device. The server may return a draining
     /// or starting state while the owner transition completes.
     pub async fn set_device_enabled(
@@ -802,13 +807,13 @@ impl MoldClient {
         device_id: &str,
         enabled: bool,
     ) -> Result<crate::DeviceInfo> {
-        let mut url = reqwest::Url::parse(&self.base_url)?;
-        url.path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("Mold server URL cannot be a base URL"))?
-            .extend(["api", "devices", device_id]);
         let response = self
             .client
-            .patch(url)
+            .patch(format!(
+                "{}/api/devices/{}",
+                self.base_url,
+                encode_path_segment(device_id)
+            ))
             .json(&crate::DeviceMutationRequest { enabled })
             .send()
             .await?;
@@ -1494,13 +1499,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capabilities_defaults_missing_device_lifecycle_to_unavailable() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "gallery": { "can_delete": true },
+                "catalog": { "available": false, "families": [], "sort": [] }
+            })))
+            .mount(&server)
+            .await;
+
+        let capabilities = MoldClient::new(&server.uri()).capabilities().await.unwrap();
+        assert!(!capabilities.devices.lifecycle);
+    }
+
+    #[tokio::test]
     async fn set_device_enabled_preserves_the_server_error_body() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("PATCH"))
-            .and(path("/api/devices/cuda:device-1"))
+            .and(path("/api/devices/cuda%3Adevice-1"))
             .and(body_json(serde_json::json!({ "enabled": true })))
             .respond_with(
                 ResponseTemplate::new(409)
@@ -1517,6 +1541,44 @@ mod tests {
         assert!(message.contains("409 Conflict"));
         assert!(message.contains("startup-excluded"));
         assert!(message.contains("requires a restart"));
+    }
+
+    #[tokio::test]
+    async fn set_device_enabled_encodes_the_stable_id_and_sends_auth() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/devices/cuda%3Aparent%2Fgpu"))
+            .and(header("x-api-key", "sekrit"))
+            .and(body_json(serde_json::json!({ "enabled": false })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "cuda:parent/gpu",
+                "backend": "cuda",
+                "ordinal": 1,
+                "device_kind": "full_gpu",
+                "name": "GPU 1",
+                "memory": {},
+                "telemetry": {},
+                "desired_enabled": false,
+                "admin_state": "draining",
+                "health": "healthy",
+                "activity": "generating",
+                "schedulable": false,
+                "loaded_models": [],
+                "planned_work_ids": []
+            })))
+            .mount(&server)
+            .await;
+
+        let device = MoldClient::with_api_key(&server.uri(), "sekrit".to_string())
+            .set_device_enabled("cuda:parent/gpu", false)
+            .await
+            .unwrap();
+        assert_eq!(device.id, "cuda:parent/gpu");
+        assert_eq!(device.admin_state, crate::DeviceAdminState::Draining);
+        assert!(!device.desired_enabled);
     }
 
     // ── Queue endpoints ──────────────────────────────────────────────────
