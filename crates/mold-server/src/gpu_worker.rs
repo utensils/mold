@@ -526,6 +526,14 @@ fn run_gpu_owner_loop(
                 hook();
             }
         }
+        // Keep actor reply ownership outside the unwind boundary. Normal
+        // stage results, typed errors, cancellation, and fatal panics all
+        // become coordinator-settled completions. A plan invalidation puts
+        // the same sender back into the returned grant for its exact retry.
+        let mut chain_result_tx = match &mut grant.work {
+            OwnerWork::ChainStage(job) => job.result_tx.take(),
+            _ => None,
+        };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_owner_work(worker, *grant, &scheduler_tx)
         }));
@@ -541,9 +549,18 @@ fn run_gpu_owner_loop(
         match outcome {
             Ok(OwnerProcessOutcome::Completed {
                 successful,
-                completion,
+                chain_result,
             }) => {
                 worker.release_in_flight();
+                let completion =
+                    chain_result_tx
+                        .take()
+                        .map(|tx| DeferredOwnerCompletion::ChainStage {
+                            tx: Some(tx),
+                            result: Some(chain_result.unwrap_or_else(|| {
+                                Err("chain stage ended without an actor result".to_string())
+                            })),
+                        });
                 let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
                     device_id: device_id.clone(),
                     ordinal: worker.gpu.ordinal,
@@ -553,12 +570,19 @@ fn run_gpu_owner_loop(
                         && !worker.poisoned.load(Ordering::SeqCst)
                         && !worker.fatal_cuda_error.load(Ordering::SeqCst),
                     phase_timings,
+                    completion,
                 });
-                if let Some(completion) = completion {
-                    completion.finish();
-                }
             }
-            Ok(OwnerProcessOutcome::PlanInvalidated { grant, error }) => {
+            Ok(OwnerProcessOutcome::PlanInvalidated { mut grant, error }) => {
+                if let Some(tx) = chain_result_tx.take() {
+                    match &mut grant.work {
+                        OwnerWork::ChainStage(job) => {
+                            debug_assert!(job.result_tx.is_none());
+                            job.result_tx = Some(tx);
+                        }
+                        _ => unreachable!("only chain stages own deferred actor replies"),
+                    }
+                }
                 let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
                     device_id: device_id.clone(),
                     ordinal: worker.gpu.ordinal,
@@ -570,6 +594,15 @@ fn run_gpu_owner_loop(
             }
             Err(_) => {
                 worker.release_in_flight();
+                let completion =
+                    chain_result_tx
+                        .take()
+                        .map(|tx| DeferredOwnerCompletion::ChainStage {
+                            tx: Some(tx),
+                            result: Some(Err(
+                                "GPU owner panicked while executing the chain stage".to_string()
+                            )),
+                        });
                 let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
                     device_id: device_id.clone(),
                     ordinal: worker.gpu.ordinal,
@@ -577,6 +610,7 @@ fn run_gpu_owner_loop(
                     worker_generation: generation,
                     successful: false,
                     phase_timings,
+                    completion,
                 });
             }
         }
@@ -778,18 +812,56 @@ fn validate_grant_before_acceptance(
     }
 }
 
-enum DeferredOwnerCompletion {
+pub enum DeferredOwnerCompletion {
     ChainStage {
-        tx: tokio::sync::oneshot::Sender<Result<crate::chain_job_runner::StageExecution, String>>,
-        result: Result<crate::chain_job_runner::StageExecution, String>,
+        tx: Option<
+            tokio::sync::oneshot::Sender<Result<crate::chain_job_runner::StageExecution, String>>,
+        >,
+        result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
     },
 }
 
 impl DeferredOwnerCompletion {
-    fn finish(self) {
+    pub(crate) fn finish(mut self) {
         match self {
-            Self::ChainStage { tx, result } => {
-                let _ = tx.send(result);
+            Self::ChainStage {
+                ref mut tx,
+                ref mut result,
+            } => {
+                let _ = tx
+                    .take()
+                    .expect("deferred actor completion owns its sender")
+                    .send(
+                        result
+                            .take()
+                            .expect("deferred actor completion owns its result"),
+                    );
+            }
+        }
+    }
+
+    pub(crate) fn fail(mut self, error: String) {
+        match self {
+            Self::ChainStage { ref mut tx, .. } => {
+                let _ = tx
+                    .take()
+                    .expect("deferred actor completion owns its sender")
+                    .send(Err(error));
+            }
+        }
+    }
+}
+
+impl Drop for DeferredOwnerCompletion {
+    fn drop(&mut self) {
+        match self {
+            Self::ChainStage { tx, .. } => {
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(Err(
+                        "scheduler coordinator stopped before settling the chain-stage lease"
+                            .to_string(),
+                    ));
+                }
             }
         }
     }
@@ -798,7 +870,7 @@ impl DeferredOwnerCompletion {
 enum OwnerProcessOutcome {
     Completed {
         successful: bool,
-        completion: Option<DeferredOwnerCompletion>,
+        chain_result: Option<Result<crate::chain_job_runner::StageExecution, String>>,
     },
     PlanInvalidated {
         grant: Box<LeaseGrant>,
@@ -812,10 +884,15 @@ fn process_owner_work(
     scheduler_tx: &tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
 ) -> OwnerProcessOutcome {
     if let Err(error) = ensure_owner_thread(worker) {
-        grant.work.reject(error.to_string());
+        let error = error.to_string();
+        let chain_result =
+            matches!(&grant.work, OwnerWork::ChainStage(_)).then(|| Err(error.clone()));
+        if chain_result.is_none() {
+            grant.work.reject(error);
+        }
         return OwnerProcessOutcome::Completed {
             successful: false,
-            completion: None,
+            chain_result,
         };
     }
     if let OwnerWork::ChainStage(job) = &grant.work {
@@ -832,10 +909,10 @@ fn process_owner_work(
             .take()
             .and_then(|on_leased| on_leased(worker.gpu.ordinal).err())
         {
-            grant.work.reject(error);
+            let chain_result = Some(Err(error));
             return OwnerProcessOutcome::Completed {
                 successful: false,
-                completion: None,
+                chain_result,
             };
         }
     }
@@ -845,17 +922,12 @@ fn process_owner_work(
             let successful = process_job(worker, *job, scheduler_tx);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         OwnerWork::ChainStage(job) => {
             commit_utility_allocation(scheduler_tx, &grant.fence);
-            let mut job = *job;
-            let result_tx = job
-                .result_tx
-                .take()
-                .expect("scheduled chain stage owns its result sender");
-            let result = process_scheduled_chain_stage(worker, job);
+            let result = process_scheduled_chain_stage(worker, *job);
             let successful = matches!(
                 &result,
                 Ok(crate::chain_job_runner::StageExecution {
@@ -865,10 +937,7 @@ fn process_owner_work(
             );
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: Some(DeferredOwnerCompletion::ChainStage {
-                    tx: result_tx,
-                    result,
-                }),
+                chain_result: Some(result),
             }
         }
         OwnerWork::PromptExpansion(job) => {
@@ -876,7 +945,7 @@ fn process_owner_work(
             let successful = process_prompt_expansion(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         OwnerWork::PostUpscale(job) => {
@@ -884,7 +953,7 @@ fn process_owner_work(
             let successful = process_post_generation_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         OwnerWork::StandaloneUpscale(job) => {
@@ -892,7 +961,7 @@ fn process_owner_work(
             let successful = process_standalone_upscale(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         OwnerWork::AdminModelLoad(job) => {
@@ -902,7 +971,7 @@ fn process_owner_work(
             let _ = job.result_tx.send(result);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         OwnerWork::AdminModelUnload(job) => {
@@ -910,7 +979,7 @@ fn process_owner_work(
             let successful = process_admin_unload(worker, *job);
             OwnerProcessOutcome::Completed {
                 successful,
-                completion: None,
+                chain_result: None,
             }
         }
         #[cfg(test)]
@@ -919,7 +988,7 @@ fn process_owner_work(
             run();
             OwnerProcessOutcome::Completed {
                 successful: true,
-                completion: None,
+                chain_result: None,
             }
         }
     }
@@ -5844,6 +5913,7 @@ mod tests {
                         worker_generation: 0,
                         successful: false,
                         phase_timings: mold_scheduler::EstimatePhaseTimings::default(),
+                        completion: None,
                     })
             ),
             None => panic!("owner event channel closed"),
@@ -5966,8 +6036,12 @@ mod tests {
             }) => {
                 assert_eq!(grant.work.id(), work_id);
                 assert!(
-                    matches!(&mut grant.work, OwnerWork::ChainStage(stage) if stage.on_leased.is_some()),
-                    "the durable lease callback must survive a pre-CUDA plan invalidation"
+                    matches!(
+                        &mut grant.work,
+                        OwnerWork::ChainStage(stage)
+                            if stage.on_leased.is_some() && stage.result_tx.is_some()
+                    ),
+                    "the lease callback and exact actor reply must survive plan invalidation"
                 );
             }
             Some(_) => panic!("expected typed second-fence invalidation event"),
@@ -5986,6 +6060,240 @@ mod tests {
             "lease authority must not persist before the second pre-CUDA fence"
         );
         worker.request_shutdown();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn chain_stage_result_waits_for_coordinator_lease_settlement() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.gguf");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let model = "settlement-test:fp8";
+        let frozen_config = ModelConfig {
+            transformer: Some(transformer.display().to_string()),
+            vae: Some(vae.display().to_string()),
+            family: Some("ltx2".to_string()),
+            ..ModelConfig::default()
+        };
+        let expected =
+            crate::execution_plan::frozen_model_fingerprint(model, &frozen_config).unwrap();
+        let mut config = Config::default();
+        config.install_frozen_model_config(model, frozen_config);
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":64,"height":64,"steps":4,"guidance":1.0}}"#
+        ))
+        .unwrap();
+
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        let plan = crate::execution_plan::resolve_execution_plans(
+            &config,
+            &request,
+            &[crate::execution_plan::DeviceFact {
+                id: device_id.clone(),
+                ordinal: 0,
+                available_vram_bytes: 48 << 30,
+            }],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let work_id = "chain:settlement:attempt:1:stage:0";
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: work_id.to_string(),
+                    device_id,
+                    owner_epoch: 1,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::ChainStage(Box::new(
+                    crate::chain_job_runner::ScheduledChainStageWork {
+                        id: work_id.to_string(),
+                        model: model.to_string(),
+                        cache_key: format!("mold-frozen-chain:{expected}"),
+                        config,
+                        stage_req: request,
+                        carry: None,
+                        motion_tail_frames: 1,
+                        progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                        cancelled: Arc::new(|| true),
+                        cancellation: mold_inference::InferenceCancellationToken::default(),
+                        on_leased: Some(Box::new(|_| Ok(()))),
+                        execution_plan: Some(plan),
+                        expected_model_fingerprint: Some(expected),
+                        result_tx: Some(result_tx),
+                        before_second_fence: None,
+                    },
+                )),
+                retry: None,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        let completion_event = event_rx
+            .blocking_recv()
+            .expect("owner publishes completion for coordinator settlement");
+        assert!(matches!(
+            completion_event,
+            crate::scheduler::WorkerEvent::Completed { .. }
+        ));
+        let resolved_before_settlement = !matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+
+        worker.request_shutdown();
+        handle.join().unwrap();
+        drop(completion_event);
+        assert!(
+            !resolved_before_settlement,
+            "actor result became visible before the coordinator settled the lease"
+        );
+        let shutdown_error = match result_rx
+            .blocking_recv()
+            .expect("dropping an unhandled completion settles the actor exactly once")
+        {
+            Ok(_) => panic!("coordinator shutdown must fail closed"),
+            Err(error) => error,
+        };
+        assert!(shutdown_error.contains("coordinator stopped"));
+    }
+
+    #[test]
+    fn fatal_chain_panic_preserves_actor_reply_until_completion_settlement() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.gguf");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let model = "fatal-settlement-test:fp8";
+        let frozen_config = ModelConfig {
+            transformer: Some(transformer.display().to_string()),
+            vae: Some(vae.display().to_string()),
+            family: Some("ltx2".to_string()),
+            ..ModelConfig::default()
+        };
+        let expected =
+            crate::execution_plan::frozen_model_fingerprint(model, &frozen_config).unwrap();
+        let mut config = Config::default();
+        config.install_frozen_model_config(model, frozen_config);
+        let request: GenerateRequest = serde_json::from_str(&format!(
+            r#"{{"prompt":"x","model":"{model}","width":64,"height":64,"steps":4,"guidance":1.0}}"#
+        ))
+        .unwrap();
+
+        let fatal = Arc::new(AtomicBool::new(false));
+        let (worker, job_rx) = protocol_worker(0, fatal.clone());
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        let plan = crate::execution_plan::resolve_execution_plans(
+            &config,
+            &request,
+            &[crate::execution_plan::DeviceFact {
+                id: device_id.clone(),
+                ordinal: 0,
+                available_vram_bytes: 48 << 30,
+            }],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let work_id = "chain:fatal-settlement:attempt:1:stage:0";
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: work_id.to_string(),
+                    device_id,
+                    owner_epoch: 1,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::ChainStage(Box::new(
+                    crate::chain_job_runner::ScheduledChainStageWork {
+                        id: work_id.to_string(),
+                        model: model.to_string(),
+                        cache_key: format!("mold-frozen-chain:{expected}"),
+                        config,
+                        stage_req: request,
+                        carry: None,
+                        motion_tail_frames: 1,
+                        progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                        cancelled: Arc::new(|| false),
+                        cancellation: mold_inference::InferenceCancellationToken::default(),
+                        on_leased: Some(Box::new(|_| panic!("injected actor-stage panic"))),
+                        execution_plan: Some(plan),
+                        expected_model_fingerprint: Some(expected),
+                        result_tx: Some(result_tx),
+                        before_second_fence: None,
+                    },
+                )),
+                retry: None,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        let completion = match event_rx.blocking_recv() {
+            Some(crate::scheduler::WorkerEvent::Completed {
+                successful: false,
+                completion: Some(completion),
+                ..
+            }) => completion,
+            Some(_) => panic!("fatal actor panic must publish a deferred completion"),
+            None => panic!("fatal actor panic closed the worker event channel"),
+        };
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(fatal.load(Ordering::SeqCst));
+        assert!(worker.poisoned.load(Ordering::SeqCst));
+
+        completion.finish();
+        let error = match result_rx
+            .blocking_recv()
+            .expect("fatal completion sends exactly one actor result")
+        {
+            Ok(_) => panic!("fatal actor panic must fail the stage"),
+            Err(error) => error,
+        };
+        assert!(error.contains("panicked"));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
         handle.join().unwrap();
     }
 

@@ -2024,6 +2024,9 @@ Deliver:
 - chain stages under leases;
 - multiple concurrent chains;
 - boundary release and sticky affinity;
+- coordinator-owned stage acknowledgement: the actor result remains unresolved
+  until the completion reducer removes the exact lease and memory reservation,
+  updates learned timing, and republishes the authoritative plan;
 - legacy queue projection;
 - adapt the existing chain-safe cancellation points to leased stages.
 
@@ -2033,6 +2036,8 @@ Gates:
 - long-video chain interleaved with ordinary image/video work;
 - durable restart with at least two interrupted chains;
 - retake/resume/cancel;
+- adversarial completion ordering, including owner ingress selected before an
+  already-queued completion and coordinator shutdown before acknowledgement;
 - external VAE/text-projection/audio paths survive every stage;
 - old chain endpoints and legacy queue position PATCH remain compatible.
 

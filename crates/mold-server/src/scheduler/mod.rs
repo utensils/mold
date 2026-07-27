@@ -144,6 +144,10 @@ pub enum WorkerEvent {
         worker_generation: u64,
         successful: bool,
         phase_timings: EstimatePhaseTimings,
+        /// Actor-only result authority transferred from the GPU owner. The
+        /// coordinator settles it only after the matching lease, memory
+        /// reservation, timing observation, and published plan are updated.
+        completion: Option<crate::gpu_worker::DeferredOwnerCompletion>,
     },
     Stopped {
         device_id: String,
@@ -1730,6 +1734,7 @@ impl Coordinator {
                 worker_generation,
                 successful,
                 phase_timings,
+                completion,
             } => {
                 self.sample_active_lease_high_waters();
                 let valid = self.leases.get(&device_id).is_some_and(|lease| {
@@ -1779,6 +1784,16 @@ impl Coordinator {
                 }
                 self.mutate(immediate);
                 self.replan_and_publish();
+                if let Some(completion) = completion {
+                    if valid {
+                        completion.finish();
+                    } else {
+                        completion.fail(
+                            "GPU owner completion did not match an authoritative scheduler lease"
+                                .to_string(),
+                        );
+                    }
+                }
             }
             WorkerEvent::Stopped {
                 device_id,
@@ -5786,6 +5801,7 @@ mod tests {
                         cold_load_ms: Some(250),
                         ..Default::default()
                     },
+                    completion: None,
                 },
                 &mut immediate,
             );
@@ -7111,6 +7127,7 @@ mod tests {
                     worker_generation: 1,
                     successful: true,
                     phase_timings: EstimatePhaseTimings::default(),
+                    completion: None,
                 },
                 &mut immediate,
             );
@@ -7266,6 +7283,7 @@ mod tests {
                 worker_generation: 1,
                 successful: true,
                 phase_timings: EstimatePhaseTimings::default(),
+                completion: None,
             },
             &mut immediate,
         );
@@ -7286,6 +7304,258 @@ mod tests {
 
         assert_eq!(recv_owner_grant_id(&worker_rx), "ordinary-upscale");
         assert!(coordinator.pending_owner_work.contains_key("chain:stage:1"));
+    }
+
+    #[tokio::test]
+    async fn queued_chain_completion_cannot_release_actor_while_owner_ingress_wins_first() {
+        let (stage_worker, _stage_worker_rx) = test_worker(0);
+        let (utility_worker, utility_worker_rx) = test_worker(1);
+        let stage_device_id = worker_device_id(&stage_worker);
+        let utility_device_id = worker_device_id(&utility_worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![stage_worker, utility_worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            2,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let stage_id = "chain:parent:attempt:1:stage:0";
+        coordinator.leases.insert(
+            stage_device_id.clone(),
+            ActiveLease {
+                work_id: stage_id.to_string(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+                estimated_finish_ms: 100,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(stage_id, 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+        coordinator.memory.reservations.insert(
+            stage_id.to_string(),
+            HostReservation {
+                bytes: 1 << 30,
+                state: ReservationState::CommittedAfterSample {
+                    commit_sequence: coordinator.memory.sequence,
+                },
+            },
+        );
+
+        let (actor_result_tx, actor_result_rx) = tokio::sync::oneshot::channel();
+        let completion = crate::gpu_worker::DeferredOwnerCompletion::ChainStage {
+            tx: Some(actor_result_tx),
+            result: Some(Ok(crate::chain_job_runner::StageExecution {
+                outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                device_ordinal: Some(0),
+            })),
+        };
+        let queued_completion = WorkerEvent::Completed {
+            device_id: stage_device_id.clone(),
+            ordinal: 0,
+            owner_epoch: 1,
+            worker_generation: 1,
+            successful: false,
+            phase_timings: EstimatePhaseTimings::default(),
+            completion: Some(completion),
+        };
+        let (actor_advanced_tx, mut actor_advanced_rx) = tokio::sync::mpsc::unbounded_channel();
+        let actor = tokio::spawn(async move {
+            let execution = actor_result_rx
+                .await
+                .expect("coordinator owns the actor reply")
+                .expect("cancelled stage is a typed result");
+            assert!(matches!(
+                execution.outcome,
+                crate::chain_job_runner::StageRenderOutcome::Cancelled
+            ));
+            actor_advanced_tx.send("stage:1").unwrap();
+        });
+
+        // Deterministically emulate tokio::select! choosing owner_work_rx
+        // while the Completed event is already queued on worker_rx.
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "utility",
+                "utility",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "utility".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: utility_device_id,
+                ordinal: 1,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        assert_eq!(recv_owner_grant_id(&utility_worker_rx), "utility");
+        assert!(matches!(
+            actor_advanced_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(coordinator.leases.contains_key(&stage_device_id));
+        assert!(coordinator.memory.reservations.contains_key(stage_id));
+
+        coordinator.handle_worker_event(queued_completion, &mut immediate);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), actor_advanced_rx.recv())
+                .await
+                .unwrap(),
+            Some("stage:1")
+        );
+        actor.await.unwrap();
+        assert!(!coordinator.leases.contains_key(&stage_device_id));
+        assert!(!coordinator.memory.reservations.contains_key(stage_id));
+        assert!(
+            coordinator
+                .state
+                .scheduled_work
+                .latest_plan()
+                .is_none_or(|plan| plan.work_items.iter().all(|item| item.work_id != stage_id)),
+            "settled stage must be absent from the published plan before actor acknowledgement"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_success_and_error_results_settle_only_after_authoritative_completion() {
+        for successful in [true, false] {
+            let (worker, _worker_rx) = test_worker(0);
+            let device_id = worker_device_id(&worker);
+            let pool = Arc::new(GpuPool {
+                workers: vec![worker].into(),
+            });
+            let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+            let state = AppState::empty(
+                mold_core::Config::default(),
+                QueueHandle::new(ingress_tx),
+                pool,
+                1,
+            );
+            let mut coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let stage_id = format!("chain:result:{successful}:attempt:1:stage:0");
+            coordinator.leases.insert(
+                device_id.clone(),
+                ActiveLease {
+                    work_id: stage_id.clone(),
+                    owner_epoch: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    accepted: true,
+                    previous_target: None,
+                    estimated_finish_ms: 100,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    started_at: Instant::now(),
+                    estimate_key: EstimateKey::default(),
+                    vram_high_water_bytes: None,
+                    host_incremental_high_water_bytes: None,
+                    fallback_reason: None,
+                    projection: WorkSnapshot::new(stage_id.clone(), 0, Vec::new()),
+                    assignment_reason: AssignmentReason::Priority,
+                },
+            );
+            coordinator.memory.reservations.insert(
+                stage_id,
+                HostReservation {
+                    bytes: 1 << 30,
+                    state: ReservationState::CommittedAfterSample {
+                        commit_sequence: coordinator.memory.sequence,
+                    },
+                },
+            );
+            let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+            let result = if successful {
+                Ok(crate::chain_job_runner::StageExecution {
+                    outcome: crate::chain_job_runner::StageRenderOutcome::Done(
+                        mold_inference::chain::StageOutcome {
+                            frames: Vec::new(),
+                            tail: mold_inference::chain::ChainTail {
+                                frames: 0,
+                                tail_rgb_frames: Vec::new(),
+                            },
+                            audio: None,
+                            generation_time_ms: 1,
+                        },
+                    ),
+                    device_ordinal: Some(0),
+                })
+            } else {
+                Err("typed stage render failure".to_string())
+            };
+            let completion = crate::gpu_worker::DeferredOwnerCompletion::ChainStage {
+                tx: Some(result_tx),
+                result: Some(result),
+            };
+            assert!(matches!(
+                result_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+
+            let mut immediate = false;
+            coordinator.handle_worker_event(
+                WorkerEvent::Completed {
+                    device_id: device_id.clone(),
+                    ordinal: 0,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    successful,
+                    phase_timings: EstimatePhaseTimings::default(),
+                    completion: Some(completion),
+                },
+                &mut immediate,
+            );
+
+            let settled = result_rx
+                .await
+                .expect("completion sends exactly one result");
+            if successful {
+                assert!(matches!(
+                    settled.unwrap().outcome,
+                    crate::chain_job_runner::StageRenderOutcome::Done(_)
+                ));
+            } else {
+                match settled {
+                    Ok(_) => panic!("failed stage must retain its typed error"),
+                    Err(error) => assert_eq!(error, "typed stage render failure"),
+                }
+            }
+            assert!(!coordinator.leases.contains_key(&device_id));
+            assert!(coordinator.memory.reservations.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -7677,6 +7947,7 @@ mod tests {
                 worker_generation: 1,
                 successful: false,
                 phase_timings: EstimatePhaseTimings::default(),
+                completion: None,
             },
             &mut immediate,
         );
