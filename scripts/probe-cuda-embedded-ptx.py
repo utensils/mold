@@ -72,8 +72,15 @@ def sha256_file(path: Path) -> str:
 
 def extract_elf_section(binary: Path, section: str, output: Path) -> bytes:
     objcopy = os.environ.get("OBJCOPY", "objcopy")
+    rewritten_elf = output.with_name(f"{output.name}.elf")
     result = subprocess.run(
-        [objcopy, "--dump-section", f"{section}={output}", str(binary)],
+        [
+            objcopy,
+            "--dump-section",
+            f"{section}={output}",
+            str(binary),
+            str(rewritten_elf),
+        ],
         text=True,
         capture_output=True,
         check=False,
@@ -88,9 +95,10 @@ def extract_elf_section(binary: Path, section: str, output: Path) -> bytes:
 
 def sealed_ptx_modules(
     binary: Path, expected_target: str
-) -> tuple[list[bytes], dict[str, object], str]:
+) -> tuple[list[bytes], dict[str, object], str, str]:
     """Return only build-manifest ranges from the ELF `.rodata` section."""
 
+    artifact_sha256 = sha256_file(binary)
     temp_parent = os.environ.get("TMPDIR")
     with tempfile.TemporaryDirectory(
         prefix="mold-cuda-ptx-probe-", dir=temp_parent
@@ -100,6 +108,8 @@ def sealed_ptx_modules(
             binary, MANIFEST_SECTION, temp_dir / "manifest.json"
         )
         rodata = extract_elf_section(binary, ".rodata", temp_dir / "rodata.bin")
+    if sha256_file(binary) != artifact_sha256:
+        fail("ELF section extraction mutated the input artifact")
 
     try:
         manifest = json.loads(manifest_bytes)
@@ -170,7 +180,7 @@ def sealed_ptx_modules(
         seen_ranges.append(byte_range)
         seen_hashes.add(expected_sha)
         modules.append(module)
-    return modules, manifest, sha256_bytes(manifest_bytes)
+    return modules, manifest, sha256_bytes(manifest_bytes), artifact_sha256
 
 
 def parse_target_operand(raw_directive: bytes) -> tuple[str | None, str]:
@@ -654,7 +664,7 @@ def main() -> int:
         fail("--extract-only and --expect-incompatible cannot be combined")
 
     expected_target = f"sm_{args.compute_cap}"
-    modules, manifest, manifest_sha256 = sealed_ptx_modules(
+    modules, manifest, manifest_sha256, artifact_sha256 = sealed_ptx_modules(
         args.binary, expected_target
     )
     # NUL boundaries prevent parser state from flowing between independently
@@ -683,7 +693,7 @@ def main() -> int:
 
     result: dict[str, object] = {
         "artifact_path": str(args.binary.resolve()),
-        "artifact_sha256": sha256_file(args.binary),
+        "artifact_sha256": artifact_sha256,
         "kernel_manifest_schema": manifest["schema_version"],
         "kernel_manifest_sha256": manifest_sha256,
         "kernel_module_count": len(modules),

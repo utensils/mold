@@ -888,6 +888,13 @@ fn ensure_published_runpod_gpu_identity(gpu_type_id: &str, display_name: &str) -
     Ok(())
 }
 
+fn authoritative_runpod_gpu_type_id(gpu: &GpuType) -> String {
+    gpu.id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| friendly_to_gpu_id(&gpu.display_name))
+}
+
 /// Build a `CreatePodRequest` from resolved defaults.
 pub async fn build_create_request(
     opts: &CreateOptions,
@@ -1023,7 +1030,7 @@ async fn resolve_gpu(
         if let Some(g) = gpus.iter().find(|g| g.display_name == *preferred) {
             let stock = g.stock_status.as_deref().unwrap_or("");
             if matches!(stock, "High" | "Medium") {
-                return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
+                return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
             }
         }
     }
@@ -1033,7 +1040,7 @@ async fn resolve_gpu(
             && is_interesting_gpu(&g.display_name)
             && gpu_vram_gb(&g.display_name).unwrap_or(0) >= need
         {
-            return Ok((friendly_to_gpu_id(&g.display_name), g.display_name.clone()));
+            return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
         }
     }
     bail!(
@@ -2404,6 +2411,55 @@ mod tests {
             ensure_published_runpod_gpu_identity("NVIDIA A100 80GB PCIe", "NVIDIA GB200").is_err()
         );
         assert!(ensure_published_runpod_gpu_identity("NVIDIA B200", "NVIDIA B200").is_ok());
+    }
+
+    #[tokio::test]
+    async fn auto_gpu_resolution_preserves_authoritative_provider_id_for_platform_validation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "NVIDIA GB200",
+                        "displayName": "A100 PCIe",
+                        "memoryInGb": 80,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "A100 PCIe",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("linux/arm64"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

@@ -147,6 +147,42 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         )
         self.assert_probe_and_verifier_reject(fixture, 86)
 
+    def test_extracting_sealed_sections_does_not_mutate_the_input_artifact(
+        self,
+    ) -> None:
+        fixture = self.temp_dir / "probe-input-is-immutable"
+        fixture.write_bytes(b"exact release artifact")
+        extracted = self.temp_dir / "probe-input-section"
+        fake_objcopy = self.temp_dir / "objcopy-mutates-in-place-without-output"
+        self._write_executable(
+            fake_objcopy,
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'section_path="${2#*=}"\n'
+            'printf "section bytes" > "$section_path"\n'
+            'if [[ "$#" -lt 4 ]]; then\n'
+            '  printf "mutated" >> "$3"\n'
+            "else\n"
+            '  cp "$3" "$4"\n'
+            "fi\n",
+        )
+        before = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        previous_objcopy = os.environ.get("OBJCOPY")
+        os.environ["OBJCOPY"] = str(fake_objcopy)
+        try:
+            self.assertEqual(
+                self.probe_module.extract_elf_section(
+                    fixture, ".mold_cuda_ptx", extracted
+                ),
+                b"section bytes",
+            )
+        finally:
+            if previous_objcopy is None:
+                os.environ.pop("OBJCOPY", None)
+            else:
+                os.environ["OBJCOPY"] = previous_objcopy
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(), before)
+
     def test_unrelated_expected_target_cannot_replace_generated_kernel_ptx(
         self,
     ) -> None:
