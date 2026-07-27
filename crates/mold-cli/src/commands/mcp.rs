@@ -528,11 +528,26 @@ impl McpServer {
                     .unwrap_or_else(|| "none".into())
             ));
             for item in &plan.work_items {
+                let lane = match item.planned_lane_kind.as_ref() {
+                    Some(mold_core::QueuePlannedLaneKind::HostUtility) => "host-utility".into(),
+                    Some(mold_core::QueuePlannedLaneKind::Device) => item
+                        .planned_device_id
+                        .clone()
+                        .unwrap_or_else(|| "device".into()),
+                    Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => "assigned".into(),
+                    None if item.activity_phase == mold_core::QueueActivityPhase::Cpu => {
+                        "host-utility".into()
+                    }
+                    None => item
+                        .planned_device_id
+                        .clone()
+                        .unwrap_or_else(|| "unassigned".into()),
+                };
                 lines.push(format!(
                     "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
                     item.work_id,
                     item.activity_phase,
-                    item.planned_device_id.as_deref().unwrap_or("unassigned"),
+                    lane,
                     item.lane_order
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "—".into()),

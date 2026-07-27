@@ -605,8 +605,11 @@ impl UpscaleEngine for UpscalerEngine {
             scale,
         });
 
-        self.progress
-            .stage_done("Loading upscaler model", load_start.elapsed());
+        self.progress.phase_done(
+            crate::ProgressPhase::ModelLoad,
+            "Loading upscaler model",
+            load_start.elapsed(),
+        );
         Ok(())
     }
 

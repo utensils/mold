@@ -420,17 +420,31 @@ pub fn format_server_status_pages(
                 .work_items
                 .iter()
                 .map(|work| {
-                    let lane = work.planned_device_id.as_deref().map_or_else(
-                        || "unassigned".to_string(),
-                        |device| {
-                            format!(
-                                "{device}/{}",
-                                work.lane_order
-                                    .map(|order| order.to_string())
-                                    .unwrap_or_else(|| "—".to_string())
-                            )
-                        },
-                    );
+                    let order = work
+                        .lane_order
+                        .map(|order| order.to_string())
+                        .unwrap_or_else(|| "—".to_string());
+                    let lane = match work.planned_lane_kind.as_ref() {
+                        Some(mold_core::QueuePlannedLaneKind::HostUtility) => {
+                            format!("host utility/{order}")
+                        }
+                        Some(mold_core::QueuePlannedLaneKind::Device) => work
+                            .planned_device_id
+                            .as_deref()
+                            .map(|device| format!("{device}/{order}"))
+                            .unwrap_or_else(|| format!("device/{order}")),
+                        Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => {
+                            format!("assigned/{order}")
+                        }
+                        None if work.activity_phase == mold_core::QueueActivityPhase::Cpu => {
+                            format!("host utility/{order}")
+                        }
+                        None => work
+                            .planned_device_id
+                            .as_deref()
+                            .map(|device| format!("{device}/{order}"))
+                            .unwrap_or_else(|| "unassigned".to_string()),
+                    };
                     let finish = work
                         .estimated_finish_unix_ms
                         .map(|value| value.to_string())
@@ -1339,6 +1353,7 @@ mod tests {
                     mold_core::QueueWorkItem {
                         work_id: "assigned".into(),
                         activity_phase: mold_core::QueueActivityPhase::Active,
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
                         planned_device_id: Some("cuda:stable-a".into()),
                         lane_order: Some(0),
                         estimate_confidence: mold_core::QueueEstimateConfidence::High,

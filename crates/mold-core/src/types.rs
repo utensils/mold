@@ -1364,6 +1364,48 @@ pub struct QueueBatchPartition {
     pub size: u32,
 }
 
+/// Public class of scheduler lane used by a planned work item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueuePlannedLaneKind {
+    #[default]
+    Device,
+    HostUtility,
+    Unknown(String),
+}
+
+impl QueuePlannedLaneKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Device => "device",
+            Self::HostUtility => "host_utility",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueuePlannedLaneKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueuePlannedLaneKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device" => Self::Device,
+            "host_utility" => Self::HostUtility,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
 /// One internal scheduler unit in the additive queue-plan projection.
 ///
 /// Strings are used for extensible scheduler states/reasons so an older
@@ -1386,7 +1428,12 @@ pub struct QueueWorkItem {
     pub hard_pinned_device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_gpu: Option<usize>,
+    /// Public lane class. A host utility lane is not a hardware device, so
+    /// `planned_device_id` remains absent for that lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub planned_lane_kind: Option<QueuePlannedLaneKind>,
+    #[serde(default)]
     pub planned_device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_order: Option<usize>,
@@ -5169,6 +5216,24 @@ mod queue_plan_wire_tests {
     }
 
     #[test]
+    fn planned_lane_kind_is_typed_and_retains_future_wire_values() {
+        let device: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("device")).unwrap();
+        let host: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("host_utility")).unwrap();
+        let future: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("remote_utility")).unwrap();
+
+        assert_eq!(device, QueuePlannedLaneKind::Device);
+        assert_eq!(host, QueuePlannedLaneKind::HostUtility);
+        assert_eq!(future.as_str(), "remote_utility");
+        assert_eq!(
+            serde_json::to_value(future).unwrap(),
+            serde_json::json!("remote_utility")
+        );
+    }
+
+    #[test]
     fn legacy_reason_only_queue_item_remains_readable() {
         let parsed: QueueWorkItem = serde_json::from_value(serde_json::json!({
             "work_id": "job-1",
@@ -5184,6 +5249,7 @@ mod queue_plan_wire_tests {
 
         assert_eq!(parsed.reason.as_deref(), Some("insufficient_vram"));
         assert_eq!(parsed.blocked_reason, None);
+        assert_eq!(parsed.planned_lane_kind, None);
         assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
     }
 }

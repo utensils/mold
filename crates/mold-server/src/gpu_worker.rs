@@ -1108,12 +1108,10 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> 
         let plan = job
             .execution_plan
             .ok_or_else(|| anyhow::anyhow!("upscaling lacked an exact execution plan"))?;
-        let load_started = Instant::now();
         let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
             plan,
             mold_inference::LoadStrategy::Eager,
         )?;
-        record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
         let progress_tx = job.progress_tx;
         engine.set_on_progress(Box::new(move |event| {
             handle_standalone_upscale_progress(event, progress_tx.as_ref());
@@ -1140,7 +1138,16 @@ fn handle_standalone_upscale_progress(
     event: mold_inference::ProgressEvent,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
 ) {
-    record_phase_timing(&event);
+    if let mold_inference::ProgressEvent::PhaseDone {
+        phase: mold_inference::ProgressPhase::ModelLoad,
+        elapsed,
+        ..
+    } = &event
+    {
+        record_model_load_timing(ModelLoadDisposition::Cold, *elapsed);
+    } else {
+        record_phase_timing(&event);
+    }
     if let Some(progress_tx) = progress_tx {
         let _ = progress_tx.send(SseMessage::Progress(event.into()));
     }
@@ -1173,12 +1180,10 @@ fn run_cpu_upscale(
     ) {
         anyhow::bail!("CPU utility lane received a GPU upscaler plan");
     }
-    let load_started = Instant::now();
     let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
         plan,
         mold_inference::LoadStrategy::Eager,
     )?;
-    record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
     engine.set_on_progress(Box::new(move |event| {
         handle_standalone_upscale_progress(event, progress_tx.as_ref());
     }));
@@ -1813,19 +1818,14 @@ fn upscale_generated_image_on_worker(
             name: format!("Loading upscaler {model_name}"),
         }));
     }
-    let load_started = Instant::now();
     let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
         plan,
         mold_inference::LoadStrategy::Eager,
     )
     .map_err(|e| format!("failed to load upscaler: {e}"))?;
-    record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
     let progress_tx = job.progress_tx.clone();
     engine.set_on_progress(Box::new(move |event| {
-        record_phase_timing(&event);
-        if let Some(tx) = &progress_tx {
-            let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }
+        handle_standalone_upscale_progress(event, progress_tx.as_ref());
     }));
     let req = mold_core::UpscaleRequest {
         model: model_name,
@@ -4254,9 +4254,9 @@ mod tests {
             }) => {
                 assert_eq!(device_id, crate::scheduler::CPU_UTILITY_DEVICE_ID);
                 assert!(!successful, "the invalid exact artifact must fail");
-                assert!(
-                    phase_timings.cold_load_ms.is_some(),
-                    "the exact CPU lane must publish its load through Phase E's typed timing payload"
+                assert_eq!(
+                    phase_timings.cold_load_ms, None,
+                    "a failed lazy load must not publish constructor time as model-load time"
                 );
                 assert_eq!(phase_timings.upscale_ms, None);
             }
@@ -5751,13 +5751,23 @@ mod tests {
         let _ = take_lease_phase_timings(None);
         handle_standalone_upscale_progress(
             mold_inference::ProgressEvent::PhaseDone {
+                phase: mold_inference::ProgressPhase::ModelLoad,
+                name: "fixture display label must not drive accounting".into(),
+                elapsed: Duration::from_millis(31),
+            },
+            None,
+        );
+        handle_standalone_upscale_progress(
+            mold_inference::ProgressEvent::PhaseDone {
                 phase: mold_inference::ProgressPhase::Upscale,
                 name: "Upscaling".into(),
                 elapsed: Duration::from_millis(17),
             },
             None,
         );
-        assert_eq!(take_lease_phase_timings(None).upscale_ms, Some(17));
+        let timings = take_lease_phase_timings(None);
+        assert_eq!(timings.cold_load_ms, Some(31));
+        assert_eq!(timings.upscale_ms, Some(17));
 
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_standalone_upscale_progress(

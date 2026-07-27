@@ -16,7 +16,7 @@ use mold_scheduler::{
     DeviceHealth, DeviceId, DeviceSnapshot, EstimateBucket, EstimateKey, EstimateObservation,
     EstimateOutcome, EstimatePhaseTimings, EstimateStore, ExecutionFingerprint,
     GrantValidationSnapshot, HostMemorySnapshot, Plan, PlannedAssignment, Planner, PlannerSnapshot,
-    PriorityClass, StaticEstimate, WorkId, WorkKind, WorkSnapshot,
+    PriorityClass, ResolvedEstimate, StaticEstimate, WorkId, WorkKind, WorkSnapshot,
 };
 
 use crate::gpu_pool::{
@@ -1257,10 +1257,14 @@ impl Coordinator {
                 upscale_candidates(&self.state, &job.model, &job.weights_path)
             }
             OwnerWork::PostUpscale(_) => {
+                #[cfg(feature = "expand")]
                 let base = supplied.iter().find_map(|plan| match plan {
                     UtilityExecutionPlan::Upscale(plan) => Some(plan),
-                    #[cfg(feature = "expand")]
                     UtilityExecutionPlan::PromptExpansion(_) => None,
+                });
+                #[cfg(not(feature = "expand"))]
+                let base = supplied.first().map(|plan| match plan {
+                    UtilityExecutionPlan::Upscale(plan) => plan,
                 });
                 let base = base.ok_or_else(|| {
                     "post-generation upscaling lacked a frozen artifact candidate".to_string()
@@ -2447,18 +2451,18 @@ impl Coordinator {
                 execution_fingerprint: execution_fingerprint.to_string(),
             };
             let static_timing = mold_scheduler::static_timing_for(owner.kind);
-            let estimate = self.estimates.estimate(
-                &key,
-                StaticEstimate {
-                    total_ms: static_timing
-                        .cold_setup_ms
-                        .saturating_add(static_timing.predicted_run_ms),
-                    cold_setup_ms: static_timing.cold_setup_ms,
-                    warm_setup_ms: static_timing.warm_setup_ms,
-                    vram_bytes: exact_vram_bytes,
-                    host_bytes: exact_host_bytes,
-                },
-            );
+            let static_estimate = StaticEstimate {
+                total_ms: static_timing
+                    .cold_setup_ms
+                    .saturating_add(static_timing.predicted_run_ms),
+                cold_setup_ms: static_timing.cold_setup_ms,
+                warm_setup_ms: static_timing.warm_setup_ms,
+                vram_bytes: exact_vram_bytes,
+                host_bytes: exact_host_bytes,
+            };
+            let estimate = self.estimates.estimate(&key, static_estimate);
+            let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                timing_with_static_floors(estimate, static_estimate);
             CandidatePlacement::new(
                 device_id.clone(),
                 ExecutionFingerprint::new(execution_fingerprint),
@@ -2469,18 +2473,18 @@ impl Coordinator {
             )
             .with_vram(exact_vram_bytes)
             .with_timing(
-                estimate.cold_setup_ms,
+                cold_setup_ms,
                 if matches!(
                     owner.kind,
                     mold_scheduler::WorkKind::PromptExpansion
                         | mold_scheduler::WorkKind::PostUpscale
                         | mold_scheduler::WorkKind::StandaloneUpscale
                 ) {
-                    estimate.cold_setup_ms
+                    cold_setup_ms
                 } else {
-                    estimate.warm_setup_ms
+                    warm_setup_ms
                 },
-                estimate.predicted_run_ms,
+                predicted_run_ms,
             )
             .with_device_available_vram(
                 authoritative_available_vram
@@ -2614,25 +2618,21 @@ impl Coordinator {
                                 shape_bucket: generation_shape_bucket(&pending.job.request),
                                 execution_fingerprint: plan.execution_fingerprint.clone(),
                             });
-                        let estimate = self.estimates.estimate(
-                            &key,
-                            static_generation_estimate(
-                                &pending.job.request,
-                                plan.predicted_vram_peak_bytes,
-                                plan.predicted_host_increment_bytes,
-                            ),
+                        let static_estimate = static_generation_estimate(
+                            &pending.job.request,
+                            plan.predicted_vram_peak_bytes,
+                            plan.predicted_host_increment_bytes,
                         );
+                        let estimate = self.estimates.estimate(&key, static_estimate);
+                        let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                            timing_with_static_floors(estimate, static_estimate);
                         CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
                             estimate.host_bytes,
                         )
                         .with_vram(estimate.vram_bytes)
-                        .with_timing(
-                            estimate.cold_setup_ms,
-                            estimate.warm_setup_ms,
-                            estimate.predicted_run_ms,
-                        )
+                        .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                     })
                     .collect::<Vec<_>>();
@@ -2921,14 +2921,14 @@ impl Coordinator {
                     request,
                     &plan.execution_fingerprint,
                 );
-                let estimate = self.estimates.estimate(
-                    &key,
-                    static_generation_estimate(
-                        request,
-                        plan.predicted_vram_peak_bytes,
-                        plan.predicted_host_increment_bytes,
-                    ),
+                let static_estimate = static_generation_estimate(
+                    request,
+                    plan.predicted_vram_peak_bytes,
+                    plan.predicted_host_increment_bytes,
                 );
+                let estimate = self.estimates.estimate(&key, static_estimate);
+                let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                    timing_with_static_floors(estimate, static_estimate);
                 confidence_by_edge.insert(
                     (plan.device_id.clone(), plan.execution_fingerprint.clone()),
                     wire_estimate_confidence(estimate.confidence),
@@ -2940,11 +2940,7 @@ impl Coordinator {
                         estimate.host_bytes,
                     )
                     .with_vram(estimate.vram_bytes)
-                    .with_timing(
-                        estimate.cold_setup_ms,
-                        estimate.warm_setup_ms,
-                        estimate.predicted_run_ms,
-                    )
+                    .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                     .with_device_available_vram(plan.admitted_available_vram_bytes),
                 )
             })
@@ -4371,6 +4367,7 @@ fn queue_plan_projection(
         .map(|(device_id, lease)| {
             let work = &lease.projection;
             let hard_id = work.hard_device_id.as_ref().map(ToString::to_string);
+            let host_utility = device_id == CPU_UTILITY_DEVICE_ID;
             mold_core::QueueWorkItem {
                 work_id: work.id.to_string(),
                 parent_id: work.parent_id.to_string(),
@@ -4390,7 +4387,12 @@ fn queue_plan_projection(
                 hard_pinned_device_id: hard_id,
                 // Legacy clients have always omitted target_gpu after dispatch.
                 target_gpu: None,
-                planned_device_id: Some(device_id.clone()),
+                planned_lane_kind: Some(if host_utility {
+                    mold_core::QueuePlannedLaneKind::HostUtility
+                } else {
+                    mold_core::QueuePlannedLaneKind::Device
+                }),
+                planned_device_id: (!host_utility).then(|| device_id.clone()),
                 lane_order: Some(0),
                 estimated_start_unix_ms: Some(
                     unix_now.saturating_sub(
@@ -4411,7 +4413,7 @@ fn queue_plan_projection(
                 blocked_reason: None,
                 assignment_reason: Some(snake_debug(lease.assignment_reason)),
                 warm_wait_deadline_unix_ms: None,
-                activity_phase: if lease.accepted && device_id == CPU_UTILITY_DEVICE_ID {
+                activity_phase: if lease.accepted && host_utility {
                     mold_core::QueueActivityPhase::Cpu
                 } else if lease.accepted {
                     mold_core::QueueActivityPhase::Active
@@ -4448,18 +4450,29 @@ fn queue_plan_projection(
                             .find(|lease| lease.work_id == work.id)
                             .map(|lease| snake_debug(lease.reason))
                     });
-                let (planned_device_id, lane_order, start, finish) =
-                    planned.map_or((None, None, None, None), |(lane, order, assignment)| {
-                        (
-                            Some(lane.device_id.to_string()),
-                            Some(
-                                order
-                                    + usize::from(active_devices.contains(lane.device_id.as_str())),
-                            ),
-                            Some(to_unix(assignment.estimated_start_ms)),
-                            Some(to_unix(assignment.estimated_finish_ms)),
-                        )
-                    });
+                let (planned_lane_kind, planned_device_id, lane_order, start, finish) = planned
+                    .map_or(
+                        (None, None, None, None, None),
+                        |(lane, order, assignment)| {
+                            let host_utility = lane.device_id.as_str() == CPU_UTILITY_DEVICE_ID;
+                            (
+                                Some(if host_utility {
+                                    mold_core::QueuePlannedLaneKind::HostUtility
+                                } else {
+                                    mold_core::QueuePlannedLaneKind::Device
+                                }),
+                                (!host_utility).then(|| lane.device_id.to_string()),
+                                Some(
+                                    order
+                                        + usize::from(
+                                            active_devices.contains(lane.device_id.as_str()),
+                                        ),
+                                ),
+                                Some(to_unix(assignment.estimated_start_ms)),
+                                Some(to_unix(assignment.estimated_finish_ms)),
+                            )
+                        },
+                    );
                 let hard_id = work.hard_device_id.as_ref().map(ToString::to_string);
                 let planned_gpu = planned_device_id
                     .as_ref()
@@ -4486,6 +4499,7 @@ fn queue_plan_projection(
                     gpu: planned_gpu,
                     hard_pinned_device_id: hard_id,
                     target_gpu,
+                    planned_lane_kind,
                     planned_device_id,
                     lane_order,
                     estimated_start_unix_ms: start,
@@ -4768,6 +4782,21 @@ fn static_generation_estimate(
     }
 }
 
+fn timing_with_static_floors(
+    estimate: ResolvedEstimate,
+    static_estimate: StaticEstimate,
+) -> (u64, u64, u64) {
+    (
+        estimate.cold_setup_ms.max(static_estimate.cold_setup_ms),
+        estimate.warm_setup_ms.max(static_estimate.warm_setup_ms),
+        estimate.predicted_run_ms.max(
+            static_estimate
+                .total_ms
+                .saturating_sub(static_estimate.cold_setup_ms),
+        ),
+    )
+}
+
 fn unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4793,7 +4822,7 @@ fn snake_debug(value: impl std::fmt::Debug) -> String {
     out
 }
 
-fn upscale_utility_candidates(
+pub(crate) fn upscale_utility_candidates(
     model_name: &str,
     weights: &mold_inference::upscaler::ResolvedUpscaleArtifact,
     placements: impl IntoIterator<Item = UtilityPlacement>,
@@ -5753,6 +5782,10 @@ mod tests {
             active.planned_device_id.as_deref(),
             Some(device_id.as_str())
         );
+        assert_eq!(
+            active.planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::Device)
+        );
         assert_eq!(active.gpu, Some(0));
         assert_eq!(active.lane_order, Some(0));
         assert_eq!(active.activity_phase, mold_core::QueueActivityPhase::Active);
@@ -5824,13 +5857,21 @@ mod tests {
         );
         assert_eq!(active.work_items.len(), 1);
         assert_eq!(
+            active.work_items[0].planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::HostUtility)
+        );
+        assert_eq!(active.work_items[0].planned_device_id, None);
+        assert_eq!(
             active.work_items[0].activity_phase,
             mold_core::QueueActivityPhase::Cpu
         );
-        assert_eq!(
-            active.work_items[0].planned_device_id.as_deref(),
-            Some(CPU_UTILITY_DEVICE_ID)
-        );
+        let active_wire = serde_json::to_value(&active.work_items[0]).unwrap();
+        assert_eq!(active_wire["planned_lane_kind"], "host_utility");
+        assert!(active_wire
+            .as_object()
+            .unwrap()
+            .contains_key("planned_device_id"));
+        assert_eq!(active_wire["planned_device_id"], serde_json::Value::Null);
         assert_eq!(active.work_items[0].gpu, None);
 
         let mut queued_work = WorkSnapshot::new(
@@ -5862,13 +5903,21 @@ mod tests {
         );
         assert_eq!(queued.work_items.len(), 1);
         assert_eq!(
+            queued.work_items[0].planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::HostUtility)
+        );
+        assert_eq!(queued.work_items[0].planned_device_id, None);
+        assert_eq!(
             queued.work_items[0].activity_phase,
             mold_core::QueueActivityPhase::Queued
         );
-        assert_eq!(
-            queued.work_items[0].planned_device_id.as_deref(),
-            Some(CPU_UTILITY_DEVICE_ID)
-        );
+        let queued_wire = serde_json::to_value(&queued.work_items[0]).unwrap();
+        assert_eq!(queued_wire["planned_lane_kind"], "host_utility");
+        assert!(queued_wire
+            .as_object()
+            .unwrap()
+            .contains_key("planned_device_id"));
+        assert_eq!(queued_wire["planned_device_id"], serde_json::Value::Null);
         assert_eq!(queued.work_items[0].gpu, None);
     }
 
@@ -7832,7 +7881,7 @@ mod tests {
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
-        let coordinator = Coordinator::with_preparer_and_memory(
+        let mut coordinator = Coordinator::with_preparer_and_memory(
             state,
             Arc::new(ImmediatePreparer),
             ample_memory(),
@@ -7848,6 +7897,42 @@ mod tests {
         )
         .await
         .unwrap();
+        let device_facts = vec![crate::execution_plan::DeviceFact {
+            id: stable_id.clone(),
+            ordinal: 0,
+            available_vram_bytes: 24 << 30,
+        }];
+        let execution = crate::execution_plan::resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &device_facts,
+            false,
+            Some(&prepared),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let worker = coordinator.state.gpu_pool.worker_by_ordinal(0).unwrap();
+        coordinator.observe_estimate(
+            generation_estimate_key(
+                &coordinator.state,
+                &worker,
+                &request,
+                &execution.execution_fingerprint,
+            ),
+            EstimateObservation {
+                total_ms: Some(100),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(10),
+                    warm_reload_ms: Some(5),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
         let before = (
             coordinator.state_version,
             coordinator.plan_version,
@@ -8371,8 +8456,10 @@ mod tests {
             placement.incremental_host_ram_bytes,
             plan.predicted_host_ram_bytes()
         );
-        assert_eq!(placement.cold_setup_ms, 10);
-        assert_eq!(placement.predicted_run_ms, 90);
+        let static_timing = mold_scheduler::static_timing_for(WorkKind::StandaloneUpscale);
+        assert_eq!(placement.cold_setup_ms, static_timing.cold_setup_ms);
+        assert_eq!(placement.warm_setup_ms, static_timing.cold_setup_ms);
+        assert_eq!(placement.predicted_run_ms, static_timing.predicted_run_ms);
     }
 
     #[test]
