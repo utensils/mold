@@ -1460,18 +1460,37 @@ The transaction root is deliberately inside the resolved gallery filesystem
 so every final no-replace rename stays on one filesystem; gallery scanners and
 reconcile must ignore that reserved directory.
 
-Each live attempt additionally holds one hashed authority file directly under
-the canonical gallery root. Authority open, claim, stale sweep, and terminal
-unlink are serialized by the gallery bookkeeping lock. Cleanup unlinks only
-while it still holds both locks, then releases the file lock, so no production
-opener can retain an old inode while another creates authority at the same
-path. The shared `.attempt-locks` directory is retired because replacing that
-directory could fork the namespace. Authority files are reclaimed on terminal
-drop or the next locked sweep; abandoned attempts retain their manifest and
-journal for startup recovery without retaining one file forever. Windows
-opens without delete sharing and compares `GetFileInformationByHandle`
-volume/file identity before and after claim; Unix uses no-follow descriptor
-walks plus device/inode/link-count comparison.
+Each live v2 attempt holds two hashed authority files for its full lifetime:
+the predecessor v1 path under `.attempt-locks` and the current v2 path directly
+under the canonical gallery root. Both are opened and nonblockingly claimed in
+the fixed v1-then-v2 order while gallery bookkeeping is held. A live v1 binary
+therefore blocks v2 begin/recovery, and a live v2 binary blocks a later v1
+claimant during a rolling deployment. Cleanup verifies and unlinks both names
+under stable bookkeeping while both OS locks remain held, then unlocks and
+closes both handles. Authority files are reclaimed on terminal drop or the
+next locked sweep; abandoned attempts retain their manifest and journal for
+startup recovery without retaining sidecars forever. A suspicious hardlinked
+or unverifiable stale sidecar is warn-skipped by the broad sweep so it cannot
+brick unrelated startup, but an exact attempt claim remains fail-closed.
+
+The predecessor directory protocol cannot defend against a same-UID adversary
+that replaces a real `.attempt-locks` directory while a legacy v1 binary is
+live: v1 retained only the displaced file inode and published no stable-root
+identity that a newer process can discover. This is an explicit out-of-band
+filesystem-adversary boundary for mixed-version overlap. Same-version v2
+ownership remains protected by the independent canonical gallery-root
+authority even if that legacy directory is maliciously replaced.
+
+Windows authority and bookkeeping handles deny delete sharing, reject reparse
+points, and compare MSRV-compatible `GetFileInformationByHandle`
+volume/file identity plus link count before and after locking. Unix uses
+no-follow descriptor walks, device/inode/link-count comparison, and verified
+directory-descriptor `unlinkat`. Every begin/recovery also proves that a second
+descriptor in the same process cannot acquire either supposedly exclusive
+lock; filesystems with process-wide or emulated non-exclusive semantics fail
+closed as unsupported. On Windows, a filesystem root cannot be the gallery
+directly because the stable bookkeeping sidecar requires a named sibling;
+operators must select a child directory.
 
 The canonical resolved gallery directory is the filesystem trust root for this
 protocol. Mold never renames or replaces that directory while serving.
