@@ -71,6 +71,11 @@ fn stage_placement_candidate(
         candidate: mold_core::GenerationPlacementCandidate {
             device_id: assignment.device_id.to_string(),
             execution_fingerprint: assignment.placement.execution_fingerprint.to_string(),
+            execution_equivalence_fingerprint: assignment
+                .placement
+                .execution_equivalence_fingerprint
+                .as_ref()
+                .map(ToString::to_string),
             predicted_start_after_ms: assignment.estimated_start_ms.saturating_sub(now_ms),
             predicted_completion_after_ms: assignment.estimated_finish_ms.saturating_sub(now_ms),
             setup_ms: if warm {
@@ -2357,6 +2362,8 @@ impl Coordinator {
                 Some(crate::execution_plan::DeviceFact {
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
+                    backend: worker.gpu.backend,
+                    compute_capability: worker.gpu.compute_capability,
                     available_vram_bytes: device.available_vram_bytes,
                 })
             })
@@ -2404,71 +2411,90 @@ impl Coordinator {
                 .iter()
                 .filter(|device| device.available_vram_bytes >= estimate)
                 .cloned()
-                .map(|device| crate::execution_plan::ResolvedExecutionPlan {
-                    device_id: device.id,
-                    device_ordinal: device.ordinal,
-                    model_family: crate::model_manager::family_for_model_sync(
+                .map(|device| {
+                    let model_family = crate::model_manager::family_for_model_sync(
                         &pending.job.request.model,
                         &config,
                     )
-                    .unwrap_or_else(|| pending.job.request.model.clone()),
-                    model_fingerprint: pending.job.request.model.clone(),
-                    effective_placement: crate::execution_plan::EffectivePlacement {
-                        components: BTreeMap::new(),
-                    },
-                    components: BTreeMap::new(),
-                    engine_paths: mold_core::ModelPaths {
-                        transformer: std::path::PathBuf::from(&pending.job.request.model),
-                        transformer_shards: vec![],
-                        vae: std::path::PathBuf::from(&pending.job.request.model),
-                        spatial_upscaler: None,
-                        temporal_upscaler: None,
-                        distilled_lora: None,
-                        t5_encoder: None,
-                        clip_encoder: None,
-                        t5_tokenizer: None,
-                        clip_tokenizer: None,
-                        clip_encoder_2: None,
-                        clip_tokenizer_2: None,
-                        text_encoder_files: vec![],
-                        text_tokenizer: None,
-                        decoder: None,
-                    },
-                    engine_config: mold_inference::FrozenEngineConfig::resolve(
+                    .unwrap_or_else(|| pending.job.request.model.clone());
+                    let model_fingerprint = pending.job.request.model.clone();
+                    let components = BTreeMap::new();
+                    let engine_config = mold_inference::FrozenEngineConfig::resolve(
                         &pending.job.request.model,
                         &config,
-                    ),
-                    admission_paths: mold_core::ModelPaths {
-                        transformer: std::path::PathBuf::from(&pending.job.request.model),
-                        transformer_shards: vec![],
-                        vae: std::path::PathBuf::from(&pending.job.request.model),
-                        spatial_upscaler: None,
-                        temporal_upscaler: None,
-                        distilled_lora: None,
-                        t5_encoder: None,
-                        clip_encoder: None,
-                        t5_tokenizer: None,
-                        clip_tokenizer: None,
-                        clip_encoder_2: None,
-                        clip_tokenizer_2: None,
-                        text_encoder_files: vec![],
-                        text_tokenizer: None,
-                        decoder: None,
-                    },
-                    admission_engine_config: mold_inference::FrozenEngineConfig::resolve(
-                        &pending.job.request.model,
-                        &config,
-                    ),
-                    effective_loras: vec![],
-                    attention_backend: crate::execution_plan::AttentionBackend::Math,
-                    engine_load_strategy: mold_inference::LoadStrategy::Eager,
-                    offload_mode: crate::execution_plan::OffloadMode::None,
-                    predicted_vram_peak_bytes: estimate,
-                    admitted_available_vram_bytes: device.available_vram_bytes,
-                    predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
-                    determinism_class:
-                        crate::execution_plan::DeterminismClass::CpuSeededCrossBackend,
-                    execution_fingerprint: pending.job.request.model.clone(),
+                    );
+                    let determinism_class =
+                        crate::execution_plan::DeterminismClass::CpuSeededCrossBackend;
+                    let environment = crate::execution_plan::execution_environment_descriptor(
+                        &device,
+                        &model_family,
+                        &model_fingerprint,
+                        &components,
+                        &[],
+                        crate::execution_plan::AttentionBackend::Math,
+                        mold_inference::LoadStrategy::Eager,
+                        crate::execution_plan::OffloadMode::None,
+                        pending.job.request.resolved_output_format(),
+                        determinism_class,
+                    );
+                    let equivalence = environment.fingerprint();
+                    crate::execution_plan::ResolvedExecutionPlan {
+                        device_id: device.id,
+                        device_ordinal: device.ordinal,
+                        model_family,
+                        model_fingerprint,
+                        effective_placement: crate::execution_plan::EffectivePlacement {
+                            components: BTreeMap::new(),
+                        },
+                        components,
+                        engine_paths: mold_core::ModelPaths {
+                            transformer: std::path::PathBuf::from(&pending.job.request.model),
+                            transformer_shards: vec![],
+                            vae: std::path::PathBuf::from(&pending.job.request.model),
+                            spatial_upscaler: None,
+                            temporal_upscaler: None,
+                            distilled_lora: None,
+                            t5_encoder: None,
+                            clip_encoder: None,
+                            t5_tokenizer: None,
+                            clip_tokenizer: None,
+                            clip_encoder_2: None,
+                            clip_tokenizer_2: None,
+                            text_encoder_files: vec![],
+                            text_tokenizer: None,
+                            decoder: None,
+                        },
+                        engine_config: engine_config.clone(),
+                        admission_paths: mold_core::ModelPaths {
+                            transformer: std::path::PathBuf::from(&pending.job.request.model),
+                            transformer_shards: vec![],
+                            vae: std::path::PathBuf::from(&pending.job.request.model),
+                            spatial_upscaler: None,
+                            temporal_upscaler: None,
+                            distilled_lora: None,
+                            t5_encoder: None,
+                            clip_encoder: None,
+                            t5_tokenizer: None,
+                            clip_tokenizer: None,
+                            clip_encoder_2: None,
+                            clip_tokenizer_2: None,
+                            text_encoder_files: vec![],
+                            text_tokenizer: None,
+                            decoder: None,
+                        },
+                        admission_engine_config: engine_config,
+                        effective_loras: vec![],
+                        attention_backend: crate::execution_plan::AttentionBackend::Math,
+                        engine_load_strategy: mold_inference::LoadStrategy::Eager,
+                        offload_mode: crate::execution_plan::OffloadMode::None,
+                        predicted_vram_peak_bytes: estimate,
+                        admitted_available_vram_bytes: device.available_vram_bytes,
+                        predicted_host_increment_bytes: MIN_TRANSIENT_HOST_RAM,
+                        determinism_class,
+                        execution_environment: environment,
+                        execution_equivalence_fingerprint: equivalence,
+                        execution_fingerprint: pending.job.request.model.clone(),
+                    }
                 })
                 .collect());
         }
@@ -2993,6 +3019,7 @@ impl Coordinator {
                             ExecutionFingerprint::new(plan.execution_fingerprint),
                             estimate.host_bytes,
                         )
+                        .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                         .with_vram(estimate.vram_bytes)
                         .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
@@ -3321,6 +3348,7 @@ impl Coordinator {
                         ExecutionFingerprint::new(plan.execution_fingerprint),
                         estimate.host_bytes,
                     )
+                    .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                     .with_vram(estimate.vram_bytes)
                     .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                     .with_device_available_vram(plan.admitted_available_vram_bytes),
@@ -3456,6 +3484,11 @@ impl Coordinator {
         }
         let first_device_id = selected[0].device_id.to_string();
         let first_execution_fingerprint = selected[0].placement.execution_fingerprint.to_string();
+        let first_execution_equivalence_fingerprint = selected[0]
+            .placement
+            .execution_equivalence_fingerprint
+            .as_ref()
+            .map(ToString::to_string);
         let first_cold_setup_ms = selected[0].placement.cold_setup_ms;
         let first_warm_setup_ms = selected[0].placement.warm_setup_ms;
         if local_expansion_model.is_none() {
@@ -3615,6 +3648,7 @@ impl Coordinator {
             candidate: Some(mold_core::GenerationPlacementCandidate {
                 device_id: first_device_id,
                 execution_fingerprint: first_execution_fingerprint,
+                execution_equivalence_fingerprint: first_execution_equivalence_fingerprint,
                 predicted_start_after_ms: predicted_start_ms.saturating_sub(snapshot.now_ms),
                 predicted_completion_after_ms: predicted_finish_ms.saturating_sub(snapshot.now_ms),
                 setup_ms,
@@ -4945,6 +4979,20 @@ fn queue_plan_projection_at_unix(
                     mold_core::QueueActivityPhase::Dispatching
                 },
                 execution_fingerprint: Some(lease.estimate_key.execution_fingerprint.clone()),
+                execution_equivalence_fingerprint: work
+                    .candidate_placements
+                    .iter()
+                    .find(|placement| {
+                        placement.device_id.as_str() == device_id
+                            && placement.execution_fingerprint.as_str()
+                                == lease.estimate_key.execution_fingerprint
+                    })
+                    .and_then(|placement| {
+                        placement
+                            .execution_equivalence_fingerprint
+                            .as_ref()
+                            .map(ToString::to_string)
+                    }),
             }
         })
         .collect::<Vec<_>>();
@@ -5049,6 +5097,13 @@ fn queue_plan_projection_at_unix(
                     },
                     execution_fingerprint: planned.map(|(_, _, assignment)| {
                         assignment.placement.execution_fingerprint.to_string()
+                    }),
+                    execution_equivalence_fingerprint: planned.and_then(|(_, _, assignment)| {
+                        assignment
+                            .placement
+                            .execution_equivalence_fingerprint
+                            .as_ref()
+                            .map(ToString::to_string)
                     }),
                 }
             })
@@ -5854,6 +5909,8 @@ mod tests {
             vec![crate::execution_plan::DeviceFact {
                 id: worker_device_id(&worker),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
             }],
         )
@@ -7549,6 +7606,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: "cuda:exact".into(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
             }],
             false,
@@ -10220,6 +10279,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: "cuda:1".to_string(),
                 ordinal: 1,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
             }],
         );
@@ -10280,6 +10341,8 @@ mod tests {
             vec![crate::execution_plan::DeviceFact {
                 id: stable_id.clone(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
             }],
         )
@@ -10288,6 +10351,8 @@ mod tests {
         let device_facts = vec![crate::execution_plan::DeviceFact {
             id: stable_id.clone(),
             ordinal: 0,
+            backend: mold_core::GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
             available_vram_bytes: 24 << 30,
         }];
         let execution = crate::execution_plan::resolve_execution_plans_with_prepared(
@@ -10436,11 +10501,15 @@ mod tests {
                 crate::execution_plan::DeviceFact {
                     id: stable_id0.clone(),
                     ordinal: 0,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: 24 << 30,
                 },
                 crate::execution_plan::DeviceFact {
                     id: worker_device_id(&coordinator.state.gpu_pool.worker_by_ordinal(1).unwrap()),
                     ordinal: 1,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: 24 << 30,
                 },
             ],

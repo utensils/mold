@@ -2449,6 +2449,8 @@ pub(crate) fn build_observed_dispatch(
                 Some(crate::execution_plan::DeviceFact {
                     id: device.id.to_string(),
                     ordinal: worker.gpu.ordinal,
+                    backend: worker.gpu.backend,
+                    compute_capability: worker.gpu.compute_capability,
                     available_vram_bytes: device.available_vram_bytes,
                 })
             })
@@ -2484,6 +2486,7 @@ pub(crate) fn build_observed_dispatch(
                             plan.execution_fingerprint,
                             plan.predicted_host_increment_bytes,
                         )
+                        .with_execution_equivalence(plan.execution_equivalence_fingerprint)
                         .with_vram(plan.predicted_vram_peak_bytes)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                         .with_static_timing(mold_scheduler::WorkKind::Generation)

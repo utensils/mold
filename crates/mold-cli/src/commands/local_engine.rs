@@ -162,6 +162,8 @@ pub(crate) async fn plan_local_batch(
             Some(mold_server::execution_plan::DeviceFact {
                 id: gpu.stable_id.clone()?,
                 ordinal: gpu.ordinal,
+                backend: gpu.backend,
+                compute_capability: gpu.compute_capability,
                 available_vram_bytes: gpu.free_vram_bytes,
             })
         })
@@ -196,6 +198,7 @@ pub(crate) async fn plan_local_batch(
             ordinal: plan.device_ordinal,
             device_id: plan.device_id.clone(),
             execution_fingerprint: plan.execution_fingerprint.clone(),
+            execution_equivalence_fingerprint: plan.execution_equivalence_fingerprint.clone(),
             available_vram_bytes: plan.admitted_available_vram_bytes,
             predicted_vram_bytes: plan.predicted_vram_peak_bytes,
             predicted_host_ram_bytes: plan.predicted_host_increment_bytes,
@@ -261,6 +264,7 @@ pub(crate) struct LocalCandidate {
     pub ordinal: usize,
     pub device_id: String,
     pub execution_fingerprint: String,
+    pub execution_equivalence_fingerprint: mold_scheduler::ExecutionEquivalenceFingerprint,
     pub available_vram_bytes: u64,
     pub predicted_vram_bytes: u64,
     pub predicted_host_ram_bytes: u64,
@@ -431,6 +435,9 @@ impl LocalBatchAdmission {
                                 candidate.execution_fingerprint.clone(),
                                 incremental_host_ram_bytes,
                             )
+                            .with_execution_equivalence(
+                                candidate.execution_equivalence_fingerprint.clone(),
+                            )
                             .with_vram(candidate.predicted_vram_bytes)
                             .with_device_available_vram(candidate.available_vram_bytes)
                             .with_static_timing(mold_scheduler::WorkKind::Generation)
@@ -541,6 +548,8 @@ mod tests {
                 ordinal,
                 device_id: format!("cuda:{ordinal}"),
                 execution_fingerprint: format!("exec:{ordinal}"),
+                execution_equivalence_fingerprint:
+                    mold_scheduler::ExecutionEquivalenceFingerprint::new("equivalent"),
                 available_vram_bytes: 24 << 30,
                 predicted_vram_bytes: 8 << 30,
                 predicted_host_ram_bytes: 1 << 30,

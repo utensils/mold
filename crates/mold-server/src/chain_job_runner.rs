@@ -2343,6 +2343,8 @@ impl ProductionStageExecutor {
             .map(|worker| crate::execution_plan::DeviceFact {
                 id: crate::scheduler::worker_device_id(&worker),
                 ordinal: worker.gpu.ordinal,
+                backend: worker.gpu.backend,
+                compute_capability: worker.gpu.compute_capability,
                 available_vram_bytes: worker.gpu.free_vram_bytes,
             })
             .collect::<Vec<_>>();

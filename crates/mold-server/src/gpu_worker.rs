@@ -6441,6 +6441,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: "cuda:00000000000000000000000000000001".to_string(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 24 << 30,
             }],
             false,
@@ -6576,6 +6578,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: device_id.clone(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 48 << 30,
             }],
             false,
@@ -6707,6 +6711,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: device_id.clone(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 48 << 30,
             }],
             false,
@@ -6825,6 +6831,8 @@ mod tests {
             &[crate::execution_plan::DeviceFact {
                 id: device_id.clone(),
                 ordinal: 0,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 48 << 30,
             }],
             false,

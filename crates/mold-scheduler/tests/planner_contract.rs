@@ -1104,11 +1104,23 @@ fn runtime_grant_fences_are_typed_and_include_worker_readiness() {
     let plan = Planner::default()
         .plan(&snapshot(
             vec![device("gpu-0")],
-            vec![work("job", 0, vec![candidate("gpu-0", 1)])],
+            vec![work(
+                "job",
+                0,
+                vec![candidate("gpu-0", 1).with_execution_equivalence("parent-compatible-class")],
+            )],
             8,
         ))
         .expect("valid plan");
     let lease = &plan.immediate_leases[0];
+    assert_eq!(
+        lease
+            .placement
+            .execution_equivalence_fingerprint
+            .as_ref()
+            .map(|fingerprint| fingerprint.as_str()),
+        Some("parent-compatible-class")
+    );
     let current = GrantValidationSnapshot {
         work_id: "job".into(),
         device_id: "gpu-0".into(),

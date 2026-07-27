@@ -5,7 +5,11 @@
 //! into one immutable plan per eligible device. Plans are validated again on
 //! the owner thread before model loading touches CUDA.
 
-use mold_core::{Config, DevicePlacement, DeviceRef, GenerateRequest, ModelPaths};
+use mold_core::{
+    Config, DevicePlacement, DeviceRef, GenerateRequest, GpuBackend, ModelPaths, OutputFormat,
+};
+use mold_scheduler::ExecutionEquivalenceFingerprint;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(any(unix, windows)))]
@@ -17,7 +21,7 @@ const MIB: u64 = 1024 * 1024;
 const BASE_HOST_TRANSIENT: u64 = 256 * MIB;
 const UNKNOWN_ARTIFACT_HOST_CHARGE: u64 = 64 * MIB;
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum ComponentRole {
     Transformer,
     TransformerShard(u8),
@@ -77,7 +81,7 @@ pub enum ResolvedComponentPlacement {
     Device(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum ComponentLoadStrategy {
     Resident,
     DropReload,
@@ -86,39 +90,131 @@ pub enum ComponentLoadStrategy {
     TiledVae,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum QuantizationVariant {
     Q4,
     Q8,
     Fp8,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum PlannedDType {
     Bf16,
     F16,
     F32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum AttentionBackend {
     Math,
     Flash,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum OffloadMode {
     None,
     Block,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum DeterminismClass {
     CpuSeededCrossBackend,
+    /// Reserved for engines whose initial noise or sampling is backend-local.
+    /// No current production family selects this class.
+    BackendSeeded,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentFingerprint(pub String);
+
+/// Stable architecture boundary for deterministic parent execution.
+///
+/// CUDA compute capability comes from the driver discovery record. Unknown
+/// architecture is deliberately device-specific so two devices with missing
+/// facts cannot be assumed equivalent. No display-name parsing is permitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum DeviceArchitectureClass {
+    CudaComputeCapability {
+        major: u16,
+        minor: u16,
+    },
+    MetalDefault,
+    Unknown {
+        backend: GpuBackend,
+        device_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticComponentPlacement {
+    Cpu,
+    AssignedDevice,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum EngineLoadStrategyClass {
+    Eager,
+    Sequential,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum AttentionKernelClass {
+    Math,
+    Flash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExecutionCodeIdentity {
+    pub package_version: String,
+    pub source_revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EquivalentComponentExecution {
+    pub role: ComponentRole,
+    pub content_fingerprint: ContentFingerprint,
+    pub dtype: Option<PlannedDType>,
+    pub quantization: Option<QuantizationVariant>,
+    pub placement: SemanticComponentPlacement,
+    pub load_strategy: ComponentLoadStrategy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EquivalentLoraExecution {
+    pub content_fingerprint: ContentFingerprint,
+    pub scale_bits: u64,
+}
+
+/// Canonical deterministic-output environment for a future server batch
+/// parent. Device identity, ordinal, paths, and capacity estimates are absent
+/// by construction; every semantic execution dimension remains explicit.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExecutionEnvironmentDescriptor {
+    pub schema_version: u16,
+    pub backend: GpuBackend,
+    pub architecture: DeviceArchitectureClass,
+    pub attention_kernel_class: AttentionKernelClass,
+    pub code: ExecutionCodeIdentity,
+    pub model_family: String,
+    pub model_fingerprint: String,
+    pub components: Vec<EquivalentComponentExecution>,
+    pub loras: Vec<EquivalentLoraExecution>,
+    pub engine_load_strategy: EngineLoadStrategyClass,
+    pub offload_mode: OffloadMode,
+    pub output_format: OutputFormat,
+    pub determinism_class: DeterminismClass,
+}
+
+impl ExecutionEnvironmentDescriptor {
+    pub fn fingerprint(&self) -> ExecutionEquivalenceFingerprint {
+        let encoded = serde_json::to_vec(self)
+            .expect("execution environment descriptor serialization is infallible");
+        let mut hash = Sha256::new();
+        hash.update(b"mold.execution-equivalence.v1\0");
+        hash.update(encoded);
+        ExecutionEquivalenceFingerprint::new(format!("{:x}", hash.finalize()))
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ComponentExecutionPlan {
@@ -181,6 +277,10 @@ pub struct ResolvedExecutionPlan {
     pub admitted_available_vram_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub determinism_class: DeterminismClass,
+    pub execution_environment: ExecutionEnvironmentDescriptor,
+    pub execution_equivalence_fingerprint: ExecutionEquivalenceFingerprint,
+    /// Exact, device-qualified worker/lease identity. This remains the
+    /// authority for residency, grants, cache reconstruction, and provenance.
     pub execution_fingerprint: String,
 }
 
@@ -201,6 +301,8 @@ impl PlannedLora {
 pub struct DeviceFact {
     pub id: String,
     pub ordinal: usize,
+    pub backend: GpuBackend,
+    pub compute_capability: Option<(u16, u16)>,
     pub available_vram_bytes: u64,
 }
 
@@ -985,11 +1087,35 @@ fn build_plan(
         context.effective_loras,
         memory.block_offload,
     );
+    let model_fingerprint = model_fingerprint(context.model, context.artifacts);
+    let attention_backend = match context.engine_config.attention_backend {
+        mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
+        mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
+    };
+    let offload_mode = if memory.block_offload {
+        OffloadMode::Block
+    } else {
+        OffloadMode::None
+    };
+    let determinism_class = DeterminismClass::CpuSeededCrossBackend;
+    let execution_environment = execution_environment_descriptor(
+        device,
+        context.family,
+        &model_fingerprint,
+        &components,
+        context.effective_loras,
+        attention_backend,
+        memory.load_strategy,
+        offload_mode,
+        context.request.resolved_output_format(),
+        determinism_class,
+    );
+    let execution_equivalence_fingerprint = execution_environment.fingerprint();
     Some(Ok(ResolvedExecutionPlan {
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
         model_family: context.family.to_string(),
-        model_fingerprint: model_fingerprint(context.model, context.artifacts),
+        model_fingerprint,
         effective_placement: context.effective.clone(),
         components,
         engine_paths: context.paths.clone(),
@@ -997,22 +1123,89 @@ fn build_plan(
         admission_paths: context.admission_paths.clone(),
         admission_engine_config: context.admission_engine_config.clone(),
         effective_loras: context.effective_loras.to_vec(),
-        attention_backend: match context.engine_config.attention_backend {
-            mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
-            mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
-        },
+        attention_backend,
         engine_load_strategy: memory.load_strategy,
-        offload_mode: if memory.block_offload {
-            OffloadMode::Block
-        } else {
-            OffloadMode::None
-        },
+        offload_mode,
         predicted_vram_peak_bytes: predicted_vram,
         admitted_available_vram_bytes: device.available_vram_bytes,
         predicted_host_increment_bytes: predicted_host,
-        determinism_class: DeterminismClass::CpuSeededCrossBackend,
+        determinism_class,
+        execution_environment,
+        execution_equivalence_fingerprint,
         execution_fingerprint: fingerprint,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execution_environment_descriptor(
+    device: &DeviceFact,
+    model_family: &str,
+    model_fingerprint: &str,
+    components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
+    effective_loras: &[PlannedLora],
+    attention_backend: AttentionBackend,
+    engine_load_strategy: mold_inference::LoadStrategy,
+    offload_mode: OffloadMode,
+    output_format: OutputFormat,
+    determinism_class: DeterminismClass,
+) -> ExecutionEnvironmentDescriptor {
+    let architecture = match (device.backend, device.compute_capability) {
+        (GpuBackend::Cuda, Some((major, minor))) => {
+            DeviceArchitectureClass::CudaComputeCapability { major, minor }
+        }
+        (GpuBackend::Metal, _) => DeviceArchitectureClass::MetalDefault,
+        (backend, None) => DeviceArchitectureClass::Unknown {
+            backend,
+            device_id: device.id.clone(),
+        },
+    };
+    let components = components
+        .iter()
+        .map(|(role, component)| EquivalentComponentExecution {
+            role: role.clone(),
+            content_fingerprint: component.content_fingerprint.clone(),
+            dtype: component.dtype,
+            quantization: component.quantization,
+            placement: match &component.placement {
+                ResolvedComponentPlacement::Cpu => SemanticComponentPlacement::Cpu,
+                ResolvedComponentPlacement::Device(_) => SemanticComponentPlacement::AssignedDevice,
+            },
+            load_strategy: component.load_strategy,
+        })
+        .collect();
+    let loras = effective_loras
+        .iter()
+        .map(|lora| EquivalentLoraExecution {
+            content_fingerprint: lora.content_fingerprint.clone(),
+            scale_bits: lora.scale_bits,
+        })
+        .collect();
+    let source_revision = (mold_core::build_info::GIT_SHA != "unknown")
+        .then(|| mold_core::build_info::GIT_SHA.to_string());
+    ExecutionEnvironmentDescriptor {
+        schema_version: 1,
+        backend: device.backend,
+        architecture,
+        attention_kernel_class: match attention_backend {
+            AttentionBackend::Math => AttentionKernelClass::Math,
+            AttentionBackend::Flash => AttentionKernelClass::Flash,
+        },
+        code: ExecutionCodeIdentity {
+            package_version: mold_core::build_info::VERSION.to_string(),
+            source_revision,
+        },
+        model_family: model_family.to_string(),
+        model_fingerprint: model_fingerprint.to_string(),
+        components,
+        loras,
+        engine_load_strategy: match engine_load_strategy {
+            mold_inference::LoadStrategy::Eager => EngineLoadStrategyClass::Eager,
+            mold_inference::LoadStrategy::Sequential => EngineLoadStrategyClass::Sequential,
+        },
+        offload_mode,
+        output_format,
+        determinism_class,
+    }
 }
 
 fn gpu_resident_paths(
@@ -1539,6 +1732,8 @@ mod tests {
             .map(|(ordinal, bytes)| DeviceFact {
                 id: format!("cuda:{ordinal}"),
                 ordinal,
+                backend: GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: *bytes,
             })
             .collect()

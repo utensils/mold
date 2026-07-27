@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 macro_rules! string_id {
-    ($name:ident) => {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
         #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(String);
 
@@ -40,6 +41,15 @@ string_id!(DeviceId);
 string_id!(WorkId);
 string_id!(ParentId);
 string_id!(ExecutionFingerprint);
+string_id!(
+    /// Parent-level execution identity shared by device-specific lease plans
+    /// that are expected to preserve the same deterministic output contract.
+    ///
+    /// This is deliberately distinct from [`ExecutionFingerprint`]: the
+    /// latter remains bound to an exact worker/device placement and is the
+    /// authority used for residency and pre-grant validation.
+    ExecutionEquivalenceFingerprint
+);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Backend {
@@ -147,6 +157,9 @@ impl DeviceSnapshot {
 pub struct CandidatePlacement {
     pub device_id: DeviceId,
     pub execution_fingerprint: ExecutionFingerprint,
+    /// Device-independent deterministic-output identity. `None` is retained
+    /// for legacy/synthetic callers that do not yet model parent batching.
+    pub execution_equivalence_fingerprint: Option<ExecutionEquivalenceFingerprint>,
     pub predicted_vram_bytes: u64,
     /// Effective device capacity used to admit this concrete edge. Runtime
     /// adapters derive it from authoritative free and safely reclaimable
@@ -240,6 +253,7 @@ impl CandidatePlacement {
         Self {
             device_id: device_id.into(),
             execution_fingerprint: execution_fingerprint.into(),
+            execution_equivalence_fingerprint: None,
             predicted_vram_bytes: 0,
             device_available_vram_bytes: u64::MAX,
             incremental_host_ram_bytes,
@@ -248,6 +262,14 @@ impl CandidatePlacement {
             predicted_run_ms: 0,
             affinity_penalty: 0,
         }
+    }
+
+    pub fn with_execution_equivalence(
+        mut self,
+        fingerprint: impl Into<ExecutionEquivalenceFingerprint>,
+    ) -> Self {
+        self.execution_equivalence_fingerprint = Some(fingerprint.into());
+        self
     }
 
     pub fn with_vram(mut self, predicted_vram_bytes: u64) -> Self {

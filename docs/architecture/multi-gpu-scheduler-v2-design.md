@@ -627,6 +627,7 @@ pub struct WorkUnit {
     pub kind: WorkKind,
     pub model_fingerprint: ModelFingerprint,
     pub execution_fingerprint: Option<ExecutionFingerprint>,
+    pub execution_equivalence_fingerprint: Option<ExecutionEquivalenceFingerprint>,
     pub request_shape: RequestShape,
     pub queue_rank: u64,
     pub priority_class: PriorityClass,
@@ -1051,14 +1052,28 @@ pub struct ResolvedExecutionPlan {
     pub predicted_vram_peak_bytes: u64,
     pub predicted_host_increment_bytes: u64,
     pub determinism_class: DeterminismClass,
+    pub execution_environment: ExecutionEnvironmentDescriptor,
+    pub execution_equivalence_fingerprint: ExecutionEquivalenceFingerprint,
     pub execution_fingerprint: ExecutionFingerprint,
 }
 ```
 
 Resolve concrete encoder variants, quantization, external companions, and load
-strategies before dispatch. `execution_fingerprint` hashes every component
-artifact/content fingerprint, dtype/quantization, placement, load strategy,
-attention backend, and offload mode.
+strategies before dispatch. The existing `execution_fingerprint` remains the
+exact device-qualified identity used for leases, residency, cache
+reconstruction, and output provenance. Grants continue to validate it exactly.
+
+`execution_environment` is a separately serialized deterministic-output
+descriptor. It records the typed backend and architecture class (CUDA compute
+capability or Metal), attention/kernel class, model and code identity,
+component and LoRA content fingerprints, dtype/quantization, semantic
+CPU-versus-assigned-device placement, component and engine load strategies,
+offload mode, output format, and determinism class. It deliberately excludes
+device ID/ordinal, artifact paths, and transient capacity estimates.
+`execution_equivalence_fingerprint` is the domain-separated hash of that
+descriptor and is the identity a Phase F parent may share across compatible
+device-specific plans. Missing architecture facts fail closed with a
+device-specific `Unknown` class; display-name inference is forbidden.
 
 The engine receives and consumes this exact plan. It may not independently
 select another GPU, artifact, encoder variant, quantization, or placement. If
@@ -1406,8 +1421,10 @@ batch_count = N
 ```
 
 The parent resolves model, companion assets, precision, attention backend,
-offload strategy, component placement, output format, and determinism class
-once. Candidate devices must admit that exact fingerprint.
+offload strategy, semantic component placement, output format, and determinism
+class once into one execution-equivalence fingerprint. Candidate devices must
+admit that equivalence identity, while every child lease still carries and
+validates the selected device's exact execution fingerprint.
 
 Initial family capabilities may expose `native_batch_sizes = [1]`. That is
 valid: the scheduler can distribute singleton children across devices without
@@ -1468,10 +1485,10 @@ The guaranteed contract is:
 
 - child ordering and seeds match sequential client fan-out;
 - output metadata/filenames retain the global child index;
-- the same model, code version, resolved execution fingerprint, and
+- the same model, code version, resolved execution-equivalence fingerprint, and
   determinism class preserve the existing exact-output guarantee;
 - cross-device execution is allowed only when candidate devices share that
-  fingerprint/class;
+  equivalence fingerprint/class;
 - otherwise keep the affected children on a compatible device and record why.
 
 Do not claim bit-identical output across different GPU architectures,
@@ -2242,7 +2259,8 @@ F0 lands first as its own PR series:
 F1 then delivers:
 
 - lazy parent/child model;
-- once-per-parent concrete execution fingerprint;
+- once-per-parent execution-equivalence fingerprint plus exact per-child lease
+  fingerprints;
 - adaptive partition planning;
 - logical atomic commit/recovery;
 - fenced retry and cancellation.

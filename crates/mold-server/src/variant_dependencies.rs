@@ -310,6 +310,8 @@ fn resource_device_facts(state: &AppState) -> Vec<DeviceFact> {
             Some(DeviceFact {
                 id: device.id,
                 ordinal,
+                backend: device.backend,
+                compute_capability: worker.and_then(|worker| worker.gpu.compute_capability),
                 available_vram_bytes: available,
             })
         })
@@ -346,6 +348,8 @@ fn worker_device_facts_from_startup_sample(state: &AppState) -> Vec<DeviceFact> 
         .map(|worker| DeviceFact {
             id: worker_device_id(&worker),
             ordinal: worker.gpu.ordinal,
+            backend: worker.gpu.backend,
+            compute_capability: worker.gpu.compute_capability,
             available_vram_bytes: worker.gpu.free_vram_bytes,
         })
         .collect()
@@ -1100,11 +1104,15 @@ mod tests {
                 DeviceFact {
                     id: "cuda:0".to_string(),
                     ordinal: 0,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: 4_000_000_000,
                 },
                 DeviceFact {
                     id: "cuda:1".to_string(),
                     ordinal: 1,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: 24_000_000_000,
                 },
             ],
@@ -1132,6 +1140,8 @@ mod tests {
             .map(|ordinal| DeviceFact {
                 id: format!("cuda:{ordinal}"),
                 ordinal,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 1,
             })
             .collect::<Vec<_>>();
@@ -1157,6 +1167,8 @@ mod tests {
                 .map(|ordinal| DeviceFact {
                     id: format!("cuda:{ordinal}"),
                     ordinal,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: 24_000_000_000,
                 })
                 .collect::<Vec<_>>(),
@@ -1181,6 +1193,8 @@ mod tests {
                 .map(|ordinal| DeviceFact {
                     id: format!("cuda:{ordinal}"),
                     ordinal,
+                    backend: mold_core::GpuBackend::Cuda,
+                    compute_capability: Some((8, 6)),
                     available_vram_bytes: if ordinal == 1 {
                         24_000_000_000
                     } else {
@@ -1361,6 +1375,8 @@ mod tests {
             .map(|ordinal| DeviceFact {
                 id: format!("cuda:{ordinal}"),
                 ordinal,
+                backend: mold_core::GpuBackend::Cuda,
+                compute_capability: Some((8, 6)),
                 available_vram_bytes: 6_500_000_000 + (ordinal as u64 % 8) * 1_000_000_000,
             })
             .collect::<Vec<_>>();

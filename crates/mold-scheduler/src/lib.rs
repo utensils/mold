@@ -29,9 +29,9 @@ pub use planner::{operation_budget, optimization_horizon, Planner};
 pub use types::{
     static_timing_for, static_timing_for_placement, AssignmentReason, Backend, BlockedReason,
     BlockedWork, BypassUpdate, CandidatePlacement, DeviceActivity, DeviceAdminState, DeviceHealth,
-    DeviceId, DeviceLane, DeviceSnapshot, ExecutionFingerprint, GrantValidationSnapshot,
-    HostMemorySnapshot, ImmediateLease, MatchingReservation, OptimizerState, ParentId, Plan,
-    PlanValidationError, PlannedAssignment, PlannedBatchPartition, PlannerConfig, PlannerError,
-    PlannerSnapshot, PlanningMode, PriorityClass, ReservationItem, StaticTimingEstimate, WarmWait,
-    WorkId, WorkKind, WorkSnapshot,
+    DeviceId, DeviceLane, DeviceSnapshot, ExecutionEquivalenceFingerprint, ExecutionFingerprint,
+    GrantValidationSnapshot, HostMemorySnapshot, ImmediateLease, MatchingReservation,
+    OptimizerState, ParentId, Plan, PlanValidationError, PlannedAssignment, PlannedBatchPartition,
+    PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode, PriorityClass, ReservationItem,
+    StaticTimingEstimate, WarmWait, WorkId, WorkKind, WorkSnapshot,
 };

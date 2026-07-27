@@ -1460,6 +1460,10 @@ pub struct QueueWorkItem {
     pub activity_phase: QueueActivityPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_fingerprint: Option<String>,
+    /// Parent-level deterministic execution identity. Unlike
+    /// `execution_fingerprint`, this may match across compatible devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_equivalence_fingerprint: Option<String>,
 }
 
 impl QueueWorkItem {
@@ -4632,6 +4636,10 @@ fn default_preview_copies() -> u32 {
 pub struct GenerationPlacementCandidate {
     pub device_id: String,
     pub execution_fingerprint: String,
+    /// Parent-level deterministic execution identity shared by compatible
+    /// device-specific candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_equivalence_fingerprint: Option<String>,
     pub predicted_start_after_ms: u64,
     pub predicted_completion_after_ms: u64,
     pub setup_ms: u64,
@@ -5350,5 +5358,26 @@ mod queue_plan_wire_tests {
         assert_eq!(parsed.blocked_reason, None);
         assert_eq!(parsed.planned_lane_kind, None);
         assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
+        assert_eq!(parsed.execution_equivalence_fingerprint, None);
+    }
+
+    #[test]
+    fn execution_equivalence_wire_fields_are_additive_and_optional() {
+        let legacy: GenerationPlacementCandidate = serde_json::from_value(serde_json::json!({
+            "device_id": "cuda:stable",
+            "execution_fingerprint": "device-qualified",
+            "predicted_start_after_ms": 0,
+            "predicted_completion_after_ms": 10,
+            "setup_ms": 1,
+            "setup_kind": "cold",
+            "estimate_confidence": "low"
+        }))
+        .unwrap();
+        assert_eq!(legacy.execution_equivalence_fingerprint, None);
+
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert!(serialized
+            .get("execution_equivalence_fingerprint")
+            .is_none());
     }
 }
