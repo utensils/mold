@@ -1430,15 +1430,27 @@ The F1 planning foundation implements this boundary without routing a parent:
   required singleton coverage), then compares complete deterministic
   schedules derived from each declared maximum size. It enforces per-device
   partition capacity and VRAM plus conservative aggregate host RAM, accounts
-  for first-use cold/warm setup and later warm reloads, and compares predicted
-  parent makespan before sum of child completion times and setup duplication.
-- Homogeneous singleton fleets and independent singleton completion streams
-  use the exact balanced/earliest-completion optimum. Heterogeneous native
-  batching uses a bounded deterministic strategy comparison; it is not
-  described as a globally optimal solution to the unrelated-machine batching
-  problem. For `N` children, `D` devices, and `S` declared sizes, the strategy
-  bound is `O(N × D × S²)` time and `O(N + D × S)` retained memory; production
-  singleton declarations reduce this to `O(N × D)` time and `O(N + D)` memory.
+  for first-use cold/warm setup and later warm reloads, and compares real
+  initial-wave device cardinality before predicted parent makespan, sum of
+  child completion times, setup duplication, and the stable assignment tie.
+- Homogeneous singleton fleets use an exact activation and balanced
+  completion-stream allocation for arbitrary `N` and `D`. Heterogeneous
+  singleton inputs at most 8 devices and arbitrary child count exhaust every
+  activation subset as compact arithmetic objectives before materializing the
+  winner once, including aggregate host-RAM coupling. Larger
+  heterogeneous/native-batch inputs use at most 64
+  deterministic capability-derived size-cap strategies. General
+  heterogeneous native batching is an NP-hard unrelated-machine batching
+  problem; the bounded path does not claim global optimality.
+- Every returned plan exposes `ExactHomogeneousSingleton`, `ExactSmall`, or
+  `BoundedHeuristic`, together with compact states scored and full
+  materialization passes. Hard capacity, VRAM, host-RAM, and missing-estimate
+  infeasibility remains typed separately from optimizer truncation, and host
+  byte arithmetic overflow is distinct from timing overflow. For `N`
+  children, `D` devices, and `S` declared sizes, the bounded strategy path is
+  `O(N × D × min(S,64) × S)` time and `O(N + D × S)` retained memory;
+  production singleton declarations use `O(N × D)` time and `O(N + D)`
+  memory, including the 100003-child/64-device stress case.
 - The output carries exact contiguous child coverage and the existing
   `PlannedBatchPartition` projection needed by future `BatchChild` work.
   Production raw batches remain unrouted and `server_batch` remains false.

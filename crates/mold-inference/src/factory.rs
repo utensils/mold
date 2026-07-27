@@ -579,7 +579,7 @@ pub fn create_engine_with_frozen_config(
                 )))
             }
         }
-        "ltx2" | "ltx-2" => {
+        "ltx2" | "ltx-2" | "ltx2.3" => {
             if is_ltx2_native_single_file(&paths) {
                 // Civitai single-file dispatch. Combined checkpoints use
                 // `vae.*`; transformer-only checkpoints use `paths.vae`.
@@ -644,6 +644,35 @@ mod tests {
             text_encoder_files: vec![],
             text_tokenizer: None,
             decoder: None,
+        }
+    }
+
+    #[test]
+    fn every_advertised_production_family_and_alias_constructs_through_frozen_factory() {
+        for entry in crate::production_batch_capabilities() {
+            for family in std::iter::once(entry.family).chain(entry.aliases.iter().copied()) {
+                let mut frozen = FrozenEngineConfig::resolve(family, &Config::default());
+                frozen.family = family.to_string();
+                let engine = create_engine_with_frozen_config(
+                    family.to_string(),
+                    dummy_paths(),
+                    &frozen,
+                    LoadStrategy::Sequential,
+                    0,
+                    false,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "advertised production family/alias {family:?} did not construct: {error}"
+                    )
+                });
+                assert_eq!(
+                    engine.batch_execution_capability(),
+                    entry.execution,
+                    "{family}"
+                );
+            }
         }
     }
 

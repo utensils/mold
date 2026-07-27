@@ -15,8 +15,9 @@ mod types;
 
 pub use batch::{
     AdaptiveBatchPartition, AdaptiveBatchPlan, BatchDeviceProfile, BatchInfeasibilityReason,
-    BatchPartitionError, BatchPartitionPlanner, BatchPartitionRequest, BatchSetupDisposition,
-    BatchSizeEstimate, NativeBatchSizes,
+    BatchOptimization, BatchPartitionError, BatchPartitionPlanner, BatchPartitionRequest,
+    BatchSetupDisposition, BatchSizeEstimate, NativeBatchSizes, BOUNDED_HEURISTIC_STRATEGY_LIMIT,
+    EXACT_SMALL_DEVICE_LIMIT,
 };
 pub use eligibility::EligibilityIndex;
 pub use estimates::{

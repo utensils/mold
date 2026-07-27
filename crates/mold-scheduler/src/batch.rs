@@ -110,6 +110,32 @@ pub struct AdaptiveBatchPlan {
     pub predicted_setup_ms: u128,
     pub predicted_peak_host_ram_bytes: u64,
     pub devices_used: usize,
+    /// Whether the returned objective is proven exact within the named
+    /// production-safe class or came from the deterministic bounded fallback.
+    pub optimization: BatchOptimization,
+    /// Compact activation/allocation objectives scored by the selected solver.
+    pub optimizer_states_evaluated: usize,
+    /// Full `AdaptiveBatchPartition` materialization passes. Exact subset
+    /// search scores summaries and materializes only the winner.
+    pub materialization_passes: u8,
+}
+
+/// Exact exhaustive activation/allocation is deliberately bounded. Larger
+/// heterogeneous/native-batch instances use the observable bounded heuristic.
+pub const EXACT_SMALL_DEVICE_LIMIT: usize = 8;
+pub const BOUNDED_HEURISTIC_STRATEGY_LIMIT: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchOptimization {
+    /// Exact for identical singleton completion streams at arbitrary parent
+    /// size and device count.
+    ExactHomogeneousSingleton,
+    /// Exact exhaustive activation plus completion-stream allocation within
+    /// [`EXACT_SMALL_DEVICE_LIMIT`] with arbitrary positive child count.
+    ExactSmall,
+    /// Deterministic bounded strategy comparison for the general NP-hard
+    /// heterogeneous/native-batching problem.
+    BoundedHeuristic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -142,6 +168,7 @@ pub enum BatchPartitionError {
         size: u32,
     },
     TimingOverflow,
+    HostMemoryOverflow,
     PartitionCountOverflow,
     Infeasible {
         remaining_children: u32,
@@ -184,6 +211,7 @@ impl fmt::Display for BatchPartitionError {
                 "batch candidate device {device_id} estimates undeclared native size {size}"
             ),
             Self::TimingOverflow => formatter.write_str("predicted batch timing overflowed"),
+            Self::HostMemoryOverflow => formatter.write_str("predicted host memory overflowed"),
             Self::PartitionCountOverflow => {
                 formatter.write_str("batch partition count exceeds the u32 projection")
             }
@@ -216,19 +244,38 @@ pub struct BatchPartitionPlanner;
 impl BatchPartitionPlanner {
     pub fn plan(request: &BatchPartitionRequest) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
         let prepared = PreparedRequest::new(request)?;
+        if prepared.native_sizes.as_slice() == [1] {
+            return plan_singleton(&prepared);
+        }
         let mut best: Option<AdaptiveBatchPlan> = None;
         let mut infeasible_reasons = BTreeSet::new();
         let mut minimum_remaining = request.child_count;
-        let strategy_caps = prepared
+        let all_strategy_caps = prepared
             .native_sizes
             .as_slice()
             .iter()
             .map(|size| (*size).min(request.child_count))
             .collect::<BTreeSet<_>>();
+        let strategy_caps = if all_strategy_caps.len() <= BOUNDED_HEURISTIC_STRATEGY_LIMIT {
+            all_strategy_caps
+        } else {
+            let mut bounded = BTreeSet::from([1]);
+            bounded.extend(
+                all_strategy_caps
+                    .iter()
+                    .rev()
+                    .take(BOUNDED_HEURISTIC_STRATEGY_LIMIT - 1)
+                    .copied(),
+            );
+            bounded
+        };
+        let strategies_evaluated = strategy_caps.len();
+        let mut successful_materializations = 0u8;
 
         for cap in strategy_caps {
             match plan_with_size_cap(&prepared, cap) {
                 Ok(candidate) => {
+                    successful_materializations += 1;
                     if best
                         .as_ref()
                         .is_none_or(|current| plan_cmp(&candidate, current).is_lt())
@@ -247,7 +294,12 @@ impl BatchPartitionPlanner {
             }
         }
 
-        best.ok_or(BatchPartitionError::Infeasible {
+        best.map(|mut plan| {
+            plan.optimizer_states_evaluated = strategies_evaluated;
+            plan.materialization_passes = successful_materializations;
+            plan
+        })
+        .ok_or(BatchPartitionError::Infeasible {
             remaining_children: minimum_remaining,
             reasons: infeasible_reasons,
         })
@@ -336,6 +388,520 @@ struct Candidate<'a> {
     setup_ms: u64,
     setup_disposition: BatchSetupDisposition,
     host_delta_bytes: u64,
+    activates_device: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SingletonDevice {
+    device_index: usize,
+    estimate: BatchSizeEstimate,
+    activation_host_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SingletonAllocation {
+    counts: Vec<u32>,
+    makespan_ms: u128,
+    sum_completion_ms: u128,
+    setup_ms: u128,
+}
+
+fn plan_singleton(
+    prepared: &PreparedRequest<'_>,
+) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
+    let mut reasons = BTreeSet::new();
+    let mut viable = Vec::new();
+    for (device_index, device) in prepared.devices.iter().enumerate() {
+        if device.profile.partition_capacity < 1 {
+            reasons.insert(BatchInfeasibilityReason::DeviceCapacity);
+            continue;
+        }
+        let Some(estimate) = device.estimates.get(&1).copied() else {
+            reasons.insert(BatchInfeasibilityReason::MissingSizeEstimate);
+            continue;
+        };
+        if estimate.predicted_vram_bytes > device.profile.available_vram_bytes {
+            reasons.insert(BatchInfeasibilityReason::InsufficientVram);
+            continue;
+        }
+        let activation_host_bytes = device
+            .profile
+            .setup_host_ram_bytes
+            .checked_add(estimate.predicted_host_ram_bytes)
+            .ok_or(BatchPartitionError::HostMemoryOverflow)?;
+        viable.push(SingletonDevice {
+            device_index,
+            estimate,
+            activation_host_bytes,
+        });
+    }
+    if viable.is_empty() {
+        return Err(BatchPartitionError::Infeasible {
+            remaining_children: prepared.request.child_count,
+            reasons,
+        });
+    }
+
+    let homogeneous = viable.windows(2).all(|pair| {
+        singleton_profile_key(prepared, pair[0]) == singleton_profile_key(prepared, pair[1])
+    });
+    if homogeneous {
+        let per_device_host = viable[0].activation_host_bytes;
+        let host_limit = prepared
+            .request
+            .host_headroom_bytes
+            .checked_div(per_device_host)
+            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+            .unwrap_or(viable.len());
+        let cardinality = viable
+            .len()
+            .min(prepared.request.child_count as usize)
+            .min(host_limit);
+        if cardinality == 0 {
+            return Err(BatchPartitionError::Infeasible {
+                remaining_children: prepared.request.child_count,
+                reasons: BTreeSet::from([BatchInfeasibilityReason::InsufficientHostRam]),
+            });
+        }
+        return singleton_plan_for_devices(
+            prepared,
+            &viable[..cardinality],
+            BatchOptimization::ExactHomogeneousSingleton,
+        );
+    }
+
+    if viable.len() <= EXACT_SMALL_DEVICE_LIMIT {
+        return exact_small_singleton_plan(prepared, &viable);
+    }
+
+    // Cardinality is still exact for singleton activation: all devices have
+    // equal value (one initial-wave lane), so taking activation costs in
+    // ascending order proves the largest feasible count. Which equal-count
+    // subset best optimizes later timing is the bounded, non-optimal part.
+    viable.sort_by(|left, right| {
+        left.activation_host_bytes
+            .cmp(&right.activation_host_bytes)
+            .then_with(|| {
+                first_singleton_finish(prepared, *left)
+                    .cmp(&first_singleton_finish(prepared, *right))
+            })
+            .then_with(|| {
+                prepared.devices[left.device_index]
+                    .profile
+                    .device_id
+                    .cmp(&prepared.devices[right.device_index].profile.device_id)
+            })
+    });
+    let mut selected = Vec::new();
+    let mut host = 0u64;
+    for candidate in viable {
+        if selected.len() >= prepared.request.child_count as usize {
+            break;
+        }
+        let next = host
+            .checked_add(candidate.activation_host_bytes)
+            .ok_or(BatchPartitionError::HostMemoryOverflow)?;
+        if next <= prepared.request.host_headroom_bytes {
+            selected.push(candidate);
+            host = next;
+        }
+    }
+    if selected.is_empty() {
+        return Err(BatchPartitionError::Infeasible {
+            remaining_children: prepared.request.child_count,
+            reasons: BTreeSet::from([BatchInfeasibilityReason::InsufficientHostRam]),
+        });
+    }
+    selected.sort_by_key(|candidate| candidate.device_index);
+    singleton_plan_for_devices(prepared, &selected, BatchOptimization::BoundedHeuristic)
+}
+
+fn singleton_profile_key(
+    prepared: &PreparedRequest<'_>,
+    candidate: SingletonDevice,
+) -> (u64, bool, u64, u64, u64, BatchSizeEstimate) {
+    let profile = prepared.devices[candidate.device_index].profile;
+    (
+        profile.available_at_ms,
+        profile.initially_warm,
+        profile.cold_setup_ms,
+        profile.warm_setup_ms,
+        candidate.activation_host_bytes,
+        candidate.estimate,
+    )
+}
+
+fn first_singleton_finish(prepared: &PreparedRequest<'_>, candidate: SingletonDevice) -> u64 {
+    let profile = prepared.devices[candidate.device_index].profile;
+    let setup = if profile.initially_warm {
+        profile.warm_setup_ms
+    } else {
+        profile.cold_setup_ms
+    };
+    profile
+        .available_at_ms
+        .max(prepared.request.now_ms)
+        .saturating_add(setup)
+        .saturating_add(candidate.estimate.predicted_run_ms)
+}
+
+fn exact_small_singleton_plan(
+    prepared: &PreparedRequest<'_>,
+    viable: &[SingletonDevice],
+) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
+    let mut best: Option<(Vec<SingletonDevice>, SingletonAllocation)> = None;
+    let mut states_evaluated = 0usize;
+    let subset_count = 1usize << viable.len();
+    for mask in 1..subset_count {
+        let cardinality = mask.count_ones() as usize;
+        if cardinality > prepared.request.child_count as usize {
+            continue;
+        }
+        let mut host = 0u64;
+        let mut selected = Vec::with_capacity(cardinality);
+        for (index, candidate) in viable.iter().copied().enumerate() {
+            if mask & (1usize << index) == 0 {
+                continue;
+            }
+            host = host
+                .checked_add(candidate.activation_host_bytes)
+                .ok_or(BatchPartitionError::HostMemoryOverflow)?;
+            selected.push(candidate);
+        }
+        if host > prepared.request.host_headroom_bytes {
+            continue;
+        }
+        states_evaluated += 1;
+        let allocation = singleton_allocation(prepared, &selected)?;
+        if best.as_ref().is_none_or(|(current_devices, current)| {
+            singleton_allocation_cmp(prepared, &selected, &allocation, current_devices, current)
+                .is_lt()
+        }) {
+            best = Some((selected, allocation));
+        }
+    }
+    let (selected, allocation) = best.ok_or(BatchPartitionError::Infeasible {
+        remaining_children: prepared.request.child_count,
+        reasons: BTreeSet::from([BatchInfeasibilityReason::InsufficientHostRam]),
+    })?;
+    singleton_plan_for_allocation(
+        prepared,
+        &selected,
+        &allocation,
+        BatchOptimization::ExactSmall,
+        states_evaluated,
+    )
+}
+
+fn singleton_plan_for_devices(
+    prepared: &PreparedRequest<'_>,
+    selected: &[SingletonDevice],
+    optimization: BatchOptimization,
+) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
+    let allocation = singleton_allocation(prepared, selected)?;
+    singleton_plan_for_allocation(prepared, selected, &allocation, optimization, 1)
+}
+
+fn singleton_allocation(
+    prepared: &PreparedRequest<'_>,
+    selected: &[SingletonDevice],
+) -> Result<SingletonAllocation, BatchPartitionError> {
+    let child_count = prepared.request.child_count;
+    let mandatory =
+        u32::try_from(selected.len()).map_err(|_| BatchPartitionError::PartitionCountOverflow)?;
+    let additional = child_count
+        .checked_sub(mandatory)
+        .ok_or(BatchPartitionError::PartitionCountOverflow)?;
+    let streams = selected
+        .iter()
+        .map(|candidate| {
+            let profile = prepared.devices[candidate.device_index].profile;
+            let first_setup = if profile.initially_warm {
+                profile.warm_setup_ms
+            } else {
+                profile.cold_setup_ms
+            };
+            (
+                u128::from(profile.available_at_ms.max(prepared.request.now_ms))
+                    + u128::from(first_setup)
+                    + u128::from(candidate.estimate.predicted_run_ms),
+                u128::from(profile.warm_setup_ms) + u128::from(candidate.estimate.predicted_run_ms),
+                first_setup,
+                profile.warm_setup_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut counts = vec![1u32; selected.len()];
+
+    if additional > 0 {
+        let additional_count_at = |stream: (u128, u128, u64, u64), limit: u128| {
+            let (first, period, _, _) = stream;
+            if period == 0 {
+                return u32::from(limit >= first).saturating_mul(additional);
+            }
+            let second = first + period;
+            if limit < second {
+                0
+            } else {
+                u32::try_from(1 + ((limit - second) / period).min(u128::from(additional - 1)))
+                    .unwrap_or(additional)
+            }
+        };
+        let mut low = 0u128;
+        let mut high = streams
+            .iter()
+            .map(|&(first, period, _, _)| first + u128::from(additional) * period)
+            .min()
+            .unwrap_or(0);
+        while low < high {
+            let middle = (low + high) / 2;
+            let covered = streams
+                .iter()
+                .copied()
+                .map(|stream| additional_count_at(stream, middle))
+                .fold(0u32, u32::saturating_add);
+            if covered >= additional {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        let threshold = low;
+        let before_limit = threshold.checked_sub(1);
+        let mut assigned = 0u32;
+        for (index, stream) in streams.iter().copied().enumerate() {
+            let before = before_limit
+                .map(|limit| additional_count_at(stream, limit))
+                .unwrap_or(0)
+                .min(additional - assigned);
+            counts[index] += before;
+            assigned += before;
+            if assigned == additional {
+                break;
+            }
+        }
+        for (index, stream) in streams.iter().copied().enumerate() {
+            if assigned == additional {
+                break;
+            }
+            let through = additional_count_at(stream, threshold);
+            let before = before_limit
+                .map(|limit| additional_count_at(stream, limit))
+                .unwrap_or(0);
+            let ties = through.saturating_sub(before);
+            let take = ties.min(additional - assigned);
+            counts[index] += take;
+            assigned += take;
+        }
+        debug_assert_eq!(assigned, additional);
+    }
+
+    let mut makespan_ms = 0u128;
+    let mut sum_completion_ms = 0u128;
+    let mut setup_ms = 0u128;
+    for ((first, period, first_setup, warm_setup), &count) in streams.iter().copied().zip(&counts) {
+        let tail = u128::from(count - 1);
+        let finish = first + tail * period;
+        makespan_ms = makespan_ms.max(finish);
+        sum_completion_ms = sum_completion_ms
+            .checked_add(u128::from(count) * first + period * tail * u128::from(count) / 2)
+            .ok_or(BatchPartitionError::TimingOverflow)?;
+        setup_ms = setup_ms
+            .checked_add(u128::from(first_setup) + tail * u128::from(warm_setup))
+            .ok_or(BatchPartitionError::TimingOverflow)?;
+    }
+    let now_total = u128::from(prepared.request.now_ms) * u128::from(child_count);
+    Ok(SingletonAllocation {
+        counts,
+        makespan_ms: makespan_ms
+            .checked_sub(u128::from(prepared.request.now_ms))
+            .ok_or(BatchPartitionError::TimingOverflow)?,
+        sum_completion_ms: sum_completion_ms
+            .checked_sub(now_total)
+            .ok_or(BatchPartitionError::TimingOverflow)?,
+        setup_ms,
+    })
+}
+
+fn singleton_allocation_cmp(
+    prepared: &PreparedRequest<'_>,
+    left_devices: &[SingletonDevice],
+    left: &SingletonAllocation,
+    right_devices: &[SingletonDevice],
+    right: &SingletonAllocation,
+) -> Ordering {
+    right_devices
+        .len()
+        .cmp(&left_devices.len())
+        .then_with(|| left.makespan_ms.cmp(&right.makespan_ms))
+        .then_with(|| left.sum_completion_ms.cmp(&right.sum_completion_ms))
+        .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+        .then_with(|| {
+            left_devices
+                .iter()
+                .zip(&left.counts)
+                .map(|(candidate, count)| {
+                    (
+                        &prepared.devices[candidate.device_index].profile.device_id,
+                        count,
+                    )
+                })
+                .cmp(
+                    right_devices
+                        .iter()
+                        .zip(&right.counts)
+                        .map(|(candidate, count)| {
+                            (
+                                &prepared.devices[candidate.device_index].profile.device_id,
+                                count,
+                            )
+                        }),
+                )
+        })
+}
+
+fn singleton_plan_for_allocation(
+    prepared: &PreparedRequest<'_>,
+    selected: &[SingletonDevice],
+    allocation: &SingletonAllocation,
+    optimization: BatchOptimization,
+    optimizer_states_evaluated: usize,
+) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
+    let request = prepared.request;
+    let mut schedules = selected
+        .iter()
+        .map(|candidate| DeviceSchedule {
+            next_available_ms: prepared.devices[candidate.device_index]
+                .profile
+                .available_at_ms
+                .max(request.now_ms),
+            used: false,
+            peak_partition_host_ram_bytes: 0,
+        })
+        .collect::<Vec<_>>();
+    let mut partitions = Vec::with_capacity(request.child_count as usize);
+    let mut predicted_setup_ms = 0u128;
+    let mut remaining_counts = allocation.counts.clone();
+
+    // Initial-wave work conservation is a hard lexicographic objective: every
+    // selected device receives one real partition before any receives a second.
+    for (selected_index, remaining) in remaining_counts.iter_mut().enumerate() {
+        push_singleton_partition(
+            prepared,
+            selected,
+            &mut schedules,
+            &mut partitions,
+            &mut predicted_setup_ms,
+            selected_index,
+        )?;
+        *remaining -= 1;
+    }
+    while partitions.len() < request.child_count as usize {
+        let mut best_index: Option<usize> = None;
+        let mut best_finish = u64::MAX;
+        for (selected_index, candidate) in selected.iter().enumerate() {
+            if remaining_counts[selected_index] == 0 {
+                continue;
+            }
+            let profile = prepared.devices[candidate.device_index].profile;
+            let finish = schedules[selected_index]
+                .next_available_ms
+                .checked_add(profile.warm_setup_ms)
+                .and_then(|time| time.checked_add(candidate.estimate.predicted_run_ms))
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            if finish < best_finish
+                || (finish == best_finish
+                    && best_index.is_none_or(|current| {
+                        profile.device_id
+                            < prepared.devices[selected[current].device_index]
+                                .profile
+                                .device_id
+                    }))
+            {
+                best_finish = finish;
+                best_index = Some(selected_index);
+            }
+        }
+        let best_index = best_index.ok_or(BatchPartitionError::PartitionCountOverflow)?;
+        push_singleton_partition(
+            prepared,
+            selected,
+            &mut schedules,
+            &mut partitions,
+            &mut predicted_setup_ms,
+            best_index,
+        )?;
+        remaining_counts[best_index] -= 1;
+    }
+
+    let plan = finalize_plan(
+        request,
+        partitions,
+        PlanSummaryInput {
+            predicted_setup_ms,
+            predicted_peak_host_ram_bytes: selected.iter().try_fold(0u64, |total, candidate| {
+                total
+                    .checked_add(candidate.activation_host_bytes)
+                    .ok_or(BatchPartitionError::HostMemoryOverflow)
+            })?,
+            devices_used: selected.len(),
+            optimization,
+            optimizer_states_evaluated,
+            materialization_passes: 1,
+        },
+    )?;
+    debug_assert_eq!(
+        u128::from(plan.predicted_parent_makespan_ms),
+        allocation.makespan_ms
+    );
+    debug_assert_eq!(
+        plan.predicted_sum_completion_ms,
+        allocation.sum_completion_ms
+    );
+    debug_assert_eq!(plan.predicted_setup_ms, allocation.setup_ms);
+    Ok(plan)
+}
+
+fn push_singleton_partition(
+    prepared: &PreparedRequest<'_>,
+    selected: &[SingletonDevice],
+    schedules: &mut [DeviceSchedule],
+    partitions: &mut Vec<AdaptiveBatchPartition>,
+    predicted_setup_ms: &mut u128,
+    selected_index: usize,
+) -> Result<(), BatchPartitionError> {
+    let candidate = selected[selected_index];
+    let profile = prepared.devices[candidate.device_index].profile;
+    let schedule = &mut schedules[selected_index];
+    let (setup_disposition, setup_ms) = if !schedule.used && !profile.initially_warm {
+        (BatchSetupDisposition::Cold, profile.cold_setup_ms)
+    } else {
+        (BatchSetupDisposition::Warm, profile.warm_setup_ms)
+    };
+    let start_ms = schedule.next_available_ms;
+    let finish_ms = start_ms
+        .checked_add(setup_ms)
+        .and_then(|time| time.checked_add(candidate.estimate.predicted_run_ms))
+        .ok_or(BatchPartitionError::TimingOverflow)?;
+    schedule.next_available_ms = finish_ms;
+    schedule.used = true;
+    *predicted_setup_ms = predicted_setup_ms
+        .checked_add(u128::from(setup_ms))
+        .ok_or(BatchPartitionError::TimingOverflow)?;
+    partitions.push(AdaptiveBatchPartition {
+        partition_index: 0,
+        partition_count: 0,
+        child_start: u32::try_from(partitions.len())
+            .map_err(|_| BatchPartitionError::PartitionCountOverflow)?,
+        size: 1,
+        device_id: profile.device_id.clone(),
+        estimated_start_ms: start_ms,
+        estimated_finish_ms: finish_ms,
+        setup_disposition,
+        predicted_vram_bytes: candidate.estimate.predicted_vram_bytes,
+        predicted_host_ram_bytes: candidate.estimate.predicted_host_ram_bytes,
+    });
+    Ok(())
 }
 
 fn plan_with_size_cap(
@@ -390,7 +956,7 @@ fn plan_with_size_cap(
                         .profile
                         .setup_host_ram_bytes
                         .checked_add(estimate.predicted_host_ram_bytes)
-                        .ok_or(BatchPartitionError::TimingOverflow)?
+                        .ok_or(BatchPartitionError::HostMemoryOverflow)?
                 };
                 if host_reserved
                     .checked_add(host_delta_bytes)
@@ -418,6 +984,7 @@ fn plan_with_size_cap(
                     setup_ms,
                     setup_disposition,
                     host_delta_bytes,
+                    activates_device: !schedule.used,
                 });
                 break;
             }
@@ -442,7 +1009,7 @@ fn plan_with_size_cap(
         let schedule = &mut schedules[chosen.device_index];
         host_reserved = host_reserved
             .checked_add(chosen.host_delta_bytes)
-            .ok_or(BatchPartitionError::TimingOverflow)?;
+            .ok_or(BatchPartitionError::HostMemoryOverflow)?;
         schedule.peak_partition_host_ram_bytes = schedule
             .peak_partition_host_ram_bytes
             .max(chosen.estimate.predicted_host_ram_bytes);
@@ -466,6 +1033,81 @@ fn plan_with_size_cap(
             .ok_or(BatchPartitionError::PartitionCountOverflow)?;
     }
 
+    finalize_plan(
+        request,
+        partitions,
+        PlanSummaryInput {
+            predicted_setup_ms,
+            predicted_peak_host_ram_bytes: host_reserved,
+            devices_used: schedules.iter().filter(|schedule| schedule.used).count(),
+            optimization: BatchOptimization::BoundedHeuristic,
+            optimizer_states_evaluated: 1,
+            materialization_passes: 1,
+        },
+    )
+}
+
+fn candidate_cmp(
+    left: &Candidate<'_>,
+    right: &Candidate<'_>,
+    prepared: &PreparedRequest<'_>,
+) -> Ordering {
+    right
+        .activates_device
+        .cmp(&left.activates_device)
+        .then_with(|| {
+            left.finish_ms
+                .cmp(&right.finish_ms)
+                .then_with(|| left.start_ms.cmp(&right.start_ms))
+                .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+                .then_with(|| right.estimate.size.cmp(&left.estimate.size))
+                .then_with(|| {
+                    prepared.devices[left.device_index]
+                        .profile
+                        .device_id
+                        .cmp(&prepared.devices[right.device_index].profile.device_id)
+                })
+        })
+}
+
+fn plan_cmp(left: &AdaptiveBatchPlan, right: &AdaptiveBatchPlan) -> Ordering {
+    right.devices_used.cmp(&left.devices_used).then_with(|| {
+        left.predicted_parent_makespan_ms
+            .cmp(&right.predicted_parent_makespan_ms)
+            .then_with(|| {
+                left.predicted_sum_completion_ms
+                    .cmp(&right.predicted_sum_completion_ms)
+            })
+            .then_with(|| left.predicted_setup_ms.cmp(&right.predicted_setup_ms))
+            .then_with(|| left.partitions.len().cmp(&right.partitions.len()))
+            .then_with(|| {
+                left.partitions
+                    .iter()
+                    .map(|partition| (&partition.device_id, partition.size))
+                    .cmp(
+                        right
+                            .partitions
+                            .iter()
+                            .map(|partition| (&partition.device_id, partition.size)),
+                    )
+            })
+    })
+}
+
+struct PlanSummaryInput {
+    predicted_setup_ms: u128,
+    predicted_peak_host_ram_bytes: u64,
+    devices_used: usize,
+    optimization: BatchOptimization,
+    optimizer_states_evaluated: usize,
+    materialization_passes: u8,
+}
+
+fn finalize_plan(
+    request: &BatchPartitionRequest,
+    mut partitions: Vec<AdaptiveBatchPartition>,
+    summary: PlanSummaryInput,
+) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
     let partition_count =
         u32::try_from(partitions.len()).map_err(|_| BatchPartitionError::PartitionCountOverflow)?;
     for (index, partition) in partitions.iter_mut().enumerate() {
@@ -489,7 +1131,6 @@ fn plan_with_size_cap(
             .checked_add(u128::from(relative_finish) * u128::from(partition.size))
             .ok_or(BatchPartitionError::TimingOverflow)
     })?;
-
     Ok(AdaptiveBatchPlan {
         child_count: request.child_count,
         partitions,
@@ -497,48 +1138,11 @@ fn plan_with_size_cap(
             .checked_sub(request.now_ms)
             .ok_or(BatchPartitionError::TimingOverflow)?,
         predicted_sum_completion_ms,
-        predicted_setup_ms,
-        predicted_peak_host_ram_bytes: host_reserved,
-        devices_used: schedules.iter().filter(|schedule| schedule.used).count(),
+        predicted_setup_ms: summary.predicted_setup_ms,
+        predicted_peak_host_ram_bytes: summary.predicted_peak_host_ram_bytes,
+        devices_used: summary.devices_used,
+        optimization: summary.optimization,
+        optimizer_states_evaluated: summary.optimizer_states_evaluated,
+        materialization_passes: summary.materialization_passes,
     })
-}
-
-fn candidate_cmp(
-    left: &Candidate<'_>,
-    right: &Candidate<'_>,
-    prepared: &PreparedRequest<'_>,
-) -> Ordering {
-    left.finish_ms
-        .cmp(&right.finish_ms)
-        .then_with(|| left.start_ms.cmp(&right.start_ms))
-        .then_with(|| left.setup_ms.cmp(&right.setup_ms))
-        .then_with(|| right.estimate.size.cmp(&left.estimate.size))
-        .then_with(|| {
-            prepared.devices[left.device_index]
-                .profile
-                .device_id
-                .cmp(&prepared.devices[right.device_index].profile.device_id)
-        })
-}
-
-fn plan_cmp(left: &AdaptiveBatchPlan, right: &AdaptiveBatchPlan) -> Ordering {
-    left.predicted_parent_makespan_ms
-        .cmp(&right.predicted_parent_makespan_ms)
-        .then_with(|| {
-            left.predicted_sum_completion_ms
-                .cmp(&right.predicted_sum_completion_ms)
-        })
-        .then_with(|| left.predicted_setup_ms.cmp(&right.predicted_setup_ms))
-        .then_with(|| left.partitions.len().cmp(&right.partitions.len()))
-        .then_with(|| {
-            left.partitions
-                .iter()
-                .map(|partition| (&partition.device_id, partition.size))
-                .cmp(
-                    right
-                        .partitions
-                        .iter()
-                        .map(|partition| (&partition.device_id, partition.size)),
-                )
-        })
 }
