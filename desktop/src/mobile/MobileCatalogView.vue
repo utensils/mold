@@ -100,6 +100,12 @@ const kind = ref<CatalogKindFilter | "">("");
 const sort = ref<CatalogSortOption>("downloads");
 const includeNsfw = ref(false);
 const families = ref<string[]>([]);
+/** Families seen in any catalog page or host inventory this session. Backs the
+ *  Family filter whenever the taxonomy endpoint could not be read (an offline
+ *  host, an API key still coming out of the Keychain). Deriving the list from
+ *  the rows currently on screen would collapse it to the family already
+ *  filtered on, stranding the picker on that one choice. */
+const observedFamilies = ref<string[]>([]);
 const entries = ref<CatalogEntry[]>([]);
 const page = ref(1);
 const hasMore = ref(false);
@@ -173,6 +179,25 @@ const installedEntries = computed<MobileCatalogEntry[]>(() => {
     hostIds,
     hostLabels,
   }));
+});
+
+function recordFamilies(values: Iterable<string | null | undefined>): void {
+  const seen = new Set(observedFamilies.value);
+  const before = seen.size;
+  for (const value of values) {
+    const name = value?.trim();
+    if (name) seen.add(name);
+  }
+  if (seen.size !== before) observedFamilies.value = [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+/** The host taxonomy when it could be read, the observed families otherwise.
+ *  The active family always stays listed so a reload can never silently blank
+ *  the control (and with it the filter it is still applying). */
+const familyOptions = computed(() => {
+  const options = families.value.length > 0 ? [...families.value] : [...observedFamilies.value];
+  if (family.value && !options.includes(family.value)) options.push(family.value);
+  return options;
 });
 
 const installedNames = computed(() => new Set(installedEntries.value.map((entry) => entry.name)));
@@ -522,6 +547,7 @@ async function runSearch(reset: boolean): Promise<void> {
       );
       if (epoch !== searchEpoch) return;
       entries.value = [...entries.value, ...response.entries];
+      recordFamilies(response.entries.map((row) => row.family));
       // Exhaustion comes from the wire `total`, not page fullness: under
       // source=All the server splits the page budget across sources, so a
       // merged page is legitimately short whenever one source has no rows
@@ -596,8 +622,10 @@ watch(loading, (isLoading) => {
 async function loadFamilies(): Promise<void> {
   const target = selectedTarget.value;
   const epoch = ++familyEpoch;
-  families.value = [];
-  if (!target) return;
+  if (!target) {
+    families.value = [];
+    return;
+  }
   try {
     // The iPhone shell has no desktop `secret_get` command. Remote catalog
     // hosts use their own configured HF/Civitai credentials; only the Mold
@@ -605,7 +633,8 @@ async function loadFamilies(): Promise<void> {
     const result = await fetchCatalogFamilies(false, target);
     if (epoch === familyEpoch) families.value = result;
   } catch {
-    // Family filtering is optional; catalog search remains fully usable.
+    // Keep the last taxonomy that did load — a failed reload must never empty
+    // the filter. `familyOptions` covers the never-loaded case.
   }
 }
 
@@ -617,7 +646,10 @@ async function refreshModels(): Promise<void> {
       try {
         const response = await apiFetchTo(mobileHostTarget(host), "/api/models");
         const result = (await response.json()) as ModelEntry[];
-        if (epoch === modelsEpoch) next[host.id] = result;
+        if (epoch === modelsEpoch) {
+          next[host.id] = result;
+          recordFamilies(result.map((model) => model.family));
+        }
       } catch {
         // One unavailable host must not blank models from the other hosts.
       }
@@ -959,16 +991,34 @@ watch(mediaType, () => {
   if (!combinedEntries.value.some(mediaMatches) && hasMore.value) loadMore();
 });
 
-watch(
-  () => props.selectedHostId,
-  () => {
-    if (!mounted) return;
+/** Everything about the browsed host that decides what the catalog can read:
+ *  which host, where it answers, the key it answers to, and whether the last
+ *  probe reached it. */
+const catalogRoute = computed(() => {
+  const host = selectedHost.value;
+  return host ? JSON.stringify([host.id, host.baseUrl, host.apiKey, host.online]) : "";
+});
+
+let routedHostId = props.selectedHostId;
+
+// A host that was unreachable — or whose API key was still coming out of the
+// Keychain — when this view mounted answers nothing, and neither the taxonomy
+// nor a failed search is retried by the debounce. Re-drive them off the route
+// so the Family filter and the grid recover on their own once the host does.
+watch(catalogRoute, () => {
+  if (!mounted) return;
+  const switched = props.selectedHostId !== routedHostId;
+  routedHostId = props.selectedHostId;
+  if (switched) {
     closeDetail();
     family.value = "";
-    void loadFamilies();
-    void runSearch(true);
-  },
-);
+    families.value = [];
+  }
+  void loadFamilies();
+  // A same-host route change keeps results the user may be scrolled into;
+  // only a run that produced nothing usable is worth restarting.
+  if (switched || error.value || entries.value.length === 0) void runSearch(true);
+});
 
 watch(
   () =>
@@ -1173,9 +1223,9 @@ onBeforeUnmount(() => {
       <div v-if="source !== 'installed'" class="mobile-catalog-filters">
         <label>
           <span>Family</span>
-          <select v-model="family">
+          <select v-model="family" data-test="mobile-catalog-family">
             <option value="">All families</option>
-            <option v-for="option in families" :key="option" :value="option">
+            <option v-for="option in familyOptions" :key="option" :value="option">
               {{ option }}
             </option>
           </select>
