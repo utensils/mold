@@ -1611,6 +1611,18 @@ internal chain stages, utility work, and future batch children; legacy
 - planned batch partitions;
 - activity phase.
 
+Phase D initially publishes `plan_version`, `state_version`, and the
+`work_items` identity/state/parent/stage projection. The richer optimizer,
+lane, timing, and blocked-reason fields above remain additive follow-up
+fields; clients must continue to tolerate their absence. Legacy queue PATCH
+addresses only `entries` and never reorders an internal work item.
+
+Phase D integration depends on Phase B's plan-aware preload contract applying
+the materialized component placement before `InferenceEngine::load()`.
+Carrying only load strategy and block-offload mode is insufficient: request
+placement applied later by `generate()` cannot retroactively move components
+that eager load already made resident.
+
 Preserve legacy `state`, `position`, `gpu`, and `target_gpu`. Preserve
 the current omission of `target_gpu` once running for old clients; do not
 change it to explicit JSON `null`. Retain the new stable pin field separately
@@ -2004,6 +2016,11 @@ Gates:
 
 Deliver:
 
+- one resumable actor per durable chain parent, with no fixed device-count cap;
+- atomically persisted `execution-authority.json` using schema
+  `mold.chain-execution.v1`, legal states `Dormant`, `Ready`, `Submitted`,
+  `Leased`, `Checkpointing`, `Finalizing`, and `Settled`, and work identity
+  `(parent_id, attempt_generation, stage_index, work_id)`;
 - chain stages under leases;
 - multiple concurrent chains;
 - boundary release and sticky affinity;

@@ -833,6 +833,9 @@ impl Ltx2Engine {
         carry: Option<&ChainTail>,
         motion_tail_pixel_frames: u32,
     ) -> Result<StageOutcome> {
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
         if motion_tail_pixel_frames == 0 {
             bail!("render_chain_stage: motion_tail_pixel_frames must be > 0");
         }
@@ -853,6 +856,9 @@ impl Ltx2Engine {
         let work_dir = tempfile::tempdir().context("failed to create LTX-2 temp directory")?;
         let native_output = work_dir.path().join("ltx2-native-output.mp4");
         let mut plan = self.materialize_request(req, work_dir.path(), &native_output)?;
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
 
         // Inject carryover RGB frames as a StagedLatent at frame 0. The
         // runtime VAE-encodes them fresh on the receiving side so every
@@ -920,6 +926,9 @@ impl Ltx2Engine {
         };
 
         self.emit("Executing native LTX-2 chain stage runtime");
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
         let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
             Ok(prepared) => prepared,
             Err(err) => {
@@ -935,6 +944,9 @@ impl Ltx2Engine {
         );
         self.native_runtime = Some(runtime);
         let rendered = render_result?;
+        if let Some(token) = self.cancellation.as_ref() {
+            token.checkpoint()?;
+        }
 
         let frames = rendered.frames;
         let audio = rendered.audio_track;

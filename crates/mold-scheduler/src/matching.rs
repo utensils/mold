@@ -25,6 +25,7 @@ pub(crate) struct MatchingResult {
 struct Cost {
     host_ram: i128,
     setup: i128,
+    affinity: i128,
     free_vram: i128,
     stable_tie: i128,
 }
@@ -36,6 +37,7 @@ impl Add for Cost {
         Self {
             host_ram: self.host_ram + right.host_ram,
             setup: self.setup + right.setup,
+            affinity: self.affinity + right.affinity,
             free_vram: self.free_vram + right.free_vram,
             stable_tie: self.stable_tie + right.stable_tie,
         }
@@ -49,6 +51,7 @@ impl Neg for Cost {
         Self {
             host_ram: -self.host_ram,
             setup: -self.setup,
+            affinity: -self.affinity,
             free_vram: -self.free_vram,
             stable_tie: -self.stable_tie,
         }
@@ -163,6 +166,11 @@ impl IncrementalMatcher {
                 .cmp(&right.placement.incremental_host_ram_bytes)
                 .then_with(|| left.setup_ms.cmp(&right.setup_ms))
                 .then_with(|| {
+                    left.placement
+                        .affinity_penalty
+                        .cmp(&right.placement.affinity_penalty)
+                })
+                .then_with(|| {
                     right
                         .placement
                         .device_available_vram_bytes
@@ -181,6 +189,7 @@ impl IncrementalMatcher {
                 Cost {
                     host_ram: i128::from(candidate.placement.incremental_host_ram_bytes),
                     setup: i128::from(candidate.setup_ms),
+                    affinity: i128::from(candidate.placement.affinity_penalty),
                     free_vram: -i128::from(candidate.placement.device_available_vram_bytes),
                     stable_tie,
                 },

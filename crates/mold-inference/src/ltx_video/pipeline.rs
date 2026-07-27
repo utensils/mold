@@ -1295,6 +1295,7 @@ impl LtxVideoEngine {
                 total: run_sigmas.len(),
                 elapsed: step_start.elapsed(),
             });
+            progress.checkpoint()?;
         }
 
         progress.checkpoint()?;

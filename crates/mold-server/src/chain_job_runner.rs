@@ -23,10 +23,13 @@ use mold_inference::chain::{ChainTail, StageOutcome, StageProgressEvent};
 use mold_inference::ltx_video::video_enc;
 use sha2::{Digest, Sha256};
 
+use crate::chain_execution::{
+    authority_path, ChainExecutionAuthority, ChainExecutionState, RecoveryFacts,
+};
 use crate::gpu_pool::{ActiveGeneration, GpuPool, GpuWorker};
 use crate::gpu_worker;
 use crate::model_manager;
-use crate::queue::save_video_to_dir;
+use crate::queue::save_video_to_dir_named;
 use crate::state::QueueHandle;
 
 const EVENT_BUS_CAPACITY: usize = 256;
@@ -43,8 +46,18 @@ pub struct ChainJobRunnerHandle {
 }
 
 pub struct CancelRegistry {
-    known: Mutex<HashSet<String>>,
-    cancelled: Mutex<HashSet<String>>,
+    tokens: Mutex<HashMap<String, mold_inference::InferenceCancellationToken>>,
+}
+
+struct ActiveChainAttemptGuard {
+    cancel: Arc<CancelRegistry>,
+    job_id: String,
+}
+
+impl Drop for ActiveChainAttemptGuard {
+    fn drop(&mut self) {
+        self.cancel.unregister(&self.job_id);
+    }
 }
 
 /// RAII claim. Held by the SHIM'S WORKER TASK (pinned P0 note 2 — never only
@@ -90,12 +103,16 @@ pub struct RunnerDeps {
     /// emit `gallery_added`. `None` in unit tests that don't assert on it.
     pub server_events: Option<Arc<crate::events::EventBroadcaster>>,
     pub gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate,
+    /// Rollout boundary: only V2 may publish chain stages into the unified
+    /// scheduler. Legacy/observe retain the bounded direct-acquisition shim.
+    pub dispatch_mode: crate::dispatch_mode::DispatchMode,
 }
 
 pub(crate) struct CreateJobParams {
     pub id: String,
     pub ephemeral: bool,
     pub request: ChainRequest,
+    pub frozen_model: Option<mold_core::chain_job::FrozenChainModel>,
 }
 
 pub enum RunnerCmd {
@@ -123,7 +140,20 @@ pub enum RunnerCmd {
 //   (CHAIN_JOBS_ARTIFACT_TTL_DAYS, default 7) at each pass.
 // resume handler behavior add: ephemeral job → 409 CHAIN_JOB_EPHEMERAL.
 
+pub type ChainLeaseCallback = Box<dyn FnOnce(usize) -> Result<(), String> + Send>;
+
 pub trait StageExecutor: Send + Sync {
+    fn before_final_publication(&self, _job_id: &str) {}
+
+    #[cfg(test)]
+    fn after_gallery_publication(&self, _job_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn freeze_model(&self, model: &str) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+        Err(anyhow!("stage executor cannot freeze model '{model}'"))
+    }
+
     fn render_stage(
         &self,
         model: &str,
@@ -133,11 +163,75 @@ pub trait StageExecutor: Send + Sync {
         progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
         cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<StageRenderOutcome>;
+
+    #[expect(clippy::too_many_arguments)]
+    fn render_stage_with_context(
+        &self,
+        _job_id: &str,
+        _stage_idx: u32,
+        model: &str,
+        stage_req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_frames: u32,
+        preferred_ordinal: Option<usize>,
+        _frozen_model: Option<&mold_core::chain_job::FrozenChainModel>,
+        _work_id: Option<&str>,
+        on_leased: Option<ChainLeaseCallback>,
+        _cancellation: mold_inference::InferenceCancellationToken,
+        progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> anyhow::Result<StageExecution> {
+        if let Some(on_leased) = on_leased {
+            on_leased(preferred_ordinal.unwrap_or(0)).map_err(anyhow::Error::msg)?;
+        }
+        let outcome = self.render_stage(
+            model,
+            stage_req,
+            carry,
+            motion_tail_frames,
+            progress.as_ref(),
+            cancelled.as_ref(),
+        )?;
+        Ok(StageExecution {
+            outcome,
+            device_ordinal: preferred_ordinal,
+        })
+    }
 }
 
 pub enum StageRenderOutcome {
     Done(StageOutcome),
     Cancelled,
+}
+
+pub struct StageExecution {
+    pub outcome: StageRenderOutcome,
+    pub device_ordinal: Option<usize>,
+}
+
+/// Fully-owned chain stage payload transported only by a scheduler lease.
+/// The optional plan is chosen from the exact per-device candidates during
+/// grant construction and validated again on the owner thread before CUDA.
+pub struct ScheduledChainStageWork {
+    pub id: String,
+    /// Original model identity. Engine family/pipeline dispatch must only use
+    /// this semantic name.
+    pub model: String,
+    /// Immutable cache identity derived from the complete frozen model graph.
+    pub cache_key: String,
+    pub config: mold_core::Config,
+    pub stage_req: GenerateRequest,
+    pub carry: Option<ChainTail>,
+    pub motion_tail_frames: u32,
+    pub progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
+    pub cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub cancellation: mold_inference::InferenceCancellationToken,
+    pub on_leased: Option<ChainLeaseCallback>,
+    pub execution_plan: Option<crate::execution_plan::ResolvedExecutionPlan>,
+    pub expected_model_fingerprint: Option<String>,
+    pub result_tx: Option<tokio::sync::oneshot::Sender<Result<StageExecution, String>>>,
+    #[cfg(test)]
+    pub before_second_fence: Option<Box<dyn FnOnce() + Send>>,
 }
 
 pub trait QueueProbe: Send + Sync {
@@ -152,40 +246,34 @@ struct StageArtifactPaths {
 impl CancelRegistry {
     pub fn new() -> Self {
         Self {
-            known: Mutex::new(HashSet::new()),
-            cancelled: Mutex::new(HashSet::new()),
+            tokens: Mutex::new(HashMap::new()),
         }
     }
 
     fn register(&self, job_id: &str) {
-        self.known
+        self.tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(job_id.to_string());
+            .entry(job_id.to_string())
+            .or_default();
     }
 
     fn unregister(&self, job_id: &str) {
-        self.known
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(job_id);
-        self.cancelled
+        self.tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(job_id);
     }
 
     fn request(&self, job_id: &str) -> bool {
-        let known = self
-            .known
+        let token = self
+            .tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(job_id);
-        if known {
-            self.cancelled
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(job_id.to_string());
+            .get(job_id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
             true
         } else {
             false
@@ -193,10 +281,20 @@ impl CancelRegistry {
     }
 
     fn is_cancelled(&self, job_id: &str) -> bool {
-        self.cancelled
+        self.tokens
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(job_id)
+            .get(job_id)
+            .is_some_and(mold_inference::InferenceCancellationToken::is_cancelled)
+    }
+
+    fn token(&self, job_id: &str) -> mold_inference::InferenceCancellationToken {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(job_id.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -379,6 +477,11 @@ impl ChainJobRunnerHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_cancel_for_tests(&self, job_id: &str) {
+        self.cancel.register(job_id);
+    }
+
     /// Nudge the runner: a job row was inserted/reset to queued.
     pub fn kick(&self) {
         let _ = self.kick_tx.send(RunnerCmd::Kick);
@@ -387,6 +490,10 @@ impl ChainJobRunnerHandle {
     /// Mark cancel-requested; false when the job is unknown to the registry.
     pub fn request_cancel(&self, job_id: &str) -> bool {
         self.cancel.request(job_id)
+    }
+
+    pub fn is_cancelling(&self, job_id: &str) -> bool {
+        self.cancel.is_cancelled(job_id)
     }
 
     pub fn unregister_cancel(&self, job_id: &str) {
@@ -488,9 +595,11 @@ pub(crate) fn create_job_with_params(
     let mut manifest = ChainJobManifest::new(params.id.clone(), now.max(0) as u64, &params.request)
         .map_err(|e| anyhow!("{e:#}"))?;
     manifest.ephemeral = params.ephemeral;
+    manifest.frozen_model = params.frozen_model;
     manifest
         .write_atomic(&job_dir)
         .map_err(|e| anyhow!("{e:#}"))?;
+    ChainExecutionAuthority::dormant(params.id.clone()).persist_atomic(&job_dir)?;
     let request_json = serde_json::to_string(&params.request)?;
     let row = ChainJobRow {
         id: params.id.clone(),
@@ -549,9 +658,6 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
 
     let mut repaired = 0;
     for row in chain_jobs::list_jobs(db)? {
-        if row.state.is_terminal() {
-            continue;
-        }
         let job_dir = if row.job_dir.is_absolute() {
             row.job_dir.clone()
         } else {
@@ -564,6 +670,39 @@ pub fn startup_reconcile(db: &MetadataDb, jobs_root: &Path) -> anyhow::Result<(u
                 continue;
             }
         };
+        let mut authority = if authority_path(&job_dir).is_file() {
+            match ChainExecutionAuthority::read_for_parent(&job_dir, &row.id) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    let message =
+                        format!("chain execution authority is corrupt or mismatched: {error:#}");
+                    tracing::warn!(job_id = %row.id, "{message}");
+                    if !settled(row.state) {
+                        let _ = chain_jobs::update_job_state(
+                            db,
+                            &row.id,
+                            ChainJobState::Failed,
+                            Some(&message),
+                            now,
+                        )?;
+                        repaired += 1;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            ChainExecutionAuthority::dormant(row.id.clone())
+        };
+        authority.recover(RecoveryFacts {
+            stage_count: manifest.stage_status.len() as u32,
+            first_incomplete_stage: first_incomplete_stage(&manifest),
+            finalized: !manifest.finalizes.is_empty(),
+            terminal: row.state.is_terminal(),
+        })?;
+        authority.persist_atomic(&job_dir)?;
+        if row.state.is_terminal() {
+            continue;
+        }
 
         let mut changed = false;
         for stage in &manifest.stage_status {
@@ -740,7 +879,15 @@ pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Res
     Ok(outcome)
 }
 
-async fn run_loop(
+async fn run_loop(deps: Arc<RunnerDeps>, kick_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerCmd>) {
+    if deps.dispatch_mode.owns_v2_workers() {
+        run_v2_loop(deps, kick_rx).await;
+    } else {
+        run_legacy_loop(deps, kick_rx).await;
+    }
+}
+
+async fn run_legacy_loop(
     deps: Arc<RunnerDeps>,
     mut kick_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerCmd>,
 ) {
@@ -815,6 +962,251 @@ async fn run_loop(
     }
 }
 
+/// V2 chain orchestration owns no GPU and has no shadow fairness queue. It
+/// claims each durable parent once, then each concurrent parent publishes
+/// exactly one dependency-ready stage and waits for that scheduler lease to
+/// settle before publishing its successor.
+async fn run_v2_loop(
+    deps: Arc<RunnerDeps>,
+    mut kick_rx: tokio::sync::mpsc::UnboundedReceiver<RunnerCmd>,
+) {
+    let mut daily = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+    daily.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    daily.tick().await;
+    let mut active = HashSet::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut task_jobs = HashMap::new();
+
+    loop {
+        while let Ok(cmd) = kick_rx.try_recv() {
+            if !handle_runner_cmd(deps.clone(), cmd).await {
+                return;
+            }
+        }
+
+        if let Some(db) = deps.db.as_ref() {
+            match chain_jobs::jobs_in_state(db, ChainJobState::Queued) {
+                Ok(jobs) => {
+                    for job in jobs {
+                        if active.contains(&job.id) {
+                            continue;
+                        }
+                        match claim_for_execution_async(&deps, &job).await {
+                            Ok(true) => {
+                                let job_id = job.id.clone();
+                                let start_stage = job.current_stage;
+                                active.insert(job_id.clone());
+                                let deps_for_job = deps.clone();
+                                let tracked_job_id = job_id.clone();
+                                let abort = tasks.spawn(async move {
+                                    let result =
+                                        run_chain_actor(deps_for_job, job, start_stage).await;
+                                    (job_id, result)
+                                });
+                                task_jobs.insert(abort.id(), tracked_job_id);
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    job_id = %job.id,
+                                    "chain job V2 claim failed: {error:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => tracing::warn!("chain-job V2 queued lookup failed: {error:#}"),
+            }
+        }
+
+        tokio::select! {
+            maybe_cmd = kick_rx.recv() => {
+                let Some(cmd) = maybe_cmd else { break };
+                if !handle_runner_cmd(deps.clone(), cmd).await {
+                    break;
+                }
+            }
+            joined = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                match joined {
+                    Some(Ok((task_id, (_job_id, Ok(()))))) => {
+                        release_actor_tracking(&mut active, &mut task_jobs, task_id);
+                    }
+                    Some(Ok((task_id, (job_id, Err(error))))) => {
+                        release_actor_tracking(&mut active, &mut task_jobs, task_id);
+                        tracing::warn!(%job_id, "chain job V2 execution failed: {error:#}");
+                    }
+                    Some(Err(error)) => {
+                        let job_id =
+                            release_actor_tracking(&mut active, &mut task_jobs, error.id());
+                        tracing::warn!(job_id = ?job_id, "chain job V2 task join failed: {error}");
+                    }
+                    None => {}
+                }
+                // A just-finished stage/job may have made another durable
+                // parent ready without a route kick.
+                tokio::task::yield_now().await;
+            }
+            _ = daily.tick() => {
+                if let Err(error) = run_gc_for_runner(deps.clone()).await {
+                    tracing::warn!("daily chain job GC failed: {error}");
+                }
+            }
+        }
+    }
+}
+
+fn release_actor_tracking(
+    active: &mut HashSet<String>,
+    task_jobs: &mut HashMap<tokio::task::Id, String>,
+    task_id: tokio::task::Id,
+) -> Option<String> {
+    let job_id = task_jobs.remove(&task_id);
+    if let Some(job_id) = job_id.as_ref() {
+        active.remove(job_id);
+    }
+    job_id
+}
+
+async fn run_chain_actor(
+    deps: Arc<RunnerDeps>,
+    job: ChainJobRow,
+    start_stage: u32,
+) -> anyhow::Result<()> {
+    let _attempt_guard = ActiveChainAttemptGuard {
+        cancel: deps.cancel.clone(),
+        job_id: job.id.clone(),
+    };
+    let result = run_chain_actor_inner(deps.clone(), job.clone(), start_stage).await;
+    let Err(actor_error) = result else {
+        return Ok(());
+    };
+
+    let db = deps
+        .db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| anyhow!("chain actor invoked without metadata DB"))?;
+    let message = format!("chain actor failed: {actor_error:#}");
+    let terminal_result = fail_job(db, &deps, &job.id, None, message);
+    if terminal_result.is_ok() {
+        if let Ok(mut authority) = ChainExecutionAuthority::read_for_parent(&job.job_dir, &job.id) {
+            if authority.state != ChainExecutionState::Settled
+                && authority.transition(ChainExecutionState::Settled).is_ok()
+            {
+                let _ = authority.persist_atomic(&job.job_dir);
+            }
+        }
+    }
+    match terminal_result {
+        Ok(()) => Err(actor_error),
+        Err(terminal_error) => Err(anyhow!(
+            "{actor_error:#}; additionally failed to persist terminal actor outcome: {terminal_error:#}"
+        )),
+    }
+}
+
+async fn run_chain_actor_inner(
+    deps: Arc<RunnerDeps>,
+    job: ChainJobRow,
+    start_stage: u32,
+) -> anyhow::Result<()> {
+    let manifest = ChainJobManifest::read_from_dir(&job.job_dir)?;
+    let authority = if authority_path(&job.job_dir).is_file() {
+        ChainExecutionAuthority::read_for_parent(&job.job_dir, &job.id)?
+    } else {
+        ChainExecutionAuthority::dormant(job.id.clone())
+    };
+    let authority = Arc::new(Mutex::new(authority));
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        authority.recover(RecoveryFacts {
+            stage_count: manifest.stage_status.len() as u32,
+            first_incomplete_stage: first_incomplete_stage(&manifest),
+            finalized: !manifest.finalizes.is_empty(),
+            terminal: false,
+        })?;
+        if authority.identity.stage_index < start_stage {
+            authority.set_stage(start_stage);
+        }
+        authority.persist_atomic(&job.job_dir)?;
+    }
+
+    loop {
+        let db = deps
+            .db
+            .as_ref()
+            .as_ref()
+            .ok_or_else(|| anyhow!("chain actor invoked without metadata DB"))?;
+        let current = chain_jobs::get_job(db, &job.id)?
+            .ok_or_else(|| anyhow!("chain job '{}' disappeared during actor run", job.id))?;
+        if settled(current.state) {
+            settle_execution_authority(&authority, &job.job_dir)?;
+            return Ok(());
+        }
+        {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if authority.state == ChainExecutionState::Ready {
+                authority.transition(ChainExecutionState::Submitted)?;
+                authority.persist_atomic(&job.job_dir)?;
+            }
+        }
+        let deps_for_turn = deps.clone();
+        let job_for_turn = job.clone();
+        let authority_for_turn = authority.clone();
+        tokio::task::spawn_blocking(move || {
+            execute_job_inner(
+                &deps_for_turn,
+                &job_for_turn,
+                start_stage,
+                true,
+                Some(authority_for_turn),
+            )
+        })
+        .await
+        .map_err(|error| anyhow!("chain actor turn join failed: {error}"))??;
+
+        let current = chain_jobs::get_job(db, &job.id)?
+            .ok_or_else(|| anyhow!("chain job '{}' disappeared after actor turn", job.id))?;
+        if settled(current.state) {
+            settle_execution_authority(&authority, &job.job_dir)?;
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn settle_execution_authority(
+    authority: &Arc<Mutex<ChainExecutionAuthority>>,
+    job_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut authority = authority
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if authority.state != ChainExecutionState::Settled {
+        authority.transition(ChainExecutionState::Settled)?;
+        authority.persist_atomic(job_dir)?;
+    }
+    Ok(())
+}
+
+async fn claim_for_execution_async(deps: &RunnerDeps, job: &ChainJobRow) -> anyhow::Result<bool> {
+    let db = deps
+        .db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| anyhow!("chain job runner invoked without metadata DB"))?;
+    let _guard = deps.job_locks.lock(&job.id).await;
+    let claimed = chain_jobs::claim_job(db, &job.id)?;
+    if claimed {
+        deps.cancel.register(&job.id);
+    }
+    Ok(claimed)
+}
+
 async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
     match cmd {
         RunnerCmd::Kick => true,
@@ -863,6 +1255,16 @@ fn claim_for_execution(deps: &RunnerDeps, job: &ChainJobRow) -> anyhow::Result<b
 }
 
 fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow::Result<()> {
+    execute_job_inner(deps, job, start_stage, false, None)
+}
+
+fn execute_job_inner(
+    deps: &RunnerDeps,
+    job: &ChainJobRow,
+    start_stage: u32,
+    stop_after_stage: bool,
+    actor_authority: Option<Arc<Mutex<ChainExecutionAuthority>>>,
+) -> anyhow::Result<()> {
     let db = deps
         .db
         .as_ref()
@@ -912,6 +1314,33 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
             }
         };
         let mut carry: Option<ChainTail> = None;
+        let mut preferred_ordinal = actor_authority.as_ref().and_then(|authority| {
+            authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .preferred_ordinal
+        });
+        if manifest.frozen_model.is_none() {
+            let frozen = match deps.executor.freeze_model(&effective.model) {
+                Ok(frozen) => frozen,
+                Err(error) => {
+                    fail_job(
+                        db,
+                        deps,
+                        &job.id,
+                        None,
+                        format!("cannot freeze durable model inputs: {error:#}"),
+                    )?;
+                    terminal = true;
+                    return Ok(());
+                }
+            };
+            manifest.frozen_model = Some(frozen);
+            let _guard = deps.job_locks.blocking_lock(&job.id);
+            manifest
+                .write_atomic(&job.job_dir)
+                .map_err(|error| anyhow!("persisting frozen chain model: {error:#}"))?;
+        }
 
         deps.events.publish(
             &job.id,
@@ -1021,8 +1450,16 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                 TransitionMode::Smooth => carry.as_ref(),
                 TransitionMode::Cut | TransitionMode::Fade => None,
             };
-            let render_outcome = match execute_stage(deps, job, &manifest, stage_idx, stage_carry) {
-                Ok(outcome) => outcome,
+            let execution = match execute_stage(
+                deps,
+                job,
+                &manifest,
+                stage_idx,
+                stage_carry,
+                preferred_ordinal,
+                actor_authority.clone(),
+            ) {
+                Ok(execution) => execution,
                 Err(err) => {
                     let error = format!("{err:#}");
                     {
@@ -1035,41 +1472,57 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                     return Ok(());
                 }
             };
-            match render_outcome {
+            preferred_ordinal = execution.device_ordinal;
+            match execution.outcome {
                 StageRenderOutcome::Cancelled => {
                     set_cancelled(db, deps, &job.id)?;
                     terminal = true;
                     return Ok(());
                 }
                 StageRenderOutcome::Done(outcome) => {
-                    let stage_artifacts = {
-                        let _guard = deps.job_locks.blocking_lock(&job.id);
-                        write_stage_artifacts(
-                            &layout,
-                            &mut manifest,
-                            stage_idx,
-                            &outcome,
-                            &effective,
-                        )
-                    };
+                    if let Some(authority) = actor_authority.as_ref() {
+                        let mut authority = authority
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        authority.transition(ChainExecutionState::Checkpointing)?;
+                        authority.persist_atomic(&job.job_dir)?;
+                    }
+                    let publication = deps.job_locks.blocking_lock(&job.id);
+                    if deps.cancel.is_cancelled(&job.id) {
+                        drop(publication);
+                        set_cancelled(db, deps, &job.id)?;
+                        terminal = true;
+                        return Ok(());
+                    }
+                    let stage_artifacts = write_stage_artifacts(
+                        &layout,
+                        &mut manifest,
+                        stage_idx,
+                        &outcome,
+                        &effective,
+                    );
                     let paths = match stage_artifacts {
                         Ok(paths) => paths,
                         Err(err) => {
                             let error = format!("{err:#}");
-                            {
-                                let _guard = deps.job_locks.blocking_lock(&job.id);
-                                let _ = mark_manifest_stage_failed(
-                                    &mut manifest,
-                                    &layout,
-                                    stage_idx,
-                                    &error,
-                                );
-                            }
+                            let _ = mark_manifest_stage_failed(
+                                &mut manifest,
+                                &layout,
+                                stage_idx,
+                                &error,
+                            );
+                            drop(publication);
                             fail_job(db, deps, &job.id, Some(stage_idx), error)?;
                             terminal = true;
                             return Ok(());
                         }
                     };
+                    if deps.cancel.is_cancelled(&job.id) {
+                        drop(publication);
+                        set_cancelled(db, deps, &job.id)?;
+                        terminal = true;
+                        return Ok(());
+                    }
 
                     let now = now_ms_i64();
                     let status = manifest.stage_status[stage_idx as usize].clone();
@@ -1087,6 +1540,7 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                             updated_at_ms: now,
                         },
                     ) {
+                        drop(publication);
                         fail_stage_job(
                             db,
                             deps,
@@ -1101,6 +1555,7 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                     }
                     if let Err(err) = chain_jobs::set_current_stage(db, &job.id, stage_idx + 1, now)
                     {
+                        drop(publication);
                         fail_stage_job(
                             db,
                             deps,
@@ -1119,6 +1574,7 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                     {
                         let fail_stage = (stage_idx + 1)
                             .min(manifest.stage_status.len().saturating_sub(1) as u32);
+                        drop(publication);
                         fail_stage_job(
                             db,
                             deps,
@@ -1128,6 +1584,12 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
                             fail_stage,
                             format!("{err:#}"),
                         )?;
+                        terminal = true;
+                        return Ok(());
+                    }
+                    if deps.cancel.is_cancelled(&job.id) {
+                        drop(publication);
+                        set_cancelled(db, deps, &job.id)?;
                         terminal = true;
                         return Ok(());
                     }
@@ -1143,10 +1605,37 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
 
                     carry = Some(outcome.tail);
 
+                    drop(publication);
                     publish_yield_if_contended(deps, &job.id);
                 }
             }
             stage_idx += 1;
+            let next_incomplete_stage = first_incomplete_stage(&manifest);
+            if let Some(authority) = actor_authority.as_ref() {
+                let mut authority = authority
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                authority.set_preferred_ordinal(preferred_ordinal);
+                match next_incomplete_stage {
+                    Some(next_stage) => {
+                        authority.transition(ChainExecutionState::Ready)?;
+                        if authority.identity.stage_index != next_stage {
+                            authority.set_stage(next_stage);
+                        }
+                    }
+                    None => {
+                        authority.transition(ChainExecutionState::Finalizing)?;
+                        let stage_count = manifest.stage_status.len() as u32;
+                        if authority.identity.stage_index != stage_count {
+                            authority.set_stage(stage_count);
+                        }
+                    }
+                }
+                authority.persist_atomic(&job.job_dir)?;
+            }
+            if stop_after_stage && next_incomplete_stage.is_some() {
+                return Ok(());
+            }
             effective = match effective_request(&manifest) {
                 Ok(effective) => effective,
                 Err(err) => {
@@ -1157,8 +1646,27 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
             };
         }
 
+        if deps.cancel.is_cancelled(&job.id) {
+            set_cancelled(db, deps, &job.id)?;
+            terminal = true;
+            return Ok(());
+        }
+        if let Some(authority) = actor_authority.as_ref() {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if authority.state != ChainExecutionState::Finalizing {
+                authority.transition(ChainExecutionState::Finalizing)?;
+                authority.persist_atomic(&job.job_dir)?;
+            }
+        }
         let output = match finalize_job(deps, job, &mut manifest) {
-            Ok(output) => output,
+            Ok(Some(output)) => output,
+            Ok(None) => {
+                set_cancelled(db, deps, &job.id)?;
+                terminal = true;
+                return Ok(());
+            }
             Err(err) => {
                 fail_job(db, deps, &job.id, None, format!("{err:#}"))?;
                 terminal = true;
@@ -1168,26 +1676,6 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
         let take = manifest.finalizes.len() as u32;
         deps.events
             .publish(&job.id, ChainJobEvent::Finalized { output, take });
-        let completed = match chain_jobs::try_transition(
-            db,
-            &job.id,
-            &[ChainJobState::Running],
-            ChainJobState::Completed,
-            None,
-            now_ms_i64(),
-        ) {
-            Ok(completed) => completed,
-            Err(err) => {
-                fail_job(db, deps, &job.id, None, format!("{err:#}"))?;
-                terminal = true;
-                return Ok(());
-            }
-        };
-        if !completed {
-            tracing::warn!(job_id = %job.id, "chain job completed but running->completed CAS lost");
-            terminal = true;
-            return Ok(());
-        }
         deps.events.publish_then_remove(
             &job.id,
             ChainJobEvent::StateChanged {
@@ -1200,7 +1688,9 @@ fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow
         Ok(())
     })();
 
-    deps.cancel.unregister(&job.id);
+    if terminal || !stop_after_stage {
+        deps.cancel.unregister(&job.id);
+    }
     if terminal {
         deps.events.remove(&job.id);
     }
@@ -1213,7 +1703,9 @@ fn execute_stage(
     manifest: &ChainJobManifest,
     stage_idx: u32,
     carry: Option<&ChainTail>,
-) -> anyhow::Result<StageRenderOutcome> {
+    preferred_ordinal: Option<usize>,
+    actor_authority: Option<Arc<Mutex<ChainExecutionAuthority>>>,
+) -> anyhow::Result<StageExecution> {
     let effective = effective_request(manifest)?;
     let stage = effective
         .stages
@@ -1225,13 +1717,15 @@ fn execute_stage(
     let model = effective.model.clone();
     let carry_owned = carry.cloned();
     let job_id = job.id.clone();
+    let stage_job_id = job.id.clone();
+    let frozen_model = manifest.frozen_model.clone();
     let events = deps.events.clone();
     let cancel = deps.cancel.clone();
     let motion_tail_frames = effective.motion_tail_frames;
     let progress_cancel = cancel.clone();
     let progress_job_id = job_id.clone();
-    let progress: Box<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync> =
-        Box::new(move |step, total| {
+    let progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync> =
+        Arc::new(move |step, total| {
             events.publish(
                 &progress_job_id,
                 ChainJobEvent::DenoiseStep {
@@ -1246,31 +1740,48 @@ fn execute_stage(
                 ControlFlow::Continue(())
             }
         });
-    let cancelled: Box<dyn Fn() -> bool + Send + Sync> =
-        Box::new(move || cancel.is_cancelled(&job_id));
+    let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+        Arc::new(move || cancel.is_cancelled(&job_id));
+    let cancellation = deps.cancel.token(&stage_job_id);
+    let work_id = actor_authority.as_ref().map(|authority| {
+        authority
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .identity
+            .work_id
+            .clone()
+    });
+    let authority_job_dir = job.job_dir.clone();
+    let on_leased = actor_authority.map(|authority| {
+        Box::new(move |ordinal| {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            authority
+                .transition(ChainExecutionState::Leased)
+                .and_then(|()| {
+                    authority.set_preferred_ordinal(Some(ordinal));
+                    authority.persist_atomic(&authority_job_dir)
+                })
+                .map_err(|error| format!("persisting leased chain authority: {error:#}"))
+        }) as Box<dyn FnOnce(usize) -> Result<(), String> + Send>
+    });
 
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle
-            .block_on(tokio::task::spawn_blocking(move || {
-                executor.render_stage(
-                    &model,
-                    &stage_req,
-                    carry_owned.as_ref(),
-                    motion_tail_frames,
-                    progress.as_ref(),
-                    cancelled.as_ref(),
-                )
-            }))
-            .map_err(|e| anyhow!("chain stage task failed: {e}"))?,
-        Err(_) => deps.executor.render_stage(
-            &model,
-            &stage_req,
-            carry,
-            motion_tail_frames,
-            progress.as_ref(),
-            cancelled.as_ref(),
-        ),
-    }
+    executor.render_stage_with_context(
+        &stage_job_id,
+        stage_idx,
+        &model,
+        &stage_req,
+        carry_owned.as_ref(),
+        motion_tail_frames,
+        preferred_ordinal,
+        frozen_model.as_ref(),
+        work_id.as_deref(),
+        on_leased,
+        cancellation,
+        progress,
+        cancelled,
+    )
 }
 
 fn write_stage_artifacts(
@@ -1452,7 +1963,7 @@ fn finalize_job(
     deps: &RunnerDeps,
     job: &ChainJobRow,
     manifest: &mut ChainJobManifest,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     let db = deps
         .db
         .as_ref()
@@ -1474,6 +1985,9 @@ fn finalize_job(
     let mut frame_count = 0u32;
 
     for stage in &manifest.stage_status {
+        if deps.cancel.is_cancelled(&job.id) {
+            return Ok(None);
+        }
         if stage.state != StageState::Completed {
             bail!(
                 "cannot finalize chain job with non-completed stage {}",
@@ -1497,6 +2011,9 @@ fn finalize_job(
         }
         let enc = encoder.as_mut().unwrap();
         for frame in frames {
+            if deps.cancel.is_cancelled(&job.id) {
+                return Ok(None);
+            }
             enc.push(&frame)?;
             frame_count += 1;
         }
@@ -1524,6 +2041,9 @@ fn finalize_job(
 
     let encoder = encoder.ok_or_else(|| anyhow!("cannot finalize chain job with no frames"))?;
     let video_bytes = encoder.finish()?;
+    if deps.cancel.is_cancelled(&job.id) {
+        return Ok(None);
+    }
     let video_bytes = if !audio_samples.is_empty() {
         #[cfg(feature = "mp4")]
         {
@@ -1549,43 +2069,102 @@ fn finalize_job(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating chain final directory '{}'", parent.display()))?;
     }
-    write_file(&output_path, &video_bytes)?;
+    let staged_output = output_path.with_extension("mp4.tmp");
+    write_file(&staged_output, &video_bytes)?;
+    deps.executor.before_final_publication(&job.id);
+    let _publication = deps.job_locks.blocking_lock(&job.id);
+    if deps.cancel.is_cancelled(&job.id) {
+        let _ = std::fs::remove_file(&staged_output);
+        return Ok(None);
+    }
+    publish_file_idempotently(&staged_output, &output_path, &video_bytes)?;
 
     if !manifest.ephemeral {
         if let Some(output_dir) = deps.output_dir.as_ref() {
             let _gallery_writer = deps.gallery_publication_gate.blocking_write();
             let metadata = effective.stitched_output_metadata(OutputFormat::Mp4, frame_count);
-            save_video_to_dir(
+            let gallery_filename = chain_gallery_filename(&job.id, take);
+            save_video_to_dir_named(
                 output_dir,
+                &gallery_filename,
                 &video_bytes,
-                &[],
                 OutputFormat::Mp4,
-                &effective.model,
                 &metadata,
                 None,
                 Some(db),
                 deps.server_events.as_deref(),
-            );
+            )?;
+            #[cfg(test)]
+            deps.executor.after_gallery_publication(&job.id)?;
         }
     }
 
     let now = now_ms_u64();
     let output = format!("final/output-{take}.mp4");
-    {
-        let _guard = deps.job_locks.blocking_lock(&job.id);
-        manifest.finalizes.push(FinalizeRecord {
-            output: output.clone(),
-            at_unix_ms: now,
-            stage_seeds: manifest
-                .stage_status
-                .iter()
-                .map(|stage| stage.seed)
-                .collect(),
-        });
-        manifest.write_atomic(layout.root())?;
-        chain_jobs::set_finalized_at(db, &job.id, i64::try_from(now).unwrap_or(i64::MAX))?;
+    manifest.finalizes.push(FinalizeRecord {
+        output: output.clone(),
+        at_unix_ms: now,
+        stage_seeds: manifest
+            .stage_status
+            .iter()
+            .map(|stage| stage.seed)
+            .collect(),
+    });
+    manifest.write_atomic(layout.root())?;
+    chain_jobs::set_finalized_at(db, &job.id, i64::try_from(now).unwrap_or(i64::MAX))?;
+    let completed = chain_jobs::try_transition(
+        db,
+        &job.id,
+        &[ChainJobState::Running],
+        ChainJobState::Completed,
+        None,
+        now_ms_i64(),
+    )?;
+    if !completed {
+        bail!("chain finalization lost running->completed CAS");
     }
-    Ok(output)
+    Ok(Some(output))
+}
+
+fn chain_gallery_filename(job_id: &str, take: u32) -> String {
+    format!(
+        "mold-chain-{:x}-take-{take}.mp4",
+        Sha256::digest(job_id.as_bytes())
+    )
+}
+
+fn publish_file_idempotently(staged: &Path, final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if final_path.exists() {
+        let existing = std::fs::read(final_path).with_context(|| {
+            format!(
+                "reading existing chain final output '{}'",
+                final_path.display()
+            )
+        })?;
+        if existing != bytes {
+            bail!(
+                "chain final replay target '{}' exists with different bytes",
+                final_path.display()
+            );
+        }
+        let _ = std::fs::remove_file(staged);
+        return Ok(());
+    }
+    std::fs::rename(staged, final_path).with_context(|| {
+        format!(
+            "publishing finalized chain output '{}' from '{}'",
+            final_path.display(),
+            staged.display()
+        )
+    })?;
+    if let Some(parent) = final_path.parent() {
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .with_context(|| format!("opening final output directory '{}'", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("fsync final output directory '{}'", parent.display()))?;
+    }
+    Ok(())
 }
 
 pub fn apply_retake(
@@ -1638,20 +2217,6 @@ pub fn apply_retake(
     let old_prompt = effective.stages[stage_idx].prompt.clone();
     let new_prompt = req.prompt.clone().unwrap_or_else(|| old_prompt.clone());
     let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
-
-    if !chain_jobs::try_transition(
-        db,
-        job_id,
-        &allowed_from,
-        ChainJobState::Queued,
-        None,
-        now_i64,
-    )? {
-        let observed = chain_jobs::get_job(db, job_id)?
-            .map(|row| row.state.as_str().to_string())
-            .unwrap_or_else(|| "missing".to_string());
-        bail!("chain job is not retakeable from current state {observed}");
-    }
 
     manifest.retakes.push(RetakeAmendment {
         stage_idx: req.stage_idx,
@@ -1715,21 +2280,89 @@ pub fn apply_retake(
     }
     chain_jobs::set_current_stage(db, job_id, req.stage_idx, now_i64)?;
 
+    // Publish schedulability last. While the route-owned mutation lock is
+    // held, the durable manifest and stage rows are prepared under the old
+    // terminal parent state; only a fully prepared retake may become Queued.
+    if !chain_jobs::try_transition(
+        db,
+        job_id,
+        &allowed_from,
+        ChainJobState::Queued,
+        None,
+        now_i64,
+    )? {
+        let observed = chain_jobs::get_job(db, job_id)?
+            .map(|row| row.state.as_str().to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        bail!("chain job is not retakeable from current state {observed}");
+    }
+
     chain_jobs::get_job(db, job_id)?.ok_or_else(|| anyhow!("chain job disappeared after retake"))
 }
 
 pub struct ProductionStageExecutor {
     gpu_pool: Arc<GpuPool>,
     config: mold_core::Config,
+    scheduled_work: crate::scheduler::ScheduledWorkHandle,
+    dispatch_mode: crate::dispatch_mode::DispatchMode,
 }
 
 impl ProductionStageExecutor {
-    pub fn new(gpu_pool: Arc<GpuPool>, config: mold_core::Config) -> Self {
-        Self { gpu_pool, config }
+    pub fn new(
+        gpu_pool: Arc<GpuPool>,
+        config: mold_core::Config,
+        scheduled_work: crate::scheduler::ScheduledWorkHandle,
+        dispatch_mode: crate::dispatch_mode::DispatchMode,
+    ) -> Self {
+        Self {
+            gpu_pool,
+            config,
+            scheduled_work,
+            dispatch_mode,
+        }
+    }
+
+    #[cfg(test)]
+    fn candidate_plans(
+        &self,
+        stage_req: &GenerateRequest,
+    ) -> Result<
+        Vec<crate::execution_plan::ResolvedExecutionPlan>,
+        crate::execution_plan::ExecutionPlanError,
+    > {
+        let devices = self
+            .gpu_pool
+            .workers
+            .iter()
+            .filter(|worker| {
+                !worker.shutdown_requested.load(Ordering::SeqCst)
+                    && !worker.poisoned.load(Ordering::SeqCst)
+                    && !worker.fatal_cuda_error.load(Ordering::SeqCst)
+            })
+            .map(|worker| crate::execution_plan::DeviceFact {
+                id: crate::scheduler::worker_device_id(&worker),
+                ordinal: worker.gpu.ordinal,
+                available_vram_bytes: worker.gpu.free_vram_bytes,
+            })
+            .collect::<Vec<_>>();
+        let offload_requested = matches!(
+            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        crate::execution_plan::resolve_execution_plans(
+            &self.config,
+            stage_req,
+            &devices,
+            offload_requested,
+        )
     }
 }
 
 impl StageExecutor for ProductionStageExecutor {
+    fn freeze_model(&self, model: &str) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+        crate::execution_plan::freeze_chain_model(&self.config, model).map_err(anyhow::Error::new)
+    }
+
     fn render_stage(
         &self,
         model: &str,
@@ -1796,6 +2429,102 @@ impl StageExecutor for ProductionStageExecutor {
             },
         )?;
         prep
+    }
+
+    fn render_stage_with_context(
+        &self,
+        job_id: &str,
+        stage_idx: u32,
+        model: &str,
+        stage_req: &GenerateRequest,
+        carry: Option<&ChainTail>,
+        motion_tail_frames: u32,
+        preferred_ordinal: Option<usize>,
+        frozen_model: Option<&mold_core::chain_job::FrozenChainModel>,
+        work_id: Option<&str>,
+        on_leased: Option<Box<dyn FnOnce(usize) -> Result<(), String> + Send>>,
+        cancellation: mold_inference::InferenceCancellationToken,
+        progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> anyhow::Result<StageExecution> {
+        if !self.dispatch_mode.owns_v2_workers() {
+            return self
+                .render_stage(
+                    model,
+                    stage_req,
+                    carry,
+                    motion_tail_frames,
+                    progress.as_ref(),
+                    cancelled.as_ref(),
+                )
+                .map(|outcome| StageExecution {
+                    outcome,
+                    device_ordinal: preferred_ordinal,
+                });
+        }
+        if cancelled() {
+            return Ok(StageExecution {
+                outcome: StageRenderOutcome::Cancelled,
+                device_ordinal: preferred_ordinal,
+            });
+        }
+        let mut frozen_config = self.config.clone();
+        let cache_key = frozen_model
+            .and_then(|frozen| {
+                (!frozen.runtime_model_id.is_empty()).then_some(frozen.runtime_model_id.clone())
+            })
+            .unwrap_or_else(|| model.to_string());
+        let expected_fingerprint = frozen_model.map(|frozen| {
+            frozen_config.install_frozen_model_config(model, frozen.config.clone());
+            frozen.model_fingerprint.clone()
+        });
+        // The coordinator is the sole owner of live placement facts. In
+        // particular, do not use startup-time discovery free-VRAM here:
+        // ResourceBroadcaster's latest sample is authoritative when the
+        // scheduler resolves and then revalidates the exact plan.
+        let estimated_vram = crate::queue::estimate_model_vram(model);
+        let fingerprint = expected_fingerprint
+            .clone()
+            .unwrap_or_else(|| model.to_string());
+        let work_id = work_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("chain:{job_id}:stage:{stage_idx}"));
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let mut scheduled_request = stage_req.clone();
+        scheduled_request.model = model.to_string();
+        let work = crate::scheduler::ScheduledOwnerWork::new(
+            work_id.clone(),
+            fingerprint,
+            estimated_vram,
+            crate::gpu_pool::OwnerWork::ChainStage(Box::new(ScheduledChainStageWork {
+                id: work_id,
+                model: model.to_string(),
+                cache_key,
+                config: frozen_config,
+                stage_req: scheduled_request,
+                carry: carry.cloned(),
+                motion_tail_frames,
+                progress,
+                cancelled,
+                cancellation,
+                on_leased,
+                execution_plan: None,
+                expected_model_fingerprint: expected_fingerprint,
+                result_tx: Some(result_tx),
+                #[cfg(test)]
+                before_second_fence: None,
+            })),
+        )
+        .with_preferred_ordinal(preferred_ordinal);
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| anyhow!("V2 chain stage submission requires a Tokio runtime"))?;
+        handle
+            .block_on(self.scheduled_work.submit(work))
+            .map_err(anyhow::Error::msg)?;
+        result_rx
+            .blocking_recv()
+            .map_err(|_| anyhow!("scheduled chain stage owner dropped its result"))?
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -2780,6 +3509,13 @@ mod tests {
     }
 
     impl StageExecutor for FakeExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
         fn render_stage(
             &self,
             _model: &str,
@@ -2798,6 +3534,71 @@ mod tests {
         }
     }
 
+    struct FrozenInspectExecutor {
+        current: mold_core::chain_job::FrozenChainModel,
+        seen: Mutex<Vec<mold_core::chain_job::FrozenChainModel>>,
+    }
+
+    fn test_frozen_model(model: &str) -> mold_core::chain_job::FrozenChainModel {
+        mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: format!("mold-frozen-chain:test:{model}"),
+            config: mold_core::ModelConfig {
+                transformer: Some("/test/transformer".into()),
+                vae: Some("/test/vae".into()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+            model_fingerprint: format!("test:{model}"),
+        }
+    }
+
+    impl StageExecutor for FrozenInspectExecutor {
+        fn freeze_model(
+            &self,
+            _model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(self.current.clone())
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            unreachable!("runner must use the context-aware stage seam")
+        }
+
+        fn render_stage_with_context(
+            &self,
+            _job_id: &str,
+            _stage_idx: u32,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            preferred_ordinal: Option<usize>,
+            frozen_model: Option<&mold_core::chain_job::FrozenChainModel>,
+            _work_id: Option<&str>,
+            _on_leased: Option<Box<dyn FnOnce(usize) -> Result<(), String> + Send>>,
+            _cancellation: mold_inference::InferenceCancellationToken,
+            _progress: Arc<dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync>,
+            _cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> anyhow::Result<StageExecution> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(frozen_model.expect("durable frozen model").clone());
+            Ok(StageExecution {
+                outcome: StageRenderOutcome::Done(outcome(44)),
+                device_ordinal: preferred_ordinal,
+            })
+        }
+    }
+
     struct FakeProbe(AtomicUsize);
 
     impl QueueProbe for FakeProbe {
@@ -2811,6 +3612,13 @@ mod tests {
     }
 
     impl StageExecutor for CarryInspectExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
         fn render_stage(
             &self,
             _model: &str,
@@ -2835,7 +3643,106 @@ mod tests {
         job_id: String,
     }
 
+    struct FinalPublicationCancelExecutor {
+        cancel: Arc<CancelRegistry>,
+        job_id: String,
+    }
+
+    struct FailAfterGalleryExecutor {
+        calls: AtomicUsize,
+        fail_once: AtomicBool,
+    }
+
+    struct FreezeFailExecutor {
+        render_calls: AtomicUsize,
+    }
+
+    impl StageExecutor for FreezeFailExecutor {
+        fn freeze_model(
+            &self,
+            _model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            bail!("forced production-style freeze failure")
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            self.render_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(StageRenderOutcome::Done(outcome(1)))
+        }
+    }
+
+    impl StageExecutor for FinalPublicationCancelExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
+        fn before_final_publication(&self, job_id: &str) {
+            assert_eq!(job_id, self.job_id);
+            assert!(self.cancel.request(job_id));
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            Ok(StageRenderOutcome::Done(outcome(90)))
+        }
+    }
+
+    impl StageExecutor for FailAfterGalleryExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
+        fn after_gallery_publication(&self, _job_id: &str) -> anyhow::Result<()> {
+            if self.fail_once.swap(false, Ordering::SeqCst) {
+                bail!("synthetic crash after gallery publication")
+            }
+            Ok(())
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = progress(1, 2);
+            Ok(StageRenderOutcome::Done(outcome(90)))
+        }
+    }
+
     impl StageExecutor for BoundaryCancelExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
         fn render_stage(
             &self,
             _model: &str,
@@ -2857,7 +3764,7 @@ mod tests {
     fn deps(
         db: MetadataDb,
         root: PathBuf,
-        executor: Arc<FakeExecutor>,
+        executor: Arc<dyn StageExecutor>,
         probe: Arc<FakeProbe>,
     ) -> RunnerDeps {
         RunnerDeps {
@@ -2872,6 +3779,7 @@ mod tests {
             output_dir: None,
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
         }
     }
 
@@ -3055,6 +3963,7 @@ mod tests {
             output_dir: None,
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -3288,6 +4197,124 @@ mod tests {
     }
 
     #[test]
+    fn resumed_job_reuses_durable_companions_after_runtime_config_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55FROZENRESUME",
+            &req,
+            ChainJobState::Interrupted,
+        );
+        let old = mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: "mold-frozen-chain:old".to_string(),
+            config: mold_core::ModelConfig {
+                transformer: Some("/frozen/transformer.safetensors".to_string()),
+                vae: Some("/frozen/vae.safetensors".to_string()),
+                text_encoder_files: Some(vec!["/frozen/text.safetensors".to_string()]),
+                ..mold_core::ModelConfig::default()
+            },
+            model_fingerprint: "frozen-artifacts-v1".to_string(),
+        };
+        let current = mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: "mold-frozen-chain:new".to_string(),
+            config: mold_core::ModelConfig {
+                transformer: Some("/changed/transformer.safetensors".to_string()),
+                vae: Some("/changed/vae.safetensors".to_string()),
+                text_encoder_files: Some(vec!["/changed/text.safetensors".to_string()]),
+                ..mold_core::ModelConfig::default()
+            },
+            model_fingerprint: "changed-artifacts-v2".to_string(),
+        };
+        let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        manifest.frozen_model = Some(old.clone());
+        manifest.write_atomic(&job_dir).unwrap();
+        assert!(chain_jobs::try_transition(
+            &db,
+            &row.id,
+            &[ChainJobState::Interrupted],
+            ChainJobState::Queued,
+            None,
+            now_ms_i64(),
+        )
+        .unwrap());
+        let queued = chain_jobs::get_job(&db, &row.id).unwrap().unwrap();
+        let executor = Arc::new(FrozenInspectExecutor {
+            current,
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+
+        execute_job(&deps, &queued, 0).unwrap();
+
+        assert_eq!(
+            executor.seen.lock().unwrap().as_slice(),
+            std::slice::from_ref(&old)
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .frozen_model,
+            Some(old)
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_without_frozen_model_migrates_before_first_stage_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55FROZENMIGRATE",
+            &req,
+            ChainJobState::Queued,
+        );
+        let current = mold_core::chain_job::FrozenChainModel {
+            runtime_model_id: "mold-frozen-chain:migrated".to_string(),
+            config: mold_core::ModelConfig {
+                transformer: Some("/canonical/transformer.safetensors".to_string()),
+                vae: Some("/canonical/vae.safetensors".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+            model_fingerprint: "migrated-artifacts".to_string(),
+        };
+        let executor = Arc::new(FrozenInspectExecutor {
+            current: current.clone(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        assert_eq!(
+            executor.seen.lock().unwrap().as_slice(),
+            std::slice::from_ref(&current)
+        );
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .frozen_model,
+            Some(current)
+        );
+    }
+
+    #[test]
     fn cancel_via_progress_marks_job_cancelled_and_keeps_completed_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -3489,6 +4516,44 @@ mod tests {
     }
 
     #[test]
+    fn retake_preparation_failure_never_publishes_queued_parent_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55RETAKEPREPFAIL",
+            &req,
+            ChainJobState::Completed,
+        );
+        let stage_path = JobDirLayout::new(job_dir).stage_dir(0);
+        std::fs::create_dir_all(stage_path.parent().unwrap()).unwrap();
+        std::fs::write(&stage_path, b"not a stage directory").unwrap();
+
+        let error = apply_retake(
+            &db,
+            dir.path(),
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 0,
+                mode: RetakeMode::Cascade,
+                seed_offset: Some(1),
+                prompt: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("removing reset chain stage"));
+        assert_eq!(
+            chain_jobs::get_job(&db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed,
+            "a partially prepared retake must remain unschedulable"
+        );
+    }
+
+    #[test]
     fn apply_retake_cascade_resets_target_through_end_and_records_amendment() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -3590,8 +4655,19 @@ mod tests {
         let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
         let first_seed = manifest.stage_status[0].seed;
         assert_eq!(manifest.finalizes[0].output, "final/output-1.mp4");
+        assert!(chain_jobs::try_transition(
+            deps.db.as_ref().as_ref().unwrap(),
+            &row.id,
+            &[ChainJobState::Completed],
+            ChainJobState::Running,
+            None,
+            now_ms_i64(),
+        )
+        .unwrap());
 
-        let second = finalize_job(&deps, &row, &mut manifest).unwrap();
+        let second = finalize_job(&deps, &row, &mut manifest)
+            .unwrap()
+            .expect("not cancelled");
 
         assert_eq!(second, "final/output-2.mp4");
         let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
@@ -3698,6 +4774,80 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn v2_actor_splice_retake_finalizes_after_skipping_completed_successors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![
+            TransitionMode::Smooth,
+            TransitionMode::Cut,
+            TransitionMode::Cut,
+        ]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55ACTORSPLICE",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = Arc::new(deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        ));
+        let initial_deps = deps.clone();
+        let initial_row = row.clone();
+        tokio::task::spawn_blocking(move || execute_job(&initial_deps, &initial_row, 0))
+            .await
+            .unwrap()
+            .unwrap();
+        let calls_before = executor.calls.load(Ordering::SeqCst);
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let queued = apply_retake(
+            db,
+            dir.path(),
+            &row.id,
+            &RetakeRequest {
+                stage_idx: 0,
+                mode: RetakeMode::Splice,
+                seed_offset: Some(9),
+                prompt: None,
+            },
+        )
+        .unwrap();
+        ChainExecutionAuthority::dormant(row.id.clone())
+            .persist_atomic(&job_dir)
+            .unwrap();
+        let claim_deps = deps.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || claim_for_execution(&claim_deps, &queued))
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        let running = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
+
+        run_chain_actor(deps.clone(), running, 0).await.unwrap();
+
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+        assert_eq!(executor.calls.load(Ordering::SeqCst) - calls_before, 1);
+        assert_eq!(
+            ChainExecutionAuthority::read_for_parent(&job_dir, &row.id)
+                .unwrap()
+                .state,
+            ChainExecutionState::Settled
+        );
+    }
+
     #[test]
     fn disk_write_failure_marks_job_and_stage_failed_with_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -3801,7 +4951,86 @@ mod tests {
     }
 
     #[test]
-    fn boundary_cancel_keeps_completed_stage_artifacts_and_stops_next_stage() {
+    fn gallery_publication_crash_replay_keeps_one_file_row_and_finalize_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let output_dir = dir.path().join("gallery");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55GALLERYREPLAY",
+            &req,
+            ChainJobState::Queued,
+        );
+        let executor = Arc::new(FailAfterGalleryExecutor {
+            calls: AtomicUsize::new(0),
+            fail_once: AtomicBool::new(true),
+        });
+        let deps = RunnerDeps {
+            db: Arc::new(Some(db)),
+            jobs_root: dir.path().join("jobs"),
+            executor: executor.clone(),
+            queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+            events: Arc::new(JobEventBus::new()),
+            cancel: Arc::new(CancelRegistry::new()),
+            job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
+            output_dir: Some(output_dir.clone()),
+            server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+        };
+
+        execute_job(&deps, &row, 0).unwrap();
+        let db = deps.db.as_ref().as_ref().unwrap();
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Failed
+        );
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        assert!(ChainJobManifest::read_from_dir(&job_dir)
+            .unwrap()
+            .finalizes
+            .is_empty());
+        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
+        assert_eq!(db.list(Some(&output_dir)).unwrap().len(), 1);
+
+        assert!(chain_jobs::try_transition(
+            db,
+            &row.id,
+            &[ChainJobState::Failed],
+            ChainJobState::Queued,
+            None,
+            now_ms_i64(),
+        )
+        .unwrap());
+        let queued = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
+        execute_job(&deps, &queued, req.stages.len() as u32).unwrap();
+
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Completed
+        );
+        assert_eq!(
+            executor.calls.load(Ordering::SeqCst),
+            1,
+            "finalization replay must not rerender completed stages"
+        );
+        assert_eq!(std::fs::read_dir(&output_dir).unwrap().count(), 1);
+        assert_eq!(db.list(Some(&output_dir)).unwrap().len(), 1);
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .finalizes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn accepted_cancel_after_render_prevents_stage_publication_and_completion() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
         let req = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
@@ -3831,6 +5060,7 @@ mod tests {
             output_dir: None,
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
         };
 
         execute_job(&deps, &row, 0).unwrap();
@@ -3840,8 +5070,116 @@ mod tests {
             chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
             ChainJobState::Cancelled
         );
-        assert!(job_dir.join("stages/000/segment.mp4").exists());
+        assert!(
+            !job_dir.join("stages/000/segment.mp4").exists(),
+            "a cancellation accepted before publication must not expose a completed segment"
+        );
         assert!(!job_dir.join("stages/001/segment.mp4").exists());
+        assert_eq!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .stage_status[0]
+                .state,
+            StageState::Pending
+        );
+    }
+
+    #[test]
+    fn accepted_cancel_after_final_encode_never_publishes_completed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55FINALCANCEL",
+            &req,
+            ChainJobState::Queued,
+        );
+        let cancel = Arc::new(CancelRegistry::new());
+        let executor = Arc::new(FinalPublicationCancelExecutor {
+            cancel: cancel.clone(),
+            job_id: row.id.clone(),
+        });
+        let deps = RunnerDeps {
+            db: Arc::new(Some(db)),
+            jobs_root: dir.path().join("jobs"),
+            executor,
+            queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+            events: Arc::new(JobEventBus::new()),
+            cancel,
+            job_locks: Arc::new(JobMutationLocks::new()),
+            claims: Arc::new(EphemeralClaims::default()),
+            output_dir: None,
+            server_events: None,
+            gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
+        };
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        assert_eq!(
+            chain_jobs::get_job(db, &row.id).unwrap().unwrap().state,
+            ChainJobState::Cancelled
+        );
+        assert!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .finalizes
+                .is_empty(),
+            "cancelled finalization must not publish a durable finalize record"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_freeze_failure_is_terminal_before_any_stage_submission() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = dir.path().join("legacy-job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55LEGACYFREEZE",
+            &req,
+            ChainJobState::Queued,
+        );
+        assert!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .frozen_model
+                .is_none(),
+            "fixture must exercise legacy manifest migration"
+        );
+        let executor = Arc::new(FreezeFailExecutor {
+            render_calls: AtomicUsize::new(0),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let settled = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
+        assert_eq!(settled.state, ChainJobState::Failed);
+        assert!(settled
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot freeze durable model inputs")));
+        assert_eq!(executor.render_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            ChainJobManifest::read_from_dir(&job_dir)
+                .unwrap()
+                .frozen_model
+                .is_none(),
+            "an unresolved legacy job must never persist a partial live fallback"
+        );
     }
 
     #[test]
@@ -3983,6 +5321,14 @@ mod tests {
         let req = request(vec![TransitionMode::Smooth]);
         let job_dir = dir.path().join("jobs/01JBR55RECON");
         let row = persist_job(&db, &job_dir, "01JBR55RECON", &req, ChainJobState::Running);
+        let second_dir = dir.path().join("jobs/01JBR55RECON2");
+        let second = persist_job(
+            &db,
+            &second_dir,
+            "01JBR55RECON2",
+            &req,
+            ChainJobState::Running,
+        );
         let mut manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
         manifest.stage_status[0].state = StageState::Completed;
         manifest.stage_status[0].frames_emitted = Some(9);
@@ -3992,7 +5338,7 @@ mod tests {
 
         let (flipped, repaired) = startup_reconcile(&db, &dir.path().join("jobs")).unwrap();
 
-        assert_eq!(flipped, 1);
+        assert_eq!(flipped, 2);
         assert!(repaired >= 1);
         let row_after = chain_jobs::get_job(&db, &row.id).unwrap().unwrap();
         assert_eq!(row_after.state, ChainJobState::Interrupted);
@@ -4001,12 +5347,140 @@ mod tests {
             row_after.error.as_deref(),
             Some("server restarted while chain job was running")
         );
+        let second_after = chain_jobs::get_job(&db, &second.id).unwrap().unwrap();
+        assert_eq!(second_after.state, ChainJobState::Interrupted);
+        assert_eq!(second_after.current_stage, 0);
         let stage = chain_jobs::stages_for_job(&db, &row.id).unwrap().remove(0);
         assert_eq!(stage.state, StageState::Completed);
         assert_eq!(
             stage.segment_rel_path.as_deref(),
             Some("stages/000/segment.mp4")
         );
+    }
+
+    #[test]
+    fn startup_reconcile_fences_two_independent_active_chain_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let jobs_root = dir.path().join("jobs");
+        let req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        for (index, state) in [
+            ChainExecutionState::Leased,
+            ChainExecutionState::Checkpointing,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("01JBR55RECOVER{index}");
+            let job_dir = jobs_root.join(&id);
+            persist_job(&db, &job_dir, &id, &req, ChainJobState::Running);
+            let mut authority = ChainExecutionAuthority::dormant(id);
+            authority.transition(ChainExecutionState::Ready).unwrap();
+            authority
+                .transition(ChainExecutionState::Submitted)
+                .unwrap();
+            authority.transition(ChainExecutionState::Leased).unwrap();
+            if state == ChainExecutionState::Checkpointing {
+                authority
+                    .transition(ChainExecutionState::Checkpointing)
+                    .unwrap();
+            }
+            authority.persist_atomic(&job_dir).unwrap();
+        }
+
+        let (flipped, _) = startup_reconcile(&db, &jobs_root).unwrap();
+
+        assert_eq!(flipped, 2);
+        for index in 0..2 {
+            let authority =
+                ChainExecutionAuthority::read(&jobs_root.join(format!("01JBR55RECOVER{index}")))
+                    .unwrap();
+            assert_eq!(authority.state, ChainExecutionState::Ready);
+            assert_eq!(authority.identity.attempt_generation, 1);
+            assert_eq!(authority.identity.stage_index, 0);
+        }
+    }
+
+    #[test]
+    fn corrupt_authority_fails_only_its_parent_and_does_not_abort_startup_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let jobs_root = dir.path().join("jobs");
+        let req = request(vec![TransitionMode::Smooth]);
+        let corrupt_dir = jobs_root.join("01JBR55CORRUPTAUTH");
+        let healthy_dir = jobs_root.join("01JBR55HEALTHYAUTH");
+        let corrupt = persist_job(
+            &db,
+            &corrupt_dir,
+            "01JBR55CORRUPTAUTH",
+            &req,
+            ChainJobState::Queued,
+        );
+        let healthy = persist_job(
+            &db,
+            &healthy_dir,
+            "01JBR55HEALTHYAUTH",
+            &req,
+            ChainJobState::Queued,
+        );
+        std::fs::write(authority_path(&corrupt_dir), b"{not-json").unwrap();
+
+        let (_, repaired) = startup_reconcile(&db, &jobs_root).unwrap();
+
+        assert!(repaired >= 1);
+        let corrupt_after = chain_jobs::get_job(&db, &corrupt.id).unwrap().unwrap();
+        assert_eq!(corrupt_after.state, ChainJobState::Failed);
+        assert!(corrupt_after
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("authority is corrupt or mismatched")));
+        assert_eq!(
+            chain_jobs::get_job(&db, &healthy.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ChainJobState::Queued
+        );
+        assert_eq!(
+            ChainExecutionAuthority::read_for_parent(&healthy_dir, &healthy.id)
+                .unwrap()
+                .state,
+            ChainExecutionState::Ready
+        );
+    }
+
+    #[test]
+    fn corrupt_authority_preserves_existing_failed_and_cancelled_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let jobs_root = dir.path().join("jobs");
+        let req = request(vec![TransitionMode::Smooth]);
+        for (id, state, original_error) in [
+            (
+                "01JBR55CORRUPTFAILED",
+                ChainJobState::Failed,
+                Some("original render failure"),
+            ),
+            ("01JBR55CORRUPTCANCELLED", ChainJobState::Cancelled, None),
+        ] {
+            let job_dir = jobs_root.join(id);
+            persist_job(&db, &job_dir, id, &req, state);
+            chain_jobs::update_job_state(&db, id, state, original_error, 2_000).unwrap();
+            std::fs::write(authority_path(&job_dir), b"{not-json").unwrap();
+        }
+
+        startup_reconcile(&db, &jobs_root).unwrap();
+
+        let failed = chain_jobs::get_job(&db, "01JBR55CORRUPTFAILED")
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, ChainJobState::Failed);
+        assert_eq!(failed.error.as_deref(), Some("original render failure"));
+        let cancelled = chain_jobs::get_job(&db, "01JBR55CORRUPTCANCELLED")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.state, ChainJobState::Cancelled);
+        assert_eq!(cancelled.error, None);
     }
 
     #[test]
@@ -4017,6 +5491,21 @@ mod tests {
             assert!(claims.is_claimed("01JBR55CLAIM"));
         }
         assert!(!claims.is_claimed("01JBR55CLAIM"));
+    }
+
+    #[test]
+    fn cancellation_tokens_are_attempt_scoped_and_replaced_after_settlement() {
+        let registry = CancelRegistry::new();
+        registry.register("parent");
+        let first = registry.token("parent");
+        assert!(!first.is_cancelled());
+        assert!(registry.request("parent"));
+        assert!(first.is_cancelled());
+
+        registry.unregister("parent");
+        registry.register("parent");
+        let next = registry.token("parent");
+        assert!(!next.is_cancelled());
     }
 
     #[test]
@@ -4031,6 +5520,7 @@ mod tests {
             CreateJobParams {
                 id: "01JBR55CREATE".into(),
                 ephemeral: true,
+                frozen_model: None,
                 request: req.clone(),
             },
         )
@@ -4290,6 +5780,7 @@ mod tests {
             output_dir: None,
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
         };
         let handle = spawn_runner(deps);
 
@@ -4299,5 +5790,424 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.swept_ephemeral_jobs, 0);
+    }
+
+    struct ConcurrentFailExecutor {
+        barrier: std::sync::Barrier,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    impl StageExecutor for ConcurrentFailExecutor {
+        fn freeze_model(
+            &self,
+            model: &str,
+        ) -> anyhow::Result<mold_core::chain_job::FrozenChainModel> {
+            Ok(test_frozen_model(model))
+        }
+
+        fn render_stage(
+            &self,
+            _model: &str,
+            _stage_req: &GenerateRequest,
+            _carry: Option<&ChainTail>,
+            _motion_tail_frames: u32,
+            _progress: &(dyn Fn(u32, u32) -> ControlFlow<()> + Send + Sync),
+            _cancelled: &(dyn Fn() -> bool + Send + Sync),
+        ) -> anyhow::Result<StageRenderOutcome> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.barrier.wait();
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            bail!("intentional concurrent-stage test stop")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn v2_runner_spawns_one_resumable_actor_per_parent_without_a_fixed_limit() {
+        for chain_count in [1_usize, 2, 8, 64] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db();
+            let jobs_root = dir.path().join("jobs");
+            let req = request(vec![TransitionMode::Smooth]);
+            for idx in 0..chain_count {
+                let id = format!("01JBR55V2{idx:02}");
+                persist_job(
+                    &db,
+                    &jobs_root.join(&id),
+                    &id,
+                    &req,
+                    ChainJobState::Interrupted,
+                );
+                assert!(chain_jobs::try_transition(
+                    &db,
+                    &id,
+                    &[ChainJobState::Interrupted],
+                    ChainJobState::Queued,
+                    None,
+                    now_ms_i64(),
+                )
+                .unwrap());
+            }
+            let executor = Arc::new(ConcurrentFailExecutor {
+                barrier: std::sync::Barrier::new(chain_count),
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+            });
+            let deps = RunnerDeps {
+                db: Arc::new(Some(db)),
+                jobs_root,
+                executor: executor.clone(),
+                queue_probe: Arc::new(FakeProbe(AtomicUsize::new(0))),
+                events: Arc::new(JobEventBus::new()),
+                cancel: Arc::new(CancelRegistry::new()),
+                job_locks: Arc::new(JobMutationLocks::new()),
+                claims: Arc::new(EphemeralClaims::default()),
+                output_dir: None,
+                server_events: None,
+                gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(
+                ),
+                dispatch_mode: crate::dispatch_mode::DispatchMode::V2,
+            };
+            let handle = spawn_runner(deps);
+            handle.kick();
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while executor.max_active.load(Ordering::SeqCst) < chain_count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("every durable parent should reach its own actor turn");
+            assert_eq!(executor.max_active.load(Ordering::SeqCst), chain_count);
+            drop(handle);
+        }
+    }
+
+    #[test]
+    fn production_v2_stage_path_has_no_direct_worker_acquisition() {
+        let source = include_str!("chain_job_runner.rs");
+        let implementation = source
+            .find("impl StageExecutor for ProductionStageExecutor")
+            .expect("production executor implementation");
+        let start = source[implementation..]
+            .find("fn render_stage_with_context(")
+            .map(|offset| implementation + offset)
+            .expect("production V2 method");
+        let end = source[start..]
+            .find("\n}\n\npub struct ProductionQueueProbe")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let method = &source[start..end];
+        assert!(method.contains("ScheduledOwnerWork::new"));
+        assert!(!method.contains("claim_worker_for_stage("));
+        assert!(!method.contains("try_claim_in_flight("));
+        assert!(!method.contains("try_claim_legacy_chain_in_flight("));
+
+        let worker_source = include_str!("gpu_worker.rs");
+        let worker_start = worker_source
+            .find("fn process_scheduled_chain_stage(")
+            .expect("scheduled chain owner path");
+        let worker_end = worker_source[worker_start..]
+            .find("\nfn process_prompt_expansion")
+            .map(|offset| worker_start + offset)
+            .expect("next owner work handler");
+        let worker_method = &worker_source[worker_start..worker_end];
+        assert!(worker_method.contains("run_stage_blocking_planned("));
+        assert!(!worker_method.contains("run_stage_blocking(\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_v2_executor_publishes_owned_work_without_touching_worker_claims() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.gguf");
+        let vae = root.path().join("vae.safetensors");
+        let text_projection = root.path().join("ltx-2.3_text_projection_bf16.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        std::fs::write(&text_projection, b"projection").unwrap();
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            "test-chain:q4".to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                text_encoder_files: Some(vec![text_projection.display().to_string()]),
+                family: Some("ltx2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut chain_request = request(vec![TransitionMode::Smooth, TransitionMode::Smooth]);
+        chain_request.model = "test-chain:q4".to_string();
+        chain_request.enable_audio = Some(true);
+        let frozen = crate::execution_plan::freeze_chain_model(&config, "test-chain:q4").unwrap();
+        let pool = claim_test_pool(2);
+        let (scheduled_tx, mut scheduled_rx) = tokio::sync::mpsc::channel(2);
+        let executor = Arc::new(ProductionStageExecutor::new(
+            pool.clone(),
+            config,
+            crate::scheduler::ScheduledWorkHandle::new(scheduled_tx),
+            crate::dispatch_mode::DispatchMode::V2,
+        ));
+        let stage_requests = chain_request
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(idx, stage)| build_stage_generate_request(stage, &chain_request, 42, idx))
+            .collect::<Vec<_>>();
+        for request in &stage_requests {
+            assert_eq!(request.enable_audio, Some(true));
+            let plans = executor.candidate_plans(request).unwrap();
+            assert_eq!(plans.len(), 2);
+            for plan in plans {
+                assert_eq!(
+                    plan.components[&crate::execution_plan::ComponentRole::Vae].artifact_path,
+                    vae
+                );
+                assert!(plan.components.values().any(|component| {
+                    component.artifact_path == text_projection
+                        && matches!(
+                            component.role,
+                            crate::execution_plan::ComponentRole::GemmaShard(_)
+                        )
+                }));
+                // Audio VAE and vocoder are checkpoint tensors today, so the
+                // transformer artifact is the frozen audio companion too.
+                assert_eq!(
+                    plan.components[&crate::execution_plan::ComponentRole::Transformer]
+                        .artifact_path,
+                    transformer
+                );
+            }
+        }
+        let stage_request = stage_requests[0].clone();
+        let expected_cache_key = frozen.runtime_model_id.clone();
+        let expected_frozen_config = frozen.config.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            executor.render_stage_with_context(
+                "parent",
+                0,
+                "test-chain:q4",
+                &stage_request,
+                None,
+                1,
+                None,
+                Some(&frozen),
+                None,
+                None,
+                mold_inference::InferenceCancellationToken::default(),
+                Arc::new(|_, _| ControlFlow::Continue(())),
+                Arc::new(|| false),
+            )
+        });
+
+        let submission = scheduled_rx.recv().await.expect("one scheduler submission");
+        assert_eq!(submission.work.kind(), mold_scheduler::WorkKind::ChainStage);
+        assert!(
+            submission.candidate_plans.is_empty(),
+            "live placement belongs to the coordinator's sampled resource view"
+        );
+        assert!(pool
+            .workers
+            .iter()
+            .all(|worker| worker.in_flight.load(Ordering::SeqCst) == 0));
+        match submission.work {
+            crate::gpu_pool::OwnerWork::ChainStage(mut work) => {
+                assert_eq!(work.model, "test-chain:q4");
+                assert_eq!(work.stage_req.model, "test-chain:q4");
+                assert_eq!(work.cache_key, expected_cache_key);
+                assert_eq!(
+                    work.config.models.get("test-chain:q4"),
+                    Some(&expected_frozen_config)
+                );
+                assert!(work
+                    .result_tx
+                    .take()
+                    .unwrap()
+                    .send(Ok(StageExecution {
+                        outcome: StageRenderOutcome::Cancelled,
+                        device_ordinal: Some(1),
+                    }))
+                    .is_ok());
+            }
+            _ => panic!("expected a first-class chain-stage payload"),
+        }
+        let execution = task.await.unwrap().unwrap();
+        assert_eq!(execution.device_ordinal, Some(1));
+        assert!(matches!(execution.outcome, StageRenderOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn panicked_actor_releases_parent_tracking_slot() {
+        let mut active = HashSet::from(["parent".to_string()]);
+        let mut task_jobs = HashMap::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        let abort = tasks.spawn(async {
+            panic!("synthetic actor panic");
+        });
+        task_jobs.insert(abort.id(), "parent".to_string());
+
+        let error = tasks
+            .join_next_with_id()
+            .await
+            .expect("one actor")
+            .expect_err("actor must panic");
+        let released = release_actor_tracking(&mut active, &mut task_jobs, error.id());
+
+        assert_eq!(released.as_deref(), Some("parent"));
+        assert!(active.is_empty());
+        assert!(task_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn actor_turn_error_fails_parent_and_clears_attempt_token() {
+        let root = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let row = job(
+            "01JBR55ACTORERROR",
+            ChainJobState::Running,
+            1_000,
+            root.path().join("missing-job-dir"),
+            &req,
+        );
+        chain_jobs::insert_job(&db, &row).unwrap();
+        let deps = Arc::new(deps(
+            db,
+            root.path().join("jobs"),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        ));
+        deps.cancel.register(&row.id);
+
+        let error = run_chain_actor(deps.clone(), row.clone(), 0)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("reading chain job manifest"));
+        let stored = chain_jobs::get_job(deps.db.as_ref().as_ref().expect("test DB"), &row.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ChainJobState::Failed);
+        assert!(
+            !deps
+                .cancel
+                .tokens
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&row.id),
+            "actor attempt token must clear even when the turn fails before authority bootstrap"
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_cancelled_attempt_settles_without_a_spurious_execution_error() {
+        let root = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = root.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55ACTORCANCEL",
+            &req,
+            ChainJobState::Queued,
+        );
+        ChainExecutionAuthority::dormant(row.id.clone())
+            .persist_atomic(&job_dir)
+            .unwrap();
+        let deps = Arc::new(deps(
+            db,
+            root.path().join("jobs"),
+            Arc::new(FakeExecutor {
+                calls: AtomicUsize::new(0),
+                cancel_on_progress: AtomicBool::new(false),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        ));
+        let claim_deps = deps.clone();
+        let claim_row = row.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || claim_for_execution(&claim_deps, &claim_row))
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(deps.cancel.request(&row.id));
+        let running = chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+            .unwrap()
+            .unwrap();
+
+        run_chain_actor(deps.clone(), running, 0).await.unwrap();
+
+        assert_eq!(
+            chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ChainJobState::Cancelled
+        );
+        assert_eq!(
+            ChainExecutionAuthority::read_for_parent(&job_dir, &row.id)
+                .unwrap()
+                .state,
+            ChainExecutionState::Settled
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_failed_attempt_settles_without_overwriting_the_stage_error() {
+        let root = tempfile::tempdir().unwrap();
+        let db = db();
+        let req = request(vec![TransitionMode::Smooth]);
+        let job_dir = root.path().join("job");
+        let row = persist_job(
+            &db,
+            &job_dir,
+            "01JBR55ACTORFAIL",
+            &req,
+            ChainJobState::Queued,
+        );
+        ChainExecutionAuthority::dormant(row.id.clone())
+            .persist_atomic(&job_dir)
+            .unwrap();
+        let deps = Arc::new(deps(
+            db,
+            root.path().join("jobs"),
+            Arc::new(FreezeFailExecutor {
+                render_calls: AtomicUsize::new(0),
+            }),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        ));
+        let claim_deps = deps.clone();
+        let claim_row = row.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || claim_for_execution(&claim_deps, &claim_row))
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        let running = chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+            .unwrap()
+            .unwrap();
+
+        run_chain_actor(deps.clone(), running, 0).await.unwrap();
+
+        let failed = chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), &row.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, ChainJobState::Failed);
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("forced production-style freeze failure")));
+        assert_eq!(
+            ChainExecutionAuthority::read_for_parent(&job_dir, &row.id)
+                .unwrap()
+                .state,
+            ChainExecutionState::Settled
+        );
     }
 }

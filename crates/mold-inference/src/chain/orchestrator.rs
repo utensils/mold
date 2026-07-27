@@ -12,13 +12,12 @@
 //! shape math (e.g. the LTX-2 VAE's latent-frame ratio) lives with the
 //! family, in `crate::ltx2`.
 
+use crate::audio::NativeAudioTrack;
 use anyhow::{bail, Result};
 use image::RgbImage;
 use mold_core::chain::{ChainProgressEvent, ChainRequest, ChainStage, TransitionMode};
 use mold_core::chain_job::effective_stage_seed;
 use mold_core::{GenerateRequest, OutputFormat};
-
-use crate::audio::NativeAudioTrack;
 
 /// Opaque carryover payload handed from one chain stage to the next.
 ///

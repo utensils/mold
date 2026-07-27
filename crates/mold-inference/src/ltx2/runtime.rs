@@ -3601,6 +3601,9 @@ fn run_real_distilled_stage(
             run_sigmas.len() - 1,
             step_start.elapsed(),
         );
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
 
         if let Some(stage) = debug_stage {
             eprintln!("[ltx2-debug] {stage} step={step_idx} sigma={sigma:.6}");

@@ -300,6 +300,86 @@ pub(crate) fn save_video_to_dir(
     Some(filename)
 }
 
+/// Idempotently publish a video under one caller-owned gallery filename.
+///
+/// Durable chain finalization uses an attempt-derived filename so replaying a
+/// crash window upserts the same gallery row instead of allocating another
+/// timestamped output. An existing file is accepted only when its bytes match.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_video_to_dir_named(
+    dir: &std::path::Path,
+    filename: &str,
+    bytes: &[u8],
+    format: OutputFormat,
+    metadata: &OutputMetadata,
+    generation_time_ms: Option<i64>,
+    db: Option<&MetadataDb>,
+    events: Option<&crate::events::EventBroadcaster>,
+) -> anyhow::Result<String> {
+    let filename_path = std::path::Path::new(filename);
+    if filename_path.components().count() != 1
+        || !matches!(
+            filename_path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        anyhow::bail!("gallery filename must be one normal path component");
+    }
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(filename);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(error.into());
+            }
+            crate::batch_transaction::sync_ordinary_gallery_directory(dir)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&path)?;
+            if existing != bytes {
+                anyhow::bail!(
+                    "gallery replay target '{}' exists with different bytes",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let image_row = match db {
+        Some(db) => Some(
+            mold_db::persist::record_saved_output_returning(
+                db,
+                dir,
+                filename,
+                &path,
+                &mold_db::persist::OutputRecordParams {
+                    format,
+                    metadata,
+                    source: RecordSource::Server,
+                    generation_time_ms,
+                    backend: Some(mold_inference::compiled_backend_label()),
+                },
+            )
+            .ok_or_else(|| anyhow::anyhow!("recording durable chain gallery metadata failed"))?,
+        ),
+        None => None,
+    };
+    if let Some(events) = events {
+        events.publish(mold_core::ServerEvent::GalleryAdded {
+            filename: filename.to_string(),
+            image: image_row.map(|record| Box::new(record.to_gallery_image())),
+        });
+    }
+    Ok(filename.to_string())
+}
+
 fn write_gallery_bytes_no_replace(
     dir: &std::path::Path,
     desired: &str,
@@ -1612,10 +1692,13 @@ async fn dispatch_legacy_scheduled_work(
             estimated_host_ram_bytes: current.estimated_host_ram_bytes,
             hard_ordinal: current.hard_ordinal,
             priority: current.priority,
+            preferred_ordinal: current.preferred_ordinal,
+            candidate_plans: current.candidate_plans,
             queue_rank: 0,
             ready_at_ms: 0,
             bypass_count: 0,
             warm_wait_started_ms: None,
+            retry_not_before_ms: None,
         };
         let fence = crate::scheduler::LeaseFence {
             work_id: current.id,
@@ -1656,6 +1739,8 @@ async fn dispatch_legacy_scheduled_work(
                     estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
                     hard_ordinal: retry.hard_ordinal,
                     priority: retry.priority,
+                    preferred_ordinal: retry.preferred_ordinal,
+                    candidate_plans: retry.candidate_plans,
                     work: grant.work,
                 });
                 if pending
@@ -3425,6 +3510,39 @@ mod tests {
         assert_eq!(rows[0].metadata.frames, Some(25));
         assert_eq!(rows[0].metadata.fps, Some(24));
         assert_eq!(rows[0].generation_time_ms, Some(5000));
+    }
+
+    #[test]
+    fn named_video_replay_keeps_one_gallery_file_and_row() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        let req = fake_request("ltx-video:fp16");
+        let meta = OutputMetadata::from_generate_request(&req, 99, None, "test-version");
+        let filename = "chain-01TEST-take-1.mp4";
+        let bytes = b"stable chain bytes";
+
+        for _ in 0..2 {
+            assert_eq!(
+                save_video_to_dir_named(
+                    tmp.path(),
+                    filename,
+                    bytes,
+                    OutputFormat::Mp4,
+                    &meta,
+                    None,
+                    Some(&db),
+                    None,
+                )
+                .unwrap(),
+                filename
+            );
+        }
+
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        let rows = db.list(Some(tmp.path())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, filename);
+        assert_eq!(std::fs::read(tmp.path().join(filename)).unwrap(), bytes);
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod batch_parent;
 pub mod batch_transaction;
 pub mod catalog_api;
 pub mod catalog_credentials;
+pub(crate) mod chain_execution;
 pub mod chain_job_runner;
 pub mod chain_limits;
 pub mod test_support;
@@ -716,6 +717,8 @@ pub async fn run_server(
                 executor: std::sync::Arc::new(chain_job_runner::ProductionStageExecutor::new(
                     state.gpu_pool.clone(),
                     config_snapshot,
+                    state.scheduled_work.clone(),
+                    dispatch_mode,
                 )),
                 queue_probe: std::sync::Arc::new(chain_job_runner::ProductionQueueProbe::new(
                     state.queue.clone(),
@@ -728,6 +731,7 @@ pub async fn run_server(
                 output_dir,
                 server_events: Some(state.events.clone()),
                 gallery_publication_gate: state.gallery_publication_gate.clone(),
+                dispatch_mode,
             };
             state.chain_jobs = Some(std::sync::Arc::new(chain_job_runner::spawn_runner(deps)));
         } else {

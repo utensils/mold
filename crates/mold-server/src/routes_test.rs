@@ -1911,6 +1911,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_v2_work_items_are_additive_and_legacy_patch_still_reorders_only_entries() {
+        let state = AppState::for_tests();
+        state.job_registry.register("ordinary-a", "flux");
+        state.job_registry.register("ordinary-b", "flux");
+        state
+            .scheduled_work
+            .set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+                work_id: "chain:parent-1:attempt:4:stage:2".to_string(),
+                parent_id: "parent-1".to_string(),
+                work_kind: "chain_stage".to_string(),
+                chain_stage: Some(2),
+                planned_device_id: Some("cuda:test-gpu".to_string()),
+                activity_phase: mold_core::QueueActivityPhase::Queued,
+                ..mold_core::QueueWorkItem::default()
+            }]);
+        let app = app_with_state(state);
+
+        let before = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(before["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(before["plan"]["plan_version"], 7);
+        assert_eq!(before["plan"]["state_version"], 11);
+        assert_eq!(before["plan"]["work_items"][0]["parent_id"], "parent-1");
+        assert_eq!(before["plan"]["work_items"][0]["chain_stage"], 2);
+        assert_eq!(before["plan"]["work_items"][0]["work_kind"], "chain_stage");
+        assert_eq!(
+            before["plan"]["work_items"][0]["planned_device_id"],
+            "cuda:test-gpu"
+        );
+
+        let patch = app
+            .clone()
+            .oneshot(
+                Request::patch("/api/queue/ordinary-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"position":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(patch.status(), StatusCode::OK);
+
+        let after = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(after["entries"][0]["id"], "ordinary-b");
+        assert_eq!(
+            after["plan"]["work_items"][0]["work_id"],
+            "chain:parent-1:attempt:4:stage:2"
+        );
+        assert_eq!(after["plan"], before["plan"]);
+    }
+
+    #[tokio::test]
     async fn queue_lists_registered_jobs_in_fifo_order_with_running_state_and_gpu() {
         // Hand-build state so we can poke the registry without standing up
         // a real generation flow. Locks in the wire shape that the SPA's
@@ -5478,6 +5540,44 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = json_body(resp).await;
         assert_eq!(body["state"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_chain_job_reports_cancelling_until_worker_settles() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(home.path());
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        seed_chain_job(&db, home.path(), "running-cancel", ChainJobState::Running);
+        let handle = Arc::new(crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests());
+        handle.register_cancel_for_tests("running-cancel");
+        let app = app_with_chain_handle(db, handle);
+
+        let cancel_resp = app
+            .clone()
+            .oneshot(
+                Request::post("/api/chain-jobs/running-cancel/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::ACCEPTED);
+        let cancel_body = json_body(cancel_resp).await;
+        assert_eq!(cancel_body["state"], "running");
+        assert_eq!(cancel_body["cancelling"], true);
+
+        let get_resp = app
+            .oneshot(
+                Request::get("/api/chain-jobs/running-cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = json_body(get_resp).await;
+        assert_eq!(get_body["state"], "running");
+        assert_eq!(get_body["cancelling"], true);
     }
 
     #[tokio::test]

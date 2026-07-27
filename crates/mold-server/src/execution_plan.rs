@@ -1269,6 +1269,159 @@ fn model_fingerprint(model: &str, artifacts: &BTreeMap<ComponentRole, PathBuf>) 
     format!("{:x}", hash.finalize())
 }
 
+pub fn resolved_model_fingerprint(
+    config: &Config,
+    model: &str,
+) -> Result<String, ExecutionPlanError> {
+    if let Some(model_config) = config.models.get(model) {
+        return frozen_model_fingerprint(model, model_config);
+    }
+    let paths =
+        ModelPaths::resolve(model, config).ok_or_else(|| ExecutionPlanError::MissingArtifacts {
+            model: model.to_string(),
+        })?;
+    let mut artifacts = BTreeMap::new();
+    artifacts.insert(ComponentRole::Transformer, paths.transformer);
+    for (index, shard) in paths.transformer_shards.into_iter().enumerate() {
+        artifacts.insert(ComponentRole::TransformerShard(index as u8), shard);
+    }
+    artifacts.insert(ComponentRole::Vae, paths.vae);
+    Ok(model_fingerprint(model, &artifacts))
+}
+
+/// Fingerprint the complete immutable input to engine construction for a
+/// durable chain job. This is deliberately broader than placement planning:
+/// tokenizers, default LoRA, and every serialized model default participate
+/// even when they do not consume GPU memory.
+pub fn frozen_model_fingerprint(
+    model: &str,
+    model_config: &mold_core::ModelConfig,
+) -> Result<String, ExecutionPlanError> {
+    let paths = ModelPaths::resolve_from_model_config_exact(model_config).ok_or_else(|| {
+        ExecutionPlanError::MissingArtifacts {
+            model: model.to_string(),
+        }
+    })?;
+    let mut files = vec![
+        ("transformer".to_string(), paths.transformer),
+        ("vae".to_string(), paths.vae),
+    ];
+    files.extend(
+        paths
+            .transformer_shards
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| (format!("transformer_shard:{index}"), path)),
+    );
+    macro_rules! optional_file {
+        ($name:literal, $value:expr) => {
+            if let Some(path) = $value {
+                files.push(($name.to_string(), path));
+            }
+        };
+    }
+    optional_file!("spatial_upscaler", paths.spatial_upscaler);
+    optional_file!("temporal_upscaler", paths.temporal_upscaler);
+    optional_file!("distilled_lora", paths.distilled_lora);
+    optional_file!("t5_encoder", paths.t5_encoder);
+    optional_file!("clip_encoder", paths.clip_encoder);
+    optional_file!("t5_tokenizer", paths.t5_tokenizer);
+    optional_file!("clip_tokenizer", paths.clip_tokenizer);
+    optional_file!("clip_encoder_2", paths.clip_encoder_2);
+    optional_file!("clip_tokenizer_2", paths.clip_tokenizer_2);
+    files.extend(
+        paths
+            .text_encoder_files
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| (format!("text_encoder:{index}"), path)),
+    );
+    optional_file!("text_tokenizer", paths.text_tokenizer);
+    optional_file!("decoder", paths.decoder);
+    if let Some(path) = model_config.lora.as_deref() {
+        files.push(("default_lora".to_string(), PathBuf::from(path)));
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(model.as_bytes());
+    hash.update(
+        serde_json::to_vec(model_config)
+            .map_err(|error| ExecutionPlanError::PlanInvalidated(error.to_string()))?,
+    );
+    for (role, path) in files {
+        hash.update(role.as_bytes());
+        hash.update(fingerprint_path(&path).0.as_bytes());
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+/// Resolve every model companion once and freeze it as a canonical absolute
+/// path set. The synthetic runtime key deliberately cannot match a catalog
+/// ID or built-in manifest, so recovery never consults changed sidecars,
+/// `MOLD_HOME`, or per-model environment fallbacks.
+pub fn freeze_chain_model(
+    config: &Config,
+    model: &str,
+) -> Result<mold_core::chain_job::FrozenChainModel, ExecutionPlanError> {
+    let paths =
+        ModelPaths::resolve(model, config).ok_or_else(|| ExecutionPlanError::MissingArtifacts {
+            model: model.to_string(),
+        })?;
+    let canonical = |path: &std::path::Path| {
+        std::fs::canonicalize(path)
+            .map_err(|_| ExecutionPlanError::MissingArtifacts {
+                model: model.to_string(),
+            })
+            .map(|path| path.to_string_lossy().into_owned())
+    };
+    let canonical_optional = |path: Option<&PathBuf>| path.map(|path| canonical(path)).transpose();
+    let mut frozen = config.resolved_model_config(model);
+    frozen.transformer = Some(canonical(&paths.transformer)?);
+    frozen.transformer_shards = (!paths.transformer_shards.is_empty())
+        .then(|| {
+            paths
+                .transformer_shards
+                .iter()
+                .map(|path| canonical(path))
+                .collect()
+        })
+        .transpose()?;
+    frozen.vae = Some(canonical(&paths.vae)?);
+    frozen.spatial_upscaler = canonical_optional(paths.spatial_upscaler.as_ref())?;
+    frozen.temporal_upscaler = canonical_optional(paths.temporal_upscaler.as_ref())?;
+    frozen.distilled_lora = canonical_optional(paths.distilled_lora.as_ref())?;
+    frozen.t5_encoder = canonical_optional(paths.t5_encoder.as_ref())?;
+    frozen.clip_encoder = canonical_optional(paths.clip_encoder.as_ref())?;
+    frozen.t5_tokenizer = canonical_optional(paths.t5_tokenizer.as_ref())?;
+    frozen.clip_tokenizer = canonical_optional(paths.clip_tokenizer.as_ref())?;
+    frozen.clip_encoder_2 = canonical_optional(paths.clip_encoder_2.as_ref())?;
+    frozen.clip_tokenizer_2 = canonical_optional(paths.clip_tokenizer_2.as_ref())?;
+    frozen.text_encoder_files = (!paths.text_encoder_files.is_empty())
+        .then(|| {
+            paths
+                .text_encoder_files
+                .iter()
+                .map(|path| canonical(path))
+                .collect()
+        })
+        .transpose()?;
+    frozen.text_tokenizer = canonical_optional(paths.text_tokenizer.as_ref())?;
+    frozen.decoder = canonical_optional(paths.decoder.as_ref())?;
+    frozen.lora = frozen
+        .lora
+        .as_deref()
+        .map(|path| canonical(Path::new(path)))
+        .transpose()?;
+
+    let model_fingerprint = frozen_model_fingerprint(model, &frozen)?;
+    let runtime_model_id = format!("mold-frozen-chain:{model_fingerprint}");
+    Ok(mold_core::chain_job::FrozenChainModel {
+        runtime_model_id,
+        config: frozen,
+        model_fingerprint,
+    })
+}
+
 fn execution_fingerprint(
     model: &str,
     device: &DeviceFact,
@@ -2053,5 +2206,176 @@ mod tests {
         set_file_mtime(&path, original_mtime).unwrap();
 
         assert_ne!(before, fingerprint_path(&path));
+    }
+
+    #[test]
+    fn frozen_chain_model_uses_canonical_companions_and_ignores_changed_config() {
+        let root = TempDir::new().unwrap();
+        let assets = root.path().join("assets");
+        let nested = assets.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let names = [
+            "transformer.safetensors",
+            "shard.safetensors",
+            "vae.safetensors",
+            "spatial.safetensors",
+            "temporal.safetensors",
+            "distilled.safetensors",
+            "t5.safetensors",
+            "clip.safetensors",
+            "clip2.safetensors",
+            "t5-tokenizer.json",
+            "clip-tokenizer.json",
+            "clip2-tokenizer.json",
+            "text_projection.safetensors",
+            "tokenizer.json",
+            "decoder.safetensors",
+            "default-lora.safetensors",
+        ];
+        for name in names {
+            std::fs::write(assets.join(name), name.as_bytes()).unwrap();
+        }
+        let relative_to_nested = |name: &str| nested.join("..").join(name);
+        let model = "cv:freeze-fixture";
+        let mut config = Config::default();
+        config.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    relative_to_nested("transformer.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                transformer_shards: Some(vec![relative_to_nested("shard.safetensors")
+                    .display()
+                    .to_string()]),
+                vae: Some(relative_to_nested("vae.safetensors").display().to_string()),
+                spatial_upscaler: Some(
+                    relative_to_nested("spatial.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                temporal_upscaler: Some(
+                    relative_to_nested("temporal.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                distilled_lora: Some(
+                    relative_to_nested("distilled.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                t5_encoder: Some(relative_to_nested("t5.safetensors").display().to_string()),
+                clip_encoder: Some(relative_to_nested("clip.safetensors").display().to_string()),
+                clip_encoder_2: Some(
+                    relative_to_nested("clip2.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                t5_tokenizer: Some(
+                    relative_to_nested("t5-tokenizer.json")
+                        .display()
+                        .to_string(),
+                ),
+                clip_tokenizer: Some(
+                    relative_to_nested("clip-tokenizer.json")
+                        .display()
+                        .to_string(),
+                ),
+                clip_tokenizer_2: Some(
+                    relative_to_nested("clip2-tokenizer.json")
+                        .display()
+                        .to_string(),
+                ),
+                text_encoder_files: Some(vec![relative_to_nested("text_projection.safetensors")
+                    .display()
+                    .to_string()]),
+                text_tokenizer: Some(relative_to_nested("tokenizer.json").display().to_string()),
+                decoder: Some(
+                    relative_to_nested("decoder.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                lora: Some(
+                    relative_to_nested("default-lora.safetensors")
+                        .display()
+                        .to_string(),
+                ),
+                family: Some("ltx2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+
+        let frozen = freeze_chain_model(&config, model).unwrap();
+        assert!(frozen.runtime_model_id.starts_with("mold-frozen-chain:"));
+        for path in frozen.config.all_file_paths() {
+            let path = PathBuf::from(path);
+            assert!(path.is_absolute());
+            assert!(!path.components().any(|part| part.as_os_str() == ".."));
+            assert!(path.is_file());
+        }
+        assert!(Path::new(frozen.config.lora.as_deref().unwrap()).is_absolute());
+        assert_eq!(
+            frozen.config.text_encoder_files.as_ref().unwrap()[0],
+            assets
+                .join("text_projection.safetensors")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        let original_fingerprint = frozen.model_fingerprint.clone();
+        std::fs::write(assets.join("t5-tokenizer.json"), b"changed-tokenizer").unwrap();
+        assert_ne!(
+            frozen_model_fingerprint(model, &frozen.config).unwrap(),
+            original_fingerprint,
+            "tokenizers are engine inputs and must invalidate the durable identity"
+        );
+        std::fs::write(assets.join("t5-tokenizer.json"), b"t5-tokenizer.json").unwrap();
+        std::fs::write(
+            assets.join("default-lora.safetensors"),
+            b"changed-default-lora",
+        )
+        .unwrap();
+        assert_ne!(
+            frozen_model_fingerprint(model, &frozen.config).unwrap(),
+            original_fingerprint,
+            "the configured default LoRA must invalidate the durable identity"
+        );
+        std::fs::write(
+            assets.join("default-lora.safetensors"),
+            b"default-lora.safetensors",
+        )
+        .unwrap();
+        let mut changed_engine_defaults = frozen.config.clone();
+        changed_engine_defaults.lora_scale = Some(0.25);
+        assert_ne!(
+            frozen_model_fingerprint(model, &changed_engine_defaults).unwrap(),
+            original_fingerprint,
+            "serialized engine-shaping defaults must participate in identity"
+        );
+
+        let changed = root.path().join("changed.safetensors");
+        std::fs::write(&changed, b"changed").unwrap();
+        let mut changed_config = config;
+        changed_config.models.insert(
+            model.to_string(),
+            mold_core::ModelConfig {
+                transformer: Some(changed.display().to_string()),
+                vae: Some(changed.display().to_string()),
+                family: Some("ltx2".to_string()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        changed_config.install_frozen_model_config(model, frozen.config.clone());
+        let paths = ModelPaths::resolve(model, &changed_config).unwrap();
+        assert_eq!(
+            paths.transformer,
+            assets
+                .join("transformer.safetensors")
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(changed_config.has_frozen_model_config(model));
     }
 }

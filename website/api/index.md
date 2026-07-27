@@ -456,11 +456,15 @@ metadata DB is disabled (`MOLD_DB_DISABLE=1`).
 
 ## `/api/queue`
 
-`GET /api/queue` returns queued and running generation jobs. Running jobs carry
-their actual `gpu`; queued jobs carry an optional `target_gpu` so UI clients
-can render one lane per GPU plus an automatic lane. Current authoritative V2
-servers also return a nullable `plan` with versioned stable-device lanes,
-estimated start/finish times, confidence, and the next tentative replan time.
+`GET /api/queue` keeps `entries` limited to queued and running generation jobs.
+Running jobs carry their actual `gpu`; queued jobs carry an
+optional `target_gpu` so UI clients can render one lane per GPU plus an
+automatic lane. Current authoritative V2 servers also return a nullable,
+additive `plan` snapshot with versioned stable-device lanes, ordinary
+generation plus scheduler-owned utility and durable-chain work items, estimated
+start/finish times, confidence, blocked reasons, and the next tentative replan
+deadline. Clients must treat it as advisory: the server revalidates the exact
+execution fingerprint and frozen artifacts before CUDA.
 
 Use `PATCH /api/queue/:id` to update a queued job's preferred lane and/or its
 0-based position among queued jobs:
@@ -825,7 +829,7 @@ Endpoints:
 - `GET /api/chain-jobs/:id/events` — SSE stream; first frame is always a snapshot.
 - `POST /api/chain-jobs/:id/resume` — requeue `interrupted`, `failed`, or `cancelled`.
 - `POST /api/chain-jobs/:id/retake` — body is `RetakeRequest` (`stage_idx`, `mode`, optional `seed_offset`, optional `prompt`).
-- `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; running jobs stop at the next boundary/progress check.
+- `POST /api/chain-jobs/:id/cancel` — queued jobs settle as `cancelled`; an accepted running cancellation returns `202`, exposes `summary.cancelling: true`, and cannot publish a completed stage/job after that barrier.
 - `DELETE /api/chain-jobs/:id` — remove a non-running job and its job directory.
 - `POST /api/chain-jobs/gc` — prune successful ephemeral jobs and completed non-ephemeral job artifacts older than `chain.jobs_artifact_ttl_days`.
 - `GET /api/chain-jobs/:id/stages/:idx/preview` — returns `image/jpeg` when that stage has a preview.

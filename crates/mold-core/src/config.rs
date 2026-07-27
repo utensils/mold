@@ -125,7 +125,7 @@ pub struct DefaultModelResolution {
 }
 
 /// Per-model file path + default settings configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub struct ModelConfig {
     // --- paths ---
     pub transformer: Option<String>,
@@ -313,10 +313,18 @@ pub struct ModelPaths {
 }
 
 impl ModelPaths {
+    const FROZEN_MODEL_PREFIX: &'static str = "\0mold-frozen-chain:";
+
     /// Resolve paths for a model. Checks config, then env vars.
     /// Returns None if transformer and VAE paths can't be resolved.
     /// All other paths are optional (depend on model family).
     pub fn resolve(model_name: &str, config: &Config) -> Option<Self> {
+        if let Some(model_cfg) = config
+            .models
+            .get(&format!("{}{model_name}", Self::FROZEN_MODEL_PREFIX))
+        {
+            return Self::resolve_from_model_config_exact(model_cfg);
+        }
         if let Some(model_cfg) = config.discovered_manifest_model_config(model_name) {
             return Self::resolve_from_model_config(Some(&model_cfg));
         }
@@ -328,6 +336,40 @@ impl ModelPaths {
 
         let model_cfg = config.lookup_model_config(model_name);
         Self::resolve_from_model_config(model_cfg.as_ref())
+    }
+
+    /// Resolve only the paths captured in `model_cfg`.
+    ///
+    /// This intentionally does not consult `MOLD_*_PATH` environment variables,
+    /// manifests, sidecars, or model discovery. Durable chain jobs use it after
+    /// admission so a restart cannot silently substitute different artifacts.
+    pub fn resolve_from_model_config_exact(model_cfg: &ModelConfig) -> Option<Self> {
+        let path = |value: Option<&str>| value.map(PathBuf::from);
+        Some(Self {
+            transformer: PathBuf::from(model_cfg.transformer.as_deref()?),
+            transformer_shards: model_cfg
+                .transformer_shards
+                .as_ref()
+                .map(|paths| paths.iter().map(PathBuf::from).collect())
+                .unwrap_or_default(),
+            vae: PathBuf::from(model_cfg.vae.as_deref()?),
+            spatial_upscaler: path(model_cfg.spatial_upscaler.as_deref()),
+            temporal_upscaler: path(model_cfg.temporal_upscaler.as_deref()),
+            distilled_lora: path(model_cfg.distilled_lora.as_deref()),
+            t5_encoder: path(model_cfg.t5_encoder.as_deref()),
+            clip_encoder: path(model_cfg.clip_encoder.as_deref()),
+            t5_tokenizer: path(model_cfg.t5_tokenizer.as_deref()),
+            clip_tokenizer: path(model_cfg.clip_tokenizer.as_deref()),
+            clip_encoder_2: path(model_cfg.clip_encoder_2.as_deref()),
+            clip_tokenizer_2: path(model_cfg.clip_tokenizer_2.as_deref()),
+            text_encoder_files: model_cfg
+                .text_encoder_files
+                .as_ref()
+                .map(|paths| paths.iter().map(PathBuf::from).collect())
+                .unwrap_or_default(),
+            text_tokenizer: path(model_cfg.text_tokenizer.as_deref()),
+            decoder: path(model_cfg.decoder.as_deref()),
+        })
     }
 
     fn resolve_from_model_config(model_cfg: Option<&ModelConfig>) -> Option<Self> {
@@ -603,6 +645,26 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Install an immutable model snapshot for one in-memory execution.
+    ///
+    /// The private sentinel makes [`ModelPaths::resolve`] choose the exact
+    /// captured paths before any mutable manifest, sidecar, or environment
+    /// source. The ordinary model entry is also replaced so engine-shaping
+    /// defaults (family, LoRA, scheduler, dtype flags) remain frozen while the
+    /// semantic model name is preserved.
+    pub fn install_frozen_model_config(&mut self, model_name: &str, model: ModelConfig) {
+        self.models.insert(
+            format!("{}{model_name}", ModelPaths::FROZEN_MODEL_PREFIX),
+            model.clone(),
+        );
+        self.models.insert(model_name.to_string(), model);
+    }
+
+    pub fn has_frozen_model_config(&self, model_name: &str) -> bool {
+        self.models
+            .contains_key(&format!("{}{model_name}", ModelPaths::FROZEN_MODEL_PREFIX))
+    }
+
     /// Build a `GpuSelection` from the config's `gpus` field.
     pub fn gpu_selection(&self) -> crate::types::GpuSelection {
         self.gpus.clone().unwrap_or_default()

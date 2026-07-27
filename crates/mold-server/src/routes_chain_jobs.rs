@@ -92,6 +92,7 @@ pub async fn create_chain_job(
         crate::chain_job_runner::CreateJobParams {
             id: job_id.clone(),
             ephemeral: false,
+            frozen_model: Some(crate::routes_chain::freeze_chain_model(&state, &req.model).await?),
             request: req,
         },
     )
@@ -172,14 +173,19 @@ pub async fn preview_chain_job_placement(
 pub async fn list_chain_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<ChainJobListing>, ApiError> {
-    chain_jobs_handle(&state)?;
+    let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let rows = chain_jobs::list_jobs(db)
         .map_err(|e| ApiError::internal(format!("failed to list chain jobs: {e:#}")))?;
     let jobs = rows
         .into_iter()
-        .map(|row| summary_for_row(&row, read_manifest_optional(&row, &root).as_ref()))
+        .map(|row| {
+            let mut summary = summary_for_row(&row, read_manifest_optional(&row, &root).as_ref());
+            summary.cancelling =
+                row.state == ChainJobState::Running && handle.is_cancelling(&row.id);
+            summary
+        })
         .collect();
     Ok(Json(ChainJobListing { jobs }))
 }
@@ -196,13 +202,15 @@ pub async fn get_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChainJobDetail>, ApiError> {
-    chain_jobs_handle(&state)?;
+    let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
-    job_detail_for(db, &root, &id)
+    let mut detail = job_detail_for(db, &root, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
-        .map(Json)
-        .ok_or_else(|| not_found(&id))
+        .ok_or_else(|| not_found(&id))?;
+    detail.summary.cancelling =
+        detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
+    Ok(Json(detail))
 }
 
 /// subscribe() FIRST, then synthesize Snapshot from DB+manifest, then live.
@@ -223,9 +231,11 @@ pub async fn chain_job_events(
         .subscribe(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to subscribe to chain job: {e:#}")))?;
     let root = jobs_root()?;
-    let detail = job_detail_for(db, &root, &id)
+    let mut detail = job_detail_for(db, &root, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job snapshot: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
+    detail.summary.cancelling =
+        detail.summary.state == ChainJobState::Running && handle.is_cancelling(&id);
     let snapshot = ChainJobEvent::Snapshot { job: detail };
     let stream = async_stream::stream! {
         yield Ok(sse_event(snapshot));
@@ -387,11 +397,15 @@ pub async fn cancel_chain_job(
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
-    let row = chain_jobs::get_job(db, &id)
+    let mut row = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to load chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
-    if row.state == ChainJobState::Running {
-        let _ = handle.request_cancel(&id);
+    let cancelling = if row.state == ChainJobState::Running {
+        let requested = handle.request_cancel(&id);
+        row = chain_jobs::get_job(db, &id)
+            .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
+            .ok_or_else(|| not_found(&id))?;
+        requested && row.state == ChainJobState::Running
     } else if row.state == ChainJobState::Queued {
         let changed = chain_jobs::try_transition(
             db,
@@ -407,19 +421,25 @@ pub async fn cancel_chain_job(
         } else {
             cancel_after_cas_loss(handle, db, &id)?;
         }
+        false
     } else if settled(row.state) {
         // Idempotent: settled jobs have already performed cancel/bus cleanup
         // on the winning settled CAS.
-    }
+        false
+    } else {
+        false
+    };
     let updated = chain_jobs::get_job(db, &id)
         .map_err(|e| ApiError::internal(format!("failed to reload chain job: {e:#}")))?
         .ok_or_else(|| not_found(&id))?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(summary_for_row(
-            &updated,
-            read_manifest_optional(&updated, &root).as_ref(),
-        )),
+        Json({
+            let mut summary =
+                summary_for_row(&updated, read_manifest_optional(&updated, &root).as_ref());
+            summary.cancelling = cancelling && updated.state == ChainJobState::Running;
+            summary
+        }),
     ))
 }
 
@@ -599,6 +619,7 @@ fn summary_for_row(row: &ChainJobRow, manifest: Option<&ChainJobManifest>) -> Ch
         updated_at_unix_ms: row.updated_at_ms.max(0) as u64,
         error: row.error.clone(),
         ephemeral: manifest.is_some_and(|manifest| manifest.ephemeral),
+        cancelling: false,
     }
 }
 
@@ -824,12 +845,24 @@ mod tests {
             db.clone(),
             crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
         );
+        let transformer = home.path().join("transformer.safetensors");
+        let vae = home.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        state.config.write().await.models.insert(
+            "route-chain-test".into(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "route-chain-test".into();
 
         let (_status, Json(body)) = with_mold_home(home.path(), || {
-            futures::executor::block_on(create_chain_job(
-                State(state),
-                Json(req(OutputFormat::Mp4)),
-            ))
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
         })
         .unwrap();
 
@@ -837,6 +870,41 @@ mod tests {
         let row = chain_jobs::get_job(db_ref, &body.job_id).unwrap().unwrap();
         let manifest = ChainJobManifest::read_from_dir(&row.job_dir).unwrap();
         assert!(!manifest.ephemeral);
+    }
+
+    #[tokio::test]
+    async fn create_chain_job_fails_closed_when_model_freeze_is_unresolvable() {
+        let home = tempfile::tempdir().unwrap();
+        let db = Arc::new(Some(MetadataDb::open_in_memory().unwrap()));
+        let state = state_with(
+            db,
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        state.config.write().await.models.insert(
+            "unfreezable-chain".into(),
+            mold_core::ModelConfig {
+                transformer: Some(
+                    home.path()
+                        .join("missing-transformer")
+                        .display()
+                        .to_string(),
+                ),
+                vae: Some(home.path().join("missing-vae").display().to_string()),
+                family: Some("ltx2".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "unfreezable-chain".into();
+
+        let error = with_mold_home(home.path(), || {
+            futures::executor::block_on(create_chain_job(State(state), Json(request)))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[tokio::test]
@@ -874,6 +942,7 @@ mod tests {
                 crate::chain_job_runner::CreateJobParams {
                     id: job_id.into(),
                     ephemeral: true,
+                    frozen_model: None,
                     request: req(OutputFormat::Mp4).normalise().unwrap(),
                 },
             )
@@ -912,6 +981,7 @@ mod tests {
             output_dir: None,
             server_events: None,
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
+            dispatch_mode: crate::dispatch_mode::DispatchMode::Legacy,
         };
         let state = state_with(db, crate::chain_job_runner::spawn_runner(deps));
 

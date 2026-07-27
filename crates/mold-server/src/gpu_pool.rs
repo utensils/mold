@@ -326,6 +326,7 @@ pub struct AdminModelUnloadJob {
 
 pub enum OwnerWork {
     Generation(Box<GpuJob>),
+    ChainStage(Box<crate::chain_job_runner::ScheduledChainStageWork>),
     PromptExpansion(Box<PromptExpansionJob>),
     PostUpscale(Box<PostGenerationUpscaleJob>),
     StandaloneUpscale(Box<StandaloneUpscaleJob>),
@@ -340,9 +341,28 @@ pub enum OwnerWork {
 }
 
 impl OwnerWork {
+    pub(crate) fn apply_execution_plan(
+        &mut self,
+        plan: crate::execution_plan::ResolvedExecutionPlan,
+    ) {
+        if let Self::ChainStage(job) = self {
+            job.execution_plan = Some(plan);
+        }
+    }
+
+    pub(crate) fn chain_plan_inputs(
+        &self,
+    ) -> Option<(&mold_core::Config, &mold_core::GenerateRequest)> {
+        match self {
+            Self::ChainStage(job) => Some((&job.config, &job.stage_req)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn id(&self) -> &str {
         match self {
             Self::Generation(job) => &job.id,
+            Self::ChainStage(job) => &job.id,
             Self::PromptExpansion(job) => &job.id,
             Self::PostUpscale(job) => &job.id,
             Self::StandaloneUpscale(job) => &job.id,
@@ -356,6 +376,7 @@ impl OwnerWork {
     pub(crate) fn kind(&self) -> WorkKind {
         match self {
             Self::Generation(_) => WorkKind::Generation,
+            Self::ChainStage(_) => WorkKind::ChainStage,
             Self::PromptExpansion(_) => WorkKind::PromptExpansion,
             Self::PostUpscale(_) => WorkKind::PostUpscale,
             Self::StandaloneUpscale(_) => WorkKind::StandaloneUpscale,
@@ -371,6 +392,13 @@ impl OwnerWork {
             value.max(1).next_power_of_two()
         }
         match self {
+            Self::ChainStage(job) => format!(
+                "{}x{}:s{}:f{}",
+                job.stage_req.width,
+                job.stage_req.height,
+                job.stage_req.steps,
+                job.stage_req.frames.unwrap_or(1)
+            ),
             Self::PromptExpansion(job) => format!(
                 "words:{}:variations:{}:max_tokens:{}",
                 bucket(job.prompt.split_whitespace().count()),
@@ -400,6 +428,9 @@ impl OwnerWork {
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
             Self::Generation(job) => job.result_tx.is_closed(),
+            Self::ChainStage(job) => {
+                job.result_tx.as_ref().is_none_or(|tx| tx.is_closed()) || (job.cancelled)()
+            }
             Self::PromptExpansion(job) => job.result_tx.is_closed(),
             Self::PostUpscale(job) => job.generation.result_tx.is_closed(),
             Self::StandaloneUpscale(job) => job.result_tx.is_closed(),
@@ -424,6 +455,11 @@ impl OwnerWork {
                 job.queue.decrement();
                 job.registry.remove(&job_id);
             }
+            Self::ChainStage(job) => {
+                if let Some(tx) = job.result_tx {
+                    let _ = tx.send(Err(error));
+                }
+            }
             Self::PromptExpansion(job) => {
                 let _ = job.result_tx.send(Err(error));
             }
@@ -443,6 +479,20 @@ impl OwnerWork {
             Self::Probe { .. } => {}
         }
     }
+
+    pub(crate) fn cancel_queued(self) {
+        match self {
+            Self::ChainStage(mut job) => {
+                if let Some(tx) = job.result_tx.take() {
+                    let _ = tx.send(Ok(crate::chain_job_runner::StageExecution {
+                        outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                        device_ordinal: None,
+                    }));
+                }
+            }
+            work => work.reject("scheduled GPU work was cancelled while queued".to_string()),
+        }
+    }
 }
 
 pub struct LeaseGrant {
@@ -458,10 +508,13 @@ pub struct OwnerWorkRetry {
     pub estimated_host_ram_bytes: u64,
     pub hard_ordinal: Option<usize>,
     pub priority: mold_scheduler::PriorityClass,
+    pub preferred_ordinal: Option<usize>,
+    pub candidate_plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
     pub queue_rank: u64,
     pub ready_at_ms: u64,
     pub bypass_count: u8,
     pub warm_wait_started_ms: Option<u64>,
+    pub retry_not_before_ms: Option<u64>,
 }
 
 pub enum GpuWorkerCommand {

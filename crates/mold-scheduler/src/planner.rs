@@ -1156,6 +1156,11 @@ fn candidate_for_device(
                 .incremental_host_ram_bytes
                 .cmp(&right.placement.incremental_host_ram_bytes)
                 .then_with(|| left.setup_ms.cmp(&right.setup_ms))
+                .then_with(|| {
+                    left.placement
+                        .affinity_penalty
+                        .cmp(&right.placement.affinity_penalty)
+                })
         })
         .map(|candidate| candidate.placement.clone())
 }
@@ -1188,6 +1193,11 @@ fn sort_match_candidates(candidates: &mut [MatchCandidate]) {
                     .cmp(&Reverse(right.placement.device_available_vram_bytes))
             })
             .then_with(|| left.placement.device_id.cmp(&right.placement.device_id))
+            .then_with(|| {
+                left.placement
+                    .affinity_penalty
+                    .cmp(&right.placement.affinity_penalty)
+            })
             .then_with(|| {
                 left.placement
                     .execution_fingerprint

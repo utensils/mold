@@ -156,6 +156,9 @@ pub struct CandidatePlacement {
     pub cold_setup_ms: u64,
     pub warm_setup_ms: u64,
     pub predicted_run_ms: u64,
+    /// Deterministic locality tie-break. Zero is preferred; non-zero never
+    /// changes eligibility, priority, cardinality, or predicted time.
+    pub affinity_penalty: u8,
 }
 
 /// Conservative static scheduler timing used until Phase E has a credible
@@ -218,6 +221,7 @@ impl CandidatePlacement {
             cold_setup_ms: 0,
             warm_setup_ms: 0,
             predicted_run_ms: 0,
+            affinity_penalty: 0,
         }
     }
 
@@ -248,6 +252,11 @@ impl CandidatePlacement {
         self.cold_setup_ms = timing.cold_setup_ms;
         self.warm_setup_ms = timing.warm_setup_ms;
         self.predicted_run_ms = timing.predicted_run_ms;
+        self
+    }
+
+    pub fn with_affinity_penalty(mut self, penalty: u8) -> Self {
+        self.affinity_penalty = penalty;
         self
     }
 }

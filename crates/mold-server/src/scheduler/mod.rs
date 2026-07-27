@@ -159,6 +159,11 @@ pub struct ScheduledOwnerWork {
     pub estimated_host_ram_bytes: u64,
     pub hard_ordinal: Option<usize>,
     pub priority: PriorityClass,
+    /// Soft stage-to-stage locality preference. This never filters candidates.
+    pub preferred_ordinal: Option<usize>,
+    /// Optional immutable per-device plans for work that loads an inference
+    /// engine outside the ordinary generation payload.
+    pub candidate_plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
     pub work: OwnerWork,
 }
 
@@ -176,6 +181,8 @@ impl ScheduledOwnerWork {
             estimated_host_ram_bytes: MIN_TRANSIENT_HOST_RAM,
             hard_ordinal: None,
             priority: PriorityClass::User,
+            preferred_ordinal: None,
+            candidate_plans: Vec::new(),
             work,
         }
     }
@@ -187,6 +194,19 @@ impl ScheduledOwnerWork {
 
     pub fn with_priority(mut self, priority: PriorityClass) -> Self {
         self.priority = priority;
+        self
+    }
+
+    pub fn with_preferred_ordinal(mut self, ordinal: Option<usize>) -> Self {
+        self.preferred_ordinal = ordinal;
+        self
+    }
+
+    pub fn with_candidate_plans(
+        mut self,
+        plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
+    ) -> Self {
+        self.candidate_plans = plans;
         self
     }
 }
@@ -319,6 +339,19 @@ impl ScheduledWorkHandle {
             .await
             .map_err(|_| "GPU scheduler is shutting down".to_string())
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_queue_work_items_for_tests(&self, items: Vec<mold_core::QueueWorkItem>) {
+        *self
+            .latest_plan
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(mold_core::QueuePlan {
+            plan_version: 7,
+            state_version: 11,
+            work_items: items,
+            ..mold_core::QueuePlan::default()
+        });
+    }
 }
 
 pub enum PlacementPreviewQuery {
@@ -369,9 +402,41 @@ struct ActiveLease {
     assignment_reason: AssignmentReason,
 }
 
+fn chain_work_identity(id: &str) -> Option<(&str, u32)> {
+    let rest = id.strip_prefix("chain:")?;
+    let (identity, stage) = rest.rsplit_once(":stage:")?;
+    let parent = identity
+        .rsplit_once(":attempt:")
+        .map_or(identity, |(parent, _)| parent);
+    Some((parent, stage.parse().ok()?))
+}
+
+fn reordered_generation_ranks(
+    original_ranks: impl IntoIterator<Item = (String, u64)>,
+    queue_order: &[String],
+) -> BTreeMap<String, u64> {
+    let original_ranks = original_ranks.into_iter().collect::<BTreeMap<_, _>>();
+    let mut rank_slots = original_ranks.values().copied().collect::<Vec<_>>();
+    rank_slots.sort_unstable();
+    let mut ordered_ids = queue_order
+        .iter()
+        .filter(|id| original_ranks.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut unlisted = original_ranks
+        .iter()
+        .filter(|(id, _)| !ordered_ids.contains(id))
+        .map(|(id, rank)| (*rank, id.clone()))
+        .collect::<Vec<_>>();
+    unlisted.sort();
+    ordered_ids.extend(unlisted.into_iter().map(|(_, id)| id));
+    ordered_ids.into_iter().zip(rank_slots).collect()
+}
+
 struct PendingGeneration {
     job: GenerationJob,
     ready_at_ms: u64,
+    queue_rank: u64,
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
     preparation: PreparationState,
@@ -455,10 +520,13 @@ struct PendingOwnerWork {
     estimated_host_ram_bytes: u64,
     hard_ordinal: Option<usize>,
     priority: PriorityClass,
+    preferred_ordinal: Option<usize>,
+    candidate_plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
     queue_rank: u64,
     ready_at_ms: u64,
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
+    retry_not_before_ms: Option<u64>,
     work: OwnerWork,
 }
 
@@ -476,6 +544,9 @@ struct OwnerWorkSchedulingView<'a> {
     warm_wait_started_ms: Option<u64>,
     kind: mold_scheduler::WorkKind,
     shape_bucket: &'a str,
+    preferred_ordinal: Option<usize>,
+    resolved_plans: &'a [crate::execution_plan::ResolvedExecutionPlan],
+    requires_exact_plan: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1072,9 +1143,10 @@ impl Coordinator {
 
     fn enqueue(&mut self, mut job: GenerationJob, immediate: &mut bool) {
         if job.id.is_empty() {
-            self.synthetic_id = self.synthetic_id.saturating_add(1);
             job.id = format!("runtime-generation-{}", self.synthetic_id);
         }
+        let queue_rank = self.synthetic_id;
+        self.synthetic_id = self.synthetic_id.saturating_add(1);
         let id = job.id.clone();
         if let Some(error) = crate::gpu_pool::model_unschedulable_message(&job.request.model) {
             reject_generation(&self.state, job, error);
@@ -1101,6 +1173,7 @@ impl Coordinator {
             PendingGeneration {
                 job,
                 ready_at_ms: monotonic_ms(),
+                queue_rank,
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 preparation: PreparationState::Needed,
@@ -1147,10 +1220,13 @@ impl Coordinator {
                 estimated_host_ram_bytes: submission.estimated_host_ram_bytes,
                 hard_ordinal: submission.hard_ordinal,
                 priority: submission.priority,
+                preferred_ordinal: submission.preferred_ordinal,
+                candidate_plans: submission.candidate_plans,
                 queue_rank,
                 ready_at_ms: monotonic_ms(),
                 bypass_count: 0,
                 warm_wait_started_ms: None,
+                retry_not_before_ms: None,
                 work: submission.work,
             },
         );
@@ -1531,6 +1607,8 @@ impl Coordinator {
                             } else {
                                 let backoff_ms = PLAN_INVALIDATION_BACKOFF_MS
                                     .saturating_mul(1_u64 << u32::from(*attempts - 1));
+                                let queue_rank = self.synthetic_id;
+                                self.synthetic_id = self.synthetic_id.saturating_add(1);
                                 self.state
                                     .job_registry
                                     .requeue_rejected_dispatch(&generation_job.id, previous_target);
@@ -1541,6 +1619,7 @@ impl Coordinator {
                                         ready_at_ms: preserved_ready_at_ms,
                                         bypass_count: preserved_bypass_count,
                                         warm_wait_started_ms: preserved_warm_wait_started_ms,
+                                        queue_rank,
                                         preparation: PreparationState::Ready,
                                         prepared_inputs: prepared_inputs.clone(),
                                         retry_not_before_ms: Some(
@@ -1552,6 +1631,8 @@ impl Coordinator {
                                 );
                             }
                         } else {
+                            let queue_rank = self.synthetic_id;
+                            self.synthetic_id = self.synthetic_id.saturating_add(1);
                             self.state
                                 .job_registry
                                 .requeue_rejected_dispatch(&generation_job.id, previous_target);
@@ -1562,6 +1643,7 @@ impl Coordinator {
                                     ready_at_ms: preserved_ready_at_ms,
                                     bypass_count: preserved_bypass_count,
                                     warm_wait_started_ms: preserved_warm_wait_started_ms,
+                                    queue_rank,
                                     preparation: PreparationState::Ready,
                                     prepared_inputs,
                                     retry_not_before_ms: None,
@@ -1573,6 +1655,7 @@ impl Coordinator {
                     }
                     work => {
                         if matches!(reason, LeaseRejection::FatalCuda) {
+                            self.plan_invalidations.remove(&work_id);
                             work.reject(
                                 "CUDA context is fatally poisoned; server restart required"
                                     .to_string(),
@@ -1587,11 +1670,34 @@ impl Coordinator {
                                 estimated_host_ram_bytes: MIN_TRANSIENT_HOST_RAM,
                                 hard_ordinal: None,
                                 priority: PriorityClass::User,
+                                preferred_ordinal: None,
+                                candidate_plans: Vec::new(),
                                 queue_rank: self.synthetic_id,
                                 ready_at_ms: preserved_ready_at_ms,
                                 bypass_count: preserved_bypass_count,
                                 warm_wait_started_ms: preserved_warm_wait_started_ms,
+                                retry_not_before_ms: None,
                             });
+                            let mut retry_not_before_ms = retry.retry_not_before_ms;
+                            if let LeaseRejection::PlanInvalidated(error) = &reason {
+                                let attempts =
+                                    self.plan_invalidations.entry(work_id.clone()).or_default();
+                                *attempts = attempts.saturating_add(1);
+                                if *attempts >= MAX_PLAN_INVALIDATIONS {
+                                    let attempts = *attempts;
+                                    self.plan_invalidations.remove(&work_id);
+                                    work.reject(format!(
+                                        "execution plan was invalidated {attempts} consecutive times; \
+                                         refusing to retry: {error}"
+                                    ));
+                                    self.mutate(immediate);
+                                    return;
+                                }
+                                let backoff_ms = PLAN_INVALIDATION_BACKOFF_MS
+                                    .saturating_mul(1_u64 << u32::from(*attempts - 1));
+                                retry_not_before_ms =
+                                    Some(monotonic_ms().saturating_add(backoff_ms));
+                            }
                             self.pending_owner_work.insert(
                                 work_id,
                                 PendingOwnerWork {
@@ -1600,10 +1706,13 @@ impl Coordinator {
                                     estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
                                     hard_ordinal: retry.hard_ordinal,
                                     priority: retry.priority,
+                                    preferred_ordinal: retry.preferred_ordinal,
+                                    candidate_plans: retry.candidate_plans,
                                     queue_rank: retry.queue_rank,
                                     ready_at_ms: retry.ready_at_ms,
                                     bypass_count: retry.bypass_count,
                                     warm_wait_started_ms: retry.warm_wait_started_ms,
+                                    retry_not_before_ms,
                                     work,
                                 },
                             );
@@ -1874,9 +1983,8 @@ impl Coordinator {
             .collect::<Vec<_>>();
         for id in cancelled_owner_work {
             if let Some(pending) = self.pending_owner_work.remove(&id) {
-                pending.work.reject(format!(
-                    "scheduled GPU work {id} was cancelled while queued"
-                ));
+                self.plan_invalidations.remove(&id);
+                pending.work.cancel_queued();
                 self.mutate(immediate);
             }
         }
@@ -2247,6 +2355,120 @@ impl Coordinator {
             .collect()
     }
 
+    fn owner_plans(
+        &self,
+        pending: &PendingOwnerWork,
+    ) -> Result<
+        Vec<crate::execution_plan::ResolvedExecutionPlan>,
+        crate::execution_plan::ExecutionPlanError,
+    > {
+        let Some((config, request)) = pending.work.chain_plan_inputs() else {
+            return Ok(pending.candidate_plans.clone());
+        };
+        let offload_requested = matches!(
+            std::env::var("MOLD_OFFLOAD").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        );
+        let frozen_chain = matches!(
+            &pending.work,
+            OwnerWork::ChainStage(job) if job.expected_model_fingerprint.is_some()
+        );
+        let plans = crate::execution_plan::resolve_execution_plans(
+            config,
+            request,
+            &self.device_facts(),
+            offload_requested,
+        )
+        .map_err(|error| {
+            if frozen_chain
+                && matches!(
+                    error,
+                    crate::execution_plan::ExecutionPlanError::MissingArtifacts { .. }
+                )
+            {
+                crate::execution_plan::ExecutionPlanError::PlanInvalidated(format!(
+                    "frozen chain artifacts are no longer resolvable: {error}"
+                ))
+            } else {
+                error
+            }
+        })?;
+        if let OwnerWork::ChainStage(work) = &pending.work {
+            if let Some(expected) = &work.expected_model_fingerprint {
+                let frozen = work.config.models.get(&work.model).ok_or_else(|| {
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "frozen chain model config is missing".to_string(),
+                    )
+                })?;
+                let current = crate::execution_plan::frozen_model_fingerprint(&work.model, frozen)?;
+                if &current != expected {
+                    return Err(crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "frozen chain inputs no longer match their durable fingerprint".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(plans)
+    }
+
+    fn owner_plan_cache_and_settle_errors(
+        &mut self,
+    ) -> BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>> {
+        let now_ms = monotonic_ms();
+        let resolutions = self
+            .pending_owner_work
+            .iter()
+            .filter(|(_, pending)| {
+                pending
+                    .retry_not_before_ms
+                    .is_none_or(|deadline| deadline <= now_ms)
+            })
+            .map(|(id, pending)| (id.clone(), self.owner_plans(pending)))
+            .collect::<Vec<_>>();
+        let mut cache = BTreeMap::new();
+        let mut changed = false;
+        for (id, resolution) in resolutions {
+            let error = match resolution {
+                Ok(plans) => {
+                    cache.insert(id, plans);
+                    continue;
+                }
+                Err(error) => error,
+            };
+            if matches!(
+                error,
+                crate::execution_plan::ExecutionPlanError::InsufficientVram
+            ) {
+                continue;
+            }
+            if let crate::execution_plan::ExecutionPlanError::PlanInvalidated(_) = &error {
+                let attempts = self.plan_invalidations.entry(id.clone()).or_default();
+                *attempts = attempts.saturating_add(1);
+                if *attempts < MAX_PLAN_INVALIDATIONS {
+                    let backoff_ms = PLAN_INVALIDATION_BACKOFF_MS
+                        .saturating_mul(1_u64 << u32::from(*attempts - 1));
+                    if let Some(pending) = self.pending_owner_work.get_mut(&id) {
+                        pending.retry_not_before_ms =
+                            Some(monotonic_ms().saturating_add(backoff_ms));
+                    }
+                    changed = true;
+                    continue;
+                }
+            }
+            if let Some(pending) = self.pending_owner_work.remove(&id) {
+                self.plan_invalidations.remove(&id);
+                pending.work.reject(format!(
+                    "execution planning failed before worker acceptance: {error}"
+                ));
+                changed = true;
+            }
+        }
+        if changed {
+            self.state_version = self.state_version.saturating_add(1);
+        }
+        cache
+    }
+
     fn reject_terminal_generation_plan_errors(&mut self) -> bool {
         let failures = self
             .pending
@@ -2282,72 +2504,114 @@ impl Coordinator {
             .cloned()
             .map(|device| (device.id, device.available_vram_bytes))
             .collect::<BTreeMap<_, _>>();
-        let candidates = self
-            .state
-            .gpu_pool
-            .workers
-            .iter()
-            .map(|worker| {
-                let device_id = DeviceId::new(worker_device_id(worker.as_ref()));
-                let key = owner_estimate_key(
-                    worker.as_ref(),
+        let candidate = |worker: &GpuWorker,
+                         device_id: DeviceId,
+                         execution_fingerprint: &str,
+                         static_vram_bytes: u64,
+                         static_host_bytes: u64,
+                         available_vram_bytes: u64| {
+            let mut key = owner_estimate_key(
+                worker,
+                owner.kind,
+                owner.model_fingerprint,
+                owner.shape_bucket,
+            );
+            key.execution_fingerprint = execution_fingerprint.to_string();
+            let static_timing = mold_scheduler::static_timing_for(owner.kind);
+            let estimate = self.estimates.estimate(
+                &key,
+                StaticEstimate {
+                    total_ms: static_timing
+                        .cold_setup_ms
+                        .saturating_add(static_timing.predicted_run_ms),
+                    cold_setup_ms: static_timing.cold_setup_ms,
+                    warm_setup_ms: static_timing.warm_setup_ms,
+                    vram_bytes: static_vram_bytes,
+                    host_bytes: static_host_bytes,
+                },
+            );
+            CandidatePlacement::new(
+                device_id,
+                ExecutionFingerprint::new(execution_fingerprint),
+                estimate.host_bytes,
+            )
+            .with_vram(estimate.vram_bytes)
+            .with_timing(
+                estimate.cold_setup_ms,
+                if matches!(
                     owner.kind,
-                    owner.model_fingerprint,
-                    owner.shape_bucket,
-                );
-                let static_timing = mold_scheduler::static_timing_for(owner.kind);
-                let estimate = self.estimates.estimate(
-                    &key,
-                    StaticEstimate {
-                        total_ms: static_timing
-                            .cold_setup_ms
-                            .saturating_add(static_timing.predicted_run_ms),
-                        cold_setup_ms: static_timing.cold_setup_ms,
-                        warm_setup_ms: static_timing.warm_setup_ms,
-                        vram_bytes: owner.estimated_vram_bytes,
-                        host_bytes: owner.estimated_host_ram_bytes,
-                    },
-                );
-                CandidatePlacement::new(
-                    device_id.clone(),
-                    ExecutionFingerprint::new(owner.model_fingerprint),
-                    estimate.host_bytes,
-                )
-                .with_vram(estimate.vram_bytes)
-                .with_timing(
-                    estimate.cold_setup_ms,
-                    if matches!(
-                        owner.kind,
-                        mold_scheduler::WorkKind::PromptExpansion
-                            | mold_scheduler::WorkKind::PostUpscale
-                            | mold_scheduler::WorkKind::StandaloneUpscale
-                    ) {
-                        estimate.cold_setup_ms
-                    } else {
-                        estimate.warm_setup_ms
-                    },
-                    estimate.predicted_run_ms,
-                )
-                .with_device_available_vram(
-                    authoritative_available_vram
-                        .get(&device_id)
-                        .copied()
-                        .unwrap_or(0),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut work = WorkSnapshot::new(
-            WorkId::new(owner.id),
-            (u64::MAX / 2).saturating_add(owner.queue_rank),
-            candidates,
-        )
-        .with_priority(owner.priority)
-        .with_bypass_count(owner.bypass_count)
-        .with_ready_at(owner.ready_at_ms);
+                    mold_scheduler::WorkKind::PromptExpansion
+                        | mold_scheduler::WorkKind::PostUpscale
+                        | mold_scheduler::WorkKind::StandaloneUpscale
+                ) {
+                    estimate.cold_setup_ms
+                } else {
+                    estimate.warm_setup_ms
+                },
+                estimate.predicted_run_ms,
+            )
+            .with_device_available_vram(available_vram_bytes)
+            .with_affinity_penalty(
+                owner
+                    .preferred_ordinal
+                    .map_or(0, |preferred| u8::from(preferred != worker.gpu.ordinal)),
+            )
+        };
+        let candidates = if owner.resolved_plans.is_empty() && !owner.requires_exact_plan {
+            self.state
+                .gpu_pool
+                .workers
+                .iter()
+                .map(|worker| {
+                    let device_id = DeviceId::new(worker_device_id(worker.as_ref()));
+                    candidate(
+                        worker.as_ref(),
+                        device_id.clone(),
+                        owner.model_fingerprint,
+                        owner.estimated_vram_bytes,
+                        owner.estimated_host_ram_bytes,
+                        authoritative_available_vram
+                            .get(&device_id)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            owner
+                .resolved_plans
+                .iter()
+                .filter_map(|plan| {
+                    self.state
+                        .gpu_pool
+                        .worker_by_ordinal(plan.device_ordinal)
+                        .map(|worker| {
+                            candidate(
+                                worker.as_ref(),
+                                DeviceId::new(plan.device_id.clone()),
+                                &plan.execution_fingerprint,
+                                plan.predicted_vram_peak_bytes,
+                                plan.predicted_host_increment_bytes,
+                                plan.admitted_available_vram_bytes,
+                            )
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut work = WorkSnapshot::new(WorkId::new(owner.id), owner.queue_rank, candidates)
+            .with_priority(owner.priority)
+            .with_bypass_count(owner.bypass_count)
+            .with_ready_at(owner.ready_at_ms);
         if let Some(started) = owner.warm_wait_started_ms {
             work = work.with_warm_wait_started_at(started);
         }
         work.kind = owner.kind;
+        if owner.kind == mold_scheduler::WorkKind::ChainStage {
+            if let Some((parent_id, stage_idx)) = chain_work_identity(owner.id) {
+                work.parent_id = mold_scheduler::ParentId::new(parent_id);
+                work.chain_stage = Some(stage_idx);
+            }
+        }
         if let Some(ordinal) = owner.hard_ordinal {
             if let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ordinal) {
                 work = work.with_hard_device(DeviceId::new(worker_device_id(&worker)));
@@ -2361,14 +2625,21 @@ impl Coordinator {
     fn work_snapshots(
         &self,
         generation_plans: &BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
+        owner_plan_cache: &BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
         device_snapshots: &[DeviceSnapshot],
     ) -> Vec<WorkSnapshot> {
+        // Generation reordering may permute generation jobs, but it must not
+        // move the entire legacy queue into a separate 0..N rank namespace
+        // ahead of scheduler-owned work. Reassign only the global rank slots
+        // originally occupied by generations; owner work keeps its position
+        // in the shared monotonic sequence.
         let queue_order = self.state.job_registry.queued_ids_in_order();
-        let ranks = queue_order
-            .iter()
-            .enumerate()
-            .map(|(rank, id)| (id.as_str(), rank as u64))
-            .collect::<BTreeMap<_, _>>();
+        let ranks = reordered_generation_ranks(
+            self.pending
+                .iter()
+                .map(|(id, pending)| (id.clone(), pending.queue_rank)),
+            &queue_order,
+        );
         let now_ms = monotonic_ms();
         let mut snapshots: Vec<WorkSnapshot> = self
             .pending
@@ -2431,7 +2702,7 @@ impl Coordinator {
                     .collect::<Vec<_>>();
                 let mut work = WorkSnapshot::new(
                     WorkId::new(id.clone()),
-                    ranks.get(id.as_str()).copied().unwrap_or(u64::MAX),
+                    ranks.get(id).copied().unwrap_or(pending.queue_rank),
                     candidates,
                 )
                 .with_bypass_count(pending.bypass_count)
@@ -2482,9 +2753,16 @@ impl Coordinator {
                 work
             })
             .collect();
-        snapshots.extend(self.pending_owner_work.iter().map(|(id, pending)| {
+        snapshots.extend(self.pending_owner_work.iter().filter_map(|(id, pending)| {
+            if pending
+                .retry_not_before_ms
+                .is_some_and(|deadline| deadline > now_ms)
+            {
+                return None;
+            }
             let shape_bucket = pending.work.scheduling_shape_bucket();
-            self.owner_work_snapshot(
+            let resolved_plans = owner_plan_cache.get(id).map_or(&[][..], Vec::as_slice);
+            Some(self.owner_work_snapshot(
                 OwnerWorkSchedulingView {
                     id,
                     model_fingerprint: &pending.model_fingerprint,
@@ -2498,15 +2776,19 @@ impl Coordinator {
                     warm_wait_started_ms: pending.warm_wait_started_ms,
                     kind: pending.work.kind(),
                     shape_bucket: &shape_bucket,
+                    preferred_ordinal: pending.preferred_ordinal,
+                    resolved_plans,
+                    requires_exact_plan: pending.work.chain_plan_inputs().is_some(),
                 },
                 device_snapshots,
-            )
+            ))
         }));
         snapshots
     }
 
     fn planner_snapshot(
         &self,
+        owner_plan_cache: &BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
     ) -> (
         PlannerSnapshot,
         BTreeMap<String, Vec<crate::execution_plan::ResolvedExecutionPlan>>,
@@ -2514,7 +2796,7 @@ impl Coordinator {
         let devices = self.device_snapshots();
         let device_facts = self.device_facts_from_snapshots(&devices);
         let generation_plans = self.generation_plan_catalog(&device_facts);
-        let work = self.work_snapshots(&generation_plans, &devices);
+        let work = self.work_snapshots(&generation_plans, owner_plan_cache, &devices);
         (
             PlannerSnapshot {
                 state_version: self.state_version,
@@ -2618,7 +2900,16 @@ impl Coordinator {
             );
         }
 
-        let (mut snapshot, _) = self.planner_snapshot();
+        let owner_plan_cache = self
+            .pending_owner_work
+            .iter()
+            .filter_map(|(id, pending)| {
+                self.owner_plans(pending)
+                    .ok()
+                    .map(|plans| (id.clone(), plans))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (mut snapshot, _) = self.planner_snapshot(&owner_plan_cache);
         let device_facts = self.device_facts_from_snapshots(&snapshot.devices);
         let config = match self.state.config.try_read() {
             Ok(config) => config,
@@ -2755,6 +3046,9 @@ impl Coordinator {
                     warm_wait_started_ms: None,
                     kind: mold_scheduler::WorkKind::PromptExpansion,
                     shape_bucket: "preview:prompt-expansion",
+                    preferred_ordinal: None,
+                    resolved_plans: &[],
+                    requires_exact_plan: false,
                 },
                 &snapshot.devices,
             ));
@@ -2887,6 +3181,9 @@ impl Coordinator {
                         warm_wait_started_ms: None,
                         kind: mold_scheduler::WorkKind::PostUpscale,
                         shape_bucket: "preview:post-upscale",
+                        preferred_ordinal: None,
+                        resolved_plans: &[],
+                        requires_exact_plan: false,
                     },
                     &snapshot.devices,
                 ));
@@ -3033,13 +3330,17 @@ impl Coordinator {
         }
         let mut replans_this_turn = 0_u8;
         loop {
+            let owner_plan_cache = self.owner_plan_cache_and_settle_errors();
             if self.reject_terminal_generation_plan_errors()
                 && self.pending.is_empty()
                 && self.pending_owner_work.is_empty()
             {
                 return None;
             }
-            let (snapshot, generation_plans) = self.planner_snapshot();
+            if self.pending.is_empty() && self.pending_owner_work.is_empty() {
+                return None;
+            }
+            let (snapshot, generation_plans) = self.planner_snapshot(&owner_plan_cache);
             let plan = match self.planner.plan(&snapshot) {
                 Ok(plan) => plan,
                 Err(error) => {
@@ -3160,7 +3461,38 @@ impl Coordinator {
                     let Some(utility) = utility else {
                         return false;
                     };
-                    ExecutionFingerprint::new(utility.model_fingerprint.clone())
+                    if utility.work.chain_plan_inputs().is_none() {
+                        ExecutionFingerprint::new(utility.model_fingerprint.clone())
+                    } else {
+                        let planned_execution =
+                            owner_plan_cache.get(&work_id).into_iter().flatten().find(
+                                |execution| {
+                                    execution.device_id == device_id
+                                        && execution.execution_fingerprint
+                                            == lease.placement.execution_fingerprint.as_str()
+                                        && execution.predicted_vram_peak_bytes
+                                            == lease.placement.predicted_vram_bytes
+                                        && execution.predicted_host_increment_bytes
+                                            == lease.placement.incremental_host_ram_bytes
+                                },
+                            );
+                        let current_execution = self
+                            .owner_plans(utility)
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .find(|execution| execution.device_id == device_id);
+                        if planned_execution.is_none()
+                            || current_execution.as_ref() != planned_execution
+                        {
+                            return false;
+                        }
+                        ExecutionFingerprint::new(
+                            current_execution
+                                .expect("checked equal owner execution plans")
+                                .execution_fingerprint,
+                        )
+                    }
                 };
                 plan.validate_lease_for_grant(
                     lease,
@@ -3277,6 +3609,7 @@ impl Coordinator {
                         break;
                     };
                     let bypass_count = pending.bypass_count;
+                    let queue_rank = pending.queue_rank;
                     let warm_wait_started_ms = pending.warm_wait_started_ms;
                     let ready_at_ms = pending.ready_at_ms;
                     let retry_not_before_ms = pending.retry_not_before_ms;
@@ -3359,6 +3692,7 @@ impl Coordinator {
                                 PendingGeneration {
                                     job: generation,
                                     ready_at_ms,
+                                    queue_rank,
                                     bypass_count,
                                     warm_wait_started_ms,
                                     preparation: PreparationState::Ready,
@@ -3376,36 +3710,50 @@ impl Coordinator {
                     }
                 } else if let Some(pending) = self.pending_owner_work.remove(&id) {
                     let shape_bucket = pending.work.scheduling_shape_bucket();
-                    let estimate_key = owner_estimate_key(
+                    let mut estimate_key = owner_estimate_key(
                         &worker,
                         pending.work.kind(),
                         &pending.model_fingerprint,
                         &shape_bucket,
                     );
+                    estimate_key.execution_fingerprint =
+                        lease.placement.execution_fingerprint.to_string();
+                    let resolved_plans = owner_plan_cache.get(&id).cloned().unwrap_or_default();
+                    let chosen_plan = exact_leased_execution_plan(&resolved_plans, lease);
                     let metadata = (
                         pending.model_fingerprint,
                         pending.estimated_vram_bytes,
                         pending.estimated_host_ram_bytes,
                         pending.hard_ordinal,
                         pending.priority,
+                        pending.preferred_ordinal,
+                        pending.candidate_plans,
                         pending.queue_rank,
                         pending.ready_at_ms,
                         pending.bypass_count,
                         pending.warm_wait_started_ms,
+                        pending.retry_not_before_ms,
                     );
+                    let mut work = pending.work;
+                    if let Some(plan) = chosen_plan {
+                        work.apply_execution_plan(plan);
+                    }
                     let grant = Box::new(LeaseGrant {
                         fence,
-                        work: pending.work,
+                        work,
                         retry: Some(crate::gpu_pool::OwnerWorkRetry {
                             model_fingerprint: metadata.0.clone(),
                             estimated_vram_bytes: metadata.1,
                             estimated_host_ram_bytes: metadata.2,
                             hard_ordinal: metadata.3,
                             priority: metadata.4,
-                            queue_rank: metadata.5,
-                            ready_at_ms: metadata.6,
-                            bypass_count: metadata.7,
-                            warm_wait_started_ms: metadata.8,
+                            preferred_ordinal: metadata.5,
+                            candidate_plans: metadata.6.clone(),
+                            queue_rank: metadata.7,
+                            ready_at_ms: metadata.8,
+                            bypass_count: metadata.9,
+                            warm_wait_started_ms: metadata.10,
+                            retry_not_before_ms: metadata.11,
                         }),
                     });
                     match worker.try_send_job(grant) {
@@ -3421,9 +3769,9 @@ impl Coordinator {
                                     accepted: false,
                                     previous_target: None,
                                     estimated_finish_ms: lease.estimated_finish_ms,
-                                    ready_at_ms: metadata.6,
-                                    bypass_count: metadata.7,
-                                    warm_wait_started_ms: metadata.8,
+                                    ready_at_ms: metadata.8,
+                                    bypass_count: metadata.9,
+                                    warm_wait_started_ms: metadata.10,
                                     started_at: Instant::now(),
                                     estimate_key,
                                     vram_high_water_bytes: None,
@@ -3449,10 +3797,13 @@ impl Coordinator {
                                     estimated_host_ram_bytes: metadata.2,
                                     hard_ordinal: metadata.3,
                                     priority: metadata.4,
-                                    queue_rank: metadata.5,
-                                    ready_at_ms: metadata.6,
-                                    bypass_count: metadata.7,
-                                    warm_wait_started_ms: metadata.8,
+                                    preferred_ordinal: metadata.5,
+                                    candidate_plans: metadata.6,
+                                    queue_rank: metadata.7,
+                                    ready_at_ms: metadata.8,
+                                    bypass_count: metadata.9,
+                                    warm_wait_started_ms: metadata.10,
+                                    retry_not_before_ms: metadata.11,
                                     work: returned.work,
                                 },
                             );
@@ -3507,8 +3858,9 @@ impl Coordinator {
             for update in &plan.bypass_updates {
                 if let Some(pending) = self.pending.get_mut(update.work_id.as_str()) {
                     pending.bypass_count = update.new_count;
-                }
-                if let Some(pending) = self.pending_owner_work.get_mut(update.work_id.as_str()) {
+                } else if let Some(pending) =
+                    self.pending_owner_work.get_mut(update.work_id.as_str())
+                {
                     pending.bypass_count = update.new_count;
                 }
             }
@@ -3527,7 +3879,8 @@ impl Coordinator {
     }
 
     fn replan_and_publish(&mut self) {
-        let (snapshot, _) = self.planner_snapshot();
+        let owner_plan_cache = self.owner_plan_cache_and_settle_errors();
+        let (snapshot, _) = self.planner_snapshot(&owner_plan_cache);
         match self.planner.plan(&snapshot) {
             Ok(plan) => {
                 self.plan_version = plan.plan_version;
@@ -3900,6 +4253,19 @@ fn generation_from_owner_grant(grant: LeaseGrant) -> GenerationJob {
             work.kind()
         ),
     }
+}
+
+fn exact_leased_execution_plan(
+    plans: &[crate::execution_plan::ResolvedExecutionPlan],
+    lease: &mold_scheduler::ImmediateLease,
+) -> Option<crate::execution_plan::ResolvedExecutionPlan> {
+    plans
+        .iter()
+        .find(|plan| {
+            plan.device_id == lease.device_id.as_str()
+                && plan.execution_fingerprint == lease.placement.execution_fingerprint.as_str()
+        })
+        .cloned()
 }
 
 fn reject_generation(state: &AppState, job: GenerationJob, error: String) {
@@ -4654,6 +5020,19 @@ mod tests {
                 .map(|ready| ready.generation),
             Some(7)
         );
+    }
+
+    fn recv_owner_grant_id(
+        rx: &std::sync::mpsc::Receiver<crate::gpu_pool::GpuWorkerCommand>,
+    ) -> String {
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker grant")
+        {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant.work.id().to_string(),
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain command"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown command"),
+        }
     }
 
     fn fake_generation(
@@ -5946,6 +6325,970 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chain_stages_fill_every_ready_device_for_one_two_and_eight_gpu_inventories() {
+        for worker_count in [1_usize, 2, 8] {
+            let root = tempfile::tempdir().unwrap();
+            let transformer = root.path().join("transformer.safetensors");
+            let vae = root.path().join("vae.safetensors");
+            std::fs::write(&transformer, b"transformer").unwrap();
+            std::fs::write(&vae, b"vae").unwrap();
+            let model = "real-chain-stage";
+            let frozen_config = mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("sd15".to_string()),
+                ..mold_core::ModelConfig::default()
+            };
+            let expected =
+                crate::execution_plan::frozen_model_fingerprint(model, &frozen_config).unwrap();
+            let mut work_config = mold_core::Config::default();
+            work_config.install_frozen_model_config(model, frozen_config);
+            let workers_and_receivers = (0..worker_count).map(test_worker).collect::<Vec<_>>();
+            let workers = workers_and_receivers
+                .iter()
+                .map(|(worker, _)| worker.clone())
+                .collect::<Vec<_>>();
+            let pool = Arc::new(GpuPool {
+                workers: workers.into(),
+            });
+            let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+            let state = AppState::empty(
+                mold_core::Config::default(),
+                QueueHandle::new(ingress_tx),
+                pool,
+                worker_count,
+            );
+            let mut coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let mut immediate = false;
+            let mut result_receivers = Vec::new();
+            for (ordinal, (worker, _)) in workers_and_receivers.iter().enumerate() {
+                let id = format!("chain-{ordinal}:stage:0");
+                let (generation, _) = fake_generation(&format!("request-{ordinal}"));
+                let mut stage_req = generation.request;
+                stage_req.model = model.to_string();
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                result_receivers.push(result_rx);
+                coordinator.enqueue_owner_work(
+                    ScheduledOwnerWork::new(
+                        id.clone(),
+                        expected.clone(),
+                        1 << 30,
+                        OwnerWork::ChainStage(Box::new(
+                            crate::chain_job_runner::ScheduledChainStageWork {
+                                id,
+                                model: model.to_string(),
+                                cache_key: format!("mold-frozen-chain:{expected}"),
+                                config: work_config.clone(),
+                                stage_req,
+                                carry: None,
+                                motion_tail_frames: 1,
+                                progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                                cancelled: Arc::new(|| false),
+                                cancellation: mold_inference::InferenceCancellationToken::default(),
+                                on_leased: None,
+                                execution_plan: None,
+                                expected_model_fingerprint: Some(expected.clone()),
+                                result_tx: Some(result_tx),
+                                before_second_fence: None,
+                            },
+                        )),
+                    ),
+                    &mut immediate,
+                );
+                coordinator.handle_worker_event(
+                    WorkerEvent::Ready {
+                        device_id: worker_device_id(worker),
+                        ordinal,
+                        owner_epoch: 1,
+                        worker_generation: 1,
+                    },
+                    &mut immediate,
+                );
+            }
+
+            for pending in coordinator.pending_owner_work.values() {
+                let plans = coordinator
+                    .owner_plans(pending)
+                    .expect("real chain-stage plans must resolve");
+                assert_eq!(plans.len(), worker_count);
+            }
+            let debug_cache = coordinator
+                .pending_owner_work
+                .iter()
+                .map(|(id, pending)| (id.clone(), coordinator.owner_plans(pending).unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            let (debug_snapshot, _) = coordinator.planner_snapshot(&debug_cache);
+            let debug_plan = mold_scheduler::Planner::default()
+                .plan(&debug_snapshot)
+                .unwrap();
+            assert!(
+                !debug_plan.immediate_leases.is_empty(),
+                "real chain stages unexpectedly blocked: {:?}",
+                debug_plan.blocked
+            );
+            coordinator.dispatch_ready().await;
+
+            assert_eq!(coordinator.leases.len(), worker_count);
+            assert!(coordinator.pending_owner_work.is_empty());
+            for (_, receiver) in &workers_and_receivers {
+                let command = receiver.recv().expect("one chain-stage grant per GPU");
+                match command {
+                    crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                        assert_eq!(grant.work.kind(), mold_scheduler::WorkKind::ChainStage);
+                    }
+                    crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected worker drain"),
+                    crate::gpu_pool::GpuWorkerCommand::Shutdown => {
+                        panic!("unexpected worker shutdown")
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_and_utility_work_share_typed_phase_e_lanes_without_identity_collision() {
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            2,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        let chain_id = "chain:durable-parent:attempt:7:stage:2";
+        for (id, kind) in [
+            (chain_id, mold_scheduler::WorkKind::ChainStage),
+            (
+                "utility-upscale",
+                mold_scheduler::WorkKind::StandaloneUpscale,
+            ),
+        ] {
+            coordinator.enqueue_owner_work(
+                ScheduledOwnerWork::new(
+                    id,
+                    format!("fingerprint:{id}"),
+                    1 << 30,
+                    OwnerWork::Probe {
+                        id: id.to_string(),
+                        kind,
+                        run: Box::new(|| {}),
+                    },
+                ),
+                &mut immediate,
+            );
+        }
+        for (worker, ordinal) in [(&worker_a, 0), (&worker_b, 1)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(worker),
+                    ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+
+        coordinator.dispatch_ready().await;
+
+        assert!(matches!(
+            worker_a_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::gpu_pool::GpuWorkerCommand::Grant(_)
+        ));
+        assert!(matches!(
+            worker_b_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::gpu_pool::GpuWorkerCommand::Grant(_)
+        ));
+        let plan = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("authoritative typed plan");
+        let chain = plan
+            .work_items
+            .iter()
+            .find(|item| item.work_id == chain_id)
+            .expect("chain work item");
+        assert_eq!(chain.parent_id, "durable-parent");
+        assert_eq!(chain.chain_stage, Some(2));
+        assert_eq!(chain.work_kind, "chain_stage");
+        assert!(chain.planned_device_id.is_some());
+        assert!(chain.estimated_start_unix_ms.is_some());
+        assert!(chain.estimated_finish_unix_ms.is_some());
+        let utility = plan
+            .work_items
+            .iter()
+            .find(|item| item.work_id == "utility-upscale")
+            .expect("utility work item");
+        assert_eq!(utility.parent_id, "utility-upscale");
+        assert_eq!(utility.chain_stage, None);
+        assert_eq!(utility.work_kind, "standalone_upscale");
+        assert!(utility.planned_device_id.is_some());
+        assert_ne!(chain.work_id, utility.work_id);
+    }
+
+    #[tokio::test]
+    async fn draining_and_fatal_devices_never_dispatch_planned_chain_or_utility_work() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            2,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        for (id, kind) in [
+            (
+                "chain:draining-parent:attempt:1:stage:0",
+                mold_scheduler::WorkKind::ChainStage,
+            ),
+            (
+                "utility-while-draining",
+                mold_scheduler::WorkKind::StandaloneUpscale,
+            ),
+        ] {
+            coordinator.enqueue_owner_work(
+                ScheduledOwnerWork::new(
+                    id,
+                    format!("fingerprint:{id}"),
+                    1 << 30,
+                    OwnerWork::Probe {
+                        id: id.to_string(),
+                        kind,
+                        run: Box::new(|| {}),
+                    },
+                ),
+                &mut immediate,
+            );
+        }
+        worker.request_drain(false);
+        coordinator.replan_and_publish();
+        let plan = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("draining plan");
+        assert_eq!(plan.work_items.len(), 2);
+        let blocked = plan
+            .work_items
+            .iter()
+            .map(|item| (item.work_id.clone(), item.blocked_reason.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            blocked.iter().all(|(_, reason)| {
+                *reason == Some(mold_core::QueueBlockedReason::NoSchedulableDevice)
+            }),
+            "auto-routed work must remain blocked while the only device drains: {blocked:?}"
+        );
+        assert_eq!(
+            worker.drain_state.load(Ordering::SeqCst),
+            crate::gpu_pool::DRAIN_REQUESTED
+        );
+
+        worker.fatal_cuda_error.store(true, Ordering::SeqCst);
+        assert_eq!(coordinator.dispatch_ready().await, None);
+        assert!(worker_rx.try_recv().is_err());
+        assert_eq!(coordinator.pending_owner_work.len(), 2);
+        assert!(coordinator.leases.is_empty());
+    }
+
+    #[test]
+    fn lease_reconstruction_selects_the_exact_execution_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"transformer").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let model = "exact-plan";
+        let mut config = mold_core::Config::default();
+        config.models.insert(
+            model.into(),
+            mold_core::ModelConfig {
+                transformer: Some(transformer.display().to_string()),
+                vae: Some(vae.display().to_string()),
+                family: Some("sd15".into()),
+                ..mold_core::ModelConfig::default()
+            },
+        );
+        let (generation, _) = fake_generation("exact-plan-request");
+        let mut request = generation.request;
+        request.model = model.into();
+        let mut wanted = crate::execution_plan::resolve_execution_plans(
+            &config,
+            &request,
+            &[crate::execution_plan::DeviceFact {
+                id: "cuda:exact".into(),
+                ordinal: 0,
+                available_vram_bytes: 24 << 30,
+            }],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        wanted.execution_fingerprint = "wanted".into();
+        let mut stale = wanted.clone();
+        stale.execution_fingerprint = "stale".into();
+        let lease = mold_scheduler::ImmediateLease {
+            work_id: WorkId::new("chain:exact:stage:0"),
+            device_id: DeviceId::new("cuda:exact"),
+            worker_generation: 1,
+            placement: CandidatePlacement::new("cuda:exact", "wanted", 0),
+            reason: mold_scheduler::AssignmentReason::Priority,
+            estimated_start_ms: 0,
+            estimated_finish_ms: 1,
+        };
+
+        assert_eq!(
+            exact_leased_execution_plan(&[stale, wanted], &lease)
+                .unwrap()
+                .execution_fingerprint,
+            "wanted"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_gpu_inventory_keeps_chain_stage_pending_without_fake_device_or_lease() {
+        let pool = Arc::new(GpuPool {
+            workers: Vec::new().into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "chain-zero:stage:0",
+                "ltx2",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "chain-zero:stage:0".to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+
+        coordinator.dispatch_ready().await;
+
+        assert!(coordinator.leases.is_empty());
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("chain-zero:stage:0"));
+    }
+
+    #[tokio::test]
+    async fn chain_sticky_affinity_is_a_preference_and_moves_when_previous_gpu_is_busy() {
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "chain-a:stage:1",
+                "ltx2:stage-plan",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "chain-a:stage:1".to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(|| {}),
+                },
+            )
+            .with_preferred_ordinal(Some(0)),
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker_b),
+                ordinal: 1,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+
+        coordinator.dispatch_ready().await;
+
+        assert!(matches!(
+            worker_a_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        match worker_b_rx.recv().unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                assert_eq!(grant.work.id(), "chain-a:stage:1");
+            }
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_sticky_affinity_breaks_equal_cost_ties_without_becoming_a_pin() {
+        let (worker_a, worker_a_rx) = test_worker(0);
+        let (worker_b, worker_b_rx) = test_worker(1);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker_a.clone(), worker_b.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "chain-b:stage:1",
+                "ltx2:stage-plan",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "chain-b:stage:1".to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(|| {}),
+                },
+            )
+            .with_preferred_ordinal(Some(1)),
+            &mut immediate,
+        );
+        for (worker, ordinal) in [(&worker_a, 0), (&worker_b, 1)] {
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: worker_device_id(worker),
+                    ordinal,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+        }
+
+        coordinator.dispatch_ready().await;
+
+        assert!(matches!(
+            worker_a_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        match worker_b_rx.recv().unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => {
+                assert_eq!(grant.work.id(), "chain-b:stage:1");
+            }
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_chain_stage_cancellation_removes_it_before_any_worker_grant() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let (generation, _) = fake_generation("chain-request-template");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation_probe = cancelled.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "chain-cancel:stage:0",
+                "ltx2",
+                1 << 30,
+                OwnerWork::ChainStage(Box::new(crate::chain_job_runner::ScheduledChainStageWork {
+                    id: "chain-cancel:stage:0".to_string(),
+                    model: "ltx2".to_string(),
+                    cache_key: "ltx2".to_string(),
+                    config: mold_core::Config::default(),
+                    stage_req: generation.request,
+                    carry: None,
+                    motion_tail_frames: 1,
+                    progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                    cancelled: Arc::new(move || cancellation_probe.load(Ordering::SeqCst)),
+                    cancellation: mold_inference::InferenceCancellationToken::default(),
+                    on_leased: None,
+                    execution_plan: None,
+                    expected_model_fingerprint: None,
+                    result_tx: Some(result_tx),
+                    before_second_fence: None,
+                })),
+            ),
+            &mut immediate,
+        );
+        cancelled.store(true, Ordering::SeqCst);
+
+        coordinator.reconcile_external_mutations(&mut immediate);
+
+        assert!(coordinator.pending_owner_work.is_empty());
+        let execution = result_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            execution.outcome,
+            crate::chain_job_runner::StageRenderOutcome::Cancelled
+        ));
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn chain_plan_invalidation_requeues_same_stage_id_with_backoff_and_open_result() {
+        let root = tempfile::tempdir().unwrap();
+        let transformer = root.path().join("transformer.safetensors");
+        let vae = root.path().join("vae.safetensors");
+        std::fs::write(&transformer, b"weights").unwrap();
+        std::fs::write(&vae, b"vae").unwrap();
+        let model = "test-chain";
+        let mut config = mold_core::Config::default();
+        let frozen_config = mold_core::ModelConfig {
+            transformer: Some(transformer.display().to_string()),
+            vae: Some(vae.display().to_string()),
+            family: Some("flux".to_string()),
+            ..mold_core::ModelConfig::default()
+        };
+        let expected_model_fingerprint =
+            crate::execution_plan::frozen_model_fingerprint(model, &frozen_config).unwrap();
+        config.install_frozen_model_config(model, frozen_config);
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let (generation, _) = fake_generation("chain-request");
+        let mut stage_req = generation.request;
+        stage_req.model = model.to_string();
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let stage_id = "chain:durable-parent:stage:0";
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                stage_id,
+                expected_model_fingerprint.clone(),
+                1 << 30,
+                OwnerWork::ChainStage(Box::new(crate::chain_job_runner::ScheduledChainStageWork {
+                    id: stage_id.to_string(),
+                    model: model.to_string(),
+                    cache_key: model.to_string(),
+                    config,
+                    stage_req,
+                    carry: None,
+                    motion_tail_frames: 1,
+                    progress: Arc::new(|_, _| std::ops::ControlFlow::Continue(())),
+                    cancelled: Arc::new(|| false),
+                    cancellation: mold_inference::InferenceCancellationToken::default(),
+                    on_leased: None,
+                    execution_plan: None,
+                    expected_model_fingerprint: Some(expected_model_fingerprint),
+                    result_tx: Some(result_tx),
+                    before_second_fence: None,
+                })),
+            ),
+            &mut immediate,
+        );
+        let device_id = worker_device_id(&worker);
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        let first_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        assert_eq!(first_grant.fence.work_id, stage_id);
+        assert!(matches!(
+            &first_grant.work,
+            OwnerWork::ChainStage(stage) if stage.execution_plan.is_some()
+        ));
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                grant: first_grant,
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "sample changed before acceptance".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+        let retry = coordinator
+            .pending_owner_work
+            .get_mut(stage_id)
+            .expect("same durable stage is requeued");
+        assert!(retry
+            .retry_not_before_ms
+            .is_some_and(|at| at > monotonic_ms()));
+        retry.retry_not_before_ms = Some(0);
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        let second_grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        assert_eq!(second_grant.fence.work_id, stage_id);
+        assert!(second_grant.fence.plan_version > 0);
+        match second_grant.work {
+            OwnerWork::ChainStage(mut stage) => {
+                assert!(stage
+                    .result_tx
+                    .take()
+                    .unwrap()
+                    .send(Ok(crate::chain_job_runner::StageExecution {
+                        outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                        device_ordinal: Some(0),
+                    }))
+                    .is_ok());
+            }
+            _ => panic!("expected chain stage"),
+        }
+        let settled = result_rx.await.unwrap().unwrap();
+        assert!(matches!(
+            settled.outcome,
+            crate::chain_job_runner::StageRenderOutcome::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn continuously_arriving_generations_cannot_starve_a_chain_stage() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            16,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let stage_id = "chain:waiting-parent:stage:0";
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                stage_id,
+                "chain-model",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: stage_id.to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        let device_id = worker_device_id(&worker);
+        let mut stage_granted_on = None;
+        for round in 0..5 {
+            let id = format!("ordinary-{round}");
+            let (job, _result) = fake_generation(&id);
+            state.job_registry.register(&id, &job.request.model);
+            coordinator.enqueue(job, &mut immediate);
+            coordinator.pending.get_mut(&id).unwrap().preparation = PreparationState::Ready;
+            coordinator.handle_worker_event(
+                WorkerEvent::Ready {
+                    device_id: device_id.clone(),
+                    ordinal: 0,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                },
+                &mut immediate,
+            );
+            coordinator.dispatch_ready().await;
+            let grant = match worker_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+                crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+                crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+                crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+            };
+            if grant.fence.work_id == stage_id {
+                stage_granted_on = Some(round);
+                break;
+            }
+            assert_eq!(grant.fence.work_id, id);
+            worker.release_in_flight();
+            coordinator.handle_worker_event(
+                WorkerEvent::Completed {
+                    device_id: device_id.clone(),
+                    ordinal: 0,
+                    owner_epoch: 1,
+                    worker_generation: 1,
+                    successful: true,
+                    phase_timings: EstimatePhaseTimings::default(),
+                },
+                &mut immediate,
+            );
+        }
+        assert!(
+            stage_granted_on.is_some_and(|round| round <= 3),
+            "owner bypass must force eventual progress under continuous ordinary arrivals"
+        );
+    }
+
+    #[test]
+    fn generation_reorder_preserves_shared_owner_work_rank_slots() {
+        let ranks = reordered_generation_ranks(
+            [
+                ("generation-a".to_string(), 0),
+                ("generation-b".to_string(), 2),
+            ],
+            &["generation-b".to_string(), "generation-a".to_string()],
+        );
+
+        assert_eq!(ranks["generation-b"], 0);
+        assert_eq!(ranks["generation-a"], 2);
+        let owner_rank = 1;
+        assert!(
+            ranks["generation-b"] < owner_rank && owner_rank < ranks["generation-a"],
+            "reordering generations must not collapse their ranks ahead of owner work"
+        );
+    }
+
+    #[test]
+    fn internal_chain_stage_does_not_shift_legacy_queue_positions_or_patch_order() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        state.job_registry.register("generation-a", "flux");
+        state.job_registry.register("generation-b", "flux");
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "chain-parent:stage:0",
+                "ltx2",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "chain-parent:stage:0".to_string(),
+                    kind: mold_scheduler::WorkKind::ChainStage,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+
+        let before = coordinator.state.job_registry.snapshot();
+        assert_eq!(
+            before
+                .entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.position))
+                .collect::<Vec<_>>(),
+            vec![("generation-a", 0), ("generation-b", 1)]
+        );
+        coordinator
+            .state
+            .job_registry
+            .reorder_queued("generation-b", 0)
+            .unwrap();
+        let after = coordinator.state.job_registry.snapshot();
+        assert_eq!(
+            after
+                .entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.position))
+                .collect::<Vec<_>>(),
+            vec![("generation-b", 0), ("generation-a", 1)]
+        );
+        assert!(coordinator
+            .pending_owner_work
+            .contains_key("chain-parent:stage:0"));
+    }
+
+    #[tokio::test]
+    async fn stage_boundary_releases_lease_and_interleaves_older_ordinary_work() {
+        let (worker, worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker.clone()].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut immediate = false;
+        let probe = |id: &str, kind| {
+            ScheduledOwnerWork::new(
+                id,
+                "same-plan",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: id.to_string(),
+                    kind,
+                    run: Box::new(|| {}),
+                },
+            )
+        };
+        coordinator.enqueue_owner_work(
+            probe("chain:stage:0", mold_scheduler::WorkKind::ChainStage),
+            &mut immediate,
+        );
+        coordinator.enqueue_owner_work(
+            probe(
+                "ordinary-upscale",
+                mold_scheduler::WorkKind::StandaloneUpscale,
+            ),
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+            },
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+        assert_eq!(recv_owner_grant_id(&worker_rx), "chain:stage:0");
+
+        worker.release_in_flight();
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                successful: true,
+                phase_timings: EstimatePhaseTimings::default(),
+            },
+            &mut immediate,
+        );
+        coordinator.handle_worker_event(
+            WorkerEvent::Ready {
+                device_id: worker_device_id(&worker),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 2,
+            },
+            &mut immediate,
+        );
+        coordinator.enqueue_owner_work(
+            probe("chain:stage:1", mold_scheduler::WorkKind::ChainStage),
+            &mut immediate,
+        );
+        coordinator.dispatch_ready().await;
+
+        assert_eq!(recv_owner_grant_id(&worker_rx), "ordinary-upscale");
+        assert!(coordinator.pending_owner_work.contains_key("chain:stage:1"));
+    }
+
+    #[tokio::test]
     async fn legacy_chain_in_flight_blocks_owner_utility_grant() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
@@ -6581,7 +7924,8 @@ mod tests {
             },
             &mut immediate,
         );
-        let (_, original_catalog) = coordinator.planner_snapshot();
+        let owner_plan_cache = coordinator.owner_plan_cache_and_settle_errors();
+        let (_, original_catalog) = coordinator.planner_snapshot(&owner_plan_cache);
         let original_fingerprint = original_catalog["config-race"][0]
             .execution_fingerprint
             .clone();
