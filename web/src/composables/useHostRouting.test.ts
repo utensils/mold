@@ -546,6 +546,44 @@ describe("useHostRouting", () => {
     await expect(pending).resolves.toBeNull();
   });
 
+  it("rejects an already-replaced frozen host before issuing a placement probe", async () => {
+    const studio = addHost({
+      url: "http://studio:7680",
+      name: "Studio",
+      apiKey: "same-key",
+      instanceId: "instance-a",
+    });
+    setGenerateTargetId(studio.id);
+    statuses.set(studio.id, status());
+    models.set(studio.id, [model("flux-dev:q4")]);
+    devices.set(studio.id, { plan_version: 1, devices: [device(0)] });
+    const request = {
+      prompt: "print",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    };
+    const routing = useHostRouting();
+    await routing.refresh();
+    const frozen = await routing.resolveFeasible(request);
+    expect(frozen).toMatchObject({
+      hostId: studio.id,
+      instanceId: "instance-a",
+    });
+
+    updateHost(studio.id, { instanceId: "instance-b" });
+    placementCall.mockClear();
+
+    await expect(
+      routing.revalidateFeasible(frozen!, request),
+    ).resolves.toBeNull();
+    expect(placementCall).not.toHaveBeenCalled();
+  });
+
   it("rejects frozen origin revalidation after the serving origin is replaced", async () => {
     statuses.set(ORIGIN_HOST_ID, status({ instance_id: "origin-instance-a" }));
     models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);

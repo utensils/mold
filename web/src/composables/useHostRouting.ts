@@ -520,7 +520,8 @@ async function revalidateFeasibleWithPreview(
   if (
     !captured ||
     captured.url !== route.target.baseUrl ||
-    (captured.apiKey ?? undefined) !== route.target.apiKey
+    (captured.apiKey ?? undefined) !== route.target.apiKey ||
+    (captured.instanceId ?? null) !== (route.instanceId ?? null)
   ) {
     return null;
   }
