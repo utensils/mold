@@ -6,7 +6,7 @@
 //! semantics, commits all metadata rows in one SQLite transaction, and
 //! durably advances the manifest to `committed`.
 
-use anyhow::{ensure, Context};
+use anyhow::{bail, ensure, Context};
 use mold_db::GenerationRecord;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +20,9 @@ pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
 const MANIFEST_FILE: &str = "manifest.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const COMMITTED_DIR: &str = "committed";
+const LEGACY_ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
+const ATTEMPT_LOCK_PREFIX: &str = ".mold-batch-attempt-";
+const ATTEMPT_LOCK_SUFFIX: &str = ".lock";
 const MANIFEST_VERSION: u32 = 1;
 const DISK_SAFETY_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -152,6 +155,23 @@ struct ReservationOwner {
     attempt_generation: u64,
 }
 
+/// Proof that the caller owns the one cross-process gallery namespace lock.
+///
+/// Every production attempt-authority open, claim, sweep, and unlink requires
+/// a reference to this guard. Keeping that requirement in the type signature
+/// prevents a future path from reintroducing open-versus-cleanup races.
+#[derive(Debug)]
+struct GalleryBookkeepingGuard {
+    lock: File,
+    canonical_output_dir: PathBuf,
+}
+
+impl Drop for GalleryBookkeepingGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.lock);
+    }
+}
+
 pub(crate) struct GalleryNameReservation {
     output_dir: PathBuf,
     final_name: String,
@@ -160,7 +180,7 @@ pub(crate) struct GalleryNameReservation {
     // reservation. Recovery may classify `ordinary:*` records as stale only
     // after it acquires this same lock, so retain it through final-file fsync,
     // directory fsync, reservation release, and cleanup.
-    _bookkeeping_lock: File,
+    _bookkeeping_lock: GalleryBookkeepingGuard,
 }
 
 impl GalleryNameReservation {
@@ -196,6 +216,10 @@ impl Drop for GalleryNameReservation {
 pub struct BatchTransaction {
     output_dir: PathBuf,
     attempt_dir: PathBuf,
+    // A live attempt owns this OS lock from before its first durable manifest
+    // through publication, archive/rollback cleanup, and Drop. Recovery may
+    // inspect or mutate an attempt only after claiming the same authority.
+    _attempt_authority: AttemptAuthority,
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
     journaled_final_children: BTreeSet<usize>,
@@ -207,6 +231,159 @@ pub struct BatchTransaction {
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
+}
+
+#[derive(Debug)]
+struct LockedAuthorityFile {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+enum AttemptAuthority {
+    Held {
+        legacy: LockedAuthorityFile,
+        current: LockedAuthorityFile,
+        output_dir: PathBuf,
+        attempt_dir: PathBuf,
+        reclaim_on_drop: bool,
+    },
+    // Direct journal/manifest unit tests inspect deliberately live fixtures.
+    // Production construction has no unclaimed variant.
+    #[cfg(test)]
+    Unclaimed,
+}
+
+impl Drop for AttemptAuthority {
+    fn drop(&mut self) {
+        match self {
+            Self::Held {
+                legacy,
+                current,
+                output_dir,
+                attempt_dir,
+                reclaim_on_drop,
+            } => {
+                if !*reclaim_on_drop {
+                    return;
+                }
+                if legacy.file.is_none() || current.file.is_none() {
+                    return;
+                }
+                // Every production authority open is serialized by this same
+                // bookkeeping lock. Claim paths never wait for an attempt
+                // while holding bookkeeping, so retaining the attempt lock
+                // while this Drop waits cannot form a lock cycle. Once both
+                // locks are held, unlink-before-unlock safely gives the v2
+                // sidecar bounded cleanup. The v1 pathname stays reusable.
+                match acquire_gallery_bookkeeping_lock(output_dir) {
+                    Ok(bookkeeping) => {
+                        reclaim_locked_authorities(current, &bookkeeping, "terminal batch attempt");
+                        unlock_and_close_authority(current);
+                        unlock_and_close_authority(legacy);
+                        cleanup_empty_transaction_hierarchy(output_dir, Some(attempt_dir));
+                        drop(bookkeeping);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            gallery = %output_dir.display(),
+                            attempt = %attempt_dir.display(),
+                            %error,
+                            "failed to acquire gallery bookkeeping while dropping batch attempt; \
+                             retaining authority paths for startup recovery"
+                        );
+                        unlock_and_close_authority(current);
+                        unlock_and_close_authority(legacy);
+                    }
+                }
+            }
+            #[cfg(test)]
+            Self::Unclaimed => {}
+        }
+    }
+}
+
+impl AttemptAuthority {
+    /// Reclaim while the caller already owns gallery bookkeeping. This is
+    /// used only for an orphan directory discovered during the locked startup
+    /// scan; reacquiring the same lock from Drop would self-deadlock.
+    fn reclaim_under_bookkeeping(&mut self, _bookkeeping: &GalleryBookkeepingGuard) {
+        let (legacy, current, output_dir, attempt_dir, reclaim_on_drop) = match self {
+            Self::Held {
+                legacy,
+                current,
+                output_dir,
+                attempt_dir,
+                reclaim_on_drop,
+            } => (legacy, current, output_dir, attempt_dir, reclaim_on_drop),
+            #[cfg(test)]
+            Self::Unclaimed => return,
+        };
+        if legacy.file.is_none() || current.file.is_none() {
+            *reclaim_on_drop = false;
+            return;
+        }
+        reclaim_locked_authorities(current, _bookkeeping, "orphaned batch attempt");
+        unlock_and_close_authority(current);
+        unlock_and_close_authority(legacy);
+        cleanup_empty_transaction_hierarchy(output_dir, Some(attempt_dir));
+        *reclaim_on_drop = false;
+    }
+}
+
+fn reclaim_locked_authorities(
+    current: &LockedAuthorityFile,
+    bookkeeping: &GalleryBookkeepingGuard,
+    owner: &str,
+) {
+    // Only v2 authority names are unlinked. A rolling v1 process can open its
+    // legacy pathname before acquiring the OS lock and does not participate
+    // in v2 gallery bookkeeping. Retaining every legacy pathname as a stable,
+    // reusable inode closes that otherwise unavoidable open-before-lock race.
+    let Some(file) = current.file.as_ref() else {
+        return;
+    };
+    match verify_authority_file_at_path(&current.path, file, bookkeeping) {
+        Ok(()) => {
+            if let Err(error) = remove_locked_authority_path(&current.path, file, bookkeeping) {
+                if !anyhow_error_is_not_found(&error) {
+                    tracing::warn!(
+                        authority = %current.path.display(),
+                        %error,
+                        "failed to reclaim {owner} authority"
+                    );
+                }
+            } else if let Some(parent) = current.path.parent() {
+                let _ = sync_attempt_authority_parent(parent);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                authority = %current.path.display(),
+                %error,
+                "retaining replaced {owner} authority path"
+            );
+        }
+    }
+}
+
+fn unlock_and_close_authority(authority: &mut LockedAuthorityFile) {
+    if let Some(file) = authority.file.as_ref() {
+        let _ = fs2::FileExt::unlock(file);
+    }
+    drop(authority.file.take());
+}
+
+fn anyhow_error_is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+#[derive(Debug)]
+struct ClaimedAttempt {
+    manifest_path: PathBuf,
+    authority: AttemptAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +406,15 @@ pub struct RecoveryReport {
     pub rolled_back: usize,
     pub rolled_forward: usize,
     pub healed_committed_rows: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "batch attempt {parent_id}/{attempt_generation} is still owned by another live transaction"
+)]
+pub struct BatchAttemptAuthorityContended {
+    pub parent_id: String,
+    pub attempt_generation: u64,
 }
 
 impl BatchTransaction {
@@ -256,7 +442,47 @@ impl BatchTransaction {
         parent_id: &str,
         attempt_generation: u64,
         normalized_request: serde_json::Value,
+        records: Vec<GenerationRecord>,
+        after_reservation_directory_created: impl FnOnce(),
+    ) -> anyhow::Result<Self> {
+        Self::begin_with_hooks(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            normalized_request,
+            records,
+            || {},
+            after_reservation_directory_created,
+        )
+    }
+
+    #[cfg(test)]
+    fn begin_with_attempt_authority_hook(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+        normalized_request: serde_json::Value,
+        records: Vec<GenerationRecord>,
+        after_attempt_directory_created: impl FnOnce(),
+    ) -> anyhow::Result<Self> {
+        Self::begin_with_hooks(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            normalized_request,
+            records,
+            after_attempt_directory_created,
+            || {},
+        )
+    }
+
+    fn begin_with_hooks(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+        normalized_request: serde_json::Value,
         mut records: Vec<GenerationRecord>,
+        after_attempt_directory_created: impl FnOnce(),
         after_reservation_directory_created: impl FnOnce(),
     ) -> anyhow::Result<Self> {
         validate_component(parent_id, "parent id")?;
@@ -272,18 +498,84 @@ impl BatchTransaction {
         // In particular, an ordinary reservation drop cannot rmdir the empty
         // reservations directory between this begin and its first durable
         // create-new reservation.
+        // This slot is declared before bookkeeping so panic unwinding releases
+        // the later bookkeeping guard before dropping an owned attempt.
+        let mut attempt_authority_for_unwind: Option<AttemptAuthority>;
         let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
+        sweep_reclaimable_attempt_authorities(&_bookkeeping_lock)?;
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
         let attempts_root = attempt_dir
             .parent()
             .context("batch attempt path has no attempts root")?;
         fs::create_dir_all(attempts_root)?;
-        fs::create_dir(&attempt_dir).with_context(|| {
-            format!(
-                "claiming batch attempt authority {parent_id}/{attempt_generation}; \
-                 an existing attempt is never shared or overwritten"
-            )
-        })?;
+        match fs::create_dir(&attempt_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return match try_claim_attempt_authority(&attempt_dir, &_bookkeeping_lock) {
+                    Ok(None) => Err(BatchAttemptAuthorityContended {
+                        parent_id: parent_id.to_owned(),
+                        attempt_generation,
+                    }
+                    .into()),
+                    Ok(Some(authority)) => {
+                        // The existing directory is durable orphan evidence,
+                        // not a live owner. Release bookkeeping before the
+                        // authority destructor reclaims its path.
+                        drop(_bookkeeping_lock);
+                        drop(authority);
+                        Err(error).with_context(|| {
+                            format!(
+                                "batch attempt {parent_id}/{attempt_generation} already exists \
+                                 without a live owner; run startup recovery before retrying"
+                            )
+                        })
+                    }
+                    Err(claim_error) => Err(claim_error).with_context(|| {
+                        format!(
+                            "inspecting existing batch attempt authority \
+                             {parent_id}/{attempt_generation}"
+                        )
+                    }),
+                };
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "claiming batch attempt authority {parent_id}/{attempt_generation}; \
+                         an existing attempt is never shared or overwritten"
+                    )
+                });
+            }
+        }
+        after_attempt_directory_created();
+        // Never wait for attempt authority while holding gallery bookkeeping.
+        // A terminal owner may retain that authority after removing its
+        // attempt directory and then need bookkeeping for unrelated work.
+        // At this point the replacement directory is still empty, so exact
+        // contention can be cleaned up without touching durable evidence.
+        attempt_authority_for_unwind = Some(
+            match try_claim_attempt_authority(&attempt_dir, &_bookkeeping_lock) {
+                Ok(Some(authority)) => authority,
+                Ok(None) => {
+                    fs::remove_dir(&attempt_dir).with_context(|| {
+                        format!(
+                            "removing empty contended batch attempt {}",
+                            attempt_dir.display()
+                        )
+                    })?;
+                    sync_dir(attempts_root)?;
+                    return Err(BatchAttemptAuthorityContended {
+                        parent_id: parent_id.to_owned(),
+                        attempt_generation,
+                    }
+                    .into());
+                }
+                Err(error) => {
+                    let _ = fs::remove_dir(&attempt_dir);
+                    return Err(error);
+                }
+            },
+        );
         if let Err(error) = (|| {
             fs::create_dir(attempt_dir.join("staging"))?;
             fs::create_dir_all(reservations_dir(output_dir))?;
@@ -292,6 +584,8 @@ impl BatchTransaction {
             Ok(())
         })() {
             let _ = fs::remove_dir_all(&attempt_dir);
+            drop(_bookkeeping_lock);
+            drop(attempt_authority_for_unwind.take());
             return Err(error);
         }
 
@@ -317,6 +611,8 @@ impl BatchTransaction {
                             let _ = release_reservation(output_dir, name, &reservation_owner);
                         }
                         let _ = fs::remove_dir_all(&attempt_dir);
+                        drop(_bookkeeping_lock);
+                        drop(attempt_authority_for_unwind.take());
                         return Err(error);
                     }
                 };
@@ -333,6 +629,14 @@ impl BatchTransaction {
             });
         }
 
+        // All namespace and reservation lifecycle mutations are now durable.
+        // Release bookkeeping before constructing an owning value so any
+        // subsequent error can drop its attempt authority in canonical
+        // attempt -> bookkeeping order.
+        drop(_bookkeeping_lock);
+        let attempt_authority = attempt_authority_for_unwind
+            .take()
+            .context("batch attempt authority disappeared before construction")?;
         let manifest = BatchAttemptManifest {
             version: MANIFEST_VERSION,
             parent_id: parent_id.to_owned(),
@@ -344,6 +648,7 @@ impl BatchTransaction {
         let mut transaction = Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
+            _attempt_authority: attempt_authority,
             manifest,
             next_journal_sequence: 0,
             journaled_final_children: BTreeSet::new(),
@@ -761,7 +1066,24 @@ impl BatchTransaction {
         Ok(())
     }
 
+    fn load_claimed(
+        output_dir: &Path,
+        manifest_path: &Path,
+        authority: AttemptAuthority,
+    ) -> anyhow::Result<Self> {
+        Self::load_with_authority(output_dir, manifest_path, authority)
+    }
+
+    #[cfg(test)]
     fn load(output_dir: &Path, manifest_path: &Path) -> anyhow::Result<Self> {
+        Self::load_with_authority(output_dir, manifest_path, AttemptAuthority::Unclaimed)
+    }
+
+    fn load_with_authority(
+        output_dir: &Path,
+        manifest_path: &Path,
+        attempt_authority: AttemptAuthority,
+    ) -> anyhow::Result<Self> {
         let attempt_dir = manifest_path
             .parent()
             .context("manifest has no attempt directory")?
@@ -819,6 +1141,7 @@ impl BatchTransaction {
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
+            _attempt_authority: attempt_authority,
             manifest,
             next_journal_sequence,
             journaled_final_children: replay.published_children,
@@ -831,6 +1154,13 @@ impl BatchTransaction {
             #[cfg(test)]
             commit_failpoint: None,
         })
+    }
+
+    #[cfg(test)]
+    fn relinquish_attempt_authority_for_recovery(&mut self) {
+        // Unit recovery fixtures retain the Rust value for path assertions;
+        // replacing this field models the OS releasing the lock on crash.
+        self._attempt_authority = AttemptAuthority::Unclaimed;
     }
 }
 
@@ -1288,25 +1618,37 @@ pub async fn recover_transactions(
 ) -> anyhow::Result<RecoveryReport> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("creating gallery {}", output_dir.display()))?;
-    // This synchronous prepass is deliberately bounded to filesystem-only
-    // discovery and stale-reservation cleanup. It waits for live ordinary
-    // publishers in other processes, then releases the OS lock before any
-    // async gallery-gate or database work, avoiding a lock-order inversion
-    // across `.await` while still making stale classification authoritative.
+    // Lock order is gallery bookkeeping -> nonblocking attempt claim. Recovery
+    // never waits for an attempt while holding bookkeeping: a live batch can
+    // already hold its attempt lock while waiting for the gallery gate, and
+    // an ordinary publisher can hold that gate while waiting for bookkeeping.
+    // Claimed attempts retain their exact OS authority after bookkeeping is
+    // released and across every async gallery-gate/database recovery action.
+    // Declare the authority collection before bookkeeping so panic unwinding
+    // drops the later bookkeeping guard first. Otherwise an AttemptAuthority
+    // destructor would wait forever on the lock still owned by this thread.
+    let mut attempts = Vec::new();
     let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
+    sweep_reclaimable_attempt_authorities(&bookkeeping_lock)?;
     let root = output_dir.join(TRANSACTION_DIR);
     if !root.is_dir() {
         return Ok(RecoveryReport::default());
     }
     sweep_stale_reservations(&root)?;
-    let mut manifests = Vec::new();
-    collect_manifests(&root, &mut manifests)?;
-    manifests.sort();
+    if let Err(error) = collect_claimed_attempts(&root, &mut attempts, &bookkeeping_lock) {
+        // Claimed attempts drop in attempt -> bookkeeping order. Explicitly
+        // release bookkeeping before unwinding a partially collected scan.
+        drop(bookkeeping_lock);
+        drop(attempts);
+        return Err(error);
+    }
+    attempts.sort_by(|left, right| left.manifest_path.cmp(&right.manifest_path));
     drop(bookkeeping_lock);
 
     let mut report = RecoveryReport::default();
-    for path in manifests {
-        let mut transaction = BatchTransaction::load(output_dir, &path)?;
+    for claimed in attempts {
+        let mut transaction =
+            BatchTransaction::load_claimed(output_dir, &claimed.manifest_path, claimed.authority)?;
         if transaction.reconstructed_from_journal {
             atomic_write_json(
                 &transaction.attempt_dir.join(MANIFEST_FILE),
@@ -1458,7 +1800,11 @@ pub async fn recover_transactions(
     Ok(report)
 }
 
-fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+fn collect_claimed_attempts(
+    root: &Path,
+    out: &mut Vec<ClaimedAttempt>,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
     // Only generation-scoped active attempts participate in startup
     // recovery. Archived committed manifests and reservation metadata are
     // durable authority, not work to replay on every boot.
@@ -1476,30 +1822,79 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> 
             if !attempt.path().is_dir() {
                 continue;
             }
+            let generation_name = attempt.file_name();
+            let generation_name = generation_name.to_str().with_context(|| {
+                format!(
+                    "unrecognized non-UTF-8 entry in batch attempts directory {}; \
+                     move it outside {TRANSACTION_DIR} before restarting",
+                    attempt.path().display()
+                )
+            })?;
+            let generation = generation_name.parse::<u64>().with_context(|| {
+                format!(
+                    "unrecognized batch attempt directory {}; expected a canonical numeric \
+                     generation and retained it for operator inspection; move it outside \
+                     {TRANSACTION_DIR} before restarting",
+                    attempt.path().display()
+                )
+            })?;
+            ensure!(
+                generation.to_string() == generation_name,
+                "non-canonical batch attempt directory {} was retained for operator inspection; \
+                 move it outside {TRANSACTION_DIR} before restarting",
+                attempt.path().display()
+            );
+            let mut authority = match try_claim_attempt_authority(&attempt.path(), bookkeeping) {
+                Ok(Some(authority)) => authority,
+                Ok(None) => {
+                    tracing::info!(
+                        attempt = %attempt.path().display(),
+                        "skipping batch recovery for an attempt owned by a live process"
+                    );
+                    continue;
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    // A live owner may archive its terminal attempt between
+                    // read_dir and our nonblocking claim.
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !attempt.path().is_dir() {
+                // The owner released and unlinked the inode after we opened
+                // it but before the claim completed.
+                authority.reclaim_under_bookkeeping(bookkeeping);
+                continue;
+            }
             let manifest = attempt.path().join(MANIFEST_FILE);
             let journal = attempt.path().join(JOURNAL_FILE);
             if manifest.is_file() || journal.is_file() {
-                out.push(manifest);
+                out.push(ClaimedAttempt {
+                    manifest_path: manifest,
+                    authority,
+                });
             } else {
                 let owner = ReservationOwner {
                     parent_id: parent.file_name().to_string_lossy().into_owned(),
-                    attempt_generation: attempt
-                        .file_name()
-                        .to_string_lossy()
-                        .parse()
-                        .with_context(|| {
-                            format!(
-                                "invalid orphaned batch attempt generation {}",
-                                attempt.path().display()
-                            )
-                        })?,
+                    attempt_generation: generation,
                 };
                 tracing::warn!(
                     attempt = %attempt.path().display(),
                     "removing orphaned batch attempt directory with no manifest or journal"
                 );
-                release_all_reservations_for_owner(root, &owner)?;
-                fs::remove_dir_all(attempt.path())?;
+                if let Err(error) = (|| {
+                    release_all_reservations_for_owner(root, &owner)?;
+                    fs::remove_dir_all(attempt.path())?;
+                    Ok::<_, anyhow::Error>(())
+                })() {
+                    authority.reclaim_under_bookkeeping(bookkeeping);
+                    return Err(error);
+                }
+                authority.reclaim_under_bookkeeping(bookkeeping);
             }
         }
     }
@@ -1603,24 +1998,1069 @@ fn reservations_dir(output_dir: &Path) -> PathBuf {
     output_dir.join(TRANSACTION_DIR).join("reservations")
 }
 
-fn acquire_gallery_bookkeeping_lock(output_dir: &Path) -> anyhow::Result<File> {
-    let lock = open_gallery_bookkeeping_lock_target(output_dir)?;
-    fs2::FileExt::lock_exclusive(&lock)
-        .with_context(|| format!("locking gallery bookkeeping {}", output_dir.display()))?;
+/// Reclaim unlocked v2 authority files while gallery bookkeeping excludes
+/// every v2 opener. Every path is derived from the guard's canonical gallery,
+/// so aliases and Windows verbatim paths cannot split sweep provenance.
+///
+/// Legacy v1 authority files are deliberately never unlinked. A v1 process
+/// can open one before taking its OS lock and does not own v2 bookkeeping; a
+/// v2 unlink in that window would let v1 lock a detached inode while a later
+/// v2 claimant creates a different one. Stable empty legacy files are harmless
+/// and reusable. Suspicious legacy namespaces and exact-shaped entries are
+/// warn-retained without aborting unrelated recovery; an exact claim still
+/// validates and fails closed.
+fn sweep_reclaimable_attempt_authorities(
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    let output_dir = &bookkeeping.canonical_output_dir;
+    for entry in fs::read_dir(output_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_attempt_authority_file_name(name) {
+            continue;
+        }
+        reclaim_unlocked_authority_path(&entry.path(), bookkeeping)?;
+    }
+
+    let legacy = output_dir
+        .join(TRANSACTION_DIR)
+        .join(LEGACY_ATTEMPT_LOCKS_DIR);
+    let metadata = match fs::symlink_metadata(&legacy) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                authority_namespace = %legacy.display(),
+                %error,
+                "retaining unverifiable legacy batch authority namespace during sweep"
+            );
+            return Ok(());
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        tracing::warn!(
+            authority_namespace = %legacy.display(),
+            "retaining suspicious legacy batch authority namespace during sweep"
+        );
+        return Ok(());
+    }
+    let entries = match fs::read_dir(&legacy) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                authority_namespace = %legacy.display(),
+                %error,
+                "retaining unreadable legacy batch authority namespace during sweep"
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    authority_namespace = %legacy.display(),
+                    %error,
+                    "retaining unreadable legacy batch authority entry during sweep"
+                );
+                continue;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_legacy_attempt_authority_file_name(&name) {
+            continue;
+        }
+        match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                tracing::warn!(
+                    authority = %entry.path().display(),
+                    "retaining suspicious legacy batch authority entry during sweep"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    authority = %entry.path().display(),
+                    %error,
+                    "retaining unverifiable legacy batch authority entry during sweep"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_attempt_authority_file_name(name: &str) -> bool {
+    let Some(hash) = name
+        .strip_prefix(ATTEMPT_LOCK_PREFIX)
+        .and_then(|name| name.strip_suffix(ATTEMPT_LOCK_SUFFIX))
+    else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_legacy_attempt_authority_file_name(name: &str) -> bool {
+    let Some(hash) = name.strip_suffix(ATTEMPT_LOCK_SUFFIX) else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn reclaim_unlocked_authority_path(
+    lock_path: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    let lock = match open_attempt_authority_file(lock_path).with_context(|| {
+        format!(
+            "opening reclaimable batch attempt authority {}",
+            lock_path.display()
+        )
+    }) {
+        Ok(lock) => lock,
+        Err(error) if is_attempt_authority_open_contention(&error) => return Ok(()),
+        Err(error) => {
+            tracing::warn!(
+                authority = %lock_path.display(),
+                %error,
+                "retaining suspicious stale batch attempt authority during sweep"
+            );
+            return Ok(());
+        }
+    };
+    match fs2::FileExt::try_lock_exclusive(&lock) {
+        Ok(()) => {
+            if let Err(error) = verify_authority_file_at_path(lock_path, &lock, bookkeeping) {
+                tracing::warn!(
+                    authority = %lock_path.display(),
+                    %error,
+                    "retaining unverifiable stale batch attempt authority during sweep"
+                );
+                let _ = fs2::FileExt::unlock(&lock);
+                return Ok(());
+            }
+            probe_attempt_authority_lock_semantics(lock_path, bookkeeping)?;
+            remove_locked_authority_path(lock_path, &lock, bookkeeping)?;
+            if let Some(parent) = lock_path.parent() {
+                sync_attempt_authority_parent(parent)?;
+            }
+            let _ = fs2::FileExt::unlock(&lock);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "probing reclaimable batch attempt authority {}",
+                    lock_path.display()
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_empty_transaction_hierarchy(output_dir: &Path, attempt_dir: Option<&Path>) {
+    if let Some(attempt_dir) = attempt_dir {
+        if let Some(attempts) = attempt_dir.parent() {
+            let _ = fs::remove_dir(attempts);
+            if let Some(parent) = attempts.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+    let root = output_dir.join(TRANSACTION_DIR);
+    let reservations = root.join("reservations");
+    let legacy = root.join(LEGACY_ATTEMPT_LOCKS_DIR);
+    let _ = fs::remove_dir(&reservations);
+    let _ = fs::remove_dir(&legacy);
+    let _ = fs::remove_dir(&root);
+    let _ = sync_dir(output_dir);
+}
+
+fn try_claim_attempt_authority(
+    attempt_dir: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<Option<AttemptAuthority>> {
+    try_claim_attempt_authority_with_post_lock_hook(attempt_dir, bookkeeping, |_| {})
+}
+
+fn try_claim_attempt_authority_with_post_lock_hook(
+    attempt_dir: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+    after_lock: impl FnOnce(&Path),
+) -> anyhow::Result<Option<AttemptAuthority>> {
+    // Rolling overlap must fence both deployed protocols. Acquire the v1
+    // authority first because a predecessor knows only that path; every v2
+    // process uses this same legacy -> current order, and both acquisitions
+    // remain nonblocking while gallery bookkeeping is held.
+    let legacy_path = legacy_attempt_authority_lock_path(attempt_dir, bookkeeping)?;
+    let current_path = attempt_authority_lock_path(attempt_dir)?;
+    let output_dir = current_path
+        .parent()
+        .context("batch attempt authority has no gallery parent")?
+        .to_path_buf();
+
+    let Some(mut legacy) = try_claim_authority_file(&legacy_path, attempt_dir, bookkeeping)? else {
+        return Ok(None);
+    };
+    let current = match try_claim_authority_file(&current_path, attempt_dir, bookkeeping) {
+        Ok(Some(current)) => current,
+        Ok(None) => {
+            reclaim_partial_authority(&mut legacy, bookkeeping);
+            return Ok(None);
+        }
+        Err(error) => {
+            reclaim_partial_authority(&mut legacy, bookkeeping);
+            return Err(error);
+        }
+    };
+
+    after_lock(&current_path);
+    if let Err(error) =
+        verify_authority_file_at_path(&legacy.path, legacy.file.as_ref().unwrap(), bookkeeping)
+            .and_then(|_| {
+                verify_authority_file_at_path(
+                    &current.path,
+                    current.file.as_ref().unwrap(),
+                    bookkeeping,
+                )
+            })
+    {
+        let mut current = current;
+        unlock_and_close_authority(&mut current);
+        unlock_and_close_authority(&mut legacy);
+        return Err(error);
+    }
+
+    Ok(Some(AttemptAuthority::Held {
+        legacy,
+        current,
+        output_dir,
+        attempt_dir: attempt_dir.to_path_buf(),
+        reclaim_on_drop: true,
+    }))
+}
+
+fn try_claim_authority_file(
+    lock_path: &Path,
+    attempt_dir: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<Option<LockedAuthorityFile>> {
+    let authority = match open_authority_file_at_path(lock_path, attempt_dir, bookkeeping) {
+        Ok(authority) => authority,
+        Err(error) if is_attempt_authority_open_contention(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match fs2::FileExt::try_lock_exclusive(&authority) {
+        Ok(()) => {
+            if let Err(error) = verify_authority_file_at_path(lock_path, &authority, bookkeeping) {
+                let _ = fs2::FileExt::unlock(&authority);
+                return Err(error);
+            }
+            if let Err(error) = probe_attempt_authority_lock_semantics(lock_path, bookkeeping) {
+                let _ = fs2::FileExt::unlock(&authority);
+                return Err(error);
+            }
+            Ok(Some(LockedAuthorityFile {
+                file: Some(authority),
+                path: lock_path.to_path_buf(),
+            }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "claiming batch attempt recovery authority {}",
+                attempt_dir.display()
+            )
+        }),
+    }
+}
+
+fn probe_attempt_authority_lock_semantics(
+    lock_path: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    let probe = open_attempt_authority_probe_file(lock_path)?;
+    verify_authority_file_at_path(lock_path, &probe, bookkeeping)?;
+    match fs2::FileExt::try_lock_exclusive(&probe) {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&probe);
+            bail!(
+                "gallery filesystem does not provide exclusive attempt locks across two \
+                 descriptors; durable batch publication is unsupported for {}",
+                lock_path.display()
+            )
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "probing batch attempt lock semantics for {}",
+                lock_path.display()
+            )
+        }),
+    }
+}
+
+fn reclaim_partial_authority(
+    authority: &mut LockedAuthorityFile,
+    _bookkeeping: &GalleryBookkeepingGuard,
+) {
+    // This is always the partially acquired legacy authority. Preserve its
+    // pathname as the one reusable inode visible to rolling v1 processes.
+    unlock_and_close_authority(authority);
+}
+
+#[cfg(windows)]
+fn is_attempt_authority_open_contention(error: &anyhow::Error) -> bool {
+    // ERROR_SHARING_VIOLATION: the live owner deliberately omits delete
+    // sharing, so Windows can reject a contender before fs2 reaches its lock.
+    // This is the same typed live-authority contention, not an I/O failure.
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            == Some(32)
+    })
+}
+
+#[cfg(not(windows))]
+fn is_attempt_authority_open_contention(_error: &anyhow::Error) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn open_attempt_authority_target_with_hook(
+    attempt_dir: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+    after_open: impl FnOnce(&Path),
+) -> anyhow::Result<File> {
+    let lock_path = attempt_authority_lock_path(attempt_dir)?;
+    let lock = open_authority_file_at_path(&lock_path, attempt_dir, bookkeeping)?;
+    after_open(&lock_path);
+    verify_authority_file_at_path(&lock_path, &lock, bookkeeping)?;
+    Ok(lock)
+}
+
+fn open_authority_file_at_path(
+    lock_path: &Path,
+    attempt_dir: &Path,
+    _bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<File> {
+    let authority_parent = lock_path
+        .parent()
+        .context("batch attempt authority has no gallery parent")?;
+    let lock = open_attempt_authority_file(lock_path).with_context(|| {
+        format!(
+            "opening batch attempt authority {} for {}",
+            lock_path.display(),
+            attempt_dir.display()
+        )
+    })?;
+    // The sidecar is retained only while its OS lock can be live. Its Drop
+    // path unlinks it under gallery bookkeeping while the lock is still held,
+    // so pathname reuse can never fork authority.
+    lock.sync_all()?;
+    sync_attempt_authority_parent(authority_parent)?;
     Ok(lock)
 }
 
 #[cfg(unix)]
+fn open_attempt_authority_probe_file(lock_path: &Path) -> anyhow::Result<File> {
+    open_attempt_authority_file(lock_path)
+}
+
+#[cfg(windows)]
+fn open_attempt_authority_probe_file(lock_path: &Path) -> anyhow::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        // The owner requests DELETE access, so this verifier must share it.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(lock_path)
+        .with_context(|| {
+            format!(
+                "opening batch attempt authority lock-semantics probe {}",
+                lock_path.display()
+            )
+        })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_attempt_authority_probe_file(lock_path: &Path) -> anyhow::Result<File> {
+    Ok(OpenOptions::new().read(true).write(true).open(lock_path)?)
+}
+
+#[cfg(unix)]
+fn open_attempt_authority_file(lock_path: &Path) -> anyhow::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let locks = lock_path
+        .parent()
+        .context("batch attempt authority has no lock directory")?;
+    let lock_name = lock_path
+        .file_name()
+        .context("batch attempt authority has no filename")?;
+    let lock_name = CString::new(lock_name.as_bytes())
+        .context("batch attempt authority filename contains NUL")?;
+    let locks = open_unix_directory_without_symlinks(locks)?;
+    // SAFETY: `locks` owns a valid directory descriptor, `lock_name` is
+    // NUL-terminated, and a nonnegative result is transferred exactly once
+    // into `File`.
+    let fd = unsafe {
+        libc::openat(
+            locks.as_raw_fd(),
+            lock_name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "opening no-follow batch attempt authority {}",
+                lock_path.display()
+            )
+        });
+    }
+    // SAFETY: `fd` is a fresh owned descriptor returned by `openat`.
+    let file = unsafe { File::from_raw_fd(fd) };
+    verify_unix_authority_entry(&locks, &lock_name, &file, lock_path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_unix_directory_without_symlinks(path: &Path) -> anyhow::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    ensure!(
+        path.is_absolute(),
+        "batch attempt authority directory is not absolute: {}",
+        path.display()
+    );
+    let mut current = File::open("/")?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            ensure!(
+                matches!(component, Component::RootDir),
+                "invalid component in batch attempt authority directory: {}",
+                path.display()
+            );
+            continue;
+        };
+        let name =
+            CString::new(name.as_bytes()).context("batch authority directory contains NUL")?;
+        // SAFETY: `current` owns a valid directory descriptor and `name` is
+        // NUL-terminated. Every successful descriptor is transferred once.
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "opening no-follow batch authority directory {}",
+                    path.display()
+                )
+            });
+        }
+        // SAFETY: `fd` is a fresh owned descriptor returned by `openat`.
+        current = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn verify_unix_authority_entry(
+    locks: &File,
+    lock_name: &std::ffi::CStr,
+    file: &File,
+    lock_path: &Path,
+) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut path_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `locks` and `lock_name` remain valid for the call, and
+    // `path_stat` points to correctly sized writable storage.
+    let result = unsafe {
+        libc::fstatat(
+            locks.as_raw_fd(),
+            lock_name.as_ptr(),
+            path_stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "verifying batch attempt authority entry {}",
+                lock_path.display()
+            )
+        });
+    }
+    // SAFETY: successful `fstatat` initialized the complete `stat`.
+    let path_stat = unsafe { path_stat.assume_init() };
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.nlink() == 1
+            && (path_stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && u128::from(metadata.dev()) == path_stat.st_dev as u128
+            && u128::from(metadata.ino()) == path_stat.st_ino as u128,
+        "batch attempt authority was replaced or is not a private regular file: {}",
+        lock_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn verify_authority_file_at_path(
+    lock_path: &Path,
+    file: &File,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    ensure!(
+        lock_path.starts_with(&bookkeeping.canonical_output_dir),
+        "batch attempt authority is outside the locked gallery: {}",
+        lock_path.display()
+    );
+    let parent = lock_path
+        .parent()
+        .context("batch attempt authority has no gallery parent")?;
+    let name = lock_path
+        .file_name()
+        .context("batch attempt authority has no filename")?;
+    let name =
+        CString::new(name.as_bytes()).context("batch attempt authority filename contains NUL")?;
+    let parent = open_unix_directory_without_symlinks(parent)?;
+    verify_unix_authority_entry(&parent, &name, file, lock_path)
+}
+
+#[cfg(unix)]
+fn remove_locked_authority_path(
+    lock_path: &Path,
+    file: &File,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent_path = lock_path
+        .parent()
+        .context("batch attempt authority has no parent for unlink")?;
+    let name = lock_path
+        .file_name()
+        .context("batch attempt authority has no filename for unlink")?;
+    let name =
+        CString::new(name.as_bytes()).context("batch attempt authority filename contains NUL")?;
+    let parent = open_unix_directory_without_symlinks(parent_path)?;
+    ensure!(
+        lock_path.starts_with(&bookkeeping.canonical_output_dir),
+        "batch attempt authority is outside the locked gallery: {}",
+        lock_path.display()
+    );
+    verify_unix_authority_entry(&parent, &name, file, lock_path)?;
+    // SAFETY: `parent` is a no-follow descriptor for the verified authority
+    // directory and `name` is NUL-terminated. The target identity was checked
+    // against the still-locked descriptor immediately before this call.
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "unlinking verified batch attempt authority {}",
+                lock_path.display()
+            )
+        })
+    }
+}
+
+#[cfg(unix)]
+fn sync_attempt_authority_parent(locks: &Path) -> anyhow::Result<()> {
+    open_unix_directory_without_symlinks(locks)?
+        .sync_all()
+        .with_context(|| {
+            format!(
+                "syncing no-follow batch authority directory {}",
+                locks.display()
+            )
+        })
+}
+
+#[cfg(windows)]
+fn open_attempt_authority_file(lock_path: &Path) -> anyhow::Result<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        // Excluding FILE_SHARE_DELETE makes the authority inode
+        // non-replaceable for the lifetime of this handle.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(lock_path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+        "batch attempt authority is not a regular file: {}",
+        lock_path.display()
+    );
+    verify_windows_authority_entry(lock_path, &file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn canonical_windows_authority_path(lock_path: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = fs::canonicalize(lock_path)?;
+    let parent = lock_path
+        .parent()
+        .context("Windows batch authority has no parent")?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    ensure!(
+        canonical.parent() == Some(canonical_parent.as_path()),
+        "batch attempt authority escaped its canonical lock directory: {}",
+        lock_path.display()
+    );
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn verify_windows_authority_entry(lock_path: &Path, file: &File) -> anyhow::Result<PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    // Compare canonical parent provenance rather than raw path spelling.
+    // Windows canonicalization commonly returns a verbatim `\\?\` path even
+    // when the caller used an ordinary path; raw equality would reject the
+    // same file and make stale sidecars immortal.
+    let canonical = canonical_windows_authority_path(lock_path)?;
+    let path_metadata = fs::symlink_metadata(lock_path)?;
+    let file_metadata = file.metadata()?;
+    let path_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(lock_path)?;
+    let path_identity = windows_file_identity(&path_file)?;
+    let file_identity = windows_file_identity(file)?;
+    ensure!(
+        path_metadata.is_file()
+            && !path_metadata.file_type().is_symlink()
+            && path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && file_metadata.is_file()
+            && file_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && path_identity == file_identity
+            && path_identity.2 == 1,
+        "batch authority was replaced, linked, or is not a private regular file: {}",
+        lock_path.display()
+    );
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> anyhow::Result<(u32, u64, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the file owns a valid Windows handle and `info` points to
+    // correctly sized writable storage for the duration of the call.
+    let result =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, info.as_mut_ptr()) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("reading stable Windows batch authority file identity");
+    }
+    // SAFETY: a successful call initialized every field.
+    let info = unsafe { info.assume_init() };
+    Ok((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        info.nNumberOfLinks,
+    ))
+}
+
+#[cfg(windows)]
+fn verify_authority_file_at_path(
+    lock_path: &Path,
+    file: &File,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    let canonical_lock_path = verify_windows_authority_entry(lock_path, file)?;
+    let canonical_gallery = fs::canonicalize(&bookkeeping.canonical_output_dir)?;
+    ensure!(
+        canonical_lock_path.starts_with(&canonical_gallery)
+            && canonical_lock_path != canonical_gallery,
+        "batch attempt authority is outside the locked gallery: {}",
+        lock_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_locked_authority_path(
+    _lock_path: &Path,
+    file: &File,
+    _bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+    // SAFETY: the file was opened with DELETE access, the handle remains
+    // valid, and `disposition` has the exact structure and size required by
+    // FileDispositionInfo.
+    let result = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as _,
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error()).context("marking batch attempt authority for deletion")
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn sync_attempt_authority_parent(_authority_parent: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_attempt_authority_file(lock_path: &Path) -> anyhow::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "batch attempt authority is not a regular file: {}",
+        lock_path.display()
+    );
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_authority_file_at_path(
+    lock_path: &Path,
+    file: &File,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    ensure!(
+        lock_path.starts_with(&bookkeeping.canonical_output_dir),
+        "batch attempt authority is outside the locked gallery: {}",
+        lock_path.display()
+    );
+    let canonical = fs::canonicalize(lock_path)?;
+    let path_metadata = fs::symlink_metadata(lock_path)?;
+    let file_metadata = file.metadata()?;
+    ensure!(
+        canonical == lock_path
+            && path_metadata.is_file()
+            && !path_metadata.file_type().is_symlink()
+            && file_metadata.is_file(),
+        "batch attempt authority was replaced or is not a regular file: {}",
+        lock_path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_locked_authority_path(
+    lock_path: &Path,
+    _file: &File,
+    _bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<()> {
+    fs::remove_file(lock_path)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_attempt_authority_parent(locks: &Path) -> anyhow::Result<()> {
+    sync_dir(locks)
+}
+
+fn attempt_authority_lock_path(attempt_dir: &Path) -> anyhow::Result<PathBuf> {
+    let generation_name = attempt_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt generation is not UTF-8")?;
+    let generation: u64 = generation_name
+        .parse()
+        .with_context(|| format!("invalid batch attempt generation {generation_name}"))?;
+    ensure!(
+        generation.to_string() == generation_name,
+        "batch attempt generation is not canonical: {generation_name}"
+    );
+    let attempts_root = attempt_dir
+        .parent()
+        .context("batch attempt directory has no attempts root")?;
+    ensure!(
+        attempts_root.file_name().and_then(|name| name.to_str()) == Some("attempts"),
+        "batch attempt path is not below an attempts directory: {}",
+        attempt_dir.display()
+    );
+    let parent_root = attempts_root
+        .parent()
+        .context("batch attempt directory has no parent root")?;
+    let parent_id = parent_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt parent id is not UTF-8")?;
+    validate_component(parent_id, "batch attempt parent id")?;
+    let transaction_root = parent_root
+        .parent()
+        .context("batch attempt parent has no transaction root")?;
+    ensure!(
+        transaction_root.file_name().and_then(|name| name.to_str()) == Some(TRANSACTION_DIR),
+        "batch attempt path is not below {TRANSACTION_DIR}: {}",
+        attempt_dir.display()
+    );
+    let output_dir = transaction_root
+        .parent()
+        .context("batch transaction root has no gallery parent")?;
+    let canonical_output = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let canonical_root = fs::canonicalize(transaction_root).with_context(|| {
+        format!(
+            "canonicalizing batch transaction root {}",
+            transaction_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_root.parent() == Some(canonical_output.as_path())
+            && canonical_root.file_name().and_then(|name| name.to_str()) == Some(TRANSACTION_DIR),
+        "batch transaction root escapes its gallery: {}",
+        transaction_root.display()
+    );
+    let canonical_parent = fs::canonicalize(parent_root).with_context(|| {
+        format!(
+            "canonicalizing batch attempt parent {}",
+            parent_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_parent.parent() == Some(canonical_root.as_path())
+            && canonical_parent.file_name().and_then(|name| name.to_str()) == Some(parent_id),
+        "batch attempt parent escapes transaction root: {}",
+        parent_root.display()
+    );
+    let canonical_attempts = fs::canonicalize(attempts_root).with_context(|| {
+        format!(
+            "canonicalizing batch attempts directory {}",
+            attempts_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_attempts.parent() == Some(canonical_parent.as_path())
+            && canonical_attempts
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some("attempts"),
+        "batch attempts directory escapes its parent: {}",
+        attempts_root.display()
+    );
+    let canonical_attempt = fs::canonicalize(attempt_dir)
+        .with_context(|| format!("canonicalizing batch attempt {}", attempt_dir.display()))?;
+    ensure!(
+        canonical_attempt.parent() == Some(canonical_attempts.as_path())
+            && canonical_attempt.file_name().and_then(|name| name.to_str())
+                == Some(generation_name),
+        "batch attempt directory escapes its attempts root: {}",
+        attempt_dir.display()
+    );
+
+    let mut identity = Sha256::new();
+    identity.update(b"mold.batch-attempt-authority.v2\0");
+    identity.update((parent_id.len() as u64).to_le_bytes());
+    identity.update(parent_id.as_bytes());
+    identity.update(generation.to_le_bytes());
+    Ok(canonical_output.join(format!(
+        "{ATTEMPT_LOCK_PREFIX}{:x}{ATTEMPT_LOCK_SUFFIX}",
+        identity.finalize()
+    )))
+}
+
+fn legacy_attempt_authority_lock_path(
+    attempt_dir: &Path,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<PathBuf> {
+    let current = attempt_authority_lock_path(attempt_dir)?;
+    ensure!(
+        current.parent() == Some(bookkeeping.canonical_output_dir.as_path()),
+        "batch attempt authority does not belong to the locked gallery: {}",
+        attempt_dir.display()
+    );
+
+    let generation_name = attempt_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt generation is not UTF-8")?;
+    let generation = generation_name
+        .parse::<u64>()
+        .context("batch attempt generation is invalid")?;
+    let parent_root = attempt_dir
+        .parent()
+        .and_then(Path::parent)
+        .context("batch attempt directory has no parent root")?;
+    let parent_id = parent_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt parent id is not UTF-8")?;
+    let transaction_root = fs::canonicalize(
+        parent_root
+            .parent()
+            .context("batch attempt parent has no transaction root")?,
+    )?;
+    let locks = transaction_root.join(LEGACY_ATTEMPT_LOCKS_DIR);
+    if let Ok(metadata) = fs::symlink_metadata(&locks) {
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "legacy batch attempt authority namespace is not a private directory: {}",
+            locks.display()
+        );
+    }
+    fs::create_dir_all(&locks)?;
+    let canonical_locks = fs::canonicalize(&locks)?;
+    ensure!(
+        canonical_locks.parent() == Some(transaction_root.as_path())
+            && canonical_locks.file_name().and_then(|name| name.to_str())
+                == Some(LEGACY_ATTEMPT_LOCKS_DIR),
+        "legacy batch attempt authority namespace escaped its transaction root: {}",
+        locks.display()
+    );
+
+    let mut identity = Sha256::new();
+    identity.update(b"mold.batch-attempt-authority.v1\0");
+    identity.update((parent_id.len() as u64).to_le_bytes());
+    identity.update(parent_id.as_bytes());
+    identity.update(generation.to_le_bytes());
+    Ok(canonical_locks.join(format!("{:x}{ATTEMPT_LOCK_SUFFIX}", identity.finalize())))
+}
+
+fn acquire_gallery_bookkeeping_lock(output_dir: &Path) -> anyhow::Result<GalleryBookkeepingGuard> {
+    let canonical_output_dir = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let lock = open_gallery_bookkeeping_lock_target(&canonical_output_dir)?;
+    verify_gallery_bookkeeping_lock_target(&canonical_output_dir, &lock)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .with_context(|| format!("locking gallery bookkeeping {}", output_dir.display()))?;
+    let validation = (|| {
+        verify_gallery_bookkeeping_lock_target(&canonical_output_dir, &lock)?;
+        probe_gallery_bookkeeping_lock_semantics(&canonical_output_dir)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if let Err(error) = validation {
+        let _ = fs2::FileExt::unlock(&lock);
+        return Err(error);
+    }
+    Ok(GalleryBookkeepingGuard {
+        lock,
+        canonical_output_dir,
+    })
+}
+
+#[cfg(unix)]
 fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
+    // The resolved gallery directory inode is the API's filesystem trust
+    // root. Renaming or replacing the gallery directory itself behind a live
+    // server is an out-of-band filesystem mutation outside the logical API
+    // atomicity boundary; internal transaction cleanup never does so.
     File::open(output_dir)
         .with_context(|| format!("opening gallery directory {}", output_dir.display()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+
     // std cannot portably open a directory handle on every non-Unix target.
     // Canonicalize first so aliases and Windows junction paths converge on
     // one stable sidecar outside the removable transaction subtree.
+    let lock_path = gallery_bookkeeping_sidecar_lock_path(output_dir)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        // A live bookkeeping inode must not be renamed or replaced.
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "opening gallery bookkeeping lock {} for {}",
+                lock_path.display(),
+                output_dir.display(),
+            )
+        })?;
+    verify_windows_authority_entry(&lock_path, &lock)?;
+    Ok(lock)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
     let lock_path = gallery_bookkeeping_sidecar_lock_path(output_dir)?;
     OpenOptions::new()
         .create(true)
@@ -1637,17 +3077,82 @@ fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<Fil
         })
 }
 
+#[cfg(unix)]
+fn verify_gallery_bookkeeping_lock_target(output_dir: &Path, file: &File) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let path_metadata = fs::metadata(output_dir)?;
+    let file_metadata = file.metadata()?;
+    ensure!(
+        path_metadata.is_dir()
+            && file_metadata.is_dir()
+            && path_metadata.dev() == file_metadata.dev()
+            && path_metadata.ino() == file_metadata.ino(),
+        "gallery bookkeeping directory was replaced while locking: {}",
+        output_dir.display()
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_gallery_bookkeeping_lock_target(output_dir: &Path, file: &File) -> anyhow::Result<()> {
+    verify_windows_authority_entry(&gallery_bookkeeping_sidecar_lock_path(output_dir)?, file)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn verify_gallery_bookkeeping_lock_target(output_dir: &Path, file: &File) -> anyhow::Result<()> {
+    let path = gallery_bookkeeping_sidecar_lock_path(output_dir)?;
+    ensure!(
+        fs::canonicalize(&path)? == path && file.metadata()?.is_file(),
+        "gallery bookkeeping sidecar was replaced while locking: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn probe_gallery_bookkeeping_lock_semantics(output_dir: &Path) -> anyhow::Result<()> {
+    let probe = open_gallery_bookkeeping_lock_target(output_dir)?;
+    match fs2::FileExt::try_lock_exclusive(&probe) {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&probe);
+            bail!(
+                "gallery filesystem does not provide exclusive locks across two descriptors; \
+                 durable batch publication is unsupported for {}",
+                output_dir.display()
+            )
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "probing gallery filesystem lock semantics for {}",
+                output_dir.display()
+            )
+        }),
+    }
+}
+
 #[cfg(any(test, not(unix)))]
 fn gallery_bookkeeping_sidecar_lock_path(output_dir: &Path) -> anyhow::Result<PathBuf> {
     let canonical = fs::canonicalize(output_dir)
         .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
-    let parent = canonical
-        .parent()
-        .context("canonical gallery directory has no parent for bookkeeping lock")?;
+    let parent = canonical.parent().with_context(|| {
+        format!(
+            "using a filesystem root directly as the gallery is unsupported on this \
+                 platform because stable bookkeeping requires a named sibling; choose a child \
+                 directory: {}",
+            canonical.display()
+        )
+    })?;
     let name = canonical
         .file_name()
         .and_then(|name| name.to_str())
-        .context("canonical gallery directory name is not UTF-8")?;
+        .with_context(|| {
+            format!(
+                "canonical gallery directory requires a UTF-8 name for stable bookkeeping: {}",
+                canonical.display()
+            )
+        })?;
     Ok(parent.join(format!(".{name}.mold-gallery.lock")))
 }
 
@@ -2297,6 +3802,591 @@ mod tests {
         }
     }
 
+    fn predecessor_attempt_authority_path(attempt_dir: &Path) -> PathBuf {
+        let generation = attempt_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let parent_root = attempt_dir.parent().unwrap().parent().unwrap();
+        let parent_id = parent_root.file_name().unwrap().to_str().unwrap();
+        let transaction_root = parent_root.parent().unwrap();
+        let locks = transaction_root.join(LEGACY_ATTEMPT_LOCKS_DIR);
+        fs::create_dir_all(&locks).unwrap();
+
+        let mut identity = Sha256::new();
+        identity.update(b"mold.batch-attempt-authority.v1\0");
+        identity.update((parent_id.len() as u64).to_le_bytes());
+        identity.update(parent_id.as_bytes());
+        identity.update(generation.to_le_bytes());
+        locks.join(format!("{:x}.lock", identity.finalize()))
+    }
+
+    #[test]
+    #[ignore = "subprocess helper emulating the predecessor v1 authority protocol"]
+    fn predecessor_attempt_authority_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let parent_id =
+            std::env::var("MOLD_TEST_BATCH_PARENT").unwrap_or_else(|_| "mixed-parent".to_owned());
+        let generation = std::env::var("MOLD_TEST_BATCH_GENERATION")
+            .unwrap_or_else(|_| "0".to_owned())
+            .parse::<u64>()
+            .unwrap();
+        let path =
+            predecessor_attempt_authority_path(&attempt_dir(&output_dir, &parent_id, generation));
+        let lock = open_attempt_authority_file(&path).unwrap();
+        match std::env::var("MOLD_TEST_PREDECESSOR_MODE")
+            .expect("MOLD_TEST_PREDECESSOR_MODE must be set")
+            .as_str()
+        {
+            "owner" => {
+                fs2::FileExt::lock_exclusive(&lock).unwrap();
+                write_process_test_marker("PREDECESSOR_LOCKED");
+                let mut command = String::new();
+                std::io::BufReader::new(std::io::stdin())
+                    .read_line(&mut command)
+                    .unwrap();
+                match command.trim() {
+                    "RELEASE" => {
+                        fs2::FileExt::unlock(&lock).unwrap();
+                        write_process_test_marker("PREDECESSOR_RELEASED");
+                    }
+                    "CRASH" => {
+                        write_process_test_marker("PREDECESSOR_CRASHING");
+                        std::process::exit(0);
+                    }
+                    command => panic!("unexpected predecessor owner command {command}"),
+                }
+            }
+            "claim" => match fs2::FileExt::try_lock_exclusive(&lock) {
+                Ok(()) => {
+                    write_process_test_marker("PREDECESSOR_ACQUIRED");
+                    fs2::FileExt::unlock(&lock).unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    write_process_test_marker("PREDECESSOR_CONTENDED");
+                }
+                Err(error) => panic!("predecessor authority probe failed: {error}"),
+            },
+            mode => panic!("unexpected predecessor authority helper mode {mode}"),
+        }
+    }
+
+    fn spawn_predecessor_authority_helper(
+        output_dir: &Path,
+        mode: &str,
+        parent_id: &str,
+    ) -> (
+        std::process::Child,
+        std::io::BufWriter<std::process::ChildStdin>,
+        std::io::BufReader<std::process::ChildStdout>,
+    ) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::predecessor_attempt_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", output_dir)
+            .env("MOLD_TEST_PREDECESSOR_MODE", mode)
+            .env("MOLD_TEST_BATCH_PARENT", parent_id)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = std::io::BufWriter::new(child.stdin.take().unwrap());
+        let output = std::io::BufReader::new(child.stdout.take().unwrap());
+        (child, input, output)
+    }
+
+    #[tokio::test]
+    async fn predecessor_v1_owner_blocks_v2_recovery_until_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let (mut predecessor, mut predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "owner", "mixed-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_LOCKED").unwrap();
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report,
+            RecoveryReport::default(),
+            "v2 recovery mutated an attempt still owned by a live v1 process"
+        );
+        assert!(
+            transaction.attempt_dir.exists(),
+            "v2 recovery removed a live v1 attempt"
+        );
+
+        writeln!(predecessor_input, "RELEASE").unwrap();
+        predecessor_input.flush().unwrap();
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_RELEASED").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(predecessor.wait().unwrap().success());
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert!(!transaction.attempt_dir.exists());
+    }
+
+    #[test]
+    fn predecessor_v1_owner_makes_v2_begin_return_typed_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let (mut predecessor, mut predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "owner", "mixed-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_LOCKED").unwrap();
+
+        let output_dir = dir.path().to_path_buf();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            result_tx
+                .send(BatchTransaction::begin(
+                    &output_dir,
+                    "mixed-parent",
+                    0,
+                    serde_json::json!({"batch_size": 1}),
+                    vec![record("mixed.png", 0)],
+                ))
+                .unwrap();
+        });
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("mixed-version begin formed a legacy/current/bookkeeping lock cycle")
+            .unwrap_err();
+        error
+            .downcast_ref::<BatchAttemptAuthorityContended>()
+            .expect("live predecessor ownership must surface typed v2 contention");
+
+        writeln!(predecessor_input, "RELEASE").unwrap();
+        predecessor_input.flush().unwrap();
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_RELEASED").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(predecessor.wait().unwrap().success());
+    }
+
+    #[test]
+    fn v2_owner_blocks_predecessor_style_v1_claimant() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+
+        let (mut predecessor, _predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "claim", "mixed-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_CONTENDED").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(predecessor.wait().unwrap().success());
+
+        drop(transaction);
+    }
+
+    #[tokio::test]
+    async fn predecessor_v1_process_exit_releases_authority_for_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let (mut predecessor, mut predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "owner", "mixed-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_LOCKED").unwrap();
+        writeln!(predecessor_input, "CRASH").unwrap();
+        predecessor_input.flush().unwrap();
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_CRASHING").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(predecessor.wait().unwrap().success());
+
+        let report = recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert!(!transaction.attempt_dir.exists());
+    }
+
+    #[test]
+    fn simultaneous_v2_recovery_skips_a_predecessor_v1_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"mixed child").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let (mut predecessor, mut predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "owner", "mixed-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_LOCKED").unwrap();
+
+        let output_dir = StdArc::new(dir.path().to_path_buf());
+        let barrier = StdArc::new(Barrier::new(2));
+        let recoveries: Vec<_> = (0..2)
+            .map(|_| {
+                let output_dir = StdArc::clone(&output_dir);
+                let barrier = StdArc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(recover_transactions(
+                            &output_dir,
+                            &GalleryPublicationGate::default(),
+                            Arc::new(None),
+                        ))
+                        .unwrap()
+                })
+            })
+            .collect();
+        for recovery in recoveries {
+            assert_eq!(
+                recovery.join().unwrap(),
+                RecoveryReport::default(),
+                "simultaneous v2 recovery crossed a live predecessor authority"
+            );
+        }
+        assert!(transaction.attempt_dir.exists());
+
+        writeln!(predecessor_input, "RELEASE").unwrap();
+        predecessor_input.flush().unwrap();
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_RELEASED").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(predecessor.wait().unwrap().success());
+    }
+
+    #[test]
+    fn stale_unlocked_predecessor_v1_authority_is_retained_as_a_reusable_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let legacy = predecessor_attempt_authority_path(&transaction.attempt_dir);
+        fs::write(&legacy, b"stale predecessor").unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        sweep_reclaimable_attempt_authorities(&bookkeeping).unwrap();
+        assert!(
+            legacy.exists(),
+            "rolling recovery must retain the predecessor's reusable stable inode"
+        );
+        assert!(transaction.attempt_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn public_recovery_sweeps_current_authority_through_a_gallery_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let alias = dir.path().join("gallery-alias");
+        std::os::unix::fs::symlink(&gallery, &alias).unwrap();
+
+        let current = gallery.join(format!(
+            "{ATTEMPT_LOCK_PREFIX}{}{ATTEMPT_LOCK_SUFFIX}",
+            "a".repeat(64)
+        ));
+        let legacy = gallery
+            .join(TRANSACTION_DIR)
+            .join(LEGACY_ATTEMPT_LOCKS_DIR)
+            .join(format!("{}{}", "b".repeat(64), ATTEMPT_LOCK_SUFFIX));
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&current, b"stale current authority").unwrap();
+        fs::write(&legacy, b"stable predecessor authority").unwrap();
+
+        recover_transactions(&alias, &GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+
+        assert!(
+            !current.exists(),
+            "public recovery through an alias retained a stale current authority"
+        );
+        assert!(
+            legacy.exists(),
+            "rolling compatibility must retain the predecessor's reusable stable inode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn public_recovery_warn_retains_exact_legacy_symlink_and_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join(LEGACY_ATTEMPT_LOCKS_DIR);
+        fs::create_dir_all(&legacy).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"operator data").unwrap();
+        let symlink = legacy.join(format!("{}{}", "c".repeat(64), ATTEMPT_LOCK_SUFFIX));
+        std::os::unix::fs::symlink(&outside, &symlink).unwrap();
+        let directory = legacy.join(format!("{}{}", "d".repeat(64), ATTEMPT_LOCK_SUFFIX));
+        fs::create_dir(&directory).unwrap();
+
+        recover_transactions(
+            dir.path(),
+            &GalleryPublicationGate::default(),
+            Arc::new(None),
+        )
+        .await
+        .expect("broad recovery must warn-retain suspicious legacy entries");
+
+        assert!(fs::symlink_metadata(&symlink)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(directory.is_dir());
+        assert_eq!(fs::read(&outside).unwrap(), b"operator data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn predecessor_open_before_lock_keeps_one_stable_legacy_authority_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "mixed-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("mixed.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let legacy = predecessor_attempt_authority_path(&transaction.attempt_dir);
+        let predecessor = open_attempt_authority_file(&legacy).unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        sweep_reclaimable_attempt_authorities(&bookkeeping).unwrap();
+        fs2::FileExt::lock_exclusive(&predecessor).unwrap();
+
+        let claim = try_claim_attempt_authority(&transaction.attempt_dir, &bookkeeping).unwrap();
+        let v2_crossed_predecessor = claim.is_some();
+        if let Some(mut authority) = claim {
+            authority.reclaim_under_bookkeeping(&bookkeeping);
+        }
+        fs2::FileExt::unlock(&predecessor).unwrap();
+        drop(bookkeeping);
+
+        assert!(
+            legacy.exists(),
+            "v2 sweep detached an authority file already opened by a rolling v1 process"
+        );
+        assert!(
+            !v2_crossed_predecessor,
+            "v2 created and locked a new legacy inode beside the predecessor's detached lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_claim_fails_closed_on_a_legacy_authority_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let legacy = predecessor_attempt_authority_path(&transaction.attempt_dir);
+        let outside = dir.path().join("outside-authority");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(&legacy).unwrap();
+        std::os::unix::fs::symlink(&outside, &legacy).unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let error = try_claim_attempt_authority(&transaction.attempt_dir, &bookkeeping)
+            .expect_err("an exact claim must reject a legacy authority symlink");
+        assert!(
+            format!("{error:#}").contains("no-follow"),
+            "unexpected exact legacy-claim error: {error:#}"
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlinked_stale_authority_is_warn_skipped_but_exact_claim_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let authority = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
+        let other_link = dir.path().join("operator-inspection-link");
+        fs::write(&authority, b"suspicious").unwrap();
+        fs::hard_link(&authority, &other_link).unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        sweep_reclaimable_attempt_authorities(&bookkeeping)
+            .expect("sweep must retain and warn-skip an unverifiable stale sidecar");
+        assert!(authority.exists());
+        assert!(other_link.exists());
+
+        let error = try_claim_attempt_authority(&transaction.attempt_dir, &bookkeeping)
+            .expect_err("an exact claim must fail closed on a hardlinked authority");
+        assert!(
+            format!("{error:#}").contains("private regular file"),
+            "unexpected exact-claim error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn bookkeeping_lock_excludes_a_second_same_process_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let probe =
+            open_gallery_bookkeeping_lock_target(&bookkeeping.canonical_output_dir).unwrap();
+        assert!(
+            matches!(
+                fs2::FileExt::try_lock_exclusive(&probe),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "filesystem lock semantics admit two same-process bookkeeping owners"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_gallery_sidecar_boundary_has_actionable_guidance() {
+        let error = gallery_bookkeeping_sidecar_lock_path(Path::new("/")).unwrap_err();
+        assert!(error.to_string().contains("choose a child directory"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bookkeeping_sidecar_cannot_be_replaced_while_guard_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(&gallery).unwrap();
+        let sidecar = gallery_bookkeeping_sidecar_lock_path(&gallery).unwrap();
+        let displaced = dir.path().join("displaced-gallery-lock");
+        assert!(
+            fs::rename(&sidecar, &displaced).is_err(),
+            "Windows bookkeeping handle unexpectedly shared delete/rename"
+        );
+        drop(bookkeeping);
+        fs::rename(&sidecar, &displaced).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_bookkeeping_rejects_a_hardlinked_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let sidecar = gallery_bookkeeping_sidecar_lock_path(&gallery).unwrap();
+        let other_link = dir.path().join("bookkeeping-hardlink");
+        fs::write(&sidecar, b"suspicious").unwrap();
+        fs::hard_link(&sidecar, &other_link).unwrap();
+
+        let error = acquire_gallery_bookkeeping_lock(&gallery).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("linked"),
+            "unexpected Windows hardlink rejection: {error:#}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_gallery_boundary_has_actionable_guidance() {
+        let error = gallery_bookkeeping_sidecar_lock_path(Path::new(r"C:\")).unwrap_err();
+        assert!(error.to_string().contains("choose a child directory"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_public_recovery_sweeps_current_authority_from_an_ordinary_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let current = gallery.join(format!(
+            "{ATTEMPT_LOCK_PREFIX}{}{ATTEMPT_LOCK_SUFFIX}",
+            "e".repeat(64)
+        ));
+        fs::write(&current, b"stale current authority").unwrap();
+
+        recover_transactions(&gallery, &GalleryPublicationGate::default(), Arc::new(None))
+            .await
+            .unwrap();
+
+        assert!(
+            !current.exists(),
+            "ordinary Windows gallery spelling did not converge on canonical sweep provenance"
+        );
+    }
+
     #[test]
     #[ignore = "subprocess helper for the cross-process reservation race test"]
     fn ordinary_reservation_drop_process_helper() {
@@ -2371,6 +4461,535 @@ mod tests {
             }
             other => panic!("unexpected writer-helper command {other}"),
         }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for cross-process batch-attempt liveness tests"]
+    fn batch_attempt_liveness_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let state = std::env::var("MOLD_TEST_BATCH_ATTEMPT_STATE")
+            .expect("MOLD_TEST_BATCH_ATTEMPT_STATE must be set by parent test");
+        let mut transaction = BatchTransaction::begin(
+            &output_dir,
+            "live-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("live-child.png", 0)],
+        )
+        .unwrap();
+        match state.as_str() {
+            "staging" => {}
+            "prepared" => {
+                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.mark_prepared().unwrap();
+            }
+            "committing" => {
+                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.mark_prepared().unwrap();
+                transaction.manifest.state = BatchManifestState::Committing;
+                transaction.persist_manifest().unwrap();
+            }
+            other => panic!("unexpected live batch-attempt state {other}"),
+        }
+
+        write_process_test_marker("READY");
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "CRASH");
+        write_process_test_marker("CRASHING");
+        // Deliberately bypass Rust destructors: only the OS may release the
+        // live-attempt authority, matching an abrupt server exit.
+        std::process::exit(0);
+    }
+
+    #[test]
+    #[ignore = "subprocess helper retaining authority after committed archive"]
+    fn archived_batch_attempt_authority_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let mut transaction = BatchTransaction::begin(
+            &output_dir,
+            "archived-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("archived-child.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"archived child").unwrap();
+        transaction.mark_prepared().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(transaction.commit(&GalleryPublicationGate::default(), Arc::new(None)))
+            .unwrap();
+        assert!(!transaction.attempt_dir.exists());
+        write_process_test_marker("ARCHIVED");
+
+        let mut transaction = Some(transaction);
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        loop {
+            let mut command = String::new();
+            input.read_line(&mut command).unwrap();
+            match command.trim() {
+                "BEGIN_SECOND" => {
+                    write_process_test_marker("SECOND_STARTED");
+                    let second = BatchTransaction::begin(
+                        &output_dir,
+                        "second-parent",
+                        0,
+                        serde_json::json!({"batch_size": 1}),
+                        vec![record("second-child.png", 0)],
+                    )
+                    .unwrap();
+                    write_process_test_marker("SECOND_ACQUIRED");
+                    drop(second);
+                }
+                "RELEASE" => {
+                    drop(transaction.take());
+                    write_process_test_marker("RELEASED");
+                    break;
+                }
+                other => panic!("unexpected archived-owner command {other}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper contending for an archived logical attempt"]
+    fn archived_batch_attempt_contender_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let result = BatchTransaction::begin_with_attempt_authority_hook(
+            &output_dir,
+            "archived-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("archived-child.png", 0)],
+            || {
+                write_process_test_marker("REPLACEMENT_CREATED");
+                let mut command = String::new();
+                input.read_line(&mut command).unwrap();
+                assert_eq!(command.trim(), "CLAIM");
+                write_process_test_marker("CLAIMING");
+            },
+        );
+        match result {
+            Ok(_) => panic!("live archived owner admitted a replacement attempt"),
+            Err(error) => {
+                error
+                    .downcast_ref::<BatchAttemptAuthorityContended>()
+                    .expect("replacement begin must return typed attempt contention");
+                write_process_test_marker("CONTENDED");
+            }
+        }
+
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        if command.trim() == "EXIT" {
+            return;
+        }
+        assert_eq!(command.trim(), "RETRY");
+        let transaction = BatchTransaction::begin(
+            &output_dir,
+            "archived-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("archived-child.png", 0)],
+        )
+        .unwrap();
+        write_process_test_marker("RETRY_ACQUIRED");
+        command.clear();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "DROP");
+        drop(transaction);
+        write_process_test_marker("DROPPED");
+    }
+
+    #[test]
+    fn archived_attempt_authority_survives_directory_removal_until_owner_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_input = owner.stdin.take().unwrap();
+        let mut owner_output = std::io::BufReader::new(owner.stdout.take().unwrap());
+        read_process_test_marker(&mut owner_output, "ARCHIVED").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("archived-child.png")).unwrap(),
+            b"archived child"
+        );
+        assert!(!attempt_dir(dir.path(), "archived-parent", 0).exists());
+
+        let (mut predecessor, _predecessor_input, mut predecessor_output) =
+            spawn_predecessor_authority_helper(dir.path(), "claim", "archived-parent");
+        read_process_test_marker(&mut predecessor_output, "PREDECESSOR_CONTENDED").unwrap();
+        let _ = std::io::copy(&mut predecessor_output, &mut std::io::sink());
+        assert!(
+            predecessor.wait().unwrap().success(),
+            "an archived v2 owner did not retain its predecessor v1 bridge lock"
+        );
+
+        // Replacing the former per-attempt lock namespace with another real
+        // directory must not fork authority. This is the exact failure mode
+        // that path-local sidecars permit: the owner keeps the displaced
+        // inode locked while a contender creates and locks a new inode at the
+        // original pathname.
+        let old_lock_namespace = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join(LEGACY_ATTEMPT_LOCKS_DIR);
+        if !old_lock_namespace.exists() {
+            fs::create_dir_all(&old_lock_namespace).unwrap();
+        }
+        let displaced_lock_namespace = dir.path().join("displaced-attempt-locks");
+        fs::rename(&old_lock_namespace, &displaced_lock_namespace).unwrap();
+        fs::create_dir(&old_lock_namespace).unwrap();
+
+        let mut contender = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_contender_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut contender_input = contender.stdin.take().unwrap();
+        let mut contender_output = std::io::BufReader::new(contender.stdout.take().unwrap());
+        read_process_test_marker(&mut contender_output, "REPLACEMENT_CREATED").unwrap();
+        writeln!(contender_input, "CLAIM").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "CLAIMING").unwrap();
+        let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+        let contender_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut contender_output, "CONTENDED");
+            contended_tx.send(result).unwrap();
+            contender_output
+        });
+        match contended_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => result.unwrap(),
+            Err(error) => {
+                let _ = contender.kill();
+                let _ = owner.kill();
+                let _ = contender_reader.join();
+                panic!(
+                    "replacement begin blocked on live authority after its deterministic pre-claim barrier: {error}"
+                );
+            }
+        }
+        let mut contender_output = contender_reader.join().unwrap();
+
+        writeln!(owner_input, "RELEASE").unwrap();
+        owner_input.flush().unwrap();
+        read_process_test_marker(&mut owner_output, "RELEASED").unwrap();
+        let _ = std::io::copy(&mut owner_output, &mut std::io::sink());
+        assert!(owner.wait().unwrap().success());
+
+        writeln!(contender_input, "RETRY").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "RETRY_ACQUIRED").unwrap();
+        writeln!(contender_input, "DROP").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "DROPPED").unwrap();
+        let _ = std::io::copy(&mut contender_output, &mut std::io::sink());
+        assert!(contender.wait().unwrap().success());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                dir.path(),
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert_eq!(
+            fs::read(dir.path().join("archived-child.png")).unwrap(),
+            b"archived child"
+        );
+    }
+
+    #[test]
+    fn contended_replacement_never_deadlocks_gallery_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_input = owner.stdin.take().unwrap();
+        let mut owner_output = std::io::BufReader::new(owner.stdout.take().unwrap());
+        read_process_test_marker(&mut owner_output, "ARCHIVED").unwrap();
+
+        let mut contender = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_contender_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut contender_input = contender.stdin.take().unwrap();
+        let mut contender_output = std::io::BufReader::new(contender.stdout.take().unwrap());
+        read_process_test_marker(&mut contender_output, "REPLACEMENT_CREATED").unwrap();
+
+        writeln!(owner_input, "BEGIN_SECOND").unwrap();
+        owner_input.flush().unwrap();
+        read_process_test_marker(&mut owner_output, "SECOND_STARTED").unwrap();
+        writeln!(contender_input, "CLAIM").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "CLAIMING").unwrap();
+
+        let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+        let contender_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut contender_output, "CONTENDED");
+            contended_tx.send(result).unwrap();
+            contender_output
+        });
+        match contended_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => result.unwrap(),
+            Err(error) => {
+                let _ = contender.kill();
+                let _ = owner.kill();
+                let _ = contender_reader.join();
+                panic!(
+                    "replacement authority and gallery bookkeeping formed a cross-process lock cycle: {error}"
+                );
+            }
+        }
+        let mut contender_output = contender_reader.join().unwrap();
+        read_process_test_marker(&mut owner_output, "SECOND_ACQUIRED").unwrap();
+
+        writeln!(contender_input, "EXIT").unwrap();
+        contender_input.flush().unwrap();
+        let _ = std::io::copy(&mut contender_output, &mut std::io::sink());
+        assert!(contender.wait().unwrap().success());
+        writeln!(owner_input, "RELEASE").unwrap();
+        owner_input.flush().unwrap();
+        read_process_test_marker(&mut owner_output, "RELEASED").unwrap();
+        let _ = std::io::copy(&mut owner_output, &mut std::io::sink());
+        assert!(owner.wait().unwrap().success());
+    }
+
+    #[test]
+    fn recovery_skips_live_batch_attempts_and_claims_them_after_process_crash() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for (state, expected_state) in [
+            ("staging", BatchManifestState::Staging),
+            ("prepared", BatchManifestState::Prepared),
+            ("committing", BatchManifestState::Committing),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "batch_transaction::tests::batch_attempt_liveness_process_helper",
+                    "--nocapture",
+                ])
+                .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+                .env("MOLD_TEST_BATCH_ATTEMPT_STATE", state)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut writer_input = writer.stdin.take().unwrap();
+            let mut writer_output = std::io::BufReader::new(writer.stdout.take().unwrap());
+            read_process_test_marker(&mut writer_output, "READY").unwrap();
+
+            let live_report = runtime
+                .block_on(recover_transactions(
+                    dir.path(),
+                    &GalleryPublicationGate::default(),
+                    Arc::new(None),
+                ))
+                .unwrap();
+            assert_eq!(
+                live_report,
+                RecoveryReport::default(),
+                "recovery mutated a live {state} attempt"
+            );
+            let live_attempt = attempt_dir(dir.path(), "live-parent", 0);
+            let live_manifest: BatchAttemptManifest =
+                serde_json::from_slice(&fs::read(live_attempt.join(MANIFEST_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(live_manifest.state, expected_state);
+            assert!(
+                !dir.path().join("live-child.png").exists(),
+                "recovery exposed a final file for a live {state} attempt"
+            );
+            assert!(
+                reservation_path(dir.path(), "live-child.png").is_file(),
+                "recovery released the live {state} attempt's reservation"
+            );
+
+            writeln!(writer_input, "CRASH").unwrap();
+            writer_input.flush().unwrap();
+            read_process_test_marker(&mut writer_output, "CRASHING").unwrap();
+            let _ = std::io::copy(&mut writer_output, &mut std::io::sink());
+            assert!(writer.wait().unwrap().success());
+
+            let orphan_report = runtime
+                .block_on(recover_transactions(
+                    dir.path(),
+                    &GalleryPublicationGate::default(),
+                    Arc::new(None),
+                ))
+                .unwrap();
+            if state == "committing" {
+                assert_eq!(orphan_report.rolled_forward, 1);
+                assert_eq!(
+                    fs::read(dir.path().join("live-child.png")).unwrap(),
+                    b"live child"
+                );
+            } else {
+                assert_eq!(orphan_report.rolled_back, 1);
+                assert!(
+                    !dir.path().join("live-child.png").exists(),
+                    "orphaned {state} attempt unexpectedly published"
+                );
+            }
+            assert!(!live_attempt.exists());
+            assert!(!reservation_path(dir.path(), "live-child.png").exists());
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper pausing after authoritative recovery claim"]
+    fn paused_batch_recovery_claim_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let bookkeeping = acquire_gallery_bookkeeping_lock(&output_dir).unwrap();
+        let root = output_dir.join(TRANSACTION_DIR);
+        let mut claimed = Vec::new();
+        collect_claimed_attempts(&root, &mut claimed, &bookkeeping).unwrap();
+        assert_eq!(claimed.len(), 1);
+        drop(bookkeeping);
+        write_process_test_marker("CLAIMED");
+
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "CONTINUE");
+        drop(claimed);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                &output_dir,
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        write_process_test_marker("COMPLETED");
+    }
+
+    #[test]
+    fn simultaneous_recovery_skips_an_attempt_claimed_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "recovery-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("recovery-child.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"orphaned child").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let mut first = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::paused_batch_recovery_claim_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut first_input = first.stdin.take().unwrap();
+        let mut first_output = std::io::BufReader::new(first.stdout.take().unwrap());
+        read_process_test_marker(&mut first_output, "CLAIMED").unwrap();
+
+        let mut second = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::reservation_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut second_output = std::io::BufReader::new(second.stdout.take().unwrap());
+        read_process_test_marker(&mut second_output, "RECOVERY_STARTED").unwrap();
+        read_process_test_marker(&mut second_output, "RECOVERY_COMPLETED").unwrap();
+        let _ = std::io::copy(&mut second_output, &mut std::io::sink());
+        assert!(second.wait().unwrap().success());
+        assert!(transaction.attempt_dir.exists());
+        assert!(reservation_path(dir.path(), "recovery-child.png").is_file());
+        assert!(!dir.path().join("recovery-child.png").exists());
+
+        writeln!(first_input, "CONTINUE").unwrap();
+        first_input.flush().unwrap();
+        read_process_test_marker(&mut first_output, "COMPLETED").unwrap();
+        let _ = std::io::copy(&mut first_output, &mut std::io::sink());
+        assert!(first.wait().unwrap().success());
+
+        assert!(!transaction.attempt_dir.exists());
+        assert!(!reservation_path(dir.path(), "recovery-child.png").exists());
+        assert!(!dir.path().join("recovery-child.png").exists());
     }
 
     #[test]
@@ -2707,6 +5326,350 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_path_collapses_gallery_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let transaction = BatchTransaction::begin(
+            &gallery,
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let gallery_alias = dir.path().join("gallery-alias");
+        std::os::unix::fs::symlink(&gallery, &gallery_alias).unwrap();
+
+        assert_eq!(
+            attempt_authority_lock_path(&transaction.attempt_dir).unwrap(),
+            attempt_authority_lock_path(&attempt_dir(&gallery_alias, "parent", 0)).unwrap(),
+            "one logical attempt must retain one sidecar across gallery aliases"
+        );
+        let authority = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
+        assert_eq!(
+            authority.parent(),
+            Some(fs::canonicalize(&gallery).unwrap().as_path()),
+            "authority must be rooted directly in the stable canonical gallery namespace"
+        );
+        assert!(
+            is_attempt_authority_file_name(authority.file_name().unwrap().to_str().unwrap()),
+            "authority filename must use the exact reserved hash shape"
+        );
+        let bookkeeping = acquire_gallery_bookkeeping_lock(&gallery).unwrap();
+        assert_eq!(
+            legacy_attempt_authority_lock_path(&transaction.attempt_dir, &bookkeeping).unwrap(),
+            predecessor_attempt_authority_path(&transaction.attempt_dir),
+            "the rolling-overlap bridge must reproduce the predecessor v1 hash and pathname"
+        );
+    }
+
+    #[test]
+    fn authority_sweep_never_deletes_unrelated_hidden_gallery_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let near_match = dir.path().join(".mold-batch-attempt-not-ours.lock");
+        let non_hex = dir.path().join(format!(
+            "{ATTEMPT_LOCK_PREFIX}{}{ATTEMPT_LOCK_SUFFIX}",
+            "g".repeat(64)
+        ));
+        let legacy_unrelated = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join(LEGACY_ATTEMPT_LOCKS_DIR)
+            .join("operator-note");
+        fs::write(&near_match, b"user data").unwrap();
+        fs::write(&non_hex, b"other user data").unwrap();
+
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        fs::write(&legacy_unrelated, b"operator data").unwrap();
+        drop(transaction);
+
+        assert_eq!(fs::read(&near_match).unwrap(), b"user data");
+        assert_eq!(fs::read(&non_hex).unwrap(), b"other user data");
+        assert_eq!(fs::read(&legacy_unrelated).unwrap(), b"operator data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_rejects_an_attempt_directory_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join("parent")
+            .join("attempts");
+        fs::create_dir_all(&attempts).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let escaped = attempts.join("0");
+        std::os::unix::fs::symlink(&outside, &escaped).unwrap();
+
+        let error = attempt_authority_lock_path(&escaped).unwrap_err();
+        assert!(error.to_string().contains("escapes its attempts root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_open_rejects_final_file_symlink_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let outside = dir.path().join("outside-file");
+        fs::write(&outside, b"outside").unwrap();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+
+        let result = open_attempt_authority_target_with_hook(
+            &transaction.attempt_dir,
+            &bookkeeping,
+            |lock_path| {
+                fs::remove_file(lock_path).unwrap();
+                std::os::unix::fs::symlink(&outside, lock_path).unwrap();
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "authority open followed a final-component symlink installed after validation"
+        );
+        assert_eq!(fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_open_rejects_final_file_regular_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+
+        let result = open_attempt_authority_target_with_hook(
+            &transaction.attempt_dir,
+            &bookkeeping,
+            |lock_path| {
+                fs::remove_file(lock_path).unwrap();
+                fs::write(lock_path, b"replacement").unwrap();
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "authority open accepted a different regular-file inode installed after open"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_claim_rejects_regular_replacement_after_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        let result = try_claim_attempt_authority_with_post_lock_hook(
+            &transaction.attempt_dir,
+            &bookkeeping,
+            |lock_path| {
+                fs::remove_file(lock_path).unwrap();
+                fs::write(lock_path, b"post-lock replacement").unwrap();
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "authority claim accepted a different inode installed after locking"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_lock_directory_symlink_replacement_cannot_redirect_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let outside = dir.path().join("outside-directory");
+        fs::create_dir(&outside).unwrap();
+        let displaced = dir.path().join("displaced-locks");
+        let legacy = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join(LEGACY_ATTEMPT_LOCKS_DIR);
+        fs::rename(&legacy, &displaced).unwrap();
+        std::os::unix::fs::symlink(&outside, &legacy).unwrap();
+
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        assert!(
+            try_claim_attempt_authority(&transaction.attempt_dir, &bookkeeping).is_err(),
+            "a replaced legacy namespace was not rejected before opening authority"
+        );
+        assert_eq!(
+            fs::read_dir(&outside).unwrap().count(),
+            0,
+            "authority claim created a lock file outside the gallery root"
+        );
+    }
+
+    #[test]
+    fn terminal_attempt_drop_reclaims_current_and_retains_stable_legacy_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let lock_path = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
+        let legacy_path = predecessor_attempt_authority_path(&transaction.attempt_dir);
+        transaction.release_reservations();
+        remove_failed_attempt(&transaction);
+        drop(transaction);
+
+        assert!(
+            !lock_path.exists(),
+            "terminal batch attempts must not retain one authority file forever"
+        );
+        assert!(
+            legacy_path.is_file(),
+            "rolling compatibility must retain one reusable predecessor authority inode"
+        );
+    }
+
+    #[test]
+    fn existing_live_attempt_returns_typed_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+
+        let error = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("two.png", 0)],
+        )
+        .unwrap_err();
+        error
+            .downcast_ref::<BatchAttemptAuthorityContended>()
+            .expect("a live existing attempt must return typed authority contention");
+
+        drop(transaction);
+    }
+
+    #[test]
+    fn dropped_unfinished_attempt_retains_recoverable_evidence_without_authority_leak() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"unfinished").unwrap();
+        let lock_path = attempt_authority_lock_path(&transaction.attempt_dir).unwrap();
+        drop(transaction);
+        assert!(
+            !lock_path.exists(),
+            "Drop leaked an unlocked authority path"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                dir.path(),
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert!(!attempt_dir(dir.path(), "parent", 0).exists());
+        assert!(
+            dir.path()
+                .join(TRANSACTION_DIR)
+                .join(LEGACY_ATTEMPT_LOCKS_DIR)
+                .is_dir(),
+            "recovery must retain the rolling predecessor authority namespace"
+        );
+    }
+
+    #[test]
+    fn recovery_retains_noncanonical_attempt_entries_with_operator_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let stray = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join("parent")
+            .join("attempts")
+            .join("not-a-generation");
+        fs::create_dir_all(&stray).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(recover_transactions(
+                dir.path(),
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("canonical numeric generation"));
+        assert!(message.contains("move it outside"));
+        assert!(
+            stray.is_dir(),
+            "fail-closed recovery removed unknown evidence"
+        );
+    }
+
     fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
         transaction.stage_bytes(0, bytes).unwrap();
         transaction.mark_prepared().unwrap();
@@ -2840,6 +5803,7 @@ mod tests {
         .unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let gate = GalleryPublicationGate::default();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(dir.path(), &gate, db.clone())
             .await
@@ -2881,6 +5845,7 @@ mod tests {
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
         fs::write(dir.path().join("one.png"), b"partial").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -2914,6 +5879,7 @@ mod tests {
             .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
             .unwrap();
         fs::write(dir.path().join("one.png"), b"corrupt").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -2959,6 +5925,7 @@ mod tests {
             } else {
                 fs::remove_file(&staged).unwrap();
             }
+            transaction.relinquish_attempt_authority_for_recovery();
 
             let error = recover_transactions(
                 dir.path(),
@@ -3014,6 +5981,7 @@ mod tests {
                 .unwrap();
         }
         fs::remove_dir_all(transaction.attempt_dir.join("staging")).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3053,6 +6021,8 @@ mod tests {
         )
         .unwrap();
         retry.stage_bytes(0, b"retry").unwrap();
+        stale.relinquish_attempt_authority_for_recovery();
+        retry.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3082,6 +6052,7 @@ mod tests {
         .unwrap();
         transaction.stage_bytes(0, b"one").unwrap();
         fs::write(transaction.attempt_dir.join(MANIFEST_FILE), b"{torn").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3213,7 +6184,7 @@ mod tests {
             serde_json::to_vec(&owner).unwrap(),
         )
         .unwrap();
-        let retry = BatchTransaction::begin(
+        let _retry = BatchTransaction::begin(
             dir.path(),
             "parent",
             5,
@@ -3223,16 +6194,16 @@ mod tests {
         .unwrap();
 
         let root = dir.path().join(TRANSACTION_DIR);
-        let mut manifests = Vec::new();
-        collect_manifests(&root, &mut manifests).unwrap();
+        let mut claimed = Vec::new();
+        let bookkeeping = acquire_gallery_bookkeeping_lock(dir.path()).unwrap();
+        collect_claimed_attempts(&root, &mut claimed, &bookkeeping).unwrap();
 
         assert!(!orphan.exists());
         assert!(!reservation_path(dir.path(), "orphan.png").exists());
         assert!(reservation_path(dir.path(), "retry.png").exists());
-        assert_eq!(
-            manifests,
-            vec![retry.attempt_dir.join(MANIFEST_FILE)],
-            "the live retry remains available to normal recovery"
+        assert!(
+            claimed.is_empty(),
+            "collection must not claim a live retry owned by this process"
         );
     }
 
@@ -3255,6 +6226,7 @@ mod tests {
             dir.path().join("one.png"),
         )
         .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -3287,6 +6259,7 @@ mod tests {
         .unwrap();
         commit_journal_without_cleanup(&mut transaction, b"one");
         fs::remove_file(dir.path().join("one.png")).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -3386,6 +6359,7 @@ mod tests {
             );
             let startup_error = error.into_startup_error();
             assert!(startup_error.to_string().contains("injected commit fault"));
+            transaction.relinquish_attempt_authority_for_recovery();
 
             let report = recover_transactions(dir.path(), &gate, db.clone())
                 .await
@@ -3850,6 +6824,7 @@ mod tests {
         transaction.stage_bytes(0, b"one").unwrap();
         transaction.manifest.state = BatchManifestState::Failed;
         transaction.persist_manifest().unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3885,6 +6860,7 @@ mod tests {
         assert!(reservation.is_file());
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3922,6 +6898,7 @@ mod tests {
         assert!(reservation.is_file());
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3958,6 +6935,7 @@ mod tests {
         let reservation = reservation_path(dir.path(), "one.png");
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),

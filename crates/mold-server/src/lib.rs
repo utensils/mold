@@ -630,7 +630,7 @@ pub async fn run_server(
     state.device_registry = device_registry;
 
     // Batch recovery is a serving precondition, including when SQLite is
-    // disabled. No router, gallery observer, or generation worker is started
+    // disabled. No router, gallery observer, or generation job producer is started
     // until every durable attempt is either rolled back or rolled forward.
     {
         let config = state.config.read().await;
