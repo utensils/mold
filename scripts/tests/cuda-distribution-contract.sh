@@ -101,6 +101,8 @@ require_text "Dockerfile" \
   'scripts/seal-cuda-ptx-manifest.py /build/target/release/mold'
 require_text "Dockerfile" \
   'scripts/probe-cuda-embedded-ptx.py /build/target/release/mold'
+require_text "Dockerfile" \
+  'python3 \'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
   'CUDA_ERROR_INVALID_PTX'
 require_text "scripts/probe-cuda-embedded-ptx.py" \
@@ -130,11 +132,39 @@ require_release_job_text "docker" \
 require_release_job_text "docker" \
   'MOLD_GIT_SHA=${{ github.sha }}'
 require_release_job_text "docker" \
-  'docker run --rm --entrypoint mold "$BUILT_IMAGE" version'
+  '-e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64'
+require_release_job_text "docker" \
+  "-c 'exec mold version'"
 require_release_job_text "docker" \
   'grep -Fq "$GITHUB_SHA"'
 require_text "Dockerfile" 'ARG MOLD_GIT_SHA'
 require_text "Dockerfile" 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}'
+
+docker_python_line="$(grep -n -m1 'python3 \\' "$repo_root/Dockerfile" | cut -d: -f1)"
+docker_seal_line="$(
+  grep -n -m1 'scripts/seal-cuda-ptx-manifest.py /build/target/release/mold' \
+    "$repo_root/Dockerfile" | cut -d: -f1
+)"
+[[ "$docker_python_line" -lt "$docker_seal_line" ]] \
+  || fail "Docker builder must install Python before sealing PTX"
+docker_source_sha_env_line="$(
+  grep -n -m1 'ENV MOLD_GIT_SHA=${MOLD_GIT_SHA}' "$repo_root/Dockerfile" | cut -d: -f1
+)"
+docker_dependency_build_line="$(
+  grep -n -m1 'RUN cargo build --release -p mold-ai' "$repo_root/Dockerfile" | cut -d: -f1
+)"
+docker_real_build_line="$(
+  grep -n 'RUN cargo build --release -p mold-ai' "$repo_root/Dockerfile" | tail -1 | cut -d: -f1
+)"
+[[ "$docker_source_sha_env_line" -gt "$docker_dependency_build_line" \
+  && "$docker_source_sha_env_line" -lt "$docker_real_build_line" ]] \
+  || fail "Docker source SHA must not invalidate the dependency-cache build"
+docker_runtime_copy_line="$(
+  grep -n -m1 'COPY --from=builder /build/target/release/mold' \
+    "$repo_root/Dockerfile" | cut -d: -f1
+)"
+[[ "$docker_seal_line" -lt "$docker_runtime_copy_line" ]] \
+  || fail "Docker PTX sealing must precede runtime image publication"
 require_release_job_text "docker" \
   'Create once and verify immutable stable tag'
 require_release_job_text "docker" \
@@ -226,6 +256,8 @@ done
 if grep -Fq 'mold-desktop-sm100' "$repo_root/flake.nix"; then
   fail "B200 is server-only; flake.nix must not export mold-desktop-sm100"
 fi
+require_text ".claude/skills/mold/SKILL.md" \
+  'B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported'
 
 require_text "install.sh" 'echo "sm86"'
 require_text "install.sh" 'echo "sm100"'
@@ -247,7 +279,11 @@ require_text "crates/mold-core/src/cuda_distribution.rs" \
 require_text "crates/mold-core/src/cuda_distribution.rs" \
   'linux/arm64'
 require_text "crates/mold-cli/src/commands/runpod.rs" \
-  'ensure_published_image_platform(&gpu_display)'
+  'ensure_published_runpod_gpu_identity(&gpu_name, &gpu_display)'
+require_text "crates/mold-cli/src/commands/runpod.rs" \
+  'ensure_published_image_platform(gpu_type_id)'
+require_text "crates/mold-cli/src/commands/runpod.rs" \
+  'ensure_published_image_platform(display_name)'
 require_text "Dockerfile" 'ARG MOLD_DISTRIBUTION_IMAGE_VERSION=latest'
 require_text "Dockerfile" \
   'ENV MOLD_DISTRIBUTION_IMAGE_VERSION=${MOLD_DISTRIBUTION_IMAGE_VERSION}'

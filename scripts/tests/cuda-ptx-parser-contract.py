@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -179,6 +181,68 @@ class EmbeddedPtxParserContract(unittest.TestCase):
         )
         self.assertNotEqual(seal.returncode, 0, seal.stdout)
         self.assertIn("no generated candle-kernels PTX", seal.stderr)
+        self.assert_probe_and_verifier_reject(fixture, 86)
+
+    def test_partially_overlapping_manifest_ranges_are_rejected(self) -> None:
+        fixture = self.fixture(
+            "overlapping-manifest-ranges",
+            """
+.version 8.0
+.target sm_86
+.address_size 64
+.visible .entry real() { ret; }
+""",
+        )
+        manifest_path = self.temp_dir / "overlapping-manifest.json"
+        rodata_path = self.temp_dir / "overlapping-rodata.bin"
+        subprocess.run(
+            [
+                "objcopy",
+                "--dump-section",
+                f".mold_cuda_ptx={manifest_path}",
+                str(fixture),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["objcopy", "--dump-section", f".rodata={rodata_path}", str(fixture)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        original = manifest["modules"][0]
+        overlapping_offset = original["rodata_offset"] + 1
+        overlapping_length = original["byte_length"] - 1
+        rodata = rodata_path.read_bytes()
+        overlapping_bytes = rodata[
+            overlapping_offset : overlapping_offset + overlapping_length
+        ]
+        manifest["modules"].append(
+            {
+                "source_name": "overlapping.ptx",
+                "rodata_offset": overlapping_offset,
+                "byte_length": overlapping_length,
+                "sha256": hashlib.sha256(overlapping_bytes).hexdigest(),
+            }
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                "objcopy",
+                "--update-section",
+                f".mold_cuda_ptx={manifest_path}",
+                str(fixture),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         self.assert_probe_and_verifier_reject(fixture, 86)
 
     def probe(self, fixture: Path, compute_cap: int) -> subprocess.CompletedProcess[str]:

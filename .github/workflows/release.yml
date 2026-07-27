@@ -545,7 +545,17 @@ jobs:
         run: |
           set -euo pipefail
           docker pull "$BUILT_IMAGE"
-          version="$(docker run --rm --entrypoint mold "$BUILT_IMAGE" version)"
+          # A GitHub-hosted runner has no NVIDIA driver injection. The CUDA
+          # runtime image includes the forward-compatibility driver library,
+          # but its compat directory is intentionally not the normal runtime
+          # loader path. Expose it only for this GPU-less identity smoke.
+          version="$(
+            docker run --rm \
+              --entrypoint /bin/sh \
+              -e LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64 \
+              "$BUILT_IMAGE" \
+              -c 'exec mold version'
+          )"
           grep -Fq "$GITHUB_SHA" <<<"$version" || {
             echo "::error::container does not report exact source SHA $GITHUB_SHA: $version"
             exit 1

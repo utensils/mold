@@ -722,7 +722,7 @@ When `--gpu`/`--dc` aren't pinned:
 
 1. Aggregate stock across datacenters per GPU family.
 2. Pick cheapest family with **High** or **Medium** stock from: 4090 > 5090 > L40S > A100.
-3. The displayed image target comes from the shared GPU table: A30/A100 and generic Ampere → `:<version>-sm80`; A2/A10/A16/A40, RTX A4000–A6000, and RTX 3050–3090 → `:<version>-sm86`; Ada → `:<version>`; H100/H200 → `:<version>-sm90`; B200/GB200/B300/GB300 → `:<version>-sm100`; named RTX PRO/GeForce 50-series → `:<version>-sm120`. Ambiguous generic Blackwell falls back to sm89 instead of guessing. Stable official clients fetch the exact release/source manifest and submit `@sha256`; missing or inconsistent manifests fail closed. Main/source/Nix clients use mutable `latest*`. B200 support is simulated, not hardware-qualified.
+3. The displayed image target comes from the shared GPU table: A30/A100 and generic Ampere → `:<version>-sm80`; A2/A10/A16/A40, RTX A4000–A6000, and RTX 3050–3090 → `:<version>-sm86`; Ada → `:<version>`; H100/H200 → `:<version>-sm90`; B200/B300 → `:<version>-sm100`; Grace Hopper and Grace Blackwell are unsupported; named RTX PRO/GeForce 50-series → `:<version>-sm120`. Ambiguous generic Blackwell falls back to sm89 instead of guessing. Stable official clients fetch the exact release/source manifest and submit `@sha256`; missing or inconsistent manifests fail closed. Main/source/Nix clients use mutable `latest*`. B200 support is simulated, not hardware-qualified.
 4. No datacenter pin — let RunPod's scheduler pick any machine.
 5. If scheduling stalls (runtime still null + machine unassigned after 90s), delete the stuck pod and try the next stock-ranked DC.
 

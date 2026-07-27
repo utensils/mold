@@ -882,6 +882,12 @@ pub fn resolve_hf_token(opts: &CreateOptions) -> Option<String> {
     Some("{{ RUNPOD_SECRET_HF_TOKEN }}".to_string())
 }
 
+fn ensure_published_runpod_gpu_identity(gpu_type_id: &str, display_name: &str) -> Result<()> {
+    mold_core::cuda_distribution::ensure_published_image_platform(gpu_type_id)?;
+    mold_core::cuda_distribution::ensure_published_image_platform(display_name)?;
+    Ok(())
+}
+
 /// Build a `CreatePodRequest` from resolved defaults.
 pub async fn build_create_request(
     opts: &CreateOptions,
@@ -890,7 +896,7 @@ pub async fn build_create_request(
 ) -> Result<CreatePodRequest> {
     // Resolve GPU — either user-supplied, config default, or cheapest available.
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
-    mold_core::cuda_distribution::ensure_published_image_platform(&gpu_display)?;
+    ensure_published_runpod_gpu_identity(&gpu_name, &gpu_display)?;
 
     // Resolve image tag.
     let image = if let Some(image_tag) = opts.image_tag.clone() {
@@ -2389,6 +2395,15 @@ mod tests {
             normalize_gpu_id("NVIDIA GeForce RTX 4090"),
             "NVIDIA GeForce RTX 4090"
         );
+    }
+
+    #[test]
+    fn published_runpod_gpu_identity_rejects_grace_in_either_field() {
+        assert!(ensure_published_runpod_gpu_identity("NVIDIA GB200 A100", "A100 PCIe").is_err());
+        assert!(
+            ensure_published_runpod_gpu_identity("NVIDIA A100 80GB PCIe", "NVIDIA GB200").is_err()
+        );
+        assert!(ensure_published_runpod_gpu_identity("NVIDIA B200", "NVIDIA B200").is_ok());
     }
 
     #[test]

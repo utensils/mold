@@ -120,7 +120,7 @@ def sealed_ptx_modules(
 
     modules: list[bytes] = []
     seen_names: set[str] = set()
-    seen_ranges: set[tuple[int, int]] = set()
+    seen_ranges: list[tuple[int, int]] = []
     seen_hashes: set[str] = set()
     required_keys = {"source_name", "rodata_offset", "byte_length", "sha256"}
     for index, raw_module in enumerate(raw_modules):
@@ -156,14 +156,18 @@ def sealed_ptx_modules(
         if sha256_bytes(module) != expected_sha:
             fail(f"{MANIFEST_SECTION} module {source_name} does not match ELF .rodata")
         byte_range = (offset, end)
+        overlaps_existing_range = any(
+            offset < seen_end and seen_start < end
+            for seen_start, seen_end in seen_ranges
+        )
         if (
             source_name in seen_names
-            or byte_range in seen_ranges
+            or overlaps_existing_range
             or expected_sha in seen_hashes
         ):
             fail(f"{MANIFEST_SECTION} contains duplicate module evidence")
         seen_names.add(source_name)
-        seen_ranges.add(byte_range)
+        seen_ranges.append(byte_range)
         seen_hashes.add(expected_sha)
         modules.append(module)
     return modules, manifest, sha256_bytes(manifest_bytes)
