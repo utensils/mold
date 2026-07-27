@@ -196,6 +196,10 @@ impl Drop for GalleryNameReservation {
 pub struct BatchTransaction {
     output_dir: PathBuf,
     attempt_dir: PathBuf,
+    // A live attempt owns this OS lock from before its first durable manifest
+    // through publication, archive/rollback cleanup, and Drop. Recovery may
+    // inspect or mutate an attempt only after claiming the same authority.
+    _attempt_authority: AttemptAuthority,
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
     journaled_final_children: BTreeSet<usize>,
@@ -207,6 +211,35 @@ pub struct BatchTransaction {
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
+}
+
+#[derive(Debug)]
+enum AttemptAuthority {
+    Held {
+        lock: File,
+    },
+    // Direct journal/manifest unit tests inspect deliberately live fixtures.
+    // Production construction has no unclaimed variant.
+    #[cfg(test)]
+    Unclaimed,
+}
+
+impl Drop for AttemptAuthority {
+    fn drop(&mut self) {
+        match self {
+            Self::Held { lock } => {
+                let _ = fs2::FileExt::unlock(lock);
+            }
+            #[cfg(test)]
+            Self::Unclaimed => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ClaimedAttempt {
+    manifest_path: PathBuf,
+    authority: File,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +317,13 @@ impl BatchTransaction {
                  an existing attempt is never shared or overwritten"
             )
         })?;
+        let attempt_authority = match acquire_attempt_authority(&attempt_dir) {
+            Ok(authority) => authority,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&attempt_dir);
+                return Err(error);
+            }
+        };
         if let Err(error) = (|| {
             fs::create_dir(attempt_dir.join("staging"))?;
             fs::create_dir_all(reservations_dir(output_dir))?;
@@ -344,6 +384,9 @@ impl BatchTransaction {
         let mut transaction = Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
+            _attempt_authority: AttemptAuthority::Held {
+                lock: attempt_authority,
+            },
             manifest,
             next_journal_sequence: 0,
             journaled_final_children: BTreeSet::new(),
@@ -761,7 +804,28 @@ impl BatchTransaction {
         Ok(())
     }
 
+    fn load_claimed(
+        output_dir: &Path,
+        manifest_path: &Path,
+        authority: File,
+    ) -> anyhow::Result<Self> {
+        Self::load_with_authority(
+            output_dir,
+            manifest_path,
+            AttemptAuthority::Held { lock: authority },
+        )
+    }
+
+    #[cfg(test)]
     fn load(output_dir: &Path, manifest_path: &Path) -> anyhow::Result<Self> {
+        Self::load_with_authority(output_dir, manifest_path, AttemptAuthority::Unclaimed)
+    }
+
+    fn load_with_authority(
+        output_dir: &Path,
+        manifest_path: &Path,
+        attempt_authority: AttemptAuthority,
+    ) -> anyhow::Result<Self> {
         let attempt_dir = manifest_path
             .parent()
             .context("manifest has no attempt directory")?
@@ -819,6 +883,7 @@ impl BatchTransaction {
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
+            _attempt_authority: attempt_authority,
             manifest,
             next_journal_sequence,
             journaled_final_children: replay.published_children,
@@ -831,6 +896,13 @@ impl BatchTransaction {
             #[cfg(test)]
             commit_failpoint: None,
         })
+    }
+
+    #[cfg(test)]
+    fn relinquish_attempt_authority_for_recovery(&mut self) {
+        // Unit recovery fixtures retain the Rust value for path assertions;
+        // replacing this field models the OS releasing the lock on crash.
+        self._attempt_authority = AttemptAuthority::Unclaimed;
     }
 }
 
@@ -1288,25 +1360,27 @@ pub async fn recover_transactions(
 ) -> anyhow::Result<RecoveryReport> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("creating gallery {}", output_dir.display()))?;
-    // This synchronous prepass is deliberately bounded to filesystem-only
-    // discovery and stale-reservation cleanup. It waits for live ordinary
-    // publishers in other processes, then releases the OS lock before any
-    // async gallery-gate or database work, avoiding a lock-order inversion
-    // across `.await` while still making stale classification authoritative.
+    // Lock order is gallery bookkeeping -> nonblocking attempt claim. Recovery
+    // never waits for an attempt while holding bookkeeping: a live batch can
+    // already hold its attempt lock while waiting for the gallery gate, and
+    // an ordinary publisher can hold that gate while waiting for bookkeeping.
+    // Claimed attempts retain their exact OS authority after bookkeeping is
+    // released and across every async gallery-gate/database recovery action.
     let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
     let root = output_dir.join(TRANSACTION_DIR);
     if !root.is_dir() {
         return Ok(RecoveryReport::default());
     }
     sweep_stale_reservations(&root)?;
-    let mut manifests = Vec::new();
-    collect_manifests(&root, &mut manifests)?;
-    manifests.sort();
+    let mut attempts = Vec::new();
+    collect_claimed_attempts(&root, &mut attempts)?;
+    attempts.sort_by(|left, right| left.manifest_path.cmp(&right.manifest_path));
     drop(bookkeeping_lock);
 
     let mut report = RecoveryReport::default();
-    for path in manifests {
-        let mut transaction = BatchTransaction::load(output_dir, &path)?;
+    for claimed in attempts {
+        let mut transaction =
+            BatchTransaction::load_claimed(output_dir, &claimed.manifest_path, claimed.authority)?;
         if transaction.reconstructed_from_journal {
             atomic_write_json(
                 &transaction.attempt_dir.join(MANIFEST_FILE),
@@ -1458,7 +1532,7 @@ pub async fn recover_transactions(
     Ok(report)
 }
 
-fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+fn collect_claimed_attempts(root: &Path, out: &mut Vec<ClaimedAttempt>) -> anyhow::Result<()> {
     // Only generation-scoped active attempts participate in startup
     // recovery. Archived committed manifests and reservation metadata are
     // durable authority, not work to replay on every boot.
@@ -1476,10 +1550,38 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> 
             if !attempt.path().is_dir() {
                 continue;
             }
+            let authority = match try_claim_attempt_authority(&attempt.path()) {
+                Ok(Some(authority)) => authority,
+                Ok(None) => {
+                    tracing::info!(
+                        attempt = %attempt.path().display(),
+                        "skipping batch recovery for an attempt owned by a live process"
+                    );
+                    continue;
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    // A live owner may archive its terminal attempt between
+                    // read_dir and our nonblocking claim.
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !attempt.path().is_dir() {
+                // The owner released and unlinked the inode after we opened
+                // it but before the claim completed.
+                continue;
+            }
             let manifest = attempt.path().join(MANIFEST_FILE);
             let journal = attempt.path().join(JOURNAL_FILE);
             if manifest.is_file() || journal.is_file() {
-                out.push(manifest);
+                out.push(ClaimedAttempt {
+                    manifest_path: manifest,
+                    authority,
+                });
             } else {
                 let owner = ReservationOwner {
                     parent_id: parent.file_name().to_string_lossy().into_owned(),
@@ -1500,6 +1602,7 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> 
                 );
                 release_all_reservations_for_owner(root, &owner)?;
                 fs::remove_dir_all(attempt.path())?;
+                drop(authority);
             }
         }
     }
@@ -1601,6 +1704,71 @@ fn attempt_dir(output_dir: &Path, parent_id: &str, generation: u64) -> PathBuf {
 
 fn reservations_dir(output_dir: &Path) -> PathBuf {
     output_dir.join(TRANSACTION_DIR).join("reservations")
+}
+
+fn acquire_attempt_authority(attempt_dir: &Path) -> anyhow::Result<File> {
+    let authority = open_attempt_authority_target(attempt_dir)?;
+    fs2::FileExt::lock_exclusive(&authority).with_context(|| {
+        format!(
+            "locking live batch attempt authority {}",
+            attempt_dir.display()
+        )
+    })?;
+    Ok(authority)
+}
+
+fn try_claim_attempt_authority(attempt_dir: &Path) -> anyhow::Result<Option<File>> {
+    let authority = open_attempt_authority_target(attempt_dir)?;
+    match fs2::FileExt::try_lock_exclusive(&authority) {
+        Ok(()) => Ok(Some(authority)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "claiming batch attempt recovery authority {}",
+                attempt_dir.display()
+            )
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn open_attempt_authority_target(attempt_dir: &Path) -> anyhow::Result<File> {
+    // The attempt directory inode is stable for the entire nonterminal
+    // attempt and remains locked even when terminal cleanup unlinks it.
+    File::open(attempt_dir)
+        .with_context(|| format!("opening batch attempt directory {}", attempt_dir.display()))
+}
+
+#[cfg(not(unix))]
+fn open_attempt_authority_target(attempt_dir: &Path) -> anyhow::Result<File> {
+    // std cannot portably open a directory handle on every non-Unix target.
+    // Keep the lock outside the removable attempts directory so terminal
+    // cleanup cannot create a second authority inode while the first is live.
+    let canonical = fs::canonicalize(attempt_dir)
+        .with_context(|| format!("canonicalizing batch attempt {}", attempt_dir.display()))?;
+    let generation = canonical
+        .file_name()
+        .context("batch attempt directory has no generation")?;
+    let parent_root = canonical
+        .parent()
+        .and_then(Path::parent)
+        .context("batch attempt directory has no parent root")?;
+    let locks = parent_root.join(".attempt-locks");
+    fs::create_dir_all(&locks)?;
+    let lock_path = locks.join(generation).with_extension("lock");
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "opening batch attempt authority {} for {}",
+                lock_path.display(),
+                attempt_dir.display()
+            )
+        })
 }
 
 fn acquire_gallery_bookkeeping_lock(output_dir: &Path) -> anyhow::Result<File> {
@@ -2374,6 +2542,136 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess helper for cross-process batch-attempt liveness tests"]
+    fn batch_attempt_liveness_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let state = std::env::var("MOLD_TEST_BATCH_ATTEMPT_STATE")
+            .expect("MOLD_TEST_BATCH_ATTEMPT_STATE must be set by parent test");
+        let mut transaction = BatchTransaction::begin(
+            &output_dir,
+            "live-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("live-child.png", 0)],
+        )
+        .unwrap();
+        match state.as_str() {
+            "staging" => {}
+            "prepared" => {
+                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.mark_prepared().unwrap();
+            }
+            "committing" => {
+                transaction.stage_bytes(0, b"live child").unwrap();
+                transaction.mark_prepared().unwrap();
+                transaction.manifest.state = BatchManifestState::Committing;
+                transaction.persist_manifest().unwrap();
+            }
+            other => panic!("unexpected live batch-attempt state {other}"),
+        }
+
+        write_process_test_marker("READY");
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "CRASH");
+        write_process_test_marker("CRASHING");
+        // Deliberately bypass Rust destructors: only the OS may release the
+        // live-attempt authority, matching an abrupt server exit.
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn recovery_skips_live_batch_attempts_and_claims_them_after_process_crash() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for (state, expected_state) in [
+            ("staging", BatchManifestState::Staging),
+            ("prepared", BatchManifestState::Prepared),
+            ("committing", BatchManifestState::Committing),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "batch_transaction::tests::batch_attempt_liveness_process_helper",
+                    "--nocapture",
+                ])
+                .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+                .env("MOLD_TEST_BATCH_ATTEMPT_STATE", state)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut writer_input = writer.stdin.take().unwrap();
+            let mut writer_output = std::io::BufReader::new(writer.stdout.take().unwrap());
+            read_process_test_marker(&mut writer_output, "READY").unwrap();
+
+            let live_report = runtime
+                .block_on(recover_transactions(
+                    dir.path(),
+                    &GalleryPublicationGate::default(),
+                    Arc::new(None),
+                ))
+                .unwrap();
+            assert_eq!(
+                live_report,
+                RecoveryReport::default(),
+                "recovery mutated a live {state} attempt"
+            );
+            let live_attempt = attempt_dir(dir.path(), "live-parent", 0);
+            let live_manifest: BatchAttemptManifest =
+                serde_json::from_slice(&fs::read(live_attempt.join(MANIFEST_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(live_manifest.state, expected_state);
+            assert!(
+                !dir.path().join("live-child.png").exists(),
+                "recovery exposed a final file for a live {state} attempt"
+            );
+            assert!(
+                reservation_path(dir.path(), "live-child.png").is_file(),
+                "recovery released the live {state} attempt's reservation"
+            );
+
+            writeln!(writer_input, "CRASH").unwrap();
+            writer_input.flush().unwrap();
+            read_process_test_marker(&mut writer_output, "CRASHING").unwrap();
+            let _ = std::io::copy(&mut writer_output, &mut std::io::sink());
+            assert!(writer.wait().unwrap().success());
+
+            let orphan_report = runtime
+                .block_on(recover_transactions(
+                    dir.path(),
+                    &GalleryPublicationGate::default(),
+                    Arc::new(None),
+                ))
+                .unwrap();
+            if state == "committing" {
+                assert_eq!(orphan_report.rolled_forward, 1);
+                assert_eq!(
+                    fs::read(dir.path().join("live-child.png")).unwrap(),
+                    b"live child"
+                );
+            } else {
+                assert_eq!(orphan_report.rolled_back, 1);
+                assert!(
+                    !dir.path().join("live-child.png").exists(),
+                    "orphaned {state} attempt unexpectedly published"
+                );
+            }
+            assert!(!live_attempt.exists());
+            assert!(!reservation_path(dir.path(), "live-child.png").exists());
+        }
+    }
+
+    #[test]
     #[ignore = "subprocess helper for cross-process recovery tests"]
     fn reservation_recovery_process_helper() {
         let output_dir = PathBuf::from(
@@ -2840,6 +3138,7 @@ mod tests {
         .unwrap();
         let db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
         let gate = GalleryPublicationGate::default();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(dir.path(), &gate, db.clone())
             .await
@@ -2881,6 +3180,7 @@ mod tests {
         transaction.manifest.state = BatchManifestState::Committing;
         transaction.persist_manifest().unwrap();
         fs::write(dir.path().join("one.png"), b"partial").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -2914,6 +3214,7 @@ mod tests {
             .append_journal(BatchJournalEvent::FinalPublished { child_index: 0 })
             .unwrap();
         fs::write(dir.path().join("one.png"), b"corrupt").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -2959,6 +3260,7 @@ mod tests {
             } else {
                 fs::remove_file(&staged).unwrap();
             }
+            transaction.relinquish_attempt_authority_for_recovery();
 
             let error = recover_transactions(
                 dir.path(),
@@ -3014,6 +3316,7 @@ mod tests {
                 .unwrap();
         }
         fs::remove_dir_all(transaction.attempt_dir.join("staging")).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3053,6 +3356,8 @@ mod tests {
         )
         .unwrap();
         retry.stage_bytes(0, b"retry").unwrap();
+        stale.relinquish_attempt_authority_for_recovery();
+        retry.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3082,6 +3387,7 @@ mod tests {
         .unwrap();
         transaction.stage_bytes(0, b"one").unwrap();
         fs::write(transaction.attempt_dir.join(MANIFEST_FILE), b"{torn").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3213,7 +3519,7 @@ mod tests {
             serde_json::to_vec(&owner).unwrap(),
         )
         .unwrap();
-        let retry = BatchTransaction::begin(
+        let _retry = BatchTransaction::begin(
             dir.path(),
             "parent",
             5,
@@ -3223,16 +3529,15 @@ mod tests {
         .unwrap();
 
         let root = dir.path().join(TRANSACTION_DIR);
-        let mut manifests = Vec::new();
-        collect_manifests(&root, &mut manifests).unwrap();
+        let mut claimed = Vec::new();
+        collect_claimed_attempts(&root, &mut claimed).unwrap();
 
         assert!(!orphan.exists());
         assert!(!reservation_path(dir.path(), "orphan.png").exists());
         assert!(reservation_path(dir.path(), "retry.png").exists());
-        assert_eq!(
-            manifests,
-            vec![retry.attempt_dir.join(MANIFEST_FILE)],
-            "the live retry remains available to normal recovery"
+        assert!(
+            claimed.is_empty(),
+            "collection must not claim a live retry owned by this process"
         );
     }
 
@@ -3255,6 +3560,7 @@ mod tests {
             dir.path().join("one.png"),
         )
         .unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -3287,6 +3593,7 @@ mod tests {
         .unwrap();
         commit_journal_without_cleanup(&mut transaction, b"one");
         fs::remove_file(dir.path().join("one.png")).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
@@ -3386,6 +3693,7 @@ mod tests {
             );
             let startup_error = error.into_startup_error();
             assert!(startup_error.to_string().contains("injected commit fault"));
+            transaction.relinquish_attempt_authority_for_recovery();
 
             let report = recover_transactions(dir.path(), &gate, db.clone())
                 .await
@@ -3850,6 +4158,7 @@ mod tests {
         transaction.stage_bytes(0, b"one").unwrap();
         transaction.manifest.state = BatchManifestState::Failed;
         transaction.persist_manifest().unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3885,6 +4194,7 @@ mod tests {
         assert!(reservation.is_file());
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3922,6 +4232,7 @@ mod tests {
         assert!(reservation.is_file());
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let report = recover_transactions(
             dir.path(),
@@ -3958,6 +4269,7 @@ mod tests {
         let reservation = reservation_path(dir.path(), "one.png");
         fs::remove_file(transaction.attempt_dir.join(JOURNAL_FILE)).unwrap();
         sync_dir(&transaction.attempt_dir).unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
 
         let error = recover_transactions(
             dir.path(),
