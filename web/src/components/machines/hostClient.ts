@@ -20,9 +20,6 @@ import {
 } from "vue";
 import type {
   DownloadsListingWire,
-  GenerateRequestWire,
-  GenerationMemoryEstimate,
-  ModelComponentsResponse,
   ModelInfoExtended,
   QueueListing,
   ResourceSnapshot,
@@ -89,25 +86,6 @@ async function send(
   if (!res.ok && res.status !== 204 && res.status !== 404) {
     throw new Error(`${method} ${path} failed: ${res.status}`);
   }
-}
-
-async function postJson<T>(
-  host: HostEntry,
-  path: string,
-  body: unknown,
-  signal?: AbortSignal,
-): Promise<T> {
-  const res = await fetch(`${host.url}${path}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...authHeaders(host.apiKey),
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
-  return (await res.json()) as T;
 }
 
 export async function hostStatus(host: HostEntry, signal?: AbortSignal) {
@@ -178,31 +156,6 @@ export function hostQueue(host: HostEntry, signal?: AbortSignal) {
 
 export function hostModels(host: HostEntry, signal?: AbortSignal) {
   return getJson<ModelInfoExtended[]>(host, "/api/models", signal);
-}
-
-export function hostModelComponents(
-  host: HostEntry,
-  model: string,
-  signal?: AbortSignal,
-) {
-  return getJson<ModelComponentsResponse>(
-    host,
-    `/api/models/${encodeURIComponent(model)}/components`,
-    signal,
-  );
-}
-
-export function hostGenerationEstimate(
-  host: HostEntry,
-  request: GenerateRequestWire,
-  signal?: AbortSignal,
-) {
-  return postJson<GenerationMemoryEstimate>(
-    host,
-    "/api/generate/estimate",
-    request,
-    signal,
-  );
 }
 
 export async function hostDownloads(
