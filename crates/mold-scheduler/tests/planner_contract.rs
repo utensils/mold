@@ -917,6 +917,72 @@ fn ineligible_work_keeps_its_precise_reason_after_openings_fill() {
 }
 
 #[test]
+fn hard_pins_preserve_each_device_lifecycle_block_reason() {
+    let cases = [
+        (
+            DeviceSnapshot::idle("gpu-disabled", 24 * GIB)
+                .with_admin_state(DeviceAdminState::Disabled),
+            BlockedReason::DeviceDisabled,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-draining", 24 * GIB)
+                .with_admin_state(DeviceAdminState::Draining),
+            BlockedReason::DeviceDraining,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-startup-excluded", 24 * GIB)
+                .with_admin_state(DeviceAdminState::StartupExcluded),
+            BlockedReason::DeviceStartupExcluded,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-degraded", 24 * GIB).with_health(DeviceHealth::Degraded),
+            BlockedReason::DeviceDegraded,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-unavailable", 24 * GIB)
+                .with_health(DeviceHealth::Unavailable),
+            BlockedReason::DeviceUnavailable,
+        ),
+        (
+            DeviceSnapshot::idle("gpu-poisoned", 24 * GIB).with_health(DeviceHealth::Poisoned),
+            BlockedReason::DeviceUnavailable,
+        ),
+    ];
+
+    for (device, expected) in cases {
+        let device_id = device.id.clone();
+        let plan = Planner::default()
+            .plan(&snapshot(
+                vec![device],
+                vec![work("blocked", 0, vec![candidate(device_id.as_str(), 1)])
+                    .with_hard_device(device_id)],
+                8,
+            ))
+            .expect("valid plan");
+        assert_eq!(
+            plan.blocked_reason(&WorkId::from("blocked")),
+            Some(&expected)
+        );
+    }
+}
+
+#[test]
+fn one_work_exceeding_host_headroom_is_not_reported_as_aggregate_contention() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("too-large", 0, vec![candidate("gpu-0", 9)])],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("too-large")),
+        Some(&BlockedReason::InsufficientHostRam)
+    );
+}
+
+#[test]
 fn busy_only_work_reports_no_idle_device_after_other_openings_fill() {
     let plan = Planner::default()
         .plan(&snapshot(

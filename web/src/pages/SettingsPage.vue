@@ -151,15 +151,18 @@ const devices = ref<DeviceInfo[] | null>(null);
 const deviceCapabilities = ref<ServerCapabilities | null>(null);
 const deviceMutations = ref(new Set<string>());
 const queuePlan = ref<QueuePlan | null>(null);
+let devicePanelRequestGeneration = 0;
 
 async function loadDevicePanel() {
   const host = originHost();
+  const generation = ++devicePanelRequestGeneration;
   const [deviceResult, queueResult, capabilityResult] =
     await Promise.allSettled([
       hostDevices(host),
       hostQueue(host),
       hostCapabilities(host),
     ]);
+  if (generation !== devicePanelRequestGeneration) return;
   if (deviceResult.status === "fulfilled")
     devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled")
@@ -219,7 +222,10 @@ onMounted(() => {
   );
 });
 
-onBeforeUnmount(() => deviceEventsAbort?.abort());
+onBeforeUnmount(() => {
+  devicePanelRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 </script>
 
 <template>
@@ -250,13 +256,8 @@ onBeforeUnmount(() => deviceEventsAbort?.abort());
       </div>
     </CardSurface>
 
-    <p v-if="devices?.length && queuePlan?.work_items.length" class="kicker">
-      Scheduler plan
-    </p>
-    <CardSurface
-      v-if="devices?.length && queuePlan?.work_items.length"
-      class="settings__card"
-    >
+    <p v-if="devices?.length" class="kicker">Scheduler plan</p>
+    <CardSurface v-if="devices?.length" class="settings__card">
       <DevicePanel
         :devices="devices"
         :plan="queuePlan"

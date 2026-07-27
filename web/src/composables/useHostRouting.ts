@@ -25,6 +25,8 @@ import {
 } from "../lib/hostRegistry";
 import {
   hostDevices,
+  hostGenerationEstimate,
+  hostModelComponents,
   hostModels,
   hostQueue,
   hostStatus,
@@ -45,6 +47,7 @@ import {
   type RoutableHost,
 } from "../lib/hostRouting";
 import type {
+  GenerateRequestWire,
   GpuInfo,
   GpuWorkerStatus,
   ModelInfoExtended,
@@ -77,6 +80,9 @@ export interface HostRouting {
   modelsSettled: Ref<boolean>;
   /** Resolve the concrete dispatch route for a model, or null if unreachable. */
   resolve: (model: string | null) => HostRoute | null;
+  /** Resolve only after the model, companions, and a concrete device estimate
+   * prove the exact request can run on the chosen host. */
+  resolveFeasible: (request: GenerateRequestWire) => Promise<HostRoute | null>;
   /** Re-read the registry and poll every host once. */
   refresh: () => Promise<void>;
   /** Start/stop the poll loop; ref-counted across consumers. */
@@ -92,6 +98,7 @@ const modelsByHost = ref<ModelsByHost>({});
 const settledHostIds = ref<string[]>([]);
 const modelsSettled = ref(false);
 const rawTargetId = ref<string>("");
+const pollGenerations = new Map<string, number>();
 
 function readRegistry(): void {
   entries.value = typeof localStorage === "undefined" ? [] : listHosts();
@@ -196,12 +203,23 @@ function gpuFromStatus(
 }
 
 async function pollHost(entry: HostEntry): Promise<void> {
+  const generation = (pollGenerations.get(entry.id) ?? 0) + 1;
+  pollGenerations.set(entry.id, generation);
   const [status, models, devices, queue] = await Promise.allSettled([
     hostStatus(entry),
     hostModels(entry),
     hostDevices(entry),
     hostQueue(entry),
   ]);
+  const current = entries.value.find((candidate) => candidate.id === entry.id);
+  if (
+    pollGenerations.get(entry.id) !== generation ||
+    !current ||
+    current.url !== entry.url ||
+    current.apiKey !== entry.apiKey
+  ) {
+    return;
+  }
   if (status.status === "fulfilled") {
     const inventory =
       devices.status === "fulfilled" ? devices.value.devices : null;
@@ -293,6 +311,50 @@ function resolve(model: string | null): HostRoute | null {
   return resolveRoute(hosts.value, rawTargetId.value, hostsForModel(model));
 }
 
+async function resolveFeasible(
+  request: GenerateRequestWire,
+): Promise<HostRoute | null> {
+  const selection = targetId.value;
+  const modelHostIds = hostsForModel(request.model);
+  let candidates = hosts.value.filter(
+    (candidate) =>
+      candidate.status === "ready" && modelHostIds.includes(candidate.id),
+  );
+  if (selection !== AUTO_TARGET_ID && selection !== CAPABLE_TARGET_ID) {
+    candidates = candidates.filter((candidate) => candidate.id === selection);
+  }
+  const eligible = (
+    await Promise.all(
+      candidates.map(async (candidate) => {
+        const entry = entries.value.find((item) => item.id === candidate.id);
+        if (!entry) return null;
+        try {
+          const [components, estimate] = await Promise.all([
+            hostModelComponents(entry, request.model),
+            hostGenerationEstimate(entry, request),
+          ]);
+          const companionsPresent = components.components.every(
+            (component) =>
+              component.present ||
+              component.options?.some((option) => option.present) === true,
+          );
+          return companionsPresent && estimate.fits_available_memory === true
+            ? candidate
+            : null;
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter((candidate): candidate is RoutableHost => candidate !== null);
+  if (eligible.length === 0) return null;
+  return resolveRoute(
+    eligible,
+    selection,
+    eligible.map((candidate) => candidate.id),
+  );
+}
+
 export function useHostRouting(): HostRouting {
   start();
   onBeforeUnmount(stop);
@@ -304,6 +366,7 @@ export function useHostRouting(): HostRouting {
     targetModels,
     modelsSettled,
     resolve,
+    resolveFeasible,
     refresh,
     start,
     stop,
@@ -323,6 +386,7 @@ export const __testing__ = {
     settledHostIds.value = [];
     modelsSettled.value = false;
     rawTargetId.value = "";
+    pollGenerations.clear();
   },
 };
 

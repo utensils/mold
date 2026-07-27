@@ -1,10 +1,12 @@
 use mold_scheduler::{
-    EstimateConfidence, EstimateKey, EstimateObservation, EstimateStore, StaticEstimate,
+    EstimateConfidence, EstimateKey, EstimateObservation, EstimateOutcome, EstimatePhaseTimings,
+    EstimateStore, StaticEstimate,
 };
 
 fn key(suffix: &str) -> EstimateKey {
     EstimateKey {
         device_class: "cuda:sm86:24gb".into(),
+        model_family: "flux".into(),
         model_fingerprint: format!("flux-dev:{suffix}"),
         work_kind: "generation".into(),
         shape_bucket: "1024x1024:s30".into(),
@@ -18,11 +20,15 @@ fn learned_timing_never_lowers_the_static_memory_floor() {
     store.observe(
         key("q8"),
         EstimateObservation {
-            total_ms: 1_000,
-            load_ms: Some(100),
-            vram_completion_sample_bytes: Some(2_000),
-            host_completion_sample_bytes: Some(3_000),
+            total_ms: Some(1_000),
+            phases: EstimatePhaseTimings {
+                cold_load_ms: Some(100),
+                ..Default::default()
+            },
+            vram_high_water_bytes: Some(2_000),
+            host_incremental_high_water_bytes: Some(3_000),
             observed_at_unix_s: 100,
+            ..Default::default()
         },
     );
 
@@ -47,15 +53,13 @@ fn samples_are_winsorized_then_ewma_updated_with_documented_confidence() {
         store.observe(
             key("q8"),
             EstimateObservation {
-                total_ms: match observed_at_unix_s {
+                total_ms: Some(match observed_at_unix_s {
                     1 => 1_000,
                     2 => 100_000,
                     _ => 1_750,
-                },
-                load_ms: None,
-                vram_completion_sample_bytes: None,
-                host_completion_sample_bytes: None,
+                }),
                 observed_at_unix_s,
+                ..Default::default()
             },
         );
     }
@@ -74,11 +78,9 @@ fn a_zero_first_sample_does_not_pin_the_ewma_at_zero() {
         store.observe(
             key.clone(),
             EstimateObservation {
-                total_ms,
-                load_ms: None,
-                vram_completion_sample_bytes: None,
-                host_completion_sample_bytes: None,
+                total_ms: Some(total_ms),
                 observed_at_unix_s,
+                ..Default::default()
             },
         );
     }
@@ -89,18 +91,17 @@ fn a_zero_first_sample_does_not_pin_the_ewma_at_zero() {
 }
 
 #[test]
-fn conservative_completion_memory_samples_decay_after_an_outlier() {
+fn conservative_measured_memory_high_water_decays_after_an_outlier() {
     let mut store = EstimateStore::default();
     let key = key("memory-envelope");
     for (sample, observed_at_unix_s) in [(10_000, 1), (1_000, 2), (1_000, 3)] {
         store.observe(
             key.clone(),
             EstimateObservation {
-                total_ms: 1_000,
-                load_ms: None,
-                vram_completion_sample_bytes: Some(sample),
-                host_completion_sample_bytes: None,
+                total_ms: Some(1_000),
+                vram_high_water_bytes: Some(sample),
                 observed_at_unix_s,
+                ..Default::default()
             },
         );
     }
@@ -118,11 +119,9 @@ fn old_buckets_and_capacity_overflow_are_pruned_deterministically() {
         store.observe(
             key(suffix),
             EstimateObservation {
-                total_ms: 1_000,
-                load_ms: None,
-                vram_completion_sample_bytes: None,
-                host_completion_sample_bytes: None,
+                total_ms: Some(1_000),
                 observed_at_unix_s,
+                ..Default::default()
             },
         );
     }
@@ -131,4 +130,64 @@ fn old_buckets_and_capacity_overflow_are_pruned_deterministically() {
 
     store.prune(180 * 24 * 60 * 60 + 31);
     assert!(store.is_empty());
+}
+
+#[test]
+fn opaque_catalog_ids_do_not_collapse_to_their_source_prefix() {
+    let mut cv = key("unused");
+    cv.model_family.clear();
+    cv.model_fingerprint = "cv:3143864".into();
+    let mut hf = cv.clone();
+    hf.model_fingerprint = "hf:org/ltx-video".into();
+
+    assert_ne!(cv.normalized(), hf.normalized());
+    assert_ne!(cv.persistence_key(), hf.persistence_key());
+}
+
+#[test]
+fn failures_and_invalidations_are_persisted_without_poisoning_eta_samples() {
+    let mut store = EstimateStore::default();
+    let key = key("outcomes");
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            total_ms: Some(1_000),
+            phases: EstimatePhaseTimings {
+                denoise_ms: Some(800),
+                ..Default::default()
+            },
+            observed_at_unix_s: 1,
+            ..Default::default()
+        },
+    );
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            outcome: EstimateOutcome::Failure,
+            fallback_reason: Some("vae_cpu".into()),
+            observed_at_unix_s: 2,
+            ..Default::default()
+        },
+    );
+    store.observe(
+        key.clone(),
+        EstimateObservation {
+            outcome: EstimateOutcome::Invalidated,
+            invalidated_plan_reason: Some("memory sample changed".into()),
+            observed_at_unix_s: 3,
+            ..Default::default()
+        },
+    );
+
+    let bucket = store.exact(&key).unwrap();
+    assert_eq!(bucket.sample_count, 1);
+    assert_eq!(bucket.failure_count, 1);
+    assert_eq!(bucket.invalidated_count, 1);
+    assert_eq!(bucket.ewma_total_ms, 1_000.0);
+    assert_eq!(bucket.ewma_denoise_ms, Some(800.0));
+    assert_eq!(bucket.last_outcome, EstimateOutcome::Invalidated);
+    assert_eq!(
+        bucket.last_invalidated_plan_reason.as_deref(),
+        Some("memory sample changed")
+    );
 }

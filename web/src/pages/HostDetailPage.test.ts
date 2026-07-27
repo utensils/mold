@@ -196,6 +196,14 @@ function queued(id: string, position: number): QueueEntry {
 }
 
 let wrapper: ReturnType<typeof mount> | null = null;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 async function mountDetail() {
   wrapper = mount(HostDetailPage);
   await flushPromises();
@@ -314,6 +322,29 @@ describe("HostDetailPage — telemetry", () => {
       wrapper = null;
       vi.useRealTimers();
     }
+  });
+
+  it("ignores an older same-host queue response after a newer event refresh", async () => {
+    const older = deferred<{ entries: QueueEntry[] }>();
+    const newer = deferred<{ entries: QueueEntry[] }>();
+    hostQueueCall
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    wrapper = mount(HostDetailPage);
+    await nextTick();
+    await Promise.resolve();
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]![2] as () => void;
+    refresh();
+    await Promise.resolve();
+
+    newer.resolve({ entries: [queued("newer", 0)] });
+    await flushPromises();
+    older.resolve({ entries: [queued("older", 0)] });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("flux-newer");
+    expect(wrapper.text()).not.toContain("flux-older");
   });
 
   it("cancels and rebinds capabilities, queue polling, and SSE on route changes", async () => {

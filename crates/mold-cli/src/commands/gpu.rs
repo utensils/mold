@@ -57,22 +57,27 @@ fn format_device_line(device: &DeviceInfo) -> String {
     } else {
         device.backend.as_str().to_ascii_uppercase()
     };
-    let used = device.memory.used_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
-    let total = device.memory.total_bytes.unwrap_or(0) as f64 / 1024_f64.powi(3);
+    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
+        (Some(used), Some(total)) => format!(
+            "{:.1}/{:.1} GiB",
+            used as f64 / 1024_f64.powi(3),
+            total as f64 / 1024_f64.powi(3)
+        ),
+        _ => "—".into(),
+    };
     let utilization = device
         .telemetry
         .utilization_percent
         .map(|value| format!("{value}%"))
         .unwrap_or_else(|| "—".into());
     format!(
-        "{}  {}  {}  {}  {}  VRAM {:.1}/{:.1} GiB  util {}",
+        "{}  {}  {}  {}  {}  VRAM {}  util {}",
         device.id,
         ordinal,
         device.name,
         kind,
         human_state(device),
-        used,
-        total,
+        vram,
         utilization
     )
 }
@@ -232,6 +237,15 @@ mod tests {
         unavailable.health = DeviceHealth::Unavailable;
         unavailable.schedulable = false;
         assert!(format_device_line(&unavailable).contains("unavailable"));
+    }
+
+    #[test]
+    fn unknown_vram_is_not_rendered_as_zero() {
+        let mut unknown = device("cuda:unknown", 0);
+        unknown.memory.used_bytes = None;
+        unknown.memory.total_bytes = None;
+        assert!(format_device_line(&unknown).contains("VRAM —"));
+        assert!(!format_device_line(&unknown).contains("0.0/0.0"));
     }
 
     #[tokio::test]

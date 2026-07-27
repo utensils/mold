@@ -53,20 +53,14 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
 }
 
 function blockedReason(work: QueueWorkItem): string | null {
-  if (!work.reason) return null;
-  return [
-    "not_ready",
-    "no_schedulable_device",
-    "no_idle_device",
-    "hard_pin_unavailable",
-    "backend_unsupported",
-    "insufficient_vram",
-    "aggregate_host_ram_reserved",
-    "warm_wait",
-    "lower_priority_opening",
-  ].includes(work.reason)
-    ? work.reason.replaceAll("_", " ")
-    : null;
+  const reason = work.blocked_reason ?? work.reason;
+  if (
+    !reason ||
+    ["priority", "starvation_forced", "warm_resident"].includes(reason)
+  ) {
+    return null;
+  }
+  return reason.replaceAll("_", " ");
 }
 
 function pinnedDevice(work: QueueWorkItem): DeviceInfo | null {

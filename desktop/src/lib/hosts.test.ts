@@ -74,6 +74,20 @@ describe("pickAutoHost", () => {
     expect(pickAutoHost([slow, fast])?.id).toBe("fast");
   });
 
+  it("ranks predicted completion before raw queue depth when both plans are known", () => {
+    const shallowSlow = host({
+      id: "shallow-slow",
+      queueDepth: 1,
+      predictedCompletionMs: 60_000,
+    });
+    const deeperFast = host({
+      id: "deeper-fast",
+      queueDepth: 2,
+      predictedCompletionMs: 10_000,
+    });
+    expect(pickAutoHost([shallowSlow, deeperFast])?.id).toBe("deeper-fast");
+  });
+
   it("prefers a known completion estimate over an unknown one on a depth tie", () => {
     const unknown = host({
       id: "local",

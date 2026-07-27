@@ -54,6 +54,14 @@ function deviceWire(enabled = true, adminState = "enabled") {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("SettingsPage", () => {
   it("keeps its padded content inside narrow web viewports", () => {
     const settingsRule = settingsPageSource.match(/\.settings\s*\{([^}]*)\}/s);
@@ -142,6 +150,61 @@ describe("SettingsPage", () => {
       ),
     ).toHaveLength(before + 1);
     wrapper.unmount();
+  });
+
+  it("ignores an older same-origin device response after an event refetch", async () => {
+    const older = deferred<Response>();
+    const newer = deferred<Response>();
+    let deviceCall = 0;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/devices"))
+        return deviceCall++ === 0 ? older.promise : newer.promise;
+      return {
+        ok: true,
+        json: async () => {
+          if (url.endsWith("/profiles"))
+            return { profiles: ["default"], active: "default" };
+          if (url.endsWith("/api/catalog/credentials"))
+            return {
+              hf: { configured: false, source: null, masked: null },
+              civitai: { configured: false, source: null, masked: null },
+            };
+          if (url.endsWith("/api/capabilities"))
+            return {
+              devices: { available: true, lifecycle: true },
+              dispatch: { active_mode: "v2", v2_authoritative: true },
+            };
+          return { entries: [], plan: null };
+        },
+      } as Response;
+    }) as typeof fetch;
+    const wrapper = mount(SettingsPage, {
+      global: { stubs: { DeviceSettingsPanel: true } },
+    });
+    await vi.waitFor(() =>
+      expect(subscribeToDeviceSnapshots).toHaveBeenCalled(),
+    );
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
+    refresh();
+    newer.resolve({
+      ok: true,
+      json: async () => ({
+        devices: [deviceWire(false, "disabled")],
+        plan_version: 2,
+      }),
+    } as Response);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("disabled"));
+    older.resolve({
+      ok: true,
+      json: async () => ({
+        devices: [deviceWire(true, "enabled")],
+        plan_version: 1,
+      }),
+    } as Response);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("disabled");
   });
 
   it("persists the theme family through the shared lib/theme refs", async () => {
@@ -435,6 +498,9 @@ describe("SettingsPage", () => {
     expect(
       wrapper.get("[data-test='settings-device-controls']").text(),
     ).toContain("NVIDIA RTX 3090");
+    expect(
+      wrapper.get("[data-test='device-panel']").attributes("data-device-count"),
+    ).toBe("1");
 
     await wrapper
       .get("[data-test='settings-device-toggle-0']")

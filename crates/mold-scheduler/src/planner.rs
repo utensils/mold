@@ -75,18 +75,21 @@ impl Planner {
             // accepted set. Any feasible augmenting path can only keep or
             // increase that set's cost, so adding the new work's cheapest idle
             // edge is a sound lower bound. Keep host RAM first in `Cost`.
-            if minimum_immediate_host_ram(item, candidates, &device_map).is_some_and(
-                |minimum_host_ram| {
-                    final_matching
-                        .total_host_ram_bytes
-                        .checked_add(minimum_host_ram)
-                        .is_none_or(|minimum_total| {
-                            minimum_total > snapshot.host_memory.headroom_bytes
-                        })
-                },
-            ) {
-                blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
-                continue;
+            if let Some(minimum_host_ram) =
+                minimum_immediate_host_ram(item, candidates, &device_map)
+            {
+                if minimum_host_ram > snapshot.host_memory.headroom_bytes {
+                    blocked.insert(item.id.clone(), BlockedReason::InsufficientHostRam);
+                    continue;
+                }
+                if final_matching
+                    .total_host_ram_bytes
+                    .checked_add(minimum_host_ram)
+                    .is_none_or(|minimum_total| minimum_total > snapshot.host_memory.headroom_bytes)
+                {
+                    blocked.insert(item.id.clone(), BlockedReason::AggregateHostRamReserved);
+                    continue;
+                }
             }
             let prepared_work =
                 prepare_work(item, candidates, &device_map, snapshot.now_ms, &self.config);
@@ -444,11 +447,23 @@ fn classify_no_candidate(
     devices: &BTreeMap<DeviceId, &DeviceSnapshot>,
 ) -> BlockedReason {
     if let Some(hard_device_id) = &work.hard_device_id {
-        if !devices
-            .get(hard_device_id)
-            .is_some_and(|device| device.is_schedulable())
-        {
+        let Some(device) = devices.get(hard_device_id) else {
             return BlockedReason::HardPinUnavailable;
+        };
+        match device.admin_state {
+            crate::DeviceAdminState::Disabled => return BlockedReason::DeviceDisabled,
+            crate::DeviceAdminState::Draining => return BlockedReason::DeviceDraining,
+            crate::DeviceAdminState::StartupExcluded => {
+                return BlockedReason::DeviceStartupExcluded;
+            }
+            crate::DeviceAdminState::Enabled => {}
+        }
+        match device.health {
+            crate::DeviceHealth::Degraded => return BlockedReason::DeviceDegraded,
+            crate::DeviceHealth::Unavailable | crate::DeviceHealth::Poisoned => {
+                return BlockedReason::DeviceUnavailable;
+            }
+            crate::DeviceHealth::Healthy => {}
         }
     }
     if let Some(backend) = work.backend_requirement {

@@ -285,6 +285,13 @@ impl PriorityClass {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedBatchPartition {
+    pub index: u32,
+    pub count: u32,
+    pub size: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkSnapshot {
     pub id: WorkId,
     pub parent_id: ParentId,
@@ -294,6 +301,8 @@ pub struct WorkSnapshot {
     pub queue_rank: u64,
     pub priority_class: PriorityClass,
     pub bypass_count: u8,
+    pub chain_stage: Option<u32>,
+    pub batch_partition: Option<PlannedBatchPartition>,
     pub hard_device_id: Option<DeviceId>,
     pub backend_requirement: Option<Backend>,
     pub warm_wait_started_at_ms: Option<u64>,
@@ -316,6 +325,8 @@ impl WorkSnapshot {
             queue_rank,
             priority_class: PriorityClass::User,
             bypass_count: 0,
+            chain_stage: None,
+            batch_partition: None,
             hard_device_id: None,
             backend_requirement: None,
             warm_wait_started_at_ms: None,
@@ -330,6 +341,16 @@ impl WorkSnapshot {
 
     pub fn with_bypass_count(mut self, bypass_count: u8) -> Self {
         self.bypass_count = bypass_count;
+        self
+    }
+
+    pub fn with_chain_stage(mut self, chain_stage: Option<u32>) -> Self {
+        self.chain_stage = chain_stage;
+        self
+    }
+
+    pub fn with_batch_partition(mut self, batch_partition: Option<PlannedBatchPartition>) -> Self {
+        self.batch_partition = batch_partition;
         self
     }
 
@@ -524,12 +545,23 @@ pub struct DeviceLane {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockedReason {
     NotReady,
+    DeviceDisabled,
+    DeviceDraining,
+    DeviceStartupExcluded,
+    DeviceUnavailable,
+    DeviceDegraded,
     NoSchedulableDevice,
     NoIdleDevice,
     HardPinUnavailable,
     BackendUnsupported,
     InsufficientVram,
+    InsufficientHostRam,
     AggregateHostRamReserved,
+    ModelNotInstalled,
+    ExecutionPlanIncompatible,
+    QueuePaused,
+    MaintenanceMode,
+    Cancelling,
     WarmWait,
     LowerPriorityOpening,
 }

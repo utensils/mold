@@ -58,20 +58,29 @@ const deviceMutations = ref(new Set<string>());
 const plan = ref<QueuePlan | null>(null);
 const deviceError = ref("");
 let deviceEventsAbort: AbortController | null = null;
+let deviceRequestGeneration = 0;
 
 async function loadDevices(): Promise<void> {
-  if (!props.host) {
+  const host = props.host;
+  const generation = ++deviceRequestGeneration;
+  if (!host) {
     devices.value = null;
     plan.value = null;
     return;
   }
+  const isCurrent = () =>
+    generation === deviceRequestGeneration &&
+    props.host?.id === host.id &&
+    props.host.baseUrl === host.baseUrl &&
+    props.host.apiKey === host.apiKey;
   try {
-    const target = mobileHostTarget(props.host);
+    const target = mobileHostTarget(host);
     const [deviceResult, capabilityResult, queueResult] = await Promise.allSettled([
       apiJsonTo<unknown>(target, "/api/devices"),
       fetchServerCapabilities(target),
       listQueue(target),
     ]);
+    if (!isCurrent()) return;
     if (deviceResult.status !== "fulfilled") throw deviceResult.reason;
     devices.value = parseDeviceListResponse(deviceResult.value).devices;
     deviceCapabilities.value =
@@ -79,6 +88,7 @@ async function loadDevices(): Promise<void> {
     plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
     deviceError.value = "";
   } catch {
+    if (!isCurrent()) return;
     // Older hosts do not expose runtime lifecycle controls.
     devices.value = null;
     deviceCapabilities.value = null;
@@ -139,7 +149,10 @@ watch(
   { immediate: true },
 );
 
-onBeforeUnmount(() => deviceEventsAbort?.abort());
+onBeforeUnmount(() => {
+  deviceRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 </script>
 
 <template>

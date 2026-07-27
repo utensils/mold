@@ -133,24 +133,23 @@ export interface RoutableHost {
 }
 
 /**
- * Auto routing: queue depth is the rollout-safe primary signal. At equal
- * depth, a known projected completion sorts ahead of an unknown one and two
- * known projections sort by finish time. Planless current, legacy, and
- * observe-mode hosts remain eligible.
+ * Auto routing: when both hosts expose an authoritative plan, predicted
+ * completion wins before raw queue depth. If either is planless, queue depth
+ * remains the deterministic backward-compatible fallback.
  */
 export function pickAutoHost<T extends RoutableHost>(hosts: T[]): T | null {
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
     const depth = (x: RoutableHost) => x.queueDepth ?? Number.MAX_SAFE_INTEGER;
-    if (depth(h) < depth(best)) return h;
-    if (depth(h) > depth(best)) return best;
     const hFinish = h.predictedCompletionMs;
     const bestFinish = best.predictedCompletionMs;
-    if (hFinish != null && bestFinish == null) return h;
-    if (hFinish == null && bestFinish != null) return best;
     if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
       return hFinish < bestFinish ? h : best;
+    if (depth(h) < depth(best)) return h;
+    if (depth(h) > depth(best)) return best;
+    if (hFinish != null && bestFinish == null) return h;
+    if (hFinish == null && bestFinish != null) return best;
     if (h.kind === "local" && best.kind !== "local") return h;
     return best;
   });

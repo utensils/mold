@@ -161,6 +161,7 @@ export const useHostsStore = defineStore("hosts", {
      *  telemetry it survives failed polls, keeping labels stable and letting
      *  instance-id dedupe stay hostname-qualified while a host is down. */
     hostnames: {} as Record<string, string>,
+    refreshGenerations: {} as Record<string, number>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
     initializing: false,
     initialized: false,
@@ -494,7 +495,17 @@ export const useHostsStore = defineStore("hosts", {
       await Promise.all(
         this.all.map(async (host) => {
           if (!host.baseUrl || host.status === "connecting") return;
+          const generation = (this.refreshGenerations[host.id] ?? 0) + 1;
+          this.refreshGenerations[host.id] = generation;
           const target = { baseUrl: host.baseUrl, apiKey: host.apiKey };
+          const isCurrent = () => {
+            const current = this.all.find((candidate) => candidate.id === host.id);
+            return (
+              this.refreshGenerations[host.id] === generation &&
+              current?.baseUrl === host.baseUrl &&
+              current.apiKey === host.apiKey
+            );
+          };
           try {
             const [status, devices, queue] = await Promise.all([
               apiJsonTo<ServerStatus>(target, "/api/status"),
@@ -507,6 +518,7 @@ export const useHostsStore = defineStore("hosts", {
                 () => null,
               ),
             ]);
+            if (!isCurrent()) return;
             this.telemetry[host.id] = {
               queueDepth: status.queue_depth ?? null,
               queueCapacity: status.queue_capacity ?? null,
@@ -533,7 +545,7 @@ export const useHostsStore = defineStore("hosts", {
               // request is in flight. Never resurrect its cache entry with a
               // late response from the old identity or address.
               const current = this.all.find((candidate) => candidate.id === host.id);
-              if (current?.status === "ready" && current.baseUrl === host.baseUrl) {
+              if (isCurrent() && current?.status === "ready" && current.baseUrl === host.baseUrl) {
                 this.capabilities[host.id] = capabilities;
               } else {
                 delete this.capabilities[host.id];
@@ -544,6 +556,7 @@ export const useHostsStore = defineStore("hosts", {
               delete this.capabilities[host.id];
             }
           } catch (err) {
+            if (!isCurrent()) return;
             const extra = this.extras.find((h) => h.id === host.id);
             if (extra) {
               extra.status = "error";

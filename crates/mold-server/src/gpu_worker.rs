@@ -13,7 +13,7 @@ use mold_core::{
 };
 use mold_inference::device;
 use sha2::{Digest, Sha256};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,10 +22,21 @@ thread_local! {
     /// Activation time accumulated by model-ready calls on one GPU owner
     /// thread during the current lease.
     static LEASE_LOAD_MS: Cell<u64> = const { Cell::new(0) };
+    static LEASE_PHASE_TIMINGS: RefCell<mold_scheduler::EstimatePhaseTimings> =
+        const { RefCell::new(mold_scheduler::EstimatePhaseTimings {
+            cold_load_ms: None,
+            warm_reload_ms: None,
+            prompt_encode_ms: None,
+            denoise_ms: None,
+            vae_ms: None,
+            upscale_ms: None,
+        }) };
 }
 
 fn reset_lease_load_ms() {
     LEASE_LOAD_MS.set(0);
+    LEASE_PHASE_TIMINGS
+        .with(|timings| *timings.borrow_mut() = mold_scheduler::EstimatePhaseTimings::default());
 }
 
 fn add_lease_load_ms(elapsed: Duration) {
@@ -38,6 +49,46 @@ fn add_lease_load_ms(elapsed: Duration) {
 fn take_lease_load_ms() -> Option<u64> {
     let millis = LEASE_LOAD_MS.replace(0);
     (millis > 0).then_some(millis)
+}
+
+fn add_phase_sample(slot: &mut Option<u64>, elapsed: Duration) {
+    let millis = u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    *slot = Some(slot.unwrap_or_default().saturating_add(millis));
+}
+
+fn record_phase_timing(event: &mold_inference::ProgressEvent) {
+    let mold_inference::ProgressEvent::StageDone { name, elapsed } = event else {
+        return;
+    };
+    let name = name.to_ascii_lowercase();
+    LEASE_PHASE_TIMINGS.with(|timings| {
+        let mut timings = timings.borrow_mut();
+        if name.contains("upscal") {
+            add_phase_sample(&mut timings.upscale_ms, *elapsed);
+        } else if name.contains("denois") || name.contains("sampling") {
+            add_phase_sample(&mut timings.denoise_ms, *elapsed);
+        } else if name.contains("encoding prompt") || name.contains("text encod") {
+            add_phase_sample(&mut timings.prompt_encode_ms, *elapsed);
+        } else if name.contains("vae") || name.contains("vq-gan") {
+            add_phase_sample(&mut timings.vae_ms, *elapsed);
+        } else if name.contains("reload") {
+            add_phase_sample(&mut timings.warm_reload_ms, *elapsed);
+        } else if name.contains("load") {
+            add_phase_sample(&mut timings.cold_load_ms, *elapsed);
+        }
+    });
+}
+
+fn take_lease_phase_timings(load_ms: Option<u64>) -> mold_scheduler::EstimatePhaseTimings {
+    LEASE_PHASE_TIMINGS.with(|timings| {
+        let mut observed = std::mem::take(&mut *timings.borrow_mut());
+        if observed.cold_load_ms.is_none() {
+            observed.cold_load_ms = load_ms;
+        }
+        observed
+    })
 }
 
 pub enum LegacyOwnerEvent {
@@ -435,6 +486,7 @@ fn run_gpu_owner_loop(
             process_owner_work(worker, *grant, &scheduler_tx)
         }));
         let load_ms = take_lease_load_ms();
+        let phase_timings = take_lease_phase_timings(load_ms);
         worker.release_in_flight();
         if outcome.is_err() {
             // A panic may have crossed arbitrary Candle/cudarc state.
@@ -450,7 +502,7 @@ fn run_gpu_owner_loop(
             successful: matches!(&outcome, Ok(true))
                 && !worker.poisoned.load(Ordering::SeqCst)
                 && !worker.fatal_cuda_error.load(Ordering::SeqCst),
-            load_ms,
+            phase_timings,
         });
         if outcome.is_err()
             || worker.shutdown_requested.load(Ordering::SeqCst)
@@ -1371,12 +1423,13 @@ fn upscale_generated_image_on_worker(
         worker.gpu.ordinal,
     )
     .map_err(|e| format!("failed to load upscaler: {e}"))?;
-    if let Some(ref tx) = job.progress_tx {
-        let tx = tx.clone();
-        engine.set_on_progress(Box::new(move |event| {
+    let progress_tx = job.progress_tx.clone();
+    engine.set_on_progress(Box::new(move |event| {
+        record_phase_timing(&event);
+        if let Some(tx) = &progress_tx {
             let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }));
-    }
+        }
+    }));
     let req = mold_core::UpscaleRequest {
         model: model_name,
         image: img.data.clone(),
@@ -1676,12 +1729,13 @@ fn process_job_with_sink(
     };
 
     // Set progress callback if SSE streaming.
-    if let Some(ref progress_tx) = job.progress_tx {
-        let tx = progress_tx.clone();
-        cached_engine.engine.set_on_progress(Box::new(move |event| {
+    let progress_tx = job.progress_tx.clone();
+    cached_engine.engine.set_on_progress(Box::new(move |event| {
+        record_phase_timing(&event);
+        if let Some(tx) = &progress_tx {
             let _ = tx.send(SseMessage::Progress(progress_to_sse(event)));
-        }));
-    }
+        }
+    }));
 
     // RSS sample taken just before inference; the post-inference sample below
     // logs the per-job delta so RAM growth can be attributed to a specific
@@ -4946,6 +5000,82 @@ mod tests {
     }
 
     #[test]
+    fn owner_completion_carries_observed_stage_timings() {
+        let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = spawn_gpu_thread(worker.clone(), job_rx, event_tx, Duration::from_secs(60));
+        let device_id = crate::scheduler::worker_device_id(&worker);
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        assert!(worker.try_claim_in_flight());
+        worker
+            .send_grant(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "timed-probe".into(),
+                    device_id,
+                    owner_epoch: worker.owner_epoch,
+                    state_version: 1,
+                    plan_version: 1,
+                    worker_generation: 1,
+                    memory_sample_generation: 1,
+                    memory_ledger_sequence: 1,
+                },
+                work: OwnerWork::Probe {
+                    id: "timed-probe".into(),
+                    kind: mold_scheduler::WorkKind::Generation,
+                    run: Box::new(|| {
+                        for (name, millis) in [
+                            ("Loading transformer", 11),
+                            ("Reloading transformer", 12),
+                            ("Encoding prompt (T5)", 13),
+                            ("Denoising", 14),
+                            ("VAE decode", 15),
+                            ("Upscaling", 16),
+                        ] {
+                            record_phase_timing(&mold_inference::ProgressEvent::StageDone {
+                                name: name.into(),
+                                elapsed: Duration::from_millis(millis),
+                            });
+                        }
+                    }),
+                },
+                retry: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted { .. })
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted { .. })
+        ));
+        let timings = match event_rx.blocking_recv() {
+            Some(crate::scheduler::WorkerEvent::Completed { phase_timings, .. }) => phase_timings,
+            _ => panic!("worker must publish completion phase evidence"),
+        };
+        assert_eq!(timings.cold_load_ms, Some(11));
+        assert_eq!(timings.warm_reload_ms, Some(12));
+        assert_eq!(timings.prompt_encode_ms, Some(13));
+        assert_eq!(timings.denoise_ms, Some(14));
+        assert_eq!(timings.vae_ms, Some(15));
+        assert_eq!(timings.upscale_ms, Some(16));
+
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready { .. })
+        ));
+        worker.request_shutdown();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Stopped { .. })
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn owner_returns_invalidated_generation_before_acceptance_or_cleanup() {
         let root = tempfile::tempdir().unwrap();
         for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
@@ -5059,7 +5189,7 @@ mod tests {
                         owner_epoch: 0,
                         worker_generation: 0,
                         successful: false,
-                        load_ms: None,
+                        phase_timings: mold_scheduler::EstimatePhaseTimings::default(),
                     })
             ),
             None => panic!("owner event channel closed"),

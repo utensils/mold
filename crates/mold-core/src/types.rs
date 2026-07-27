@@ -1155,6 +1155,127 @@ pub enum QueueEstimateConfidence {
     High,
 }
 
+/// Typed reason that a scheduler work unit cannot currently advance.
+///
+/// `reason` remains on [`QueueWorkItem`] as a backward-compatible display
+/// alias. New clients should prefer this field so assignment and blocking
+/// causes cannot be confused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueBlockedReason {
+    DeviceDisabled,
+    DeviceDraining,
+    DeviceStartupExcluded,
+    DeviceUnavailable,
+    DeviceDegraded,
+    HardPinUnavailable,
+    BackendUnsupported,
+    ModelNotInstalled,
+    InsufficientVram,
+    InsufficientHostRam,
+    AggregateHostRamReserved,
+    ExecutionPlanIncompatible,
+    DependencyWait,
+    WarmWait,
+    QueuePaused,
+    MaintenanceMode,
+    Cancelling,
+    NoSchedulableDevice,
+    NoIdleDevice,
+    LowerPriorityOpening,
+    Unknown(String),
+}
+
+impl QueueBlockedReason {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::DeviceDisabled => "device_disabled",
+            Self::DeviceDraining => "device_draining",
+            Self::DeviceStartupExcluded => "device_startup_excluded",
+            Self::DeviceUnavailable => "device_unavailable",
+            Self::DeviceDegraded => "device_degraded",
+            Self::HardPinUnavailable => "hard_pin_unavailable",
+            Self::BackendUnsupported => "backend_unsupported",
+            Self::ModelNotInstalled => "model_not_installed",
+            Self::InsufficientVram => "insufficient_vram",
+            Self::InsufficientHostRam => "insufficient_host_ram",
+            Self::AggregateHostRamReserved => "aggregate_host_ram_reserved",
+            Self::ExecutionPlanIncompatible => "execution_plan_incompatible",
+            Self::DependencyWait => "dependency_wait",
+            Self::WarmWait => "warm_wait",
+            Self::QueuePaused => "queue_paused",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::Cancelling => "cancelling",
+            Self::NoSchedulableDevice => "no_schedulable_device",
+            Self::NoIdleDevice => "no_idle_device",
+            Self::LowerPriorityOpening => "lower_priority_opening",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueueBlockedReason {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueBlockedReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device_disabled" => Self::DeviceDisabled,
+            "device_draining" => Self::DeviceDraining,
+            "device_startup_excluded" => Self::DeviceStartupExcluded,
+            "device_unavailable" => Self::DeviceUnavailable,
+            "device_degraded" => Self::DeviceDegraded,
+            "hard_pin_unavailable" => Self::HardPinUnavailable,
+            "backend_unsupported" => Self::BackendUnsupported,
+            "model_not_installed" => Self::ModelNotInstalled,
+            "insufficient_vram" => Self::InsufficientVram,
+            "insufficient_host_ram" => Self::InsufficientHostRam,
+            "aggregate_host_ram_reserved" => Self::AggregateHostRamReserved,
+            "execution_plan_incompatible" => Self::ExecutionPlanIncompatible,
+            "dependency_wait" => Self::DependencyWait,
+            "warm_wait" => Self::WarmWait,
+            "queue_paused" => Self::QueuePaused,
+            "maintenance_mode" => Self::MaintenanceMode,
+            "cancelling" => Self::Cancelling,
+            "no_schedulable_device" => Self::NoSchedulableDevice,
+            "no_idle_device" => Self::NoIdleDevice,
+            "lower_priority_opening" => Self::LowerPriorityOpening,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+/// Truthful scheduler-owned phase for a projected work unit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueActivityPhase {
+    #[default]
+    Queued,
+    Blocked,
+    WarmWait,
+    Dispatching,
+    Active,
+    Cpu,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct QueueBatchPartition {
+    /// One-based partition/sibling index.
+    pub index: u32,
+    pub count: u32,
+    /// Number of generation outputs owned by this work unit.
+    pub size: u32,
+}
+
 /// One internal scheduler unit in the additive queue-plan projection.
 ///
 /// Strings are used for extensible scheduler states/reasons so an older
@@ -1164,6 +1285,10 @@ pub struct QueueWorkItem {
     pub work_id: String,
     pub parent_id: String,
     pub work_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_stage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_partition: Option<QueueBatchPartition>,
     pub priority_class: String,
     pub queue_rank: u64,
     pub bypass_count: u8,
@@ -1183,8 +1308,21 @@ pub struct QueueWorkItem {
     pub estimated_finish_unix_ms: Option<u64>,
     #[serde(default)]
     pub estimate_confidence: QueueEstimateConfidence,
+    /// Backward-compatible display alias. For queued work this contains the
+    /// block, warm-wait, or assignment reason used by pre-Phase-E clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub blocked_reason: Option<QueueBlockedReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_wait_deadline_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub activity_phase: QueueActivityPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_fingerprint: Option<String>,
 }
 
 /// Versioned scheduler plan appended to `GET /api/queue`.
@@ -4816,5 +4954,71 @@ mod downloads_types_tests {
         let s = serde_json::to_string(&evt).unwrap();
         assert!(s.contains("\"type\":\"progress\""), "wire: {s}");
         assert!(s.contains("\"bytes_done\":2000000"), "wire: {s}");
+    }
+}
+
+#[cfg(test)]
+mod queue_plan_wire_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_reasons_round_trip_without_collapsing_distinct_causes() {
+        let expected = [
+            "device_disabled",
+            "device_draining",
+            "device_startup_excluded",
+            "device_unavailable",
+            "device_degraded",
+            "hard_pin_unavailable",
+            "backend_unsupported",
+            "model_not_installed",
+            "insufficient_vram",
+            "insufficient_host_ram",
+            "aggregate_host_ram_reserved",
+            "execution_plan_incompatible",
+            "dependency_wait",
+            "warm_wait",
+            "queue_paused",
+            "maintenance_mode",
+            "cancelling",
+            "no_schedulable_device",
+            "no_idle_device",
+            "lower_priority_opening",
+        ];
+
+        for wire in expected {
+            let parsed: QueueBlockedReason =
+                serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn future_blocked_reason_retains_its_exact_wire_value() {
+        let parsed: QueueBlockedReason =
+            serde_json::from_value(serde_json::json!("thermal_throttle")).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::json!("thermal_throttle")
+        );
+    }
+
+    #[test]
+    fn legacy_reason_only_queue_item_remains_readable() {
+        let parsed: QueueWorkItem = serde_json::from_value(serde_json::json!({
+            "work_id": "job-1",
+            "parent_id": "job-1",
+            "work_kind": "generation",
+            "priority_class": "user",
+            "queue_rank": 4,
+            "bypass_count": 0,
+            "estimate_confidence": "low",
+            "reason": "insufficient_vram"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.reason.as_deref(), Some("insufficient_vram"));
+        assert_eq!(parsed.blocked_reason, None);
+        assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
     }
 }

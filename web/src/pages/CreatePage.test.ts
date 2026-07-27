@@ -135,6 +135,16 @@ vi.mock("../components/machines/hostClient", () => ({
   hostModels: hostModelsMock,
   hostQueue: () => Promise.resolve({ entries: [], plan: null }),
   hostDevices: () => Promise.reject(new Error("legacy server in tests")),
+  hostModelComponents: (_host: unknown, model: string) =>
+    Promise.resolve({ model, components: [] }),
+  hostGenerationEstimate: (_host: unknown, request: { model: string }) =>
+    Promise.resolve({
+      model: request.model,
+      peak_memory_bytes: 1,
+      activation_memory_bytes: 1,
+      fits_available_memory: true,
+      load_strategy: "resident",
+    }),
 }));
 
 const RecentGridStub = defineComponent({

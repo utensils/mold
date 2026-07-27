@@ -25,6 +25,7 @@ const plan = ref<QueuePlan | null>(null);
 const mutatingDeviceId = ref<string | null>(null);
 const lifecycleMutable = ref(false);
 let deviceEventsAbort: AbortController | null = null;
+let deviceRequestGeneration = 0;
 
 function target() {
   return connection.baseUrl ? { baseUrl: connection.baseUrl, apiKey: connection.apiKey } : null;
@@ -32,17 +33,27 @@ function target() {
 
 async function loadDevices() {
   const apiTarget = target();
+  const generation = ++deviceRequestGeneration;
   if (!apiTarget) {
     devices.value = [];
     plan.value = null;
     lifecycleMutable.value = false;
     return;
   }
+  const isCurrent = () => {
+    const current = target();
+    return (
+      generation === deviceRequestGeneration &&
+      current?.baseUrl === apiTarget.baseUrl &&
+      current.apiKey === apiTarget.apiKey
+    );
+  };
   const [deviceResult, queueResult, capabilityResult] = await Promise.allSettled([
     listDevices(apiTarget),
     listQueue(apiTarget),
     fetchServerCapabilities(apiTarget),
   ]);
+  if (!isCurrent()) return;
   if (deviceResult.status === "fulfilled") devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled") plan.value = queueResult.value.plan;
   lifecycleMutable.value =
@@ -98,7 +109,10 @@ watch(
   { immediate: true },
 );
 
-onBeforeUnmount(() => deviceEventsAbort?.abort());
+onBeforeUnmount(() => {
+  deviceRequestGeneration += 1;
+  deviceEventsAbort?.abort();
+});
 
 async function save(row: ConfigRow, value: ConfigRow["value"]) {
   const error = await config.save(row.key, value);
@@ -113,7 +127,7 @@ async function reset(row: ConfigRow) {
 <template>
   <div>
     <DevicePanel
-      v-if="!filter && devices.length && plan?.work_items.length"
+      v-if="!filter && devices.length"
       class="mb-5"
       :devices="devices"
       :plan="plan"

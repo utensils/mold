@@ -8,20 +8,22 @@ import {
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
 import type { HostEntry } from "../lib/hostRegistry";
 import type { ModelInfoExtended } from "../types";
+import type {
+  GenerationMemoryEstimate,
+  ModelComponentsResponse,
+} from "../types";
 import type { DeviceInfo, DeviceListResponse } from "@studio/api/devices";
 
 /** Per-host canned `/api/status` + `/api/models` responses, keyed by host id. */
 const statuses = new Map<string, unknown>();
 const models = new Map<string, ModelInfoExtended[]>();
 const devices = new Map<string, DeviceListResponse>();
+const components = new Map<string, ModelComponentsResponse>();
+const estimates = new Map<string, GenerationMemoryEstimate>();
+const hostStatusCall = vi.hoisted(() => vi.fn());
 
 vi.mock("../components/machines/hostClient", () => ({
-  hostStatus: (host: HostEntry) => {
-    const canned = statuses.get(host.id);
-    return canned
-      ? Promise.resolve(canned)
-      : Promise.reject(new Error("unreachable"));
-  },
+  hostStatus: (...args: unknown[]) => hostStatusCall(...args),
   hostModels: (host: HostEntry) => {
     const canned = models.get(host.id);
     return canned
@@ -35,6 +37,20 @@ vi.mock("../components/machines/hostClient", () => ({
       : Promise.reject(new Error("legacy server"));
   },
   hostQueue: () => Promise.resolve({ entries: [], plan: null }),
+  hostModelComponents: (host: HostEntry) =>
+    Promise.resolve(
+      components.get(host.id) ?? { model: "unknown", components: [] },
+    ),
+  hostGenerationEstimate: (host: HostEntry) =>
+    Promise.resolve(
+      estimates.get(host.id) ?? {
+        model: "unknown",
+        peak_memory_bytes: 1,
+        activation_memory_bytes: 1,
+        fits_available_memory: true,
+        load_strategy: "resident",
+      },
+    ),
 }));
 
 function model(
@@ -115,6 +131,14 @@ describe("useHostRouting", () => {
     statuses.clear();
     models.clear();
     devices.clear();
+    components.clear();
+    estimates.clear();
+    hostStatusCall.mockReset().mockImplementation((host: HostEntry) => {
+      const canned = statuses.get(host.id);
+      return canned
+        ? Promise.resolve(canned)
+        : Promise.reject(new Error("unreachable"));
+    });
     __testing__.reset();
   });
 
@@ -130,6 +154,38 @@ describe("useHostRouting", () => {
 
     expect(routing.hosts.value.map((h) => h.id)).toEqual([ORIGIN_HOST_ID]);
     expect(routing.multiHost.value).toBe(false);
+  });
+
+  it("ignores an older same-host poll after a newer refresh settles", async () => {
+    statuses.set(ORIGIN_HOST_ID, status({ queue_depth: 0 }));
+    models.set(ORIGIN_HOST_ID, [model("flux-dev:q4")]);
+    devices.set(ORIGIN_HOST_ID, {
+      plan_version: 1,
+      devices: [device(0)],
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    let resolveOlder!: (value: unknown) => void;
+    let resolveNewer!: (value: unknown) => void;
+    const older = new Promise((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise((resolve) => {
+      resolveNewer = resolve;
+    });
+    hostStatusCall
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+
+    const first = routing.refresh();
+    const second = routing.refresh();
+    resolveNewer(status({ queue_depth: 9 }));
+    await second;
+    resolveOlder(status({ queue_depth: 1 }));
+    await first;
+
+    expect(routing.hosts.value[0]?.queueDepth).toBe(9);
   });
 
   it("reports a remote host as ready with its live queue depth and GPU", async () => {
@@ -162,6 +218,69 @@ describe("useHostRouting", () => {
       vramTotalMb: 24576,
     });
     expect(routing.multiHost.value).toBe(true);
+  });
+
+  it("routes only to a host whose required companions are present", async () => {
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status({ queue_depth: id === ORIGIN_HOST_ID ? 0 : 2 }));
+      models.set(id, [model("ltx2.3-dev:bf16")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    components.set(ORIGIN_HOST_ID, {
+      model: "ltx2.3-dev:bf16",
+      components: [{ kind: "vae", name: "ltx2.3-vae", present: false }],
+    });
+    components.set(studio.id, {
+      model: "ltx2.3-dev:bf16",
+      components: [{ kind: "vae", name: "ltx2.3-vae", present: true }],
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const route = await routing.resolveFeasible({
+      prompt: "shot",
+      model: "ltx2.3-dev:bf16",
+      width: 768,
+      height: 512,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    });
+    expect(route?.hostId).toBe(studio.id);
+  });
+
+  it("routes only to a host with a feasible concrete device estimate", async () => {
+    setGenerateTargetId(AUTO_TARGET_ID);
+    const studio = addHost({ url: "http://studio:7680", name: "Studio" });
+    for (const id of [ORIGIN_HOST_ID, studio.id]) {
+      statuses.set(id, status({ queue_depth: id === ORIGIN_HOST_ID ? 0 : 2 }));
+      models.set(id, [model("flux-dev:q4")]);
+      devices.set(id, { plan_version: 1, devices: [device(0)] });
+    }
+    estimates.set(ORIGIN_HOST_ID, {
+      model: "flux-dev:q4",
+      peak_memory_bytes: 30 * 1024 ** 3,
+      activation_memory_bytes: 1,
+      fits_available_memory: false,
+      load_strategy: "resident",
+    });
+    const routing = useHostRouting();
+    await routing.refresh();
+
+    const route = await routing.resolveFeasible({
+      prompt: "print",
+      model: "flux-dev:q4",
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      guidance: 3.5,
+      seed: null,
+      batch_size: 1,
+    });
+    expect(route?.hostId).toBe(studio.id);
   });
 
   it("marks an unreachable host errored without dropping it from the list", async () => {

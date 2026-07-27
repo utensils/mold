@@ -187,6 +187,44 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function raceDevice(name: string) {
+  return {
+    id: `cuda:${name}`,
+    backend: "cuda",
+    ordinal: 0,
+    device_kind: "full_gpu",
+    nvml_uuid: name,
+    physical_uuid: name,
+    mig_uuid: null,
+    mig_parent_uuid: null,
+    mig_profile: null,
+    name,
+    pci_bus_id: null,
+    compute_capability: "8.6",
+    memory: {
+      total_bytes: 24_000_000_000,
+      used_bytes: 0,
+      mold_used_bytes: 0,
+      other_used_bytes: 0,
+    },
+    telemetry: {
+      utilization_percent: 0,
+      temperature_c: 30,
+      power_w: 20,
+    },
+    desired_enabled: true,
+    restart_required: false,
+    admin_state: "enabled",
+    health: "healthy",
+    activity: "idle",
+    schedulable: true,
+    unschedulable_reason: null,
+    loaded_models: [],
+    active_work_id: null,
+    planned_work_ids: [],
+  };
+}
+
 let wrapper: VueWrapper | null = null;
 
 async function mountDetail(host: MobileHost = studio, active = false): Promise<VueWrapper> {
@@ -317,6 +355,66 @@ describe("MobileHostDetail remote host data", () => {
         .attributes("aria-valuenow"),
     ).toBe("25");
     expect(view.emitted("status")).toEqual([[{ id: studio.id, status: serverStatus() }]]);
+  });
+
+  it("ignores older same-host queue and device refetches after a newer event refresh", async () => {
+    const view = await mountDetail();
+    const olderQueue = deferred<unknown>();
+    const newerQueue = deferred<unknown>();
+    const olderDevices = deferred<unknown>();
+    const newerDevices = deferred<unknown>();
+    let queueCall = 0;
+    let deviceCall = 0;
+    const existingApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((requestTarget, path) => {
+      if (path === "/api/queue") return queueCall++ === 0 ? olderQueue.promise : newerQueue.promise;
+      if (path === "/api/devices")
+        return deviceCall++ === 0 ? olderDevices.promise : newerDevices.promise;
+      return existingApi(requestTarget, path);
+    });
+    const deviceEvents = stream("/api/events");
+    const invalidate = () =>
+      deviceEvents.options.onEvent("message", JSON.stringify({ type: "queue_plan_changed" }));
+    invalidate();
+    invalidate();
+
+    newerQueue.resolve({
+      entries: [
+        {
+          id: "newer-job",
+          model: "newer-model",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 0,
+        },
+      ],
+    });
+    newerDevices.resolve({
+      devices: [raceDevice("NEW DEVICE")],
+      plan_version: 3,
+    });
+    await flushPromises();
+    olderQueue.resolve({
+      entries: [
+        {
+          id: "older-job",
+          model: "older-model",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+      ],
+    });
+    olderDevices.resolve({
+      devices: [raceDevice("OLD DEVICE")],
+      plan_version: 2,
+    });
+    await flushPromises();
+
+    expect(view.text()).toContain("newer-model");
+    expect(view.text()).not.toContain("older-model");
+    expect(view.text()).toContain("NEW DEVICE");
+    expect(view.text()).not.toContain("OLD DEVICE");
   });
 
   it("renders every status GPU before the resource stream produces a snapshot", async () => {

@@ -74,6 +74,14 @@ function seedHosts() {
   return hosts;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 /** Route API mocks by path so one implementation serves every host. */
 function installApi({
   paused = false,
@@ -137,6 +145,61 @@ describe("jobs store", () => {
     for (const [target] of apiJsonTo.mock.calls as [{ baseUrl: string }, string][]) {
       expect(target.baseUrl).toBe("http://hal9000:7680");
     }
+  });
+
+  it("ignores an older same-host queue refresh after a newer refresh settles", async () => {
+    const hosts = seedHosts();
+    const host = hosts.all.find((entry) => entry.id === "hal9000-7680")!;
+    const older = deferred<unknown>();
+    const newer = deferred<unknown>();
+    let queueCall = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/queue") return queueCall++ === 0 ? older.promise : newer.promise;
+      if (path === "/api/status")
+        return Promise.resolve({ version: "0.20.0", queue_paused: false });
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    listDevices.mockResolvedValue({ plan_version: 1, devices: [device(0)] });
+    const jobs = useJobsStore();
+    jobs.queues[host.id] = {
+      hostId: host.id,
+      entries: [],
+      paused: false,
+      caps: { canPause: true, canCancelAll: true, canReorder: true },
+      gpuOrdinals: [],
+      devices: [],
+      plan: null,
+      error: null,
+    };
+
+    const first = jobs.refreshHost(host);
+    const second = jobs.refreshHost(host);
+    newer.resolve({
+      entries: [
+        {
+          id: "newer",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 2,
+          position: 0,
+        },
+      ],
+    });
+    await second;
+    older.resolve({
+      entries: [
+        {
+          id: "older",
+          model: "flux-dev:q4",
+          state: "queued",
+          started_at_unix_ms: 1,
+          position: 0,
+        },
+      ],
+    });
+    await first;
+
+    expect(jobs.queues[host.id]?.entries.map((entry) => entry.id)).toEqual(["newer"]);
   });
 
   it("pause and resume post against the right host", async () => {

@@ -152,6 +152,8 @@ pub struct PlacementCapabilities {
 pub struct ResolvedExecutionPlan {
     pub device_id: String,
     pub device_ordinal: usize,
+    /// Semantic family resolved from authoritative model metadata.
+    pub model_family: String,
     pub model_fingerprint: String,
     pub effective_placement: EffectivePlacement,
     pub components: BTreeMap<ComponentRole, ComponentExecutionPlan>,
@@ -984,6 +986,7 @@ fn build_plan(
     Some(Ok(ResolvedExecutionPlan {
         device_id: device.id.clone(),
         device_ordinal: device.ordinal,
+        model_family: context.family.to_string(),
         model_fingerprint: model_fingerprint(context.model, context.artifacts),
         effective_placement: context.effective.clone(),
         components,

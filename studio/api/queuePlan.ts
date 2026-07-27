@@ -16,6 +16,12 @@ export interface QueueWorkItem {
   work_id: string;
   parent_id: string;
   work_kind: string;
+  chain_stage?: number | null;
+  batch_partition?: {
+    index: number;
+    count: number;
+    size: number;
+  } | null;
   priority_class: string;
   queue_rank: number;
   bypass_count: number;
@@ -28,6 +34,18 @@ export interface QueueWorkItem {
   estimated_finish_unix_ms?: number | null;
   estimate_confidence: EstimateConfidence;
   reason?: string | null;
+  blocked_reason?: string | null;
+  assignment_reason?: string | null;
+  warm_wait_deadline_unix_ms?: number | null;
+  activity_phase?:
+    | "queued"
+    | "blocked"
+    | "warm_wait"
+    | "dispatching"
+    | "active"
+    | "cpu"
+    | string;
+  execution_fingerprint?: string | null;
 }
 
 export interface QueuePlan {

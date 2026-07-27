@@ -64,10 +64,9 @@ function depth(host: RoutableHost): number {
 }
 
 /**
- * Auto routing: the ready host with the shallowest queue wins. At equal
- * depth, a known prediction sorts ahead of an unknown one and two known
- * predictions sort by finish time. Planless hosts remain eligible and use
- * the normal origin/id tie-break when all tied predictions are unknown.
+ * Auto routing: when both hosts expose an authoritative plan, predicted
+ * completion wins before raw queue depth. If either host is planless, queue
+ * depth is the deterministic backward-compatible fallback.
  */
 export function pickAutoHost<T extends RoutableHost>(
   hosts: readonly T[],
@@ -75,14 +74,14 @@ export function pickAutoHost<T extends RoutableHost>(
   const ready = hosts.filter((h) => h.status === "ready");
   if (ready.length === 0) return null;
   return ready.reduce((best, h) => {
-    if (depth(h) < depth(best)) return h;
-    if (depth(h) > depth(best)) return best;
     const hFinish = h.predictedCompletionMs;
     const bestFinish = best.predictedCompletionMs;
-    if (hFinish != null && bestFinish == null) return h;
-    if (hFinish == null && bestFinish != null) return best;
     if (hFinish != null && bestFinish != null && hFinish !== bestFinish)
       return hFinish < bestFinish ? h : best;
+    if (depth(h) < depth(best)) return h;
+    if (depth(h) > depth(best)) return best;
+    if (hFinish != null && bestFinish == null) return h;
+    if (hFinish == null && bestFinish != null) return best;
     if (isOrigin(h) && !isOrigin(best)) return h;
     if (h.id < best.id) return h;
     return best;

@@ -1009,6 +1009,21 @@ function resolveSubmitRoute(): HostRoute | null | false {
   return route;
 }
 
+async function resolveFeasibleSubmitRoute(
+  request: GenerateRequestWire,
+): Promise<HostRoute | null | false> {
+  if (!routing.multiHost.value) return null;
+  const route = await routing.resolveFeasible(request);
+  if (!route) {
+    toast(
+      "error",
+      "No selected machine has the model, required components, and available GPU memory for this print.",
+    );
+    return false;
+  }
+  return route;
+}
+
 async function onSubmit(allowStaleQuick = false) {
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
@@ -1021,7 +1036,7 @@ async function onSubmit(allowStaleQuick = false) {
       return;
     }
   }
-  const route =
+  let route =
     quick && !allowStaleQuick ? cloneRoute(quick.route) : resolveSubmitRoute();
   if (route === false) return;
   if (!validateSubmit()) return;
@@ -1029,6 +1044,23 @@ async function onSubmit(allowStaleQuick = false) {
   if (decision.kind === "reject") {
     toast("error", decision.reason);
     return;
+  }
+  const currentRequest = form.toRequest(currentModel.value);
+  if (quick && !allowStaleQuick) {
+    const feasible = await resolveFeasibleSubmitRoute(currentRequest);
+    if (feasible === false) return;
+    if (!sameRoute(route, feasible)) {
+      toast(
+        "error",
+        "The prepared machine is no longer the feasible route for this print. Re-expand or choose Generate anyway.",
+      );
+      return;
+    }
+    route = feasible;
+  } else {
+    const feasible = await resolveFeasibleSubmitRoute(currentRequest);
+    if (feasible === false) return;
+    route = feasible;
   }
   const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
@@ -1076,9 +1108,26 @@ async function onSubmitScript(script: ChainScriptToml) {
     enable_audio: script.chain.enable_audio,
   };
   try {
-    const route = routing.resolve(script.chain.model);
+    const representative: GenerateRequestWire = {
+      prompt: stages[0]?.prompt ?? "",
+      model: script.chain.model,
+      width: script.chain.width,
+      height: script.chain.height,
+      steps: script.chain.steps,
+      guidance: script.chain.guidance,
+      seed: script.chain.seed ?? null,
+      batch_size: 1,
+      frames: stages[0]?.frames,
+      fps: script.chain.fps,
+      enable_audio: script.chain.enable_audio,
+    };
+    const route = routing.multiHost.value
+      ? await routing.resolveFeasible(representative)
+      : routing.resolve(script.chain.model);
     if (!route) {
-      throw new Error("The selected sequence host is unavailable.");
+      throw new Error(
+        "No selected machine has the model, required components, and available GPU memory for this sequence.",
+      );
     }
     const { job_id } = await createChainJob(req, route.target);
     submittedChainJobHostId.value = route.hostId;
@@ -1108,8 +1157,7 @@ function validateExpandedPrompts(
 
 async function onExpand() {
   if (form.state.value.batchSize > 1) {
-    const route = resolveSubmitRoute();
-    if (route === false || !validateSubmit()) return;
+    if (!validateSubmit()) return;
     const decision = chainDecision.value;
     if (decision.kind === "reject") {
       toast("error", decision.reason);
@@ -1121,6 +1169,8 @@ async function onExpand() {
     const model = form.state.value.model;
     const selectedHostPolicy = routing.targetId.value;
     const baseRequest = form.toRequest(currentModel.value);
+    const route = await resolveFeasibleSubmitRoute(baseRequest);
+    if (route === false) return;
     const style = styleHint(form.state.value.stylePreset ?? "");
     composerError.value = null;
     try {

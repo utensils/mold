@@ -105,6 +105,7 @@ export function enrichQueueEntries(
 export const useJobsStore = defineStore("jobs", {
   state: () => ({
     queues: {} as Record<string, HostQueueSnapshot>,
+    requestGenerations: {} as Record<string, number>,
     pollTimer: null as ReturnType<typeof setInterval> | null,
   }),
   getters: {
@@ -142,7 +143,17 @@ export const useJobsStore = defineStore("jobs", {
     async refreshHost(host: HostView) {
       const target = this.targetFor(host);
       if (!target || host.status !== "ready") return;
+      const generation = (this.requestGenerations[host.id] ?? 0) + 1;
+      this.requestGenerations[host.id] = generation;
       const hosts = useHostsStore();
+      const isCurrent = () => {
+        const current = hosts.all.find((candidate) => candidate.id === host.id);
+        return (
+          this.requestGenerations[host.id] === generation &&
+          current?.baseUrl === host.baseUrl &&
+          current.apiKey === host.apiKey
+        );
+      };
       const previous = this.queues[host.id];
       try {
         // Capabilities are fetched once per host and cached — they only
@@ -167,6 +178,7 @@ export const useJobsStore = defineStore("jobs", {
             () => null,
           ),
         ]);
+        if (!isCurrent()) return;
         this.queues[host.id] = {
           hostId: host.id,
           entries: (listing.entries ?? [])
@@ -197,6 +209,7 @@ export const useJobsStore = defineStore("jobs", {
             listing.plan == null ? null : predictedCompletionUnixMs(listing.plan);
         }
       } catch (err) {
+        if (!isCurrent()) return;
         this.queues[host.id] = {
           hostId: host.id,
           entries: previous?.entries ?? [],
@@ -215,7 +228,10 @@ export const useJobsStore = defineStore("jobs", {
       // Hosts that disconnected drop out of the map.
       const live = new Set(hosts.all.map((h) => h.id));
       for (const id of Object.keys(this.queues)) {
-        if (!live.has(id)) delete this.queues[id];
+        if (!live.has(id)) {
+          delete this.queues[id];
+          delete this.requestGenerations[id];
+        }
       }
     },
     async pause(hostId: string) {

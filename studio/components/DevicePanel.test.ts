@@ -141,6 +141,37 @@ describe("DevicePanel", () => {
     expect(wrapper.emitted("toggle")?.[0]).toEqual([pinned.id, true]);
   });
 
+  it("renders future typed blocked reasons without a client allowlist", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [device(0)],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "job-future",
+              parent_id: "job-future",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              estimate_confidence: "low",
+              blocked_reason: "thermal_throttle",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get(".device-panel__blocked").text()).toContain(
+      "thermal throttle",
+    );
+  });
+
   it("updates ETA and replan countdowns while the snapshot is otherwise static", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);

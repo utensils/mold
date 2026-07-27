@@ -121,6 +121,7 @@ const installed = computed(() => models.value.filter((m) => m.downloaded));
 const modelLabel = (name: string) => modelDisplayNameForId(name, models.value);
 
 let sessionEpoch = 0;
+let queueRequestGeneration = 0;
 
 function isCurrentSession(
   entry: NonNullable<typeof host.value>,
@@ -141,9 +142,13 @@ async function reloadQueue(
   signal?: AbortSignal,
 ) {
   if (!entry) return;
+  const generation = ++queueRequestGeneration;
   try {
     const listing = await hostQueue(entry, signal);
-    if (isCurrentSession(entry, epoch)) {
+    if (
+      generation === queueRequestGeneration &&
+      isCurrentSession(entry, epoch)
+    ) {
       queue.value = listing.entries;
       queuePlan.value = listing.plan ?? null;
     }
@@ -375,6 +380,7 @@ let sessionAbort: AbortController | null = null;
 
 function stopHostSession() {
   sessionEpoch += 1;
+  queueRequestGeneration += 1;
   if (timer) clearInterval(timer);
   timer = null;
   deviceEventsAbort?.abort();

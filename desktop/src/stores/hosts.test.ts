@@ -101,6 +101,14 @@ function installedModel(name: string): ModelEntry {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 function settings(overrides: Record<string, unknown> = {}) {
   return {
     mode: "local",
@@ -748,6 +756,41 @@ describe("hosts store", () => {
     expect(hosts.telemetry["hal9000-7680"]?.gpuInfo?.vram_total_mb).toBe(24564);
     expect(hosts.telemetry["hal9000-7680"]?.gpuWorkers).toHaveLength(1);
     expect(hosts.telemetry["hal9000-7680"]?.devices).toHaveLength(1);
+  });
+
+  it("ignores an older same-host telemetry refresh after a newer refresh settles", async () => {
+    const older = deferred<Record<string, unknown>>();
+    const newer = deferred<Record<string, unknown>>();
+    let statusCall = 0;
+    apiJsonTo.mockImplementation((_target: unknown, path: string) => {
+      if (path === "/api/status") return statusCall++ === 0 ? older.promise : newer.promise;
+      if (path === "/api/capabilities") return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    listDevices.mockResolvedValue({
+      plan_version: 1,
+      devices: [device(0)],
+    });
+    listQueue.mockResolvedValue({ entries: [], plan: null });
+    const hosts = useHostsStore();
+
+    const first = hosts.refresh();
+    const second = hosts.refresh();
+    newer.resolve({
+      queue_depth: 9,
+      queue_capacity: 16,
+      version: "newer",
+    });
+    await second;
+    older.resolve({
+      queue_depth: 1,
+      queue_capacity: 16,
+      version: "older",
+    });
+    await first;
+
+    expect(hosts.telemetry.local?.queueDepth).toBe(9);
+    expect(hosts.telemetry.local?.version).toBe("newer");
   });
 
   it("always refreshes predicted completion so Auto can refine equal-depth hosts", async () => {

@@ -65,6 +65,8 @@ const renameValue = ref("");
 const forgetPending = ref(false);
 const unloading = ref<Set<string>>(new Set());
 let loadEpoch = 0;
+let queueRequestGeneration = 0;
+let deviceRequestGeneration = 0;
 let resourceAbort: AbortController | null = null;
 let downloadsAbort: AbortController | null = null;
 let deviceEventsAbort: AbortController | null = null;
@@ -92,6 +94,8 @@ const cpu = computed(() => snapshot.value?.cpu ?? null);
 const disk = computed(() => status.value?.models_disk ?? null);
 
 function stopLiveServices(): void {
+  queueRequestGeneration += 1;
+  deviceRequestGeneration += 1;
   resourceAbort?.abort();
   downloadsAbort?.abort();
   deviceEventsAbort?.abort();
@@ -103,9 +107,16 @@ function stopLiveServices(): void {
 }
 
 async function refreshQueue(epoch = loadEpoch): Promise<void> {
+  const generation = ++queueRequestGeneration;
+  const requestTarget = target.value;
   try {
-    const listing = parseQueueListing(await apiJsonTo<unknown>(target.value, "/api/queue"));
-    if (epoch === loadEpoch) {
+    const listing = parseQueueListing(await apiJsonTo<unknown>(requestTarget, "/api/queue"));
+    if (
+      epoch === loadEpoch &&
+      generation === queueRequestGeneration &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
       queue.value = listing.entries as QueueEntry[];
       queuePlan.value = listing.plan;
       queueApiAvailable.value = true;
@@ -115,15 +126,24 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
   }
 }
 
-async function loadDevices(): Promise<DeviceInfo[]> {
-  const response = await apiJsonTo<unknown>(target.value, "/api/devices");
+async function loadDevices(requestTarget = target.value): Promise<DeviceInfo[]> {
+  const response = await apiJsonTo<unknown>(requestTarget, "/api/devices");
   return parseDeviceListResponse(response).devices;
 }
 
 async function refreshDevices(epoch = loadEpoch): Promise<void> {
+  const generation = ++deviceRequestGeneration;
+  const requestTarget = target.value;
   try {
-    const next = await loadDevices();
-    if (epoch === loadEpoch) devices.value = next;
+    const next = await loadDevices(requestTarget);
+    if (
+      epoch === loadEpoch &&
+      generation === deviceRequestGeneration &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      devices.value = next;
+    }
   } catch {
     // Device inventory is additive; older hosts retain legacy telemetry.
   }
@@ -217,7 +237,7 @@ async function toggleDevice(device: DeviceInfo): Promise<void> {
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
     await setDeviceEnabled(target.value, device.id, enabled);
-    devices.value = await loadDevices();
+    await refreshDevices();
   } catch (caught) {
     error.value = describeTransportError(caught, props.host.name);
   } finally {

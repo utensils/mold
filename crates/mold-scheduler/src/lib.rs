@@ -14,8 +14,8 @@ mod types;
 
 pub use eligibility::EligibilityIndex;
 pub use estimates::{
-    EstimateBucket, EstimateConfidence, EstimateKey, EstimateObservation, EstimateStore,
-    ResolvedEstimate, StaticEstimate,
+    EstimateBucket, EstimateConfidence, EstimateKey, EstimateObservation, EstimateOutcome,
+    EstimatePhaseTimings, EstimateStore, ResolvedEstimate, StaticEstimate,
 };
 pub use planner::{operation_budget, optimization_horizon, Planner};
 pub use types::{
@@ -23,6 +23,7 @@ pub use types::{
     CandidatePlacement, DeviceActivity, DeviceAdminState, DeviceHealth, DeviceId, DeviceLane,
     DeviceSnapshot, ExecutionFingerprint, GrantValidationSnapshot, HostMemorySnapshot,
     ImmediateLease, MatchingReservation, OptimizerState, ParentId, Plan, PlanValidationError,
-    PlannedAssignment, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode, PriorityClass,
-    ReservationItem, StaticTimingEstimate, WarmWait, WorkId, WorkKind, WorkSnapshot,
+    PlannedAssignment, PlannedBatchPartition, PlannerConfig, PlannerError, PlannerSnapshot,
+    PlanningMode, PriorityClass, ReservationItem, StaticTimingEstimate, WarmWait, WorkId, WorkKind,
+    WorkSnapshot,
 };
