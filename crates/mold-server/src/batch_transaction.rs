@@ -20,6 +20,7 @@ pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
 const MANIFEST_FILE: &str = "manifest.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const COMMITTED_DIR: &str = "committed";
+const ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
 const MANIFEST_VERSION: u32 = 1;
 const DISK_SAFETY_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1731,32 +1732,21 @@ fn try_claim_attempt_authority(attempt_dir: &Path) -> anyhow::Result<Option<File
     }
 }
 
-#[cfg(unix)]
 fn open_attempt_authority_target(attempt_dir: &Path) -> anyhow::Result<File> {
-    // The attempt directory inode is stable for the entire nonterminal
-    // attempt and remains locked even when terminal cleanup unlinks it.
-    File::open(attempt_dir)
-        .with_context(|| format!("opening batch attempt directory {}", attempt_dir.display()))
-}
-
-#[cfg(not(unix))]
-fn open_attempt_authority_target(attempt_dir: &Path) -> anyhow::Result<File> {
-    // std cannot portably open a directory handle on every non-Unix target.
-    // Keep the lock outside the removable attempts directory so terminal
-    // cleanup cannot create a second authority inode while the first is live.
-    let canonical = fs::canonicalize(attempt_dir)
-        .with_context(|| format!("canonicalizing batch attempt {}", attempt_dir.display()))?;
-    let generation = canonical
-        .file_name()
-        .context("batch attempt directory has no generation")?;
-    let parent_root = canonical
+    let lock_path = attempt_authority_lock_path(attempt_dir)?;
+    let locks = lock_path
         .parent()
-        .and_then(Path::parent)
-        .context("batch attempt directory has no parent root")?;
-    let locks = parent_root.join(".attempt-locks");
-    fs::create_dir_all(&locks)?;
-    let lock_path = locks.join(generation).with_extension("lock");
-    OpenOptions::new()
+        .context("batch attempt authority has no lock directory")?;
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "batch attempt authority is not a regular file: {}",
+            lock_path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
@@ -1768,7 +1758,123 @@ fn open_attempt_authority_target(attempt_dir: &Path) -> anyhow::Result<File> {
                 lock_path.display(),
                 attempt_dir.display()
             )
-        })
+        })?;
+    // Authority sidecars are intentionally never unlinked: a terminal
+    // BatchTransaction may outlive its removed attempt directory, and path
+    // reuse must keep resolving to this same inode until that owner drops.
+    lock.sync_all()?;
+    sync_dir(locks)?;
+    Ok(lock)
+}
+
+fn attempt_authority_lock_path(attempt_dir: &Path) -> anyhow::Result<PathBuf> {
+    let generation_name = attempt_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt generation is not UTF-8")?;
+    let generation: u64 = generation_name
+        .parse()
+        .with_context(|| format!("invalid batch attempt generation {generation_name}"))?;
+    ensure!(
+        generation.to_string() == generation_name,
+        "batch attempt generation is not canonical: {generation_name}"
+    );
+    let attempts_root = attempt_dir
+        .parent()
+        .context("batch attempt directory has no attempts root")?;
+    ensure!(
+        attempts_root.file_name().and_then(|name| name.to_str()) == Some("attempts"),
+        "batch attempt path is not below an attempts directory: {}",
+        attempt_dir.display()
+    );
+    let parent_root = attempts_root
+        .parent()
+        .context("batch attempt directory has no parent root")?;
+    let parent_id = parent_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("batch attempt parent id is not UTF-8")?;
+    validate_component(parent_id, "batch attempt parent id")?;
+    let transaction_root = parent_root
+        .parent()
+        .context("batch attempt parent has no transaction root")?;
+    ensure!(
+        transaction_root.file_name().and_then(|name| name.to_str()) == Some(TRANSACTION_DIR),
+        "batch attempt path is not below {TRANSACTION_DIR}: {}",
+        attempt_dir.display()
+    );
+    let output_dir = transaction_root
+        .parent()
+        .context("batch transaction root has no gallery parent")?;
+    let canonical_output = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let canonical_root = fs::canonicalize(transaction_root).with_context(|| {
+        format!(
+            "canonicalizing batch transaction root {}",
+            transaction_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_root.parent() == Some(canonical_output.as_path())
+            && canonical_root.file_name().and_then(|name| name.to_str()) == Some(TRANSACTION_DIR),
+        "batch transaction root escapes its gallery: {}",
+        transaction_root.display()
+    );
+    let canonical_parent = fs::canonicalize(parent_root).with_context(|| {
+        format!(
+            "canonicalizing batch attempt parent {}",
+            parent_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_parent.parent() == Some(canonical_root.as_path())
+            && canonical_parent.file_name().and_then(|name| name.to_str()) == Some(parent_id),
+        "batch attempt parent escapes transaction root: {}",
+        parent_root.display()
+    );
+    let canonical_attempts = fs::canonicalize(attempts_root).with_context(|| {
+        format!(
+            "canonicalizing batch attempts directory {}",
+            attempts_root.display()
+        )
+    })?;
+    ensure!(
+        canonical_attempts.parent() == Some(canonical_parent.as_path())
+            && canonical_attempts
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some("attempts"),
+        "batch attempts directory escapes its parent: {}",
+        attempts_root.display()
+    );
+    let canonical_attempt = fs::canonicalize(attempt_dir)
+        .with_context(|| format!("canonicalizing batch attempt {}", attempt_dir.display()))?;
+    ensure!(
+        canonical_attempt.parent() == Some(canonical_attempts.as_path())
+            && canonical_attempt.file_name().and_then(|name| name.to_str())
+                == Some(generation_name),
+        "batch attempt directory escapes its attempts root: {}",
+        attempt_dir.display()
+    );
+
+    let locks = canonical_root.join(ATTEMPT_LOCKS_DIR);
+    fs::create_dir_all(&locks)?;
+    let canonical_locks = fs::canonicalize(&locks)
+        .with_context(|| format!("canonicalizing attempt lock directory {}", locks.display()))?;
+    ensure!(
+        canonical_locks.parent() == Some(canonical_root.as_path())
+            && canonical_locks.file_name().and_then(|name| name.to_str())
+                == Some(ATTEMPT_LOCKS_DIR),
+        "batch attempt lock directory escapes transaction root: {}",
+        locks.display()
+    );
+
+    let mut identity = Sha256::new();
+    identity.update(b"mold.batch-attempt-authority.v1\0");
+    identity.update((parent_id.len() as u64).to_le_bytes());
+    identity.update(parent_id.as_bytes());
+    identity.update(generation.to_le_bytes());
+    Ok(canonical_locks.join(format!("{:x}.lock", identity.finalize())))
 }
 
 fn acquire_gallery_bookkeeping_lock(output_dir: &Path) -> anyhow::Result<File> {
@@ -2585,6 +2691,158 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess helper retaining authority after committed archive"]
+    fn archived_batch_attempt_authority_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let mut transaction = BatchTransaction::begin(
+            &output_dir,
+            "archived-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("archived-child.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"archived child").unwrap();
+        transaction.mark_prepared().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(transaction.commit(&GalleryPublicationGate::default(), Arc::new(None)))
+            .unwrap();
+        assert!(!transaction.attempt_dir.exists());
+        write_process_test_marker("ARCHIVED");
+
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "RELEASE");
+        drop(transaction);
+        write_process_test_marker("RELEASED");
+    }
+
+    #[test]
+    #[ignore = "subprocess helper contending for an archived logical attempt"]
+    fn archived_batch_attempt_contender_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        write_process_test_marker("BEGIN_STARTED");
+        let transaction = BatchTransaction::begin(
+            &output_dir,
+            "archived-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("archived-child.png", 0)],
+        )
+        .unwrap();
+        write_process_test_marker("BEGIN_ACQUIRED");
+
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "DROP");
+        drop(transaction);
+        write_process_test_marker("DROPPED");
+    }
+
+    #[test]
+    fn archived_attempt_authority_survives_directory_removal_until_owner_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_input = owner.stdin.take().unwrap();
+        let mut owner_output = std::io::BufReader::new(owner.stdout.take().unwrap());
+        read_process_test_marker(&mut owner_output, "ARCHIVED").unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("archived-child.png")).unwrap(),
+            b"archived child"
+        );
+        assert!(!attempt_dir(dir.path(), "archived-parent", 0).exists());
+
+        let mut contender = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::archived_batch_attempt_contender_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut contender_input = contender.stdin.take().unwrap();
+        let mut contender_output = std::io::BufReader::new(contender.stdout.take().unwrap());
+        read_process_test_marker(&mut contender_output, "BEGIN_STARTED").unwrap();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let contender_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut contender_output, "BEGIN_ACQUIRED");
+            acquired_tx.send(result).unwrap();
+            contender_output
+        });
+        let acquired_while_old_owner_was_live = acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+
+        writeln!(owner_input, "RELEASE").unwrap();
+        owner_input.flush().unwrap();
+        read_process_test_marker(&mut owner_output, "RELEASED").unwrap();
+        let _ = std::io::copy(&mut owner_output, &mut std::io::sink());
+        assert!(owner.wait().unwrap().success());
+
+        if !acquired_while_old_owner_was_live {
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("contender did not acquire after archived owner released")
+                .unwrap();
+        }
+        let mut contender_output = contender_reader.join().unwrap();
+        writeln!(contender_input, "DROP").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "DROPPED").unwrap();
+        let _ = std::io::copy(&mut contender_output, &mut std::io::sink());
+        assert!(contender.wait().unwrap().success());
+
+        assert!(
+            !acquired_while_old_owner_was_live,
+            "removing the attempt directory created a second lock authority for the same logical attempt"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                dir.path(),
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert_eq!(
+            fs::read(dir.path().join("archived-child.png")).unwrap(),
+            b"archived child"
+        );
+    }
+
+    #[test]
     fn recovery_skips_live_batch_attempts_and_claims_them_after_process_crash() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2669,6 +2927,103 @@ mod tests {
             assert!(!live_attempt.exists());
             assert!(!reservation_path(dir.path(), "live-child.png").exists());
         }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper pausing after authoritative recovery claim"]
+    fn paused_batch_recovery_claim_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let bookkeeping = acquire_gallery_bookkeeping_lock(&output_dir).unwrap();
+        let root = output_dir.join(TRANSACTION_DIR);
+        let mut claimed = Vec::new();
+        collect_claimed_attempts(&root, &mut claimed).unwrap();
+        assert_eq!(claimed.len(), 1);
+        drop(bookkeeping);
+        write_process_test_marker("CLAIMED");
+
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "CONTINUE");
+        drop(claimed);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                &output_dir,
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report.rolled_back, 1);
+        write_process_test_marker("COMPLETED");
+    }
+
+    #[test]
+    fn simultaneous_recovery_skips_an_attempt_claimed_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "recovery-parent",
+            0,
+            serde_json::json!({"batch_size": 1}),
+            vec![record("recovery-child.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"orphaned child").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let mut first = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::paused_batch_recovery_claim_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut first_input = first.stdin.take().unwrap();
+        let mut first_output = std::io::BufReader::new(first.stdout.take().unwrap());
+        read_process_test_marker(&mut first_output, "CLAIMED").unwrap();
+
+        let mut second = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::reservation_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut second_output = std::io::BufReader::new(second.stdout.take().unwrap());
+        read_process_test_marker(&mut second_output, "RECOVERY_STARTED").unwrap();
+        read_process_test_marker(&mut second_output, "RECOVERY_COMPLETED").unwrap();
+        let _ = std::io::copy(&mut second_output, &mut std::io::sink());
+        assert!(second.wait().unwrap().success());
+        assert!(transaction.attempt_dir.exists());
+        assert!(reservation_path(dir.path(), "recovery-child.png").is_file());
+        assert!(!dir.path().join("recovery-child.png").exists());
+
+        writeln!(first_input, "CONTINUE").unwrap();
+        first_input.flush().unwrap();
+        read_process_test_marker(&mut first_output, "COMPLETED").unwrap();
+        let _ = std::io::copy(&mut first_output, &mut std::io::sink());
+        assert!(first.wait().unwrap().success());
+
+        assert!(!transaction.attempt_dir.exists());
+        assert!(!reservation_path(dir.path(), "recovery-child.png").exists());
+        assert!(!dir.path().join("recovery-child.png").exists());
     }
 
     #[test]
@@ -3003,6 +3358,49 @@ mod tests {
             gallery_bookkeeping_sidecar_lock_path(&gallery_alias).unwrap(),
             "sidecar locking must retain one authority across filesystem aliases"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_path_collapses_gallery_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let gallery = dir.path().join("gallery");
+        fs::create_dir(&gallery).unwrap();
+        let transaction = BatchTransaction::begin(
+            &gallery,
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let gallery_alias = dir.path().join("gallery-alias");
+        std::os::unix::fs::symlink(&gallery, &gallery_alias).unwrap();
+
+        assert_eq!(
+            attempt_authority_lock_path(&transaction.attempt_dir).unwrap(),
+            attempt_authority_lock_path(&attempt_dir(&gallery_alias, "parent", 0)).unwrap(),
+            "one logical attempt must retain one sidecar across gallery aliases"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attempt_authority_rejects_an_attempt_directory_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir
+            .path()
+            .join(TRANSACTION_DIR)
+            .join("parent")
+            .join("attempts");
+        fs::create_dir_all(&attempts).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let escaped = attempts.join("0");
+        std::os::unix::fs::symlink(&outside, &escaped).unwrap();
+
+        let error = attempt_authority_lock_path(&escaped).unwrap_err();
+        assert!(error.to_string().contains("escapes its attempts root"));
     }
 
     fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
