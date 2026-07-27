@@ -219,11 +219,7 @@ fn normalized_provider_identity(value: &str) -> String {
 }
 
 fn provider_gpu_id(gpu: &GpuType) -> Option<&str> {
-    gpu.id
-        .as_deref()
-        .or_else(|| (!gpu.gpu_id.trim().is_empty()).then_some(gpu.gpu_id.as_str()))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    gpu.authoritative_type_id()
 }
 
 fn resolve_provider_gpu<'a>(
@@ -308,7 +304,7 @@ where
     }
     input.gpu_type_id = provider_id.to_string();
     input.gpu_display_name = provider_name.to_string();
-    let image_name = image_resolver(provider_name).await?;
+    let image_name = image_resolver(provider_id).await?;
     build_request(input, hf_token, image_name)
 }
 
@@ -668,7 +664,7 @@ mod tests {
         let result = prepare_pod_request_with_image_resolver(&client, launch_input, None, |name| {
             let name = name.to_string();
             async move {
-                assert_eq!(name, "NVIDIA B200");
+                assert_eq!(name, "B200-ID");
                 Ok("ghcr.io/utensils/mold:latest-sm100".into())
             }
         })
@@ -678,6 +674,36 @@ mod tests {
         assert_eq!(result.gpu_type_ids, ["B200-ID"]);
         assert_eq!(result.image_name, "ghcr.io/utensils/mold:latest-sm100");
         assert_eq!(client.create_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn desktop_image_routing_uses_the_same_authoritative_id_as_allocation() {
+        let client = FakeLaunchClient {
+            gpu_types: vec![gpu("NVIDIA A100 80GB PCIe", "RTX 5090")],
+            supported_ids: ["nvidia a100 80gb pcie".into()].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut launch_input = input();
+        launch_input.gpu_type_id = "NVIDIA A100 80GB PCIe".into();
+        launch_input.gpu_display_name = "RTX 5090".into();
+
+        let result = prepare_pod_request_with_image_resolver(
+            &client,
+            launch_input,
+            None,
+            |identity| {
+                let identity = identity.to_string();
+                async move {
+                    assert_eq!(identity, "NVIDIA A100 80GB PCIe");
+                    Ok("ghcr.io/utensils/mold:latest-sm80".into())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.gpu_type_ids, ["NVIDIA A100 80GB PCIe"]);
+        assert_eq!(result.image_name, "ghcr.io/utensils/mold:latest-sm80");
     }
 
     #[test]

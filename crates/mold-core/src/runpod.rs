@@ -132,6 +132,21 @@ pub struct GpuType {
     pub available: bool,
 }
 
+impl GpuType {
+    /// Provider identity accepted by the Pod API. GraphQL normally supplies
+    /// `id`; older/alternate inventory shapes may supply `gpuId` instead.
+    pub fn authoritative_type_id(&self) -> Option<&str> {
+        self.id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                let gpu_id = self.gpu_id.trim();
+                (!gpu_id.is_empty()).then_some(gpu_id)
+            })
+    }
+}
+
 /// One entry from `GET /datacenters`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Datacenter {
@@ -832,6 +847,33 @@ pub const GPU_PREFERENCE: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_type_authority_prefers_id_then_gpu_id_and_rejects_blank_values() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  primary-id  ",
+            "gpuId": "  alternate-id  ",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), Some("primary-id"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "  alternate-id  ",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), Some("alternate-id"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "\t",
+            "displayName": "Display label"
+        }))
+        .unwrap();
+        assert_eq!(gpu.authoritative_type_id(), None);
+    }
 
     #[test]
     fn image_tag_mapping() {

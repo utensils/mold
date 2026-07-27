@@ -894,10 +894,17 @@ fn ensure_published_runpod_gpu_identity<'a>(
 }
 
 fn authoritative_runpod_gpu_type_id(gpu: &GpuType) -> String {
-    gpu.id
-        .clone()
-        .filter(|id| !id.trim().is_empty())
+    gpu.authoritative_type_id()
+        .map(str::to_owned)
         .unwrap_or_else(|| friendly_to_gpu_id(&gpu.display_name))
+}
+
+fn advertised_vram_gb(gpu: &GpuType) -> u32 {
+    if gpu.memory_in_gb > 0 {
+        gpu.memory_in_gb
+    } else {
+        gpu_vram_gb(&gpu.display_name).unwrap_or(0)
+    }
 }
 
 /// Build a `CreatePodRequest` from resolved defaults.
@@ -1028,13 +1035,9 @@ async fn resolve_gpu(
         "H100 SXM",
     ];
     for preferred in ranked {
-        let vram = gpu_vram_gb(preferred).unwrap_or(0);
-        if vram < need {
-            continue;
-        }
         if let Some(g) = gpus.iter().find(|g| g.display_name == *preferred) {
             let stock = g.stock_status.as_deref().unwrap_or("");
-            if matches!(stock, "High" | "Medium") {
+            if advertised_vram_gb(g) >= need && matches!(stock, "High" | "Medium") {
                 return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
             }
         }
@@ -1043,7 +1046,7 @@ async fn resolve_gpu(
     for g in &gpus {
         if g.stock_status.as_deref() == Some("High")
             && is_interesting_gpu(&g.display_name)
-            && gpu_vram_gb(&g.display_name).unwrap_or(0) >= need
+            && advertised_vram_gb(g) >= need
         {
             return Ok((authoritative_runpod_gpu_type_id(g), g.display_name.clone()));
         }
@@ -2439,6 +2442,67 @@ mod tests {
         assert_eq!(
             authoritative_runpod_gpu_type_id(&gpu),
             "NVIDIA A100 80GB PCIe"
+        );
+    }
+
+    #[test]
+    fn alternate_provider_gpu_id_precedes_display_name_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "gpuId": "  NVIDIA A100-SXM4-80GB  ",
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        assert_eq!(
+            authoritative_runpod_gpu_type_id(&gpu),
+            "NVIDIA A100-SXM4-80GB"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_gpu_resolution_uses_provider_memory_instead_of_display_label_capacity() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "gpuTypes": [{
+                        "id": "NVIDIA GeForce RTX 5090",
+                        "displayName": "A100 PCIe",
+                        "memoryInGb": 16,
+                        "secureCloud": true,
+                        "communityCloud": false
+                    }],
+                    "dataCenters": [{
+                        "gpuAvailability": [{
+                            "displayName": "A100 PCIe",
+                            "stockStatus": "High"
+                        }]
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = RunPodClient::new(server.uri(), "test-key");
+        let opts = CreateOptions {
+            name: None,
+            gpu: None,
+            datacenter: None,
+            cloud: CloudType::Secure,
+            volume_gb: 50,
+            disk_gb: 20,
+            image_tag: Some("latest".into()),
+            model: None,
+            hf_token: false,
+            network_volume_id: None,
+            dry_run: true,
+            json: true,
+        };
+
+        let error = build_create_request(&opts, &client, &Config::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("no GPUs with"),
+            "unexpected error: {error:#}"
         );
     }
 
