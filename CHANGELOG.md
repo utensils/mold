@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Library thumbnail-size slider no longer has a gap through its middle.** The small-to-large ramp was drawn as two independently positioned wedges, which left roughly 29 px of empty track between them and a visible step where their thicknesses disagreed. Desktop and web now render one continuous ramp spanning the thumb's full travel.
 - **Desktop Library now uses native save language for gallery media.** The print-details action says **Save image** or **Save video** instead of the browser-oriented **Download**, while preserving the existing user-chosen file-save behavior.
 - **New video sequences now start at a GPU-safe clip duration.** Web,
   desktop, and iPhone use the Plato-verified 25-frame default instead of

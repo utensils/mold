@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
- * Lightroom-style thumbnail size control. The opposing wedges communicate
- * dense-to-large without adding toolbar copy; the native range input preserves
- * keyboard, pointer, and assistive-technology behavior.
+ * Lightroom-style thumbnail size control. One ramp spanning the whole track
+ * communicates dense-to-large without adding toolbar copy; the native range
+ * input preserves keyboard, pointer, and assistive-technology behavior.
  */
 import { computed } from "vue";
 
@@ -24,20 +24,13 @@ function onInput(event: Event) {
 <template>
   <label class="ms-thumbnail-size" :title="`Thumbnail size: ${valueText}`">
     <svg
-      class="ms-thumbnail-size__wedge ms-thumbnail-size__wedge--small"
-      data-test="thumbnail-size-small"
-      viewBox="0 0 42 24"
+      class="ms-thumbnail-size__ramp"
+      data-test="thumbnail-size-ramp"
+      viewBox="0 0 114 24"
+      preserveAspectRatio="none"
       aria-hidden="true"
     >
-      <path d="M2 17 40 11v8H2Z" />
-    </svg>
-    <svg
-      class="ms-thumbnail-size__wedge ms-thumbnail-size__wedge--large"
-      data-test="thumbnail-size-large"
-      viewBox="0 0 48 24"
-      aria-hidden="true"
-    >
-      <path d="M2 10 46 3v16H2Z" />
+      <path d="M0 17L114 3L114 19L0 19Z" />
     </svg>
     <input
       class="ms-thumbnail-size__input"
@@ -67,22 +60,19 @@ function onInput(event: Event) {
   color: var(--ink-3);
 }
 
-.ms-thumbnail-size__wedge {
+/*
+ * Spans the thumb's full travel (the 7px-wide thumb centers at 10.5px and
+ * 123.5px), so the ramp reads as one glyph the thumb rides along instead of
+ * separate marks with dead track between them.
+ */
+.ms-thumbnail-size__ramp {
   position: absolute;
   top: 5px;
+  left: 10px;
+  right: 10px;
   height: 24px;
   fill: currentColor;
   pointer-events: none;
-}
-
-.ms-thumbnail-size__wedge--small {
-  left: 10px;
-  width: 42px;
-}
-
-.ms-thumbnail-size__wedge--large {
-  right: 9px;
-  width: 48px;
 }
 
 .ms-thumbnail-size__input {
