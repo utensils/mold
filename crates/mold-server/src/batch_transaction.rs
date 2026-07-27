@@ -156,6 +156,11 @@ pub(crate) struct GalleryNameReservation {
     output_dir: PathBuf,
     final_name: String,
     owner: ReservationOwner,
+    // The stable filesystem lock is the liveness authority for an ordinary
+    // reservation. Recovery may classify `ordinary:*` records as stale only
+    // after it acquires this same lock, so retain it through final-file fsync,
+    // directory fsync, reservation release, and cleanup.
+    _bookkeeping_lock: File,
 }
 
 impl GalleryNameReservation {
@@ -166,17 +171,6 @@ impl GalleryNameReservation {
 
 impl Drop for GalleryNameReservation {
     fn drop(&mut self) {
-        let _bookkeeping_lock = match acquire_gallery_bookkeeping_lock(&self.output_dir) {
-            Ok(lock) => lock,
-            Err(error) => {
-                tracing::warn!(
-                    final_name = %self.final_name,
-                    %error,
-                    "failed to lock gallery bookkeeping; retaining ordinary filename reservation"
-                );
-                return;
-            }
-        };
         if let Err(error) = release_reservation(&self.output_dir, &self.final_name, &self.owner) {
             tracing::warn!(
                 final_name = %self.final_name,
@@ -1292,6 +1286,14 @@ pub async fn recover_transactions(
     gate: &GalleryPublicationGate,
     db: Arc<Option<mold_db::MetadataDb>>,
 ) -> anyhow::Result<RecoveryReport> {
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("creating gallery {}", output_dir.display()))?;
+    // This synchronous prepass is deliberately bounded to filesystem-only
+    // discovery and stale-reservation cleanup. It waits for live ordinary
+    // publishers in other processes, then releases the OS lock before any
+    // async gallery-gate or database work, avoiding a lock-order inversion
+    // across `.await` while still making stale classification authoritative.
+    let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
     let root = output_dir.join(TRANSACTION_DIR);
     if !root.is_dir() {
         return Ok(RecoveryReport::default());
@@ -1300,6 +1302,7 @@ pub async fn recover_transactions(
     let mut manifests = Vec::new();
     collect_manifests(&root, &mut manifests)?;
     manifests.sort();
+    drop(bookkeeping_lock);
 
     let mut report = RecoveryReport::default();
     for path in manifests {
@@ -1616,27 +1619,36 @@ fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<Fil
 #[cfg(not(unix))]
 fn open_gallery_bookkeeping_lock_target(output_dir: &Path) -> anyhow::Result<File> {
     // std cannot portably open a directory handle on every non-Unix target.
-    // Keep the stable lock outside the removable transaction subtree so
-    // ordinary gallery cleanup never creates a split-lock inode.
-    let parent = output_dir
-        .parent()
-        .context("gallery directory has no parent for bookkeeping lock")?;
-    let name = output_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("gallery directory name is not UTF-8")?;
+    // Canonicalize first so aliases and Windows junction paths converge on
+    // one stable sidecar outside the removable transaction subtree.
+    let lock_path = gallery_bookkeeping_sidecar_lock_path(output_dir)?;
     OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(parent.join(format!(".{name}.mold-gallery.lock")))
+        .open(&lock_path)
         .with_context(|| {
             format!(
-                "opening gallery bookkeeping lock for {}",
-                output_dir.display()
+                "opening gallery bookkeeping lock {} for {}",
+                lock_path.display(),
+                output_dir.display(),
             )
         })
+}
+
+#[cfg(any(test, not(unix)))]
+fn gallery_bookkeeping_sidecar_lock_path(output_dir: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let parent = canonical
+        .parent()
+        .context("canonical gallery directory has no parent for bookkeeping lock")?;
+    let name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("canonical gallery directory name is not UTF-8")?;
+    Ok(parent.join(format!(".{name}.mold-gallery.lock")))
 }
 
 fn committed_manifests_dir(output_dir: &Path, parent_id: &str) -> PathBuf {
@@ -1764,7 +1776,7 @@ pub(crate) fn reserve_gallery_final_name_with_directory_sync(
     sync_directory: &dyn Fn(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<GalleryNameReservation> {
     fs::create_dir_all(output_dir)?;
-    let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
     fs::create_dir_all(reservations_dir(output_dir))?;
     let owner = ReservationOwner {
         parent_id: format!("ordinary:{}", uuid::Uuid::new_v4()),
@@ -1776,6 +1788,7 @@ pub(crate) fn reserve_gallery_final_name_with_directory_sync(
         output_dir: output_dir.to_path_buf(),
         final_name,
         owner,
+        _bookkeeping_lock: bookkeeping_lock,
     })
 }
 
@@ -2220,27 +2233,21 @@ mod tests {
                 },
             )
         });
-        directory_ready_rx.recv().unwrap();
+        assert!(
+            matches!(
+                directory_ready_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "batch begin bypassed a live ordinary reservation's filesystem authority"
+        );
 
-        let (drop_started_tx, drop_started_rx) = std::sync::mpsc::channel();
-        let (drop_completed_tx, drop_completed_rx) = std::sync::mpsc::channel();
-        let dropper = std::thread::spawn(move || {
-            drop_started_tx.send(()).unwrap();
-            drop(ordinary);
-            drop_completed_tx.send(()).unwrap();
-        });
-        drop_started_rx.recv().unwrap();
-        let drop_completed_while_begin_was_paused = drop_completed_rx
-            .recv_timeout(std::time::Duration::from_millis(100))
-            .is_ok();
+        drop(ordinary);
+        directory_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("batch begin did not continue after ordinary reservation drop");
         continue_begin_tx.send(()).unwrap();
 
         let transaction = begin.join().unwrap();
-        dropper.join().unwrap();
-        assert!(
-            !drop_completed_while_begin_was_paused,
-            "ordinary cleanup must wait for batch begin's filesystem authority"
-        );
         let transaction = transaction.expect("batch begin must retain the reservations directory");
         assert!(
             reservation_path(&output_dir, "batch.png").is_file(),
@@ -2328,6 +2335,290 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess helper for live ordinary publication tests"]
+    fn ordinary_reservation_publish_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let desired = std::env::var("MOLD_TEST_GALLERY_NAME")
+            .expect("MOLD_TEST_GALLERY_NAME must be set by parent test");
+        let reservation =
+            reserve_gallery_final_name_with_directory_sync(&output_dir, &desired, &|_| Ok(()))
+                .unwrap();
+        assert_eq!(reservation.final_name(), desired);
+        write_process_test_marker("READY");
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        match command.trim() {
+            "PUBLISH" => {
+                let path = output_dir.join(reservation.final_name());
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .unwrap();
+                file.write_all(b"ordinary publication").unwrap();
+                file.sync_all().unwrap();
+                sync_dir(&output_dir).unwrap();
+                drop(reservation);
+                write_process_test_marker("PUBLISHED");
+            }
+            "CRASH" => {
+                write_process_test_marker("CRASHING");
+                std::process::exit(0);
+            }
+            other => panic!("unexpected writer-helper command {other}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for cross-process recovery tests"]
+    fn reservation_recovery_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        write_process_test_marker("RECOVERY_STARTED");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(recover_transactions(
+                &output_dir,
+                &GalleryPublicationGate::default(),
+                Arc::new(None),
+            ))
+            .unwrap();
+        assert_eq!(report, RecoveryReport::default());
+        write_process_test_marker("RECOVERY_COMPLETED");
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for blocked ordinary reservation tests"]
+    fn ordinary_reservation_contender_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set by parent test"),
+        );
+        let desired = std::env::var("MOLD_TEST_GALLERY_NAME")
+            .expect("MOLD_TEST_GALLERY_NAME must be set by parent test");
+        let expected = std::env::var("MOLD_TEST_GALLERY_EXPECTED_NAME")
+            .expect("MOLD_TEST_GALLERY_EXPECTED_NAME must be set by parent test");
+        write_process_test_marker("RESERVATION_STARTED");
+        let reservation =
+            reserve_gallery_final_name_with_directory_sync(&output_dir, &desired, &|_| Ok(()))
+                .unwrap();
+        assert_eq!(reservation.final_name(), expected);
+        write_process_test_marker("RESERVATION_ACQUIRED");
+
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut command = String::new();
+        input.read_line(&mut command).unwrap();
+        assert_eq!(command.trim(), "RELEASE");
+        drop(reservation);
+        write_process_test_marker("RESERVATION_RELEASED");
+    }
+
+    #[test]
+    fn recovery_waits_for_live_ordinary_publication_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = "live-publication.png";
+        let mut writer = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::ordinary_reservation_publish_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .env("MOLD_TEST_GALLERY_NAME", desired)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut writer_input = writer.stdin.take().unwrap();
+        let mut writer_output = std::io::BufReader::new(writer.stdout.take().unwrap());
+        read_process_test_marker(&mut writer_output, "READY").unwrap();
+        assert!(reservation_path(dir.path(), desired).is_file());
+
+        let mut recovery = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::reservation_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut recovery_output = std::io::BufReader::new(recovery.stdout.take().unwrap());
+        read_process_test_marker(&mut recovery_output, "RECOVERY_STARTED").unwrap();
+        let (recovery_completed_tx, recovery_completed_rx) = std::sync::mpsc::channel();
+        let recovery_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut recovery_output, "RECOVERY_COMPLETED");
+            recovery_completed_tx.send(result).unwrap();
+            let _ = std::io::copy(&mut recovery_output, &mut std::io::sink());
+        });
+        let recovery_completed_while_writer_was_live = recovery_completed_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+
+        let mut contender = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::ordinary_reservation_contender_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .env("MOLD_TEST_GALLERY_NAME", desired)
+            .env("MOLD_TEST_GALLERY_EXPECTED_NAME", "live-publication-1.png")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut contender_input = contender.stdin.take().unwrap();
+        let mut contender_output = std::io::BufReader::new(contender.stdout.take().unwrap());
+        read_process_test_marker(&mut contender_output, "RESERVATION_STARTED").unwrap();
+        let (contender_acquired_tx, contender_acquired_rx) = std::sync::mpsc::channel();
+        let contender_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut contender_output, "RESERVATION_ACQUIRED");
+            contender_acquired_tx.send(result).unwrap();
+            contender_output
+        });
+        let contender_acquired_while_writer_was_live = contender_acquired_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_ok();
+
+        writeln!(writer_input, "PUBLISH").unwrap();
+        writer_input.flush().unwrap();
+        read_process_test_marker(&mut writer_output, "PUBLISHED").unwrap();
+        let _ = std::io::copy(&mut writer_output, &mut std::io::sink());
+        assert!(writer.wait().unwrap().success());
+
+        if !contender_acquired_while_writer_was_live {
+            contender_acquired_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("third process did not reserve after ordinary publication")
+                .unwrap();
+        }
+        let mut contender_output = contender_reader.join().unwrap();
+        writeln!(contender_input, "RELEASE").unwrap();
+        contender_input.flush().unwrap();
+        read_process_test_marker(&mut contender_output, "RESERVATION_RELEASED").unwrap();
+        let _ = std::io::copy(&mut contender_output, &mut std::io::sink());
+        assert!(contender.wait().unwrap().success());
+
+        if !recovery_completed_while_writer_was_live {
+            recovery_completed_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("recovery did not continue after ordinary publication")
+                .unwrap();
+        }
+        recovery_reader.join().unwrap();
+        assert!(recovery.wait().unwrap().success());
+
+        assert!(
+            !recovery_completed_while_writer_was_live,
+            "recovery swept a live ordinary reservation"
+        );
+        assert!(
+            !contender_acquired_while_writer_was_live,
+            "a third process reserved a gallery name while the writer was live"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(desired)).unwrap(),
+            b"ordinary publication"
+        );
+        assert!(!reservation_path(dir.path(), desired).exists());
+        let next = reserve_gallery_final_name_with_directory_sync(dir.path(), desired, &|_| Ok(()))
+            .unwrap();
+        assert_eq!(next.final_name(), "live-publication-1.png");
+        drop(next);
+    }
+
+    #[test]
+    fn recovery_reclaims_reservation_after_writer_process_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = "crashed-publication.png";
+        let mut writer = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::ordinary_reservation_publish_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .env("MOLD_TEST_GALLERY_NAME", desired)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut writer_input = writer.stdin.take().unwrap();
+        let mut writer_output = std::io::BufReader::new(writer.stdout.take().unwrap());
+        read_process_test_marker(&mut writer_output, "READY").unwrap();
+        assert!(reservation_path(dir.path(), desired).is_file());
+
+        let mut recovery = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_transaction::tests::reservation_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut recovery_output = std::io::BufReader::new(recovery.stdout.take().unwrap());
+        read_process_test_marker(&mut recovery_output, "RECOVERY_STARTED").unwrap();
+        let (recovery_completed_tx, recovery_completed_rx) = std::sync::mpsc::channel();
+        let recovery_reader = std::thread::spawn(move || {
+            let result = read_process_test_marker(&mut recovery_output, "RECOVERY_COMPLETED");
+            recovery_completed_tx.send(result).unwrap();
+            let _ = std::io::copy(&mut recovery_output, &mut std::io::sink());
+        });
+        assert!(
+            matches!(
+                recovery_completed_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "recovery bypassed a live crashed-writer candidate"
+        );
+
+        writeln!(writer_input, "CRASH").unwrap();
+        writer_input.flush().unwrap();
+        read_process_test_marker(&mut writer_output, "CRASHING").unwrap();
+        let _ = std::io::copy(&mut writer_output, &mut std::io::sink());
+        assert!(writer.wait().unwrap().success());
+
+        recovery_completed_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("recovery did not continue after the writer process exited")
+            .unwrap();
+        recovery_reader.join().unwrap();
+        assert!(recovery.wait().unwrap().success());
+
+        assert!(
+            !reservation_path(dir.path(), desired).exists(),
+            "recovery leaked the crashed writer's stale reservation"
+        );
+        let replacement =
+            reserve_gallery_final_name_with_directory_sync(dir.path(), desired, &|_| Ok(()))
+                .unwrap();
+        assert_eq!(replacement.final_name(), desired);
+        drop(replacement);
+        assert!(
+            !dir.path().join(TRANSACTION_DIR).exists(),
+            "recovery and replacement drop left transaction bookkeeping behind"
+        );
+    }
+
+    #[test]
     fn ordinary_reservation_drop_is_serialized_across_processes() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -2362,47 +2653,33 @@ mod tests {
                 },
             )
         });
-        begin_paused_rx.recv().unwrap();
+        assert!(
+            matches!(
+                begin_paused_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "batch begin bypassed the child process's live reservation authority"
+        );
         writeln!(child_input, "CHECK").unwrap();
         child_input.flush().unwrap();
         read_process_test_marker(&mut child_output, "CONTENDED").unwrap();
         writeln!(child_input, "DROP").unwrap();
         child_input.flush().unwrap();
         read_process_test_marker(&mut child_output, "DROP_STARTED").unwrap();
-        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
-        let completion_reader = std::thread::spawn(move || {
-            let result = read_process_test_marker(&mut child_output, "COMPLETED");
-            completed_tx.send(result).unwrap();
-            // Keep the pipe open and drain libtest's trailing result output;
-            // closing stdout immediately after the marker makes the helper
-            // process report a BrokenPipe even though the test passed.
-            let _ = std::io::copy(&mut child_output, &mut std::io::sink());
-        });
-        let completed_while_begin_was_paused =
-            match completed_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(result) => {
-                    result.unwrap();
-                    true
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-                Err(error) => panic!("reservation helper completion channel failed: {error}"),
-            };
+        read_process_test_marker(&mut child_output, "COMPLETED").unwrap();
+
+        begin_paused_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("batch begin did not continue after child reservation drop");
         continue_begin_tx.send(()).unwrap();
 
         let transaction = begin.join().unwrap();
-        if !completed_while_begin_was_paused {
-            completed_rx
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .expect("reservation drop did not complete after batch begin")
-                .unwrap();
-        }
-        completion_reader.join().unwrap();
+        // Keep the pipe open and drain libtest's trailing result output;
+        // closing stdout immediately after the marker makes the helper process
+        // report a BrokenPipe even though the test passed.
+        let _ = std::io::copy(&mut child_output, &mut std::io::sink());
         let status = child.wait().unwrap();
         assert!(status.success(), "reservation-drop helper failed: {status}");
-        assert!(
-            !completed_while_begin_was_paused,
-            "a separate process bypassed batch begin's filesystem authority"
-        );
         let transaction =
             transaction.expect("cross-process cleanup must not break batch reservation");
         assert!(reservation_path(dir.path(), "batch-process.png").is_file());
@@ -2412,6 +2689,22 @@ mod tests {
         );
         transaction.release_reservations();
         remove_failed_attempt(&transaction);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_sidecar_path_collapses_filesystem_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_gallery = dir.path().join("gallery");
+        fs::create_dir(&canonical_gallery).unwrap();
+        let gallery_alias = dir.path().join("gallery-alias");
+        std::os::unix::fs::symlink(&canonical_gallery, &gallery_alias).unwrap();
+
+        assert_eq!(
+            gallery_bookkeeping_sidecar_lock_path(&canonical_gallery).unwrap(),
+            gallery_bookkeeping_sidecar_lock_path(&gallery_alias).unwrap(),
+            "sidecar locking must retain one authority across filesystem aliases"
+        );
     }
 
     fn journal_post_publish_snapshot(transaction: &mut BatchTransaction, bytes: &[u8]) {
