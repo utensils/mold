@@ -1446,7 +1446,13 @@ settled-success prefix plus at most 1,024 materialized child states; callers
 page pending indices through a bounded cursor window. That window is a
 durability/memory bound, not a batch-size or GPU-count limit. Recovery still
 replays v1 full-snapshot journals, including the v1 replace-before-append crash
-window where the atomic snapshot is exactly one legal transition ahead.
+window where the atomic snapshot is exactly one legal transition ahead. A
+mixed journal is legal only as `v1* → v2*`; a v1 record after any v2 record,
+unknown future versions, sequence gaps, and attempt-generation drift fail
+closed in both state and receipt replay. A legacy parent whose active or
+out-of-order materialized set exceeds the v2 window remains in v1 drain mode:
+it accepts no new grants, persists legal v1 transitions across restarts, and
+switches once to v2 only after the sparse reducer is representable.
 
 ### 12.3 Parent and child model
 
@@ -1717,6 +1723,18 @@ rolled back one generation at a time before the current generation is
 recovered; a future generation or conflicting committed archive fails
 startup. Parent-owned directories are excluded from the legacy sweep so it
 cannot destroy transaction evidence before joint reconciliation.
+
+The parent and transaction are one cross-process authority domain. Begin and
+startup recovery acquire gallery bookkeeping, a stable gallery-root lock
+derived from the parent ID, then every generation-scoped attempt lock before
+releasing bookkeeping. Discovery collects names only before those claims; no
+parent/transaction journal read, incomplete-tail heal, archive validation, or
+cleanup happens first. The stable parent pathname is identity-checked,
+no-follow, and never unlinked, and its guard outlives the current transaction
+guard. Contention is nonblocking and parent-scoped, so unrelated parents can
+recover in parallel. Any error at a transaction delta write, flush, file
+fsync, or directory fsync boundary poisons that live transaction; it cannot
+reuse the sequence and only a fresh authoritative recovery may continue.
 
 External direct filesystem observers remain outside the logical API guarantee.
 

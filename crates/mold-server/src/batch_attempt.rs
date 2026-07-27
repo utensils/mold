@@ -8,7 +8,8 @@ use crate::batch_parent::{
     BatchChildLease, BatchParentState, CompletionDisposition, DurableBatchParent,
 };
 use crate::batch_transaction::{
-    BatchManifestState, BatchTransaction, GalleryPublicationGate, RecoveryReport,
+    claim_parent_and_attempt_authorities, claim_parent_authority, BatchManifestState,
+    BatchTransaction, GalleryPublicationGate, ParentAuthority, RecoveryReport,
     PARENT_AUTHORITY_DIR, TRANSACTION_DIR,
 };
 use anyhow::Context as _;
@@ -131,6 +132,9 @@ pub enum RecoveredParentOutcome {
 pub struct DurableBatchAttempt {
     parent: DurableBatchParent,
     transaction: BatchTransaction,
+    // Field order is deliberate: the generation transaction (and its attempt
+    // authority) must drop before the stable parent authority is released.
+    _parent_authority: ParentAuthority,
 }
 
 impl DurableBatchAttempt {
@@ -141,8 +145,15 @@ impl DurableBatchAttempt {
         records: Vec<GenerationRecord>,
     ) -> anyhow::Result<Self> {
         let total_children = records.len();
-        let transaction =
-            BatchTransaction::begin(output_dir, parent_id, 0, normalized_request, records)?;
+        let mut transaction = BatchTransaction::begin_parent_owned(
+            output_dir,
+            parent_id,
+            0,
+            normalized_request,
+            records,
+        )?;
+        let parent_authority = transaction.take_parent_authority()?;
+        parent_authority.validate_identity(output_dir, parent_id)?;
         let parent = DurableBatchParent::create(
             &parent_authority_dir(output_dir, parent_id),
             parent_id,
@@ -157,6 +168,7 @@ impl DurableBatchAttempt {
         Ok(Self {
             parent,
             transaction,
+            _parent_authority: parent_authority,
         })
     }
 
@@ -164,15 +176,27 @@ impl DurableBatchAttempt {
         output_dir: &Path,
         parent_id: &str,
     ) -> anyhow::Result<(Self, BatchAttemptReconciliation)> {
+        let generations = attempt_generations_names_only(output_dir, parent_id)?;
+        let (parent_authority, mut authorities) =
+            claim_parent_and_attempt_authorities(output_dir, parent_id, &generations)?;
         let parent_dir = parent_authority_dir(output_dir, parent_id);
         let mut parent = DurableBatchParent::recover_unfenced(&parent_dir)?;
         let generation = parent.attempt_generation();
-        let mut transaction = BatchTransaction::recover_exact(output_dir, parent_id, generation)?;
+        let authority = authorities.remove(&generation).with_context(|| {
+            format!("current batch attempt {parent_id}/{generation} is missing")
+        })?;
+        anyhow::ensure!(
+            authorities.is_empty(),
+            "stale batch attempts require startup joint recovery"
+        );
+        let mut transaction =
+            BatchTransaction::recover_exact_claimed(output_dir, parent_id, generation, authority)?;
         let report = reconcile_receipts(&mut parent, &mut transaction)?;
         Ok((
             Self {
                 parent,
                 transaction,
+                _parent_authority: parent_authority,
             },
             report,
         ))
@@ -343,6 +367,22 @@ pub fn reconcile_archived_commit(
     parent_id: &str,
     attempt_generation: u64,
 ) -> anyhow::Result<BatchAttemptReconciliation> {
+    let parent_authority = claim_parent_authority(output_dir, parent_id)?;
+    let mut parent =
+        DurableBatchParent::recover_unfenced(&parent_authority_dir(output_dir, parent_id))?;
+    let result =
+        reconcile_archived_commit_claimed(output_dir, parent_id, attempt_generation, &mut parent);
+    drop(parent);
+    drop(parent_authority);
+    result
+}
+
+fn reconcile_archived_commit_claimed(
+    output_dir: &Path,
+    parent_id: &str,
+    attempt_generation: u64,
+    parent: &mut DurableBatchParent,
+) -> anyhow::Result<BatchAttemptReconciliation> {
     let manifest_path = output_dir
         .join(TRANSACTION_DIR)
         .join(parent_id)
@@ -359,8 +399,6 @@ pub fn reconcile_archived_commit(
             manifest_path.display()
         )
     })?;
-    let mut parent =
-        DurableBatchParent::recover_unfenced(&parent_authority_dir(output_dir, parent_id))?;
     anyhow::ensure!(
         parent.parent_id() == manifest.parent_id
             && parent.attempt_generation() == attempt_generation
@@ -385,7 +423,7 @@ pub fn reconcile_archived_commit(
         );
     }
     let was_committed = parent.state() == BatchParentState::Committed;
-    roll_parent_to_committed(&mut parent)?;
+    roll_parent_to_committed(parent)?;
     Ok(BatchAttemptReconciliation {
         parent_rolled_forward: !was_committed,
         ..BatchAttemptReconciliation::default()
@@ -404,32 +442,47 @@ pub async fn recover_batches(
     std::fs::create_dir_all(output_dir)?;
     let root = output_dir.join(TRANSACTION_DIR);
     let mut parent_ids = Vec::new();
-    if root.is_dir() {
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            if !entry.path().is_dir() || !entry.path().join(PARENT_AUTHORITY_DIR).is_dir() {
-                continue;
+    match std::fs::read_dir(&root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let parent_id = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("batch parent directory name is not UTF-8"))?;
+                if matches!(parent_id.as_str(), "reservations" | ".attempt-locks") {
+                    continue;
+                }
+                parent_ids.push(parent_id);
             }
-            let parent_id = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("batch parent directory name is not UTF-8"))?;
-            parent_ids.push(parent_id);
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     parent_ids.sort();
 
     let mut report = JointBatchRecoveryReport {
-        parents_discovered: parent_ids.len(),
+        parents_discovered: 0,
         ..JointBatchRecoveryReport::default()
     };
     for parent_id in parent_ids {
-        let probe =
-            DurableBatchParent::recover_unfenced(&parent_authority_dir(output_dir, &parent_id))?;
-        let generation = probe.attempt_generation();
-        let state = probe.state();
-        drop(probe);
-        for stale_generation in attempt_generations(output_dir, &parent_id)? {
+        // Discovery above and here collects names only. No manifest, journal,
+        // archive, or path metadata is observed until the stable parent and
+        // every discovered generation authority are jointly claimed.
+        let discovered_generations = attempt_generations_names_only(output_dir, &parent_id)?;
+        let (parent_authority, mut authorities) =
+            claim_parent_and_attempt_authorities(output_dir, &parent_id, &discovered_generations)?;
+        let parent_dir = parent_authority_dir(output_dir, &parent_id);
+        if !parent_dir.is_dir() {
+            drop(authorities);
+            drop(parent_authority);
+            continue;
+        }
+        report.parents_discovered += 1;
+        let mut parent = DurableBatchParent::recover_unfenced(&parent_dir)?;
+        let generation = parent.attempt_generation();
+        let state = parent.state();
+        for stale_generation in discovered_generations.iter().copied() {
             anyhow::ensure!(
                 stale_generation <= generation,
                 "batch transaction generation {stale_generation} is ahead of parent authority {parent_id}/{generation}"
@@ -437,17 +490,24 @@ pub async fn recover_batches(
             if stale_generation == generation {
                 continue;
             }
-            let mut stale =
-                BatchTransaction::recover_exact(output_dir, &parent_id, stale_generation)
-                    .with_context(|| {
-                        format!("claiming stale batch transaction {parent_id}/{stale_generation}")
-                    })?;
+            let authority = authorities
+                .remove(&stale_generation)
+                .context("claimed stale batch attempt authority disappeared")?;
+            let mut stale = BatchTransaction::recover_exact_claimed(
+                output_dir,
+                &parent_id,
+                stale_generation,
+                authority,
+            )
+            .with_context(|| {
+                format!("loading stale batch transaction {parent_id}/{stale_generation}")
+            })?;
             stale.rollback_private_attempt().with_context(|| {
                 format!("retiring stale batch transaction {parent_id}/{stale_generation}")
             })?;
             report.stale_attempts_rolled_back += 1;
         }
-        for archived_generation in archived_generations(output_dir, &parent_id)? {
+        for archived_generation in archived_generations_names_only(output_dir, &parent_id)? {
             anyhow::ensure!(
                 archived_generation == generation,
                 "committed archive {parent_id}/{archived_generation} conflicts with parent generation {generation}"
@@ -458,13 +518,16 @@ pub async fn recover_batches(
             .join(&parent_id)
             .join(COMMITTED_DIR)
             .join(format!("{generation}.json"));
-        let attempt = output_dir
-            .join(TRANSACTION_DIR)
-            .join(&parent_id)
-            .join("attempts")
-            .join(generation.to_string());
-        if attempt.is_dir() {
-            let (mut bridge, reconciled) = DurableBatchAttempt::recover(output_dir, &parent_id)?;
+        if let Some(authority) = authorities.remove(&generation) {
+            let mut transaction = BatchTransaction::recover_exact_claimed(
+                output_dir, &parent_id, generation, authority,
+            )?;
+            let reconciled = reconcile_receipts(&mut parent, &mut transaction)?;
+            let mut bridge = DurableBatchAttempt {
+                parent,
+                transaction,
+                _parent_authority: parent_authority,
+            };
             report.receipts_removed += reconciled.receipts_removed;
             report.leases_requeued += reconciled.leases_requeued;
             let action = recovery_action(
@@ -533,6 +596,10 @@ pub async fn recover_batches(
             }
             continue;
         }
+        anyhow::ensure!(
+            authorities.is_empty(),
+            "unconsumed batch attempt authorities remain after recovery"
+        );
         let evidence = if archive.is_file() {
             TransactionEvidence::CommittedArchive
         } else {
@@ -540,7 +607,12 @@ pub async fn recover_batches(
         };
         match recovery_action(state, evidence)? {
             RecoveryAction::RollForwardArchive => {
-                let reconciled = reconcile_archived_commit(output_dir, &parent_id, generation)?;
+                let reconciled = reconcile_archived_commit_claimed(
+                    output_dir,
+                    &parent_id,
+                    generation,
+                    &mut parent,
+                )?;
                 report.parents_rolled_forward += usize::from(reconciled.parent_rolled_forward);
                 report.outcomes.push(RecoveredParentOutcome::Committed {
                     parent_id,
@@ -549,7 +621,12 @@ pub async fn recover_batches(
             }
             RecoveryAction::AlreadyCommitted => {
                 if evidence == TransactionEvidence::CommittedArchive {
-                    reconcile_archived_commit(output_dir, &parent_id, generation)?;
+                    reconcile_archived_commit_claimed(
+                        output_dir,
+                        &parent_id,
+                        generation,
+                        &mut parent,
+                    )?;
                 }
                 report.outcomes.push(RecoveredParentOutcome::Committed {
                     parent_id,
@@ -576,41 +653,41 @@ pub async fn recover_batches(
                 unreachable!("missing transaction cannot select an active recovery action")
             }
         }
+        drop(parent);
+        drop(parent_authority);
     }
     report.legacy_transactions =
         crate::batch_transaction::recover_transactions(output_dir, gate, db).await?;
     Ok(report)
 }
 
-fn numeric_children(directory: &Path) -> anyhow::Result<Vec<u64>> {
-    if !directory.is_dir() {
-        return Ok(Vec::new());
-    }
+fn numeric_child_names(directory: &Path) -> anyhow::Result<Vec<u64>> {
     let mut generations = Vec::new();
-    for entry in std::fs::read_dir(directory)? {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(generations),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
-        if !entry.path().is_dir() && entry.path().extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("batch generation name is not UTF-8"))?;
         let number = name.strip_suffix(".json").unwrap_or(&name);
-        generations.push(number.parse::<u64>().with_context(|| {
-            format!(
-                "batch generation path is not numeric: {}",
-                entry.path().display()
-            )
-        })?);
+        generations.push(
+            number
+                .parse::<u64>()
+                .with_context(|| format!("batch generation name is not numeric: {name}"))?,
+        );
     }
     generations.sort_unstable();
     generations.dedup();
     Ok(generations)
 }
 
-fn attempt_generations(output_dir: &Path, parent_id: &str) -> anyhow::Result<Vec<u64>> {
-    numeric_children(
+fn attempt_generations_names_only(output_dir: &Path, parent_id: &str) -> anyhow::Result<Vec<u64>> {
+    numeric_child_names(
         &output_dir
             .join(TRANSACTION_DIR)
             .join(parent_id)
@@ -618,8 +695,8 @@ fn attempt_generations(output_dir: &Path, parent_id: &str) -> anyhow::Result<Vec
     )
 }
 
-fn archived_generations(output_dir: &Path, parent_id: &str) -> anyhow::Result<Vec<u64>> {
-    numeric_children(
+fn archived_generations_names_only(output_dir: &Path, parent_id: &str) -> anyhow::Result<Vec<u64>> {
+    numeric_child_names(
         &output_dir
             .join(TRANSACTION_DIR)
             .join(parent_id)
@@ -639,6 +716,7 @@ mod tests {
     use super::*;
     use mold_core::{GenerateRequest, OutputFormat, OutputMetadata};
     use mold_db::RecordSource;
+    use std::io::{BufRead as _, Write as _};
 
     fn record(name: &str, seed: u64, count: u32) -> GenerationRecord {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
@@ -661,6 +739,186 @@ mod tests {
             RecordSource::Server,
             1,
         )
+    }
+
+    fn write_process_marker(marker: &str) {
+        println!("MOLD_PARENT_AUTHORITY_TEST:{marker}");
+        std::io::stdout().flush().unwrap();
+    }
+
+    fn read_process_marker(reader: &mut impl std::io::BufRead, expected: &str) {
+        let expected = format!("MOLD_PARENT_AUTHORITY_TEST:{expected}");
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            if line.trim() == expected {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper retaining stable parent and attempt authority"]
+    fn durable_parent_authority_process_helper() {
+        let output_dir = PathBuf::from(
+            std::env::var_os("MOLD_TEST_GALLERY_OUTPUT")
+                .expect("MOLD_TEST_GALLERY_OUTPUT must be set"),
+        );
+        let mut bridge = DurableBatchAttempt::begin(
+            &output_dir,
+            "owned-parent",
+            serde_json::json!({}),
+            vec![record("owned.png", 0, 1)],
+        )
+        .unwrap();
+        if std::env::var_os("MOLD_TEST_ARCHIVED_PARENT").is_some() {
+            bridge.start().unwrap();
+            let (lease, _) = bridge.grant(0).unwrap();
+            bridge.stage_and_accept(&lease, b"owned").unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(
+                    bridge.converge_commit(&GalleryPublicationGate::default(), Arc::new(None)),
+                )
+                .unwrap();
+        } else if std::env::var_os("MOLD_TEST_INCOMPLETE_PARENT_TAIL").is_some() {
+            let journal =
+                parent_authority_dir(&output_dir, "owned-parent").join("parent-journal.jsonl");
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(journal)
+                .unwrap();
+            file.write_all(b"{incomplete").unwrap();
+            file.sync_all().unwrap();
+        }
+        write_process_marker("READY");
+        let mut command = String::new();
+        std::io::BufReader::new(std::io::stdin())
+            .read_line(&mut command)
+            .unwrap();
+        assert_eq!(command.trim(), "EXIT");
+    }
+
+    #[test]
+    fn stable_parent_authority_fences_recovery_before_incomplete_tail_healing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_attempt::tests::durable_parent_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .env("MOLD_TEST_INCOMPLETE_PARENT_TAIL", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_input = owner.stdin.take().unwrap();
+        let mut owner_output = std::io::BufReader::new(owner.stdout.take().unwrap());
+        read_process_marker(&mut owner_output, "READY");
+
+        let journal = parent_authority_dir(dir.path(), "owned-parent").join("parent-journal.jsonl");
+        let before = std::fs::read(&journal).unwrap();
+        let error = DurableBatchAttempt::recover(dir.path(), "owned-parent").unwrap_err();
+        error
+            .downcast_ref::<crate::batch_transaction::BatchParentAuthorityContended>()
+            .expect("same-parent recovery must return typed parent contention");
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+
+        // A distinct parent is independent; the stable authority is not a
+        // gallery-global serialization point.
+        let other = DurableBatchAttempt::begin(
+            dir.path(),
+            "other-parent",
+            serde_json::json!({}),
+            vec![record("other.png", 0, 1)],
+        )
+        .unwrap();
+        drop(other);
+
+        writeln!(owner_input, "EXIT").unwrap();
+        owner_input.flush().unwrap();
+        assert!(owner.wait().unwrap().success());
+        let recovered = DurableBatchAttempt::recover(dir.path(), "owned-parent").unwrap();
+        drop(recovered);
+    }
+
+    #[test]
+    fn archived_commit_reconciliation_is_fenced_by_live_parent_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "batch_attempt::tests::durable_parent_authority_process_helper",
+                "--nocapture",
+            ])
+            .env("MOLD_TEST_GALLERY_OUTPUT", dir.path())
+            .env("MOLD_TEST_ARCHIVED_PARENT", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owner_input = owner.stdin.take().unwrap();
+        let mut owner_output = std::io::BufReader::new(owner.stdout.take().unwrap());
+        read_process_marker(&mut owner_output, "READY");
+
+        let journal = parent_authority_dir(dir.path(), "owned-parent").join("parent-journal.jsonl");
+        let before = std::fs::read(&journal).unwrap();
+        let error = reconcile_archived_commit(dir.path(), "owned-parent", 0).unwrap_err();
+        error
+            .downcast_ref::<crate::batch_transaction::BatchParentAuthorityContended>()
+            .expect("archive reconciliation must return typed parent contention");
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+
+        writeln!(owner_input, "EXIT").unwrap();
+        owner_input.flush().unwrap();
+        assert!(owner.wait().unwrap().success());
+        assert!(reconcile_archived_commit(dir.path(), "owned-parent", 0).is_ok());
+    }
+
+    #[test]
+    fn parent_authority_identity_and_drop_order_are_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let bridge = DurableBatchAttempt::begin(
+            dir.path(),
+            "parent",
+            serde_json::json!({}),
+            vec![record("child.png", 0, 1)],
+        )
+        .unwrap();
+        let stable_lock = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".mold-batch-parent-"))
+            })
+            .expect("joint begin must create a root-level stable parent authority");
+        assert!(claim_parent_authority(dir.path(), "parent").is_err());
+        assert!(bridge
+            ._parent_authority
+            .validate_identity(other_dir.path(), "parent")
+            .is_err());
+        assert!(bridge
+            ._parent_authority
+            .validate_identity(dir.path(), "other-parent")
+            .is_err());
+        drop(bridge);
+        assert!(
+            stable_lock.is_file(),
+            "parent authority pathname must never be cleanup-removed"
+        );
+        let reacquired = claim_parent_authority(dir.path(), "parent").unwrap();
+        reacquired.validate_identity(dir.path(), "parent").unwrap();
+        drop(reacquired);
+        assert!(stable_lock.is_file());
     }
 
     #[test]
@@ -1165,12 +1423,13 @@ mod tests {
             .complete(&retry, crate::batch_parent::ChildCompletion::Failed)
             .unwrap();
         bridge.parent.begin_retry().unwrap();
-        let current = BatchTransaction::begin(
+        let current = BatchTransaction::begin_under_parent_authority(
             dir.path(),
             "parent",
             1,
             serde_json::json!({}),
             vec![record("new.png", 0, 1)],
+            &bridge._parent_authority,
         )
         .unwrap();
         drop(bridge);
@@ -1254,12 +1513,13 @@ mod tests {
                         .unwrap();
                     bridge.transaction.rollback_private_attempt().unwrap();
                     bridge.parent.begin_retry().unwrap();
-                    bridge.transaction = BatchTransaction::begin(
+                    bridge.transaction = BatchTransaction::begin_under_parent_authority(
                         dir.path(),
                         "parent",
                         1,
                         serde_json::json!({}),
                         vec![record("retry.png", 0, 1)],
+                        &bridge._parent_authority,
                     )
                     .unwrap();
                 }

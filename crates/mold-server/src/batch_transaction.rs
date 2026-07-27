@@ -26,6 +26,7 @@ const DELETED_ARCHIVE_CHILDREN_DIR: &str = "deleted-archive-children";
 const DELETED_ARCHIVE_CHILD_VERSION: u32 = 1;
 const LEGACY_ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
 const ATTEMPT_LOCK_PREFIX: &str = ".mold-batch-attempt-";
+const PARENT_LOCK_PREFIX: &str = ".mold-batch-parent-";
 const ATTEMPT_LOCK_SUFFIX: &str = ".lock";
 const MANIFEST_VERSION_V1: u32 = 1;
 const MANIFEST_VERSION: u32 = 2;
@@ -570,6 +571,10 @@ pub struct BatchTransaction {
     // through publication, archive/rollback cleanup, and Drop. Recovery may
     // inspect or mutate an attempt only after claiming the same authority.
     _attempt_authority: AttemptAuthority,
+    // Joint parent-owned attempts retain the stable parent authority after
+    // the generation-scoped authority. Field order is load-bearing: Rust
+    // drops `_attempt_authority` before `_parent_authority`.
+    _parent_authority: Option<ParentAuthority>,
     manifest: BatchAttemptManifest,
     next_journal_sequence: u64,
     journaled_final_children: BTreeSet<usize>,
@@ -582,16 +587,18 @@ pub struct BatchTransaction {
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
+    #[cfg(test)]
+    delta_append_failpoint: Option<DeltaAppendFailpoint>,
 }
 
 #[derive(Debug)]
-struct LockedAuthorityFile {
+pub(crate) struct LockedAuthorityFile {
     file: Option<File>,
     path: PathBuf,
 }
 
 #[derive(Debug)]
-enum AttemptAuthority {
+pub(crate) enum AttemptAuthority {
     Held {
         legacy: LockedAuthorityFile,
         current: LockedAuthorityFile,
@@ -603,6 +610,42 @@ enum AttemptAuthority {
     // Production construction has no unclaimed variant.
     #[cfg(test)]
     Unclaimed,
+}
+
+#[derive(Debug)]
+pub(crate) struct ParentAuthority {
+    file: Option<File>,
+    path: PathBuf,
+    canonical_output_dir: PathBuf,
+    parent_id: String,
+}
+
+impl ParentAuthority {
+    pub(crate) fn validate_identity(
+        &self,
+        output_dir: &Path,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.parent_id == parent_id
+                && self.canonical_output_dir == fs::canonicalize(output_dir)?
+                && self.path == parent_authority_lock_path(output_dir, parent_id)?,
+            "batch parent authority identity drift"
+        );
+        Ok(())
+    }
+}
+
+impl Drop for ParentAuthority {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.as_ref() {
+            let _ = fs2::FileExt::unlock(file);
+        }
+        drop(self.file.take());
+        // The stable parent pathname is deliberately never unlinked. Every
+        // claimant opens this same inode under gallery bookkeeping, so a
+        // replaceable lockfile can never split parent authority.
+    }
 }
 
 impl Drop for AttemptAuthority {
@@ -759,6 +802,15 @@ enum CommitFailpoint {
     AttemptsDirectoryFsync,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeltaAppendFailpoint {
+    Open,
+    Write,
+    Flush,
+    FileSync,
+    DirectorySync,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
     pub rolled_back: usize,
@@ -773,6 +825,12 @@ pub struct RecoveryReport {
 pub struct BatchAttemptAuthorityContended {
     pub parent_id: String,
     pub attempt_generation: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("batch parent {parent_id} is still owned by another live process")]
+pub struct BatchParentAuthorityContended {
+    pub parent_id: String,
 }
 
 impl BatchTransaction {
@@ -811,6 +869,7 @@ impl BatchTransaction {
             records,
             || {},
             after_reservation_directory_created,
+            false,
         )
     }
 
@@ -831,9 +890,56 @@ impl BatchTransaction {
             records,
             after_attempt_directory_created,
             || {},
+            false,
         )
     }
 
+    pub(crate) fn begin_parent_owned(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+        normalized_request: serde_json::Value,
+        records: Vec<GenerationRecord>,
+    ) -> anyhow::Result<Self> {
+        Self::begin_with_hooks(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            normalized_request,
+            records,
+            || {},
+            || {},
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_under_parent_authority(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+        normalized_request: serde_json::Value,
+        records: Vec<GenerationRecord>,
+        parent_authority: &ParentAuthority,
+    ) -> anyhow::Result<Self> {
+        parent_authority.validate_identity(output_dir, parent_id)?;
+        // The stable parent authority is already retained by the caller.
+        // `begin` acquires bookkeeping and then the generation authority, so
+        // retry preserves parent -> attempt lifetime ordering without trying
+        // to recursively lock the parent.
+        Self::begin(
+            output_dir,
+            parent_id,
+            attempt_generation,
+            normalized_request,
+            records,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test hooks and the parent-claim mode are explicit durability boundaries"
+    )]
     fn begin_with_hooks(
         output_dir: &Path,
         parent_id: &str,
@@ -842,6 +948,7 @@ impl BatchTransaction {
         mut records: Vec<GenerationRecord>,
         after_attempt_directory_created: impl FnOnce(),
         after_reservation_directory_created: impl FnOnce(),
+        claim_parent_authority: bool,
     ) -> anyhow::Result<Self> {
         validate_component(parent_id, "parent id")?;
         ensure!(!records.is_empty(), "batch transaction must have children");
@@ -858,10 +965,20 @@ impl BatchTransaction {
         // create-new reservation.
         // This slot is declared before bookkeeping so panic unwinding releases
         // the later bookkeeping guard before dropping an owned attempt.
+        let mut parent_authority_for_unwind: Option<ParentAuthority> = None;
         let mut attempt_authority_for_unwind: Option<AttemptAuthority>;
         let _bookkeeping_lock = acquire_gallery_bookkeeping_lock(output_dir)?;
         let canonical_output_dir = _bookkeeping_lock.canonical_root().to_path_buf();
         sweep_reclaimable_attempt_authorities(&_bookkeeping_lock)?;
+        if claim_parent_authority {
+            parent_authority_for_unwind = Some(
+                try_claim_parent_authority(parent_id, &_bookkeeping_lock)?.ok_or_else(|| {
+                    BatchParentAuthorityContended {
+                        parent_id: parent_id.to_owned(),
+                    }
+                })?,
+            );
+        }
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
         let attempts_root = attempt_dir
             .parent()
@@ -1008,6 +1125,7 @@ impl BatchTransaction {
             output_dir: canonical_output_dir,
             attempt_dir,
             _attempt_authority: attempt_authority,
+            _parent_authority: parent_authority_for_unwind.take(),
             manifest,
             next_journal_sequence: 0,
             journaled_final_children: BTreeSet::new(),
@@ -1020,6 +1138,8 @@ impl BatchTransaction {
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
+            #[cfg(test)]
+            delta_append_failpoint: None,
         };
         if let Err(error) = transaction.persist_manifest() {
             transaction.release_reservations();
@@ -1033,25 +1153,23 @@ impl BatchTransaction {
         &self.manifest
     }
 
+    pub(crate) fn take_parent_authority(&mut self) -> anyhow::Result<ParentAuthority> {
+        self._parent_authority
+            .take()
+            .context("joint batch transaction has no parent authority")
+    }
+
     pub(crate) fn protocol_version(&self) -> u32 {
         self.manifest.version
     }
 
-    pub(crate) fn recover_exact(
+    pub(crate) fn recover_exact_claimed(
         output_dir: &Path,
         parent_id: &str,
         attempt_generation: u64,
+        authority: AttemptAuthority,
     ) -> anyhow::Result<Self> {
-        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
         let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
-        let authority =
-            try_claim_attempt_authority(&attempt_dir, &bookkeeping)?.ok_or_else(|| {
-                BatchAttemptAuthorityContended {
-                    parent_id: parent_id.to_owned(),
-                    attempt_generation,
-                }
-            })?;
-        drop(bookkeeping);
         Self::load_claimed(output_dir, &attempt_dir.join(MANIFEST_FILE), authority)
     }
 
@@ -1640,22 +1758,49 @@ impl BatchTransaction {
     }
 
     fn append_journal(&mut self, event: BatchJournalEvent) -> anyhow::Result<()> {
-        let record = BatchJournalRecord {
-            sequence: self.next_journal_sequence,
-            attempt_generation: self.manifest.attempt_generation,
-            event,
-        };
-        let path = self.attempt_dir.join(JOURNAL_FILE);
-        let mut bytes = serde_json::to_vec(&record)?;
-        bytes.push(b'\n');
-        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        sync_dir(&self.attempt_dir)?;
-        self.next_journal_sequence = self
-            .next_journal_sequence
-            .checked_add(1)
-            .context("batch journal sequence overflow")?;
+        self.ensure_usable()?;
+        let result = (|| {
+            let record = BatchJournalRecord {
+                sequence: self.next_journal_sequence,
+                attempt_generation: self.manifest.attempt_generation,
+                event,
+            };
+            let path = self.attempt_dir.join(JOURNAL_FILE);
+            let mut bytes = serde_json::to_vec(&record)?;
+            bytes.push(b'\n');
+            self.inject_delta_append_error(DeltaAppendFailpoint::Open)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+            file.write_all(&bytes)?;
+            self.inject_delta_append_error(DeltaAppendFailpoint::Write)?;
+            file.flush()?;
+            self.inject_delta_append_error(DeltaAppendFailpoint::Flush)?;
+            file.sync_all()?;
+            self.inject_delta_append_error(DeltaAppendFailpoint::FileSync)?;
+            sync_dir(&self.attempt_dir)?;
+            self.inject_delta_append_error(DeltaAppendFailpoint::DirectorySync)?;
+            self.next_journal_sequence = self
+                .next_journal_sequence
+                .checked_add(1)
+                .context("batch journal sequence overflow")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn inject_delta_append_error(&mut self, point: DeltaAppendFailpoint) -> anyhow::Result<()> {
+        if self.delta_append_failpoint == Some(point) {
+            self.delta_append_failpoint = None;
+            anyhow::bail!("injected batch delta append fault at {point:?}");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    fn inject_delta_append_error(&mut self, _point: DeltaAppendFailpoint) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -1818,13 +1963,18 @@ impl BatchTransaction {
             "unsupported batch manifest version {}",
             manifest.version
         );
-        let next_journal_sequence = journal
-            .last()
-            .map_or(0, |record| record.sequence.saturating_add(1));
+        let next_journal_sequence = match journal.last() {
+            Some(record) => record
+                .sequence
+                .checked_add(1)
+                .context("batch transaction journal sequence overflow")?,
+            None => 0,
+        };
         Ok(Self {
             output_dir: output_dir.to_path_buf(),
             attempt_dir,
             _attempt_authority: attempt_authority,
+            _parent_authority: None,
             manifest,
             next_journal_sequence,
             journaled_final_children: replay.published_children,
@@ -1837,6 +1987,8 @@ impl BatchTransaction {
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
+            #[cfg(test)]
+            delta_append_failpoint: None,
         })
     }
 
@@ -2999,6 +3151,88 @@ fn try_claim_attempt_authority(
     bookkeeping: &GalleryBookkeepingGuard,
 ) -> anyhow::Result<Option<AttemptAuthority>> {
     try_claim_attempt_authority_with_post_lock_hook(attempt_dir, bookkeeping, |_| {})
+}
+
+fn try_claim_parent_authority(
+    parent_id: &str,
+    bookkeeping: &GalleryBookkeepingGuard,
+) -> anyhow::Result<Option<ParentAuthority>> {
+    validate_component(parent_id, "batch parent id")?;
+    let lock_path = parent_authority_lock_path(&bookkeeping.canonical_output_dir, parent_id)?;
+    let Some(authority) = try_claim_authority_file(
+        &lock_path,
+        &bookkeeping
+            .canonical_output_dir
+            .join(TRANSACTION_DIR)
+            .join(parent_id),
+        bookkeeping,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ParentAuthority {
+        file: authority.file,
+        path: authority.path,
+        canonical_output_dir: bookkeeping.canonical_output_dir.clone(),
+        parent_id: parent_id.to_owned(),
+    }))
+}
+
+pub(crate) fn claim_parent_authority(
+    output_dir: &Path,
+    parent_id: &str,
+) -> anyhow::Result<ParentAuthority> {
+    fs::create_dir_all(output_dir)?;
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
+        BatchParentAuthorityContended {
+            parent_id: parent_id.to_owned(),
+        }
+        .into()
+    })
+}
+
+pub(crate) fn claim_parent_and_attempt_authorities(
+    output_dir: &Path,
+    parent_id: &str,
+    generations: &[u64],
+) -> anyhow::Result<(ParentAuthority, BTreeMap<u64, AttemptAuthority>)> {
+    fs::create_dir_all(output_dir)?;
+    let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+    let parent = try_claim_parent_authority(parent_id, &bookkeeping)?.ok_or_else(|| {
+        BatchParentAuthorityContended {
+            parent_id: parent_id.to_owned(),
+        }
+    })?;
+    let mut attempts = BTreeMap::new();
+    for generation in generations.iter().copied() {
+        let directory = attempt_dir(output_dir, parent_id, generation);
+        let authority =
+            try_claim_attempt_authority(&directory, &bookkeeping)?.ok_or_else(|| {
+                BatchAttemptAuthorityContended {
+                    parent_id: parent_id.to_owned(),
+                    attempt_generation: generation,
+                }
+            })?;
+        attempts.insert(generation, authority);
+    }
+    drop(bookkeeping);
+    parent.validate_identity(output_dir, parent_id)?;
+    Ok((parent, attempts))
+}
+
+fn parent_authority_lock_path(output_dir: &Path, parent_id: &str) -> anyhow::Result<PathBuf> {
+    validate_component(parent_id, "batch parent id")?;
+    let canonical_output = fs::canonicalize(output_dir)
+        .with_context(|| format!("canonicalizing gallery {}", output_dir.display()))?;
+    let mut identity = Sha256::new();
+    identity.update(b"mold.batch-parent-authority.v1\0");
+    identity.update((parent_id.len() as u64).to_le_bytes());
+    identity.update(parent_id.as_bytes());
+    Ok(canonical_output.join(format!(
+        "{PARENT_LOCK_PREFIX}{:x}{ATTEMPT_LOCK_SUFFIX}",
+        identity.finalize()
+    )))
 }
 
 fn try_claim_attempt_authority_with_post_lock_hook(
@@ -9322,6 +9556,44 @@ mod tests {
             "ChildStaged deltas are not constant-size: {} bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn uncertain_delta_append_boundaries_poison_until_recovery() {
+        for failpoint in [
+            DeltaAppendFailpoint::Open,
+            DeltaAppendFailpoint::Write,
+            DeltaAppendFailpoint::Flush,
+            DeltaAppendFailpoint::FileSync,
+            DeltaAppendFailpoint::DirectorySync,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut transaction = BatchTransaction::begin(
+                dir.path(),
+                "parent",
+                0,
+                serde_json::json!({}),
+                vec![record("one.png", 0)],
+            )
+            .unwrap();
+            transaction.delta_append_failpoint = Some(failpoint);
+            assert!(transaction.stage_bytes(0, b"one").is_err());
+            assert!(transaction.poisoned);
+            let sequence = transaction.next_journal_sequence;
+            let error = transaction
+                .append_journal(BatchJournalEvent::MetadataCommitted)
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("poisoned"));
+            assert_eq!(transaction.next_journal_sequence, sequence);
+
+            transaction.relinquish_attempt_authority_for_recovery();
+            let recovered =
+                BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE));
+            assert!(
+                recovered.is_ok(),
+                "recovery could not decide the durable prefix after {failpoint:?}: {recovered:?}"
+            );
+        }
     }
 
     #[test]
