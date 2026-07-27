@@ -121,7 +121,7 @@ pub struct GpuType {
     #[serde(rename = "gpuId", default)]
     pub gpu_id: String,
     #[serde(rename = "memoryInGb", default)]
-    pub memory_in_gb: u32,
+    pub memory_in_gb: Option<u32>,
     #[serde(rename = "secureCloud", default)]
     pub secure_cloud: bool,
     #[serde(rename = "communityCloud", default)]
@@ -145,6 +145,57 @@ impl GpuType {
                 (!gpu_id.is_empty()).then_some(gpu_id)
             })
     }
+
+    /// Allocation identity accepted by the Pod API. Provider IDs remain
+    /// authoritative; display-name inference exists only for legacy inventory
+    /// shapes that omitted both provider identity fields.
+    pub fn allocation_type_id(&self) -> Option<&str> {
+        self.authoritative_type_id().or_else(|| {
+            let legacy_id = legacy_gpu_type_id_from_display_name(&self.display_name);
+            (!legacy_id.is_empty()).then_some(legacy_id)
+        })
+    }
+}
+
+/// Legacy RunPod inventory exposed a human display label without an allocation
+/// ID. Keep this mapping centralized so every launcher makes the same fallback.
+pub fn legacy_gpu_type_id_from_display_name(display_name: &str) -> &str {
+    match display_name.trim() {
+        "RTX 4090" => "NVIDIA GeForce RTX 4090",
+        "RTX 5090" => "NVIDIA GeForce RTX 5090",
+        "RTX 3090" => "NVIDIA GeForce RTX 3090",
+        "L40S" => "NVIDIA L40S",
+        "L40" => "NVIDIA L40",
+        "A100 PCIe" => "NVIDIA A100 80GB PCIe",
+        "A100 SXM" => "NVIDIA A100-SXM4-80GB",
+        "H100 SXM" => "NVIDIA H100 80GB HBM3",
+        "H100 NVL" => "NVIDIA H100 NVL",
+        "RTX A6000" => "NVIDIA RTX A6000",
+        other => other,
+    }
+}
+
+pub fn normalized_gpu_type_identity(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+pub fn canonical_supported_gpu_type_id<'a>(
+    supported_gpu_ids: &'a HashSet<String>,
+    candidate_id: &str,
+) -> Option<&'a str> {
+    let candidate = normalized_gpu_type_identity(candidate_id);
+    if candidate.is_empty() {
+        return None;
+    }
+    supported_gpu_ids
+        .iter()
+        .filter(|supported| normalized_gpu_type_identity(supported) == candidate)
+        .map(String::as_str)
+        .min()
 }
 
 /// One entry from `GET /datacenters`.
@@ -873,6 +924,50 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(gpu.authoritative_type_id(), None);
+    }
+
+    #[test]
+    fn gpu_type_allocation_identity_uses_display_only_as_legacy_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": "  ",
+            "gpuId": "\t",
+            "displayName": "  RTX 5090 "
+        }))
+        .unwrap();
+        assert_eq!(gpu.allocation_type_id(), Some("NVIDIA GeForce RTX 5090"));
+
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "id": " provider-id ",
+            "gpuId": "alternate-id",
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        assert_eq!(gpu.allocation_type_id(), Some("provider-id"));
+    }
+
+    #[test]
+    fn gpu_type_memory_preserves_missing_and_present_zero() {
+        let missing: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "RTX 5090"
+        }))
+        .unwrap();
+        let zero: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "RTX 5090",
+            "memoryInGb": 0
+        }))
+        .unwrap();
+        assert_eq!(missing.memory_in_gb, None);
+        assert_eq!(zero.memory_in_gb, Some(0));
+    }
+
+    #[test]
+    fn supported_gpu_identity_matching_normalizes_case_and_whitespace() {
+        let supported = ["NVIDIA A100-SXM4-80GB".to_string()].into_iter().collect();
+        assert_eq!(
+            canonical_supported_gpu_type_id(&supported, "  nvidia   a100-sxm4-80gb "),
+            Some("NVIDIA A100-SXM4-80GB")
+        );
+        assert!(canonical_supported_gpu_type_id(&supported, " \t ").is_none());
     }
 
     #[test]

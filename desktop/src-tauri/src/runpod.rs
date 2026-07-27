@@ -1,7 +1,8 @@
 use mold_core::runpod::{
-    valid_network_volume_size, CreateNetworkVolumeRequest, CreatePodRequest, Datacenter, GpuType,
-    NetworkVolume, Pod, RunPodClient, UpdateNetworkVolumeRequest, DEFAULT_ENDPOINT,
-    NETWORK_VOLUME_MAX_GB, NETWORK_VOLUME_MIN_GB,
+    canonical_supported_gpu_type_id, normalized_gpu_type_identity, valid_network_volume_size,
+    CreateNetworkVolumeRequest, CreatePodRequest, Datacenter, GpuType, NetworkVolume, Pod,
+    RunPodClient, UpdateNetworkVolumeRequest, DEFAULT_ENDPOINT, NETWORK_VOLUME_MAX_GB,
+    NETWORK_VOLUME_MIN_GB,
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -211,15 +212,25 @@ impl RunPodLaunchClient for RunPodClient {
 }
 
 fn normalized_provider_identity(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
+    normalized_gpu_type_identity(value)
 }
 
 fn provider_gpu_id(gpu: &GpuType) -> Option<&str> {
-    gpu.authoritative_type_id()
+    gpu.allocation_type_id()
+}
+
+fn normalize_supported_inventory_gpu(
+    gpu: &mut GpuType,
+    supported_gpu_ids: &std::collections::HashSet<String>,
+) -> bool {
+    let Some(provider_id) = gpu.allocation_type_id() else {
+        return false;
+    };
+    let Some(supported_id) = canonical_supported_gpu_type_id(supported_gpu_ids, provider_id) else {
+        return false;
+    };
+    gpu.id = Some(supported_id.to_string());
+    true
 }
 
 fn resolve_provider_gpu<'a>(
@@ -293,18 +304,16 @@ where
         .supported_pod_gpu_type_ids()
         .await
         .map_err(|error| format!("Could not validate RunPod GPU launch support: {error:#}"))?;
-    if !supported_ids
-        .iter()
-        .any(|id| normalized_provider_identity(id) == normalized_provider_identity(provider_id))
-    {
+    let Some(supported_provider_id) = canonical_supported_gpu_type_id(&supported_ids, provider_id)
+    else {
         return Err(
             "The selected GPU is not currently accepted by RunPod's Pod API. Refresh inventory and choose another GPU."
                 .into(),
         );
-    }
-    input.gpu_type_id = provider_id.to_string();
+    };
+    input.gpu_type_id = supported_provider_id.to_string();
     input.gpu_display_name = provider_name.to_string();
-    let image_name = image_resolver(provider_id).await?;
+    let image_name = image_resolver(supported_provider_id).await?;
     build_request(input, hf_token, image_name)
 }
 
@@ -343,12 +352,7 @@ pub async fn runpod_overview(state: tauri::State<'_, AppState>) -> Result<RunPod
             SUPPORTED_POD_GPU_IDS.get_or_try_init(|| client.supported_pod_gpu_type_ids()),
         )
         .map_err(|e| format!("{e:#}"))?;
-    gpus.retain(|gpu| {
-        gpu.id
-            .as_deref()
-            .or_else(|| (!gpu.gpu_id.is_empty()).then_some(gpu.gpu_id.as_str()))
-            .is_some_and(|id| supported_gpu_ids.contains(id))
-    });
+    gpus.retain_mut(|gpu| normalize_supported_inventory_gpu(gpu, supported_gpu_ids));
     for pod in &mut pods {
         if pod.network_volume.is_none() {
             pod.network_volume = pod
@@ -545,12 +549,35 @@ mod tests {
             id: Some(id.into()),
             display_name: display_name.into(),
             gpu_id: String::new(),
-            memory_in_gb: 192,
+            memory_in_gb: Some(192),
             secure_cloud: true,
             community_cloud: false,
             stock_status: Some("High".into()),
             available: true,
         }
+    }
+
+    #[test]
+    fn inventory_filter_uses_trimmed_primary_then_alternate_then_display_fallback() {
+        let supported = [
+            "NVIDIA A100-SXM4-80GB".to_string(),
+            "NVIDIA GeForce RTX 5090".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut alternate = gpu(" \t ", "Misleading display");
+        alternate.gpu_id = "  nvidia a100-sxm4-80gb  ".into();
+        assert!(normalize_supported_inventory_gpu(
+            &mut alternate,
+            &supported
+        ));
+        assert_eq!(alternate.id.as_deref(), Some("NVIDIA A100-SXM4-80GB"));
+
+        let mut legacy = gpu("", "RTX 5090");
+        legacy.id = None;
+        assert!(normalize_supported_inventory_gpu(&mut legacy, &supported));
+        assert_eq!(legacy.id.as_deref(), Some("NVIDIA GeForce RTX 5090"));
     }
 
     fn input() -> RunPodCreateInput {
@@ -654,7 +681,7 @@ mod tests {
     async fn launch_normalizes_provider_id_and_uses_authoritative_b200_identity() {
         let client = FakeLaunchClient {
             gpu_types: vec![gpu("  B200-ID  ", "NVIDIA B200")],
-            supported_ids: ["b200-id".into()].into_iter().collect(),
+            supported_ids: ["B200-ID".into()].into_iter().collect(),
             ..Default::default()
         };
         let mut launch_input = input();
@@ -680,27 +707,23 @@ mod tests {
     async fn desktop_image_routing_uses_the_same_authoritative_id_as_allocation() {
         let client = FakeLaunchClient {
             gpu_types: vec![gpu("NVIDIA A100 80GB PCIe", "RTX 5090")],
-            supported_ids: ["nvidia a100 80gb pcie".into()].into_iter().collect(),
+            supported_ids: ["NVIDIA A100 80GB PCIe".into()].into_iter().collect(),
             ..Default::default()
         };
         let mut launch_input = input();
         launch_input.gpu_type_id = "NVIDIA A100 80GB PCIe".into();
         launch_input.gpu_display_name = "RTX 5090".into();
 
-        let result = prepare_pod_request_with_image_resolver(
-            &client,
-            launch_input,
-            None,
-            |identity| {
+        let result =
+            prepare_pod_request_with_image_resolver(&client, launch_input, None, |identity| {
                 let identity = identity.to_string();
                 async move {
                     assert_eq!(identity, "NVIDIA A100 80GB PCIe");
                     Ok("ghcr.io/utensils/mold:latest-sm80".into())
                 }
-            },
-        )
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.gpu_type_ids, ["NVIDIA A100 80GB PCIe"]);
         assert_eq!(result.image_name, "ghcr.io/utensils/mold:latest-sm80");

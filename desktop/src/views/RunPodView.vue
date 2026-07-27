@@ -402,7 +402,9 @@ onBeforeUnmount(() => {
             :value="gpu.id ?? gpu.gpuId"
             :disabled="!gpu.available"
           >
-            {{ gpu.displayName }} · {{ gpu.memoryInGb }} GB · {{ gpu.stockStatus ?? "No stock" }}
+            {{ gpu.displayName }} ·
+            {{ gpu.memoryInGb == null ? "VRAM unknown" : `${gpu.memoryInGb} GB` }} ·
+            {{ gpu.stockStatus ?? "No stock" }}
           </option>
         </select>
 

@@ -15,7 +15,11 @@ import {
   podHardwareSummary,
 } from "./runpod";
 
-const gpu = (displayName: string, stockStatus: string | null, memoryInGb: number): RunPodGpu => ({
+const gpu = (
+  displayName: string,
+  stockStatus: string | null,
+  memoryInGb: number | null,
+): RunPodGpu => ({
   id: displayName,
   displayName,
   memoryInGb,
@@ -31,12 +35,14 @@ describe("RunPod presentation helpers", () => {
       gpu("A100 80GB", "Medium", 80),
       gpu("RTX 4090", "High", 24),
       gpu("RTX 5090", "High", 32),
+      gpu("Unknown", "High", null),
       gpu("RTX 3090", "None", 24),
     ]);
 
     expect(ranked.map((entry) => entry.displayName)).toEqual([
       "RTX 4090",
       "RTX 5090",
+      "Unknown",
       "A100 80GB",
       "RTX 3090",
     ]);
