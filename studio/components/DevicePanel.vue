@@ -27,10 +27,20 @@ const emit = defineEmits<{
 }>();
 
 const compact = computed(() => props.devices.length <= 1);
+const CPU_UTILITY_DEVICE_ID = "cpu:utility:0";
 const nowUnixMs = ref(Date.now());
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 const blocked = computed(
   () => props.plan?.work_items.filter((work) => blockedReason(work)) ?? [],
+);
+const cpuUtilityWork = computed(
+  () =>
+    props.plan?.work_items
+      .filter((work) => work.planned_device_id === CPU_UTILITY_DEVICE_ID)
+      .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
+);
+const hasComputeLanes = computed(
+  () => props.devices.length > 0 || cpuUtilityWork.value.length > 0,
 );
 const lifecycleNote = computed(() => {
   if (!props.showControls) return null;
@@ -95,6 +105,11 @@ function eta(work: QueueWorkItem): string {
   if (finish == null) return "ETA pending";
   const seconds = Math.max(0, Math.ceil((finish - nowUnixMs.value) / 1000));
   return `~${seconds}s · ${work.estimate_confidence} confidence`;
+}
+
+function workKindLabel(kind: string): string {
+  const words = kind.replaceAll("_", " ");
+  return words.length ? `${words[0]!.toUpperCase()}${words.slice(1)}` : "Work";
 }
 
 function replanLabel(): string | null {
@@ -162,7 +177,7 @@ onBeforeUnmount(() => {
       {{ lifecycleNote }}
     </p>
 
-    <p v-if="devices.length === 0" class="device-panel__empty">
+    <p v-if="!hasComputeLanes" class="device-panel__empty">
       No compute devices visible.
     </p>
     <div v-else class="device-panel__grid">
@@ -226,6 +241,30 @@ onBeforeUnmount(() => {
         >
           {{ toggleLabel(device) }}
         </button>
+      </article>
+      <article
+        v-if="cpuUtilityWork.length"
+        class="device-card device-card--utility"
+        data-test="cpu-utility-lane"
+      >
+        <div class="device-card__title">
+          <span class="device-card__name">Host utility</span>
+          <span class="device-card__badge">CPU</span>
+        </div>
+        <div class="device-card__meta">
+          <code>{{ CPU_UTILITY_DEVICE_ID }}</code>
+          <span>One task at a time</span>
+        </div>
+        <div class="device-card__metrics">
+          <span>Prompt expansion and upscaling</span>
+          <span>Uses available system memory</span>
+        </div>
+        <ol class="device-card__lane" data-test="cpu-utility-lane-list">
+          <li v-for="work in cpuUtilityWork" :key="work.work_id">
+            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
+            {{ eta(work) }}
+          </li>
+        </ol>
       </article>
     </div>
 

@@ -172,6 +172,45 @@ describe("DevicePanel", () => {
     );
   });
 
+  it("keeps CPU utility work visible without presenting it as a mutable GPU", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [device(0)],
+        mutable: true,
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "expand-parent-1",
+              parent_id: "parent-1",
+              work_kind: "prompt_expansion",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: "cpu:utility:0",
+              lane_order: 0,
+              estimated_finish_unix_ms: Date.now() + 5_000,
+              estimate_confidence: "medium",
+              activity_phase: "cpu",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(1);
+    const utility = wrapper.get('[data-test="cpu-utility-lane"]');
+    expect(utility.text()).toContain("Host utility");
+    expect(utility.text()).toContain("CPU");
+    expect(utility.text()).toContain("expand-parent-1");
+    expect(utility.text()).toContain("Prompt expansion");
+    expect(utility.find("button").exists()).toBe(false);
+  });
+
   it("updates ETA and replan countdowns while the snapshot is otherwise static", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
