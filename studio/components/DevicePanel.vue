@@ -108,7 +108,8 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
     props.plan?.work_items
       .filter(
         (work) =>
-          work.planned_lane_kind === "device" &&
+          (work.planned_lane_kind === "device" ||
+            work.planned_lane_kind == null) &&
           work.planned_device_id === device.id &&
           !blockedReason(work),
       )
@@ -303,7 +304,7 @@ onBeforeUnmount(() => {
       >
         <div class="device-card__title">
           <span class="device-card__name">Scheduled work</span>
-          <span class="device-card__badge">HOST</span>
+          <span class="device-card__badge">OTHER</span>
         </div>
         <ol class="device-card__lane">
           <li v-for="work in otherComputeWork" :key="work.work_id">

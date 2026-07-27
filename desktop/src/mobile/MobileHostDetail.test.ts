@@ -316,6 +316,18 @@ describe("MobileHostDetail remote host data", () => {
                 lane_order: 0,
                 estimate_confidence: "low",
               },
+              {
+                work_id: "mobile-legacy-device",
+                parent_id: "legacy-parent",
+                work_kind: "generation",
+                priority_class: "user",
+                queue_rank: 1,
+                bypass_count: 0,
+                planned_device_id: visible.id,
+                planned_lane_kind: null,
+                lane_order: 1,
+                estimate_confidence: "low",
+              },
             ],
           },
         });
@@ -328,8 +340,10 @@ describe("MobileHostDetail remote host data", () => {
     expect(view.get('[data-test="other-compute-lane"]').text()).toContain(
       "mobile-future-collision",
     );
-    expect(view.find('[data-test="device-lane"]').exists()).toBe(false);
+    expect(view.get('[data-test="device-lane"]').text()).toContain("mobile-legacy-device");
+    expect(view.get('[data-test="device-lane"]').text()).not.toContain("mobile-future-collision");
     expect(view.text().match(/mobile-future-collision/g)).toHaveLength(1);
+    expect(view.text().match(/mobile-legacy-device/g)).toHaveLength(1);
   });
 
   it("targets the exact remote and renders telemetry, queue, downloads, and installed models", async () => {
@@ -717,29 +731,63 @@ describe("MobileHostDetail remote host data", () => {
     );
   });
 
-  it("clears an older-host 404 plan and restores queue authority after a later poll", async () => {
-    vi.useFakeTimers();
-    try {
-      let queueCalls = 0;
-      const originalApi = apiJsonTo.getMockImplementation()!;
-      apiJsonTo.mockImplementation((target, path) => {
-        if (path === "/api/status") {
-          return Promise.resolve(serverStatus({ queue_depth: 7 }));
-        }
-        if (path === "/api/queue") {
-          queueCalls += 1;
-          if (queueCalls === 1) {
+  it.each([
+    ["404", () => new ApiError("queue unsupported", 404)],
+    ["transport failure", () => new TypeError("Failed to fetch")],
+    ["500", () => new ApiError("server failure", 500)],
+  ])(
+    "clears stale queue entries and plan after %s, then restores authority",
+    async (_label, failure) => {
+      vi.useFakeTimers();
+      try {
+        let queueCalls = 0;
+        const originalApi = apiJsonTo.getMockImplementation()!;
+        apiJsonTo.mockImplementation((target, path) => {
+          if (path === "/api/status") {
+            return Promise.resolve(serverStatus({ queue_depth: 7 }));
+          }
+          if (path === "/api/queue") {
+            queueCalls += 1;
+            if (queueCalls === 1) {
+              return Promise.resolve({
+                entries: [queueEntries[0]],
+                plan: {
+                  plan_version: 1,
+                  state_version: 1,
+                  optimizer_state: "optimized",
+                  dirty_since_unix_ms: null,
+                  next_replan_at_unix_ms: null,
+                  work_items: [
+                    {
+                      work_id: "stale-cpu-work",
+                      parent_id: "parent",
+                      work_kind: "post_upscale",
+                      priority_class: "user",
+                      queue_rank: 0,
+                      bypass_count: 0,
+                      planned_device_id: null,
+                      planned_lane_kind: "host_utility",
+                      lane_order: 0,
+                      estimate_confidence: "low",
+                    },
+                  ],
+                },
+              });
+            }
+            if (queueCalls === 2) {
+              return Promise.reject(failure());
+            }
             return Promise.resolve({
-              entries: [],
+              entries: [queueEntries[0]],
               plan: {
-                plan_version: 1,
-                state_version: 1,
+                plan_version: 2,
+                state_version: 2,
                 optimizer_state: "optimized",
                 dirty_since_unix_ms: null,
                 next_replan_at_unix_ms: null,
                 work_items: [
                   {
-                    work_id: "stale-cpu-work",
+                    work_id: "restored-cpu-work",
                     parent_id: "parent",
                     work_kind: "post_upscale",
                     priority_class: "user",
@@ -754,62 +802,37 @@ describe("MobileHostDetail remote host data", () => {
               },
             });
           }
-          if (queueCalls === 2) {
-            return Promise.reject(new ApiError("queue unsupported", 404));
-          }
-          return Promise.resolve({
-            entries: [queueEntries[0]],
-            plan: {
-              plan_version: 2,
-              state_version: 2,
-              optimizer_state: "optimized",
-              dirty_since_unix_ms: null,
-              next_replan_at_unix_ms: null,
-              work_items: [
-                {
-                  work_id: "restored-cpu-work",
-                  parent_id: "parent",
-                  work_kind: "post_upscale",
-                  priority_class: "user",
-                  queue_rank: 0,
-                  bypass_count: 0,
-                  planned_device_id: null,
-                  planned_lane_kind: "host_utility",
-                  lane_order: 0,
-                  estimate_confidence: "low",
-                },
-              ],
-            },
-          });
-        }
-        return originalApi(target, path);
-      });
+          return originalApi(target, path);
+        });
 
-      const view = await mountDetail();
-      expect(view.text()).toContain("stale-cpu-work");
-      expect(
-        view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-      ).toBe("0/8");
+        const view = await mountDetail();
+        expect(view.text()).toContain("stale-cpu-work");
+        expect(view.find("[data-test='host-detail-queue']").exists()).toBe(true);
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("1/8");
 
-      await vi.advanceTimersByTimeAsync(5_000);
-      await flushPromises();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushPromises();
 
-      expect(view.text()).not.toContain("stale-cpu-work");
-      expect(
-        view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-      ).toBe("7/8");
+        expect(view.text()).not.toContain("stale-cpu-work");
+        expect(view.find("[data-test='host-detail-queue']").exists()).toBe(false);
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("7/8");
 
-      await vi.advanceTimersByTimeAsync(5_000);
-      await flushPromises();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushPromises();
 
-      expect(view.text()).toContain("restored-cpu-work");
-      expect(
-        view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
-      ).toBe("1/8");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        expect(view.text()).toContain("restored-cpu-work");
+        expect(
+          view.get("[aria-labelledby='host-queue-title'] .mobile-section-head span").text(),
+        ).toBe("1/8");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("recovers from a transient initial failure when retrying the same host", async () => {
     let statusAttempts = 0;

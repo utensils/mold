@@ -77,6 +77,9 @@ pub struct StaticEstimate {
     pub total_ms: u64,
     pub cold_setup_ms: u64,
     pub warm_setup_ms: u64,
+    /// Setup-independent runtime supplied by the static estimator. This is
+    /// explicit because `total_ms` may include costs beyond cold setup.
+    pub predicted_run_ms: u64,
     pub vram_bytes: u64,
     pub host_bytes: u64,
 }
@@ -366,9 +369,7 @@ impl EstimateStore {
                 total_ms: static_estimate.total_ms,
                 cold_setup_ms: static_estimate.cold_setup_ms,
                 warm_setup_ms: static_estimate.warm_setup_ms,
-                predicted_run_ms: static_estimate
-                    .total_ms
-                    .saturating_sub(static_estimate.cold_setup_ms),
+                predicted_run_ms: static_estimate.predicted_run_ms,
                 vram_bytes: static_estimate.vram_bytes,
                 host_bytes: static_estimate.host_bytes,
                 confidence: EstimateConfidence::Low,

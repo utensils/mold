@@ -369,20 +369,6 @@ pub(crate) enum UtilityPlacement {
     },
 }
 
-impl PostGenerationUpscaleJob {
-    fn reject(self, error: String) {
-        if let Some(progress) = &self.generation.progress_tx {
-            let _ = progress.send(crate::state::SseMessage::Error(mold_core::SseErrorEvent {
-                message: error.clone(),
-            }));
-        }
-        let generation_id = self.generation.id.clone();
-        let _ = self.generation.result_tx.send(Err(error));
-        self.generation.queue.decrement();
-        self.generation.registry.remove(&generation_id);
-    }
-}
-
 pub struct AdminModelLoadJob {
     pub id: String,
     pub model: String,
@@ -504,8 +490,7 @@ impl OwnerWork {
                 let _ = job.result_tx.send(Err(error));
             }
             Self::PostUpscale(job) => {
-                job.cancellation.cancel();
-                job.reject(error);
+                crate::gpu_worker::finish_post_generation_upscale_failure(job, error);
             }
             Self::StandaloneUpscale(job) => {
                 job.cancellation.cancel();

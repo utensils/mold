@@ -155,6 +155,15 @@ pub enum WorkerEvent {
     },
 }
 
+fn reject_owner_work_preserving_completed_generation(work: OwnerWork, error: String) {
+    match work {
+        OwnerWork::PostUpscale(job) => {
+            crate::gpu_worker::finish_post_generation_upscale_failure(job, error);
+        }
+        work => work.reject(error),
+    }
+}
+
 pub struct ScheduledOwnerWork {
     pub id: String,
     pub model_fingerprint: String,
@@ -1546,9 +1555,10 @@ impl Coordinator {
                         work_id = %rejected_work_id,
                         "rejecting payload returned by an unknown or stale owner"
                     );
-                    grant
-                        .work
-                        .reject("GPU owner returned work from a stale lifecycle epoch".to_string());
+                    reject_owner_work_preserving_completed_generation(
+                        grant.work,
+                        "GPU owner returned work from a stale lifecycle epoch".to_string(),
+                    );
                     return;
                 }
                 // A rejection returns ownership of the transported payload
@@ -1693,14 +1703,18 @@ impl Coordinator {
                     }
                     work => {
                         if matches!(&reason, LeaseRejection::FatalCuda) {
-                            work.reject(
+                            reject_owner_work_preserving_completed_generation(
+                                work,
                                 "CUDA context is fatally poisoned; server restart required"
                                     .to_string(),
                             );
                         } else if let LeaseRejection::PlanInvalidated(error) = &reason {
-                            work.reject(format!(
-                                "utility execution plan was invalidated; refusing fallback: {error}"
-                            ));
+                            reject_owner_work_preserving_completed_generation(
+                                work,
+                                format!(
+                                    "utility execution plan was invalidated; refusing fallback: {error}"
+                                ),
+                            );
                         } else {
                             // A stale worker generation means this payload was
                             // never touched. Put it back into the authoritative
@@ -2462,6 +2476,7 @@ impl Coordinator {
                     .saturating_add(static_timing.predicted_run_ms),
                 cold_setup_ms: static_timing.cold_setup_ms,
                 warm_setup_ms: static_timing.warm_setup_ms,
+                predicted_run_ms: static_timing.predicted_run_ms,
                 vram_bytes: exact_vram_bytes,
                 host_bytes: exact_host_bytes,
             };
@@ -3503,7 +3518,7 @@ impl Coordinator {
                     };
                     let execution_fingerprint = selected.execution_fingerprint().to_string();
                     if let Err(error) = pending.work.install_utility_plan(selected) {
-                        pending.work.reject(error);
+                        reject_owner_work_preserving_completed_generation(pending.work, error);
                         grant_failed = true;
                         break;
                     }
@@ -3535,9 +3550,10 @@ impl Coordinator {
                         retry: Some(retry),
                     });
                     let Some(cpu_tx) = &self.cpu_utility_tx else {
-                        grant
-                            .work
-                            .reject("CPU utility lane is unavailable".to_string());
+                        reject_owner_work_preserving_completed_generation(
+                            grant.work,
+                            "CPU utility lane is unavailable".to_string(),
+                        );
                         grant_failed = true;
                         break;
                     };
@@ -3751,7 +3767,7 @@ impl Coordinator {
                         };
                         if let Err(error) = pending.work.install_utility_plan(selected) {
                             worker.release_in_flight();
-                            pending.work.reject(error);
+                            reject_owner_work_preserving_completed_generation(pending.work, error);
                             self.memory.release(&id);
                             self.state_version = self.state_version.saturating_add(1);
                             grant_failed = true;
@@ -4782,6 +4798,7 @@ fn static_generation_estimate(
         total_ms: timing.cold_setup_ms.saturating_add(predicted_run_ms),
         cold_setup_ms: timing.cold_setup_ms,
         warm_setup_ms: timing.warm_setup_ms,
+        predicted_run_ms,
         vram_bytes,
         host_bytes,
     }
@@ -4794,11 +4811,9 @@ fn timing_with_static_floors(
     (
         estimate.cold_setup_ms.max(static_estimate.cold_setup_ms),
         estimate.warm_setup_ms.max(static_estimate.warm_setup_ms),
-        estimate.predicted_run_ms.max(
-            static_estimate
-                .total_ms
-                .saturating_sub(static_estimate.cold_setup_ms),
-        ),
+        estimate
+            .predicted_run_ms
+            .max(static_estimate.predicted_run_ms),
     )
 }
 
@@ -7089,6 +7104,263 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_v2_post_upscale_preserves_f0_and_ignores_late_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let output_dir = root.path().join("gallery");
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, b"frozen-before-owner-validation").unwrap();
+        let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let (slot_tx, _slot_rx) = tokio::sync::oneshot::channel();
+        let (slot_job, _) = fake_generation("held-slot");
+        queue
+            .submit(
+                GenerationJob {
+                    result_tx: slot_tx,
+                    ..slot_job
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let _held_slot = ingress_rx.try_recv().unwrap();
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        state.job_registry.register("v2-f0-parent", "flux-dev:q4");
+
+        let (mut generation, mut result) = fake_generation("v2-f0-parent");
+        generation.output_dir = Some(output_dir.clone());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        generation.progress_tx = Some(progress_tx);
+        let fence = LeaseFence {
+            work_id: "v2-f0-parent::post-upscale".to_string(),
+            device_id: device_id.clone(),
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        let gpu_job = gpu_job_from_generation(&state, generation, fence.clone(), None, None);
+        let original = mold_core::ImageData {
+            data: vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+        let post = OwnerWork::PostUpscale(Box::new(crate::gpu_pool::PostGenerationUpscaleJob {
+            id: fence.work_id.clone(),
+            generation: Box::new(gpu_job),
+            response: mold_core::GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                generation_time_ms: 1,
+                model: "flux-dev:q4".to_string(),
+                seed_used: 7,
+                gpu: Some(0),
+            },
+            image: original.clone(),
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: Some(plan),
+        }));
+        std::fs::remove_file(&weights).unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: fence.work_id.clone(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: false,
+                previous_target: None,
+                estimated_finish_ms: 1,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(fence.work_id.clone(), 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                grant: Box::new(LeaseGrant {
+                    fence,
+                    work: post,
+                    retry: None,
+                }),
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "upscale weights disappeared".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), &mut result)
+            .await
+            .expect("V2 rejection settles the parent promptly")
+            .expect("result sender remains alive")
+            .expect("completed F0 is not converted into a generation error");
+        assert_eq!(completed.image.data, original.data);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while queue.pending() != 0 || !state.job_registry.snapshot().entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-upscale fallback cleanup settles");
+        assert_eq!(queue.pending(), 0);
+        assert!(state.job_registry.snapshot().entries.is_empty());
+        assert!(coordinator.leases.is_empty());
+        let files_before = std::fs::read_dir(&output_dir).unwrap().count();
+        assert_eq!(files_before, 1, "F0 is published exactly once");
+        let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SseMessage::Progress(mold_core::SseProgressEvent::Info { message })
+                if message.contains("post-generation upscale failed")
+        )));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, SseMessage::Error(_))));
+        assert!(matches!(events.last(), Some(SseMessage::Complete(_))));
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                successful: false,
+                phase_timings: EstimatePhaseTimings::default(),
+            },
+            &mut immediate,
+        );
+        assert_eq!(
+            std::fs::read_dir(&output_dir).unwrap().count(),
+            files_before,
+            "a late completion cannot publish or settle the parent twice"
+        );
+        assert_eq!(queue.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_cpu_owner_rejection_preserves_post_upscale_f0() {
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            Arc::new(GpuPool {
+                workers: Vec::new().into(),
+            }),
+            1,
+        );
+        state
+            .job_registry
+            .register("cpu-owner-parent", "flux-dev:q4");
+        let (mut generation, mut result) = fake_generation("cpu-owner-parent");
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        generation.progress_tx = Some(progress_tx);
+        let child_id = "cpu-owner-parent::post-upscale".to_string();
+        let fence = LeaseFence {
+            work_id: child_id.clone(),
+            device_id: CPU_UTILITY_DEVICE_ID.to_string(),
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        let gpu_job = gpu_job_from_generation(&state, generation, fence, None, None);
+        let original = mold_core::ImageData {
+            data: vec![1, 2, 3],
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+        let work = OwnerWork::PostUpscale(Box::new(crate::gpu_pool::PostGenerationUpscaleJob {
+            id: child_id.clone(),
+            generation: Box::new(gpu_job),
+            response: mold_core::GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                generation_time_ms: 1,
+                model: "flux-dev:q4".to_string(),
+                seed_used: 9,
+                gpu: Some(0),
+            },
+            image: original.clone(),
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: None,
+        }));
+
+        reject_owner_work_preserving_completed_generation(
+            work,
+            "CPU utility lane is unavailable".to_string(),
+        );
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), &mut result)
+            .await
+            .expect("missing CPU owner fallback settles promptly")
+            .expect("result sender remains alive")
+            .expect("missing CPU utility owner cannot discard F0");
+        assert_eq!(completed.image.data, original.data);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.job_registry.snapshot().entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("missing CPU owner cleanup settles");
+        let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SseMessage::Progress(mold_core::SseProgressEvent::Info { message })
+                if message.contains("CPU utility lane is unavailable")
+        )));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, SseMessage::Error(_))));
+        assert!(matches!(events.last(), Some(SseMessage::Complete(_))));
+    }
+
+    #[tokio::test]
     async fn cancellation_after_plan_before_grant_is_acknowledged_and_never_transported() {
         let (worker, worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
@@ -8413,6 +8685,33 @@ mod tests {
                 "the execution transport must consume the exact preview candidate"
             );
         }
+    }
+
+    #[test]
+    fn static_timing_floor_uses_explicit_runtime_instead_of_total_subtraction() {
+        let estimate = ResolvedEstimate {
+            total_ms: 1,
+            cold_setup_ms: 1,
+            warm_setup_ms: 1,
+            predicted_run_ms: 1,
+            vram_bytes: 1,
+            host_bytes: 1,
+            confidence: mold_scheduler::EstimateConfidence::Low,
+            learned: false,
+        };
+        let static_estimate = StaticEstimate {
+            total_ms: 9_999,
+            cold_setup_ms: 900,
+            warm_setup_ms: 90,
+            predicted_run_ms: 1_234,
+            vram_bytes: 1,
+            host_bytes: 1,
+        };
+
+        assert_eq!(
+            timing_with_static_floors(estimate, static_estimate),
+            (900, 90, 1_234)
+        );
     }
 
     #[test]

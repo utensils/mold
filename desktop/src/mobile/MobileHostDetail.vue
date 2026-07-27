@@ -125,6 +125,7 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
     ) {
       // A plan is tentative server authority, so it cannot survive a failed
       // refresh. Older hosts still fall back to status queue depth.
+      queue.value = [];
       queuePlan.value = null;
       queueApiAvailable.value = false;
     }

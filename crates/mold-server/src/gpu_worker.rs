@@ -1223,6 +1223,7 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
     let successful = result.is_ok();
     let (image, original, error) = settle_post_generation_upscale(job.image, result);
     if let Some(error) = error {
+        report_post_generation_upscale_failure(job.generation.progress_tx.as_ref(), &error);
         tracing::warn!(
             gpu = worker.gpu.ordinal,
             %error,
@@ -1284,11 +1285,51 @@ fn process_cpu_post_generation_upscale(mut job: PostGenerationUpscaleJob) -> boo
     let successful = result.is_ok();
     let (image, original, error) = settle_post_generation_upscale(job.image, result);
     if let Some(error) = error {
+        report_post_generation_upscale_failure(job.generation.progress_tx.as_ref(), &error);
         tracing::warn!(%error, "CPU post-generation upscale failed; keeping original image");
     }
     finish_generation_success(*job.generation, job.response, image, original);
     drop(cleanup);
     successful
+}
+
+fn report_post_generation_upscale_failure(
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    error: &str,
+) {
+    if let Some(progress) = progress {
+        let _ = progress.send(SseMessage::Progress(SseProgressEvent::Info {
+            message: format!("post-generation upscale failed; keeping original image: {error}"),
+        }));
+    }
+}
+
+/// A post-upscale owner exists only after generation has already produced F0.
+/// Any terminal utility failure must therefore complete the parent with that
+/// original output instead of converting successful generation into an error.
+pub(crate) fn finish_post_generation_upscale_failure(
+    job: Box<PostGenerationUpscaleJob>,
+    error: String,
+) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::spawn_blocking(move || {
+            finish_post_generation_upscale_failure_blocking(job, error);
+        });
+        return;
+    }
+    finish_post_generation_upscale_failure_blocking(job, error);
+}
+
+fn finish_post_generation_upscale_failure_blocking(
+    job: Box<PostGenerationUpscaleJob>,
+    error: String,
+) {
+    job.cancellation.cancel();
+    report_post_generation_upscale_failure(job.generation.progress_tx.as_ref(), &error);
+    tracing::warn!(%error, "post-generation upscale failed; keeping original image");
+    let cleanup = GenerationCleanup::new(&job.generation);
+    finish_generation_success(*job.generation, job.response, job.image, None);
+    drop(cleanup);
 }
 
 fn process_admin_unload(worker: &GpuWorker, job: AdminModelUnloadJob) -> bool {
@@ -2316,10 +2357,19 @@ fn process_job_with_sink(
                     let frozen_upscale_plan = match frozen_upscale_plan {
                         Ok(plan) => plan,
                         Err(error) => {
-                            let _ = job.result_tx.send(Err(format!(
+                            let error = format!(
                                 "post-generation upscaler plan could not be frozen: {error}"
-                            )));
-                            return false;
+                            );
+                            report_post_generation_upscale_failure(
+                                job.progress_tx.as_ref(),
+                                &error,
+                            );
+                            tracing::warn!(
+                                %error,
+                                "post-generation upscale failed; keeping original image"
+                            );
+                            finish_generation_success(job, response, img, None);
+                            return true;
                         }
                     };
                     let followup_id = format!("{}::post-upscale", job.id);
@@ -2360,7 +2410,7 @@ fn process_job_with_sink(
                                     .to_string(),
                             );
                             std::mem::forget(cleanup);
-                            false
+                            true
                         }
                     };
                     return followup_started;
@@ -3462,6 +3512,38 @@ mod tests {
         name: String,
         generate_started: Option<std::sync::mpsc::SyncSender<()>>,
         generate_resume: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    struct RemovingWeightsGenerationEngine {
+        name: String,
+        weights: std::path::PathBuf,
+        generated: ImageData,
+    }
+
+    impl InferenceEngine for RemovingWeightsGenerationEngine {
+        fn generate(&mut self, _req: &GenerateRequest) -> anyhow::Result<GenerateResponse> {
+            std::fs::remove_file(&self.weights)?;
+            Ok(GenerateResponse {
+                images: vec![self.generated.clone()],
+                video: None,
+                generation_time_ms: 1,
+                model: self.name.clone(),
+                seed_used: 7,
+                gpu: None,
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn is_loaded(&self) -> bool {
+            true
+        }
+
+        fn load(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     impl InferenceEngine for BarrierGenerationEngine {
@@ -6508,6 +6590,115 @@ mod tests {
         .expect_err("planning must surface missing weights before admission");
 
         assert!(err.to_string().contains("could not resolve"), "got: {err}");
+    }
+
+    #[test]
+    fn legacy_generation_preserves_f0_when_upscale_weights_disappear_before_freeze() {
+        assert_eq!(
+            crate::dispatch_mode::DispatchMode::default(),
+            crate::dispatch_mode::DispatchMode::Legacy
+        );
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, b"present-until-generation-completes").unwrap();
+        let output_dir = root.path().join("gallery");
+        let original = fake_upscale_image();
+
+        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+        worker.model_cache.lock().unwrap().insert(
+            Box::new(RemovingWeightsGenerationEngine {
+                name: "flux-dev:q4".to_string(),
+                weights: weights.clone(),
+                generated: original.clone(),
+            }),
+            0,
+        );
+
+        let mut config = Config::default();
+        config.models.insert(
+            "real-esrgan-x4plus:fp16".to_string(),
+            ModelConfig {
+                transformer: Some(weights.display().to_string()),
+                ..ModelConfig::default()
+            },
+        );
+        let mut job = fake_upscale_job(config, "real-esrgan-x4plus:fp16");
+        job.id = "legacy-f0-freeze-drift".to_string();
+        job.output_dir = Some(output_dir.clone());
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        job.result_tx = result_tx;
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        job.progress_tx = Some(progress_tx);
+        let registry = JobRegistry::new();
+        registry.register(&job.id, &job.model);
+        job.registry = registry.clone();
+
+        let (slot_tx, mut slot_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(slot_tx);
+        let (dummy_tx, _dummy_rx) = tokio::sync::oneshot::channel();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(queue.submit(
+                GenerationJob {
+                    id: "queue-slot".to_string(),
+                    request: job.request.clone(),
+                    completion_payload: SseCompletionPayload::Full,
+                    progress_tx: None,
+                    result_tx: dummy_tx,
+                    output_dir: None,
+                },
+                1,
+            ))
+            .unwrap();
+        let _held_slot = slot_rx.try_recv().unwrap();
+        job.queue = queue.clone();
+
+        let (owner_event_tx, mut owner_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<LegacyOwnerEvent>();
+        let successful =
+            process_job_with_sink(&worker, job, GenerationEventSink::Legacy(&owner_event_tx));
+
+        assert!(successful, "completed generation remains successful");
+        let completed = result_rx
+            .blocking_recv()
+            .expect("result channel settles")
+            .expect("F0 is returned despite upscale planning drift");
+        assert_eq!(completed.image.data, original.data);
+        assert_eq!(queue.pending(), 0, "generation cleanup runs exactly once");
+        assert!(registry.snapshot().entries.is_empty());
+        assert!(
+            std::fs::read_dir(output_dir)
+                .unwrap()
+                .any(|entry| entry.unwrap().path().is_file()),
+            "original F0 is published to the gallery"
+        );
+        assert!(
+            owner_event_rx.try_recv().is_err(),
+            "failed freeze never creates an upscale owner"
+        );
+        let progress = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            progress.iter().any(|event| matches!(
+                event,
+                SseMessage::Progress(SseProgressEvent::Info { message })
+                    if message.contains("post-generation upscale failed")
+            )),
+            "freeze drift is reported as an upscale warning"
+        );
+        assert!(
+            progress.iter().all(|event| !matches!(
+                event,
+                SseMessage::Progress(SseProgressEvent::StageStart { name })
+                    if name.contains("upscaler")
+            )),
+            "the upscale factory is never touched after freeze failure"
+        );
+        assert!(
+            matches!(progress.last(), Some(SseMessage::Complete(_))),
+            "one successful completion terminates progress"
+        );
     }
 
     #[test]

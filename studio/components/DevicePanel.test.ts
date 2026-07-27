@@ -281,7 +281,7 @@ describe("DevicePanel", () => {
     );
   });
 
-  it("lets a future typed lane win when its opaque device ID collides with a GPU", () => {
+  it("keeps typed collisions authoritative while accepting an exact legacy GPU lane", () => {
     const visible = device(0);
     const wrapper = mount(DevicePanel, {
       props: {
@@ -306,6 +306,19 @@ describe("DevicePanel", () => {
               estimate_confidence: "low",
               activity_phase: "queued",
             },
+            {
+              work_id: "legacy-device-work",
+              parent_id: "legacy-parent",
+              work_kind: "generation",
+              priority_class: "user",
+              queue_rank: 1,
+              bypass_count: 0,
+              planned_device_id: visible.id,
+              planned_lane_kind: null,
+              lane_order: 1,
+              estimate_confidence: "low",
+              activity_phase: "queued",
+            },
           ],
         },
       },
@@ -314,8 +327,17 @@ describe("DevicePanel", () => {
     expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
       "future-collision",
     );
-    expect(wrapper.find('[data-test="device-lane"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+      "legacy-device-work",
+    );
+    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
+      "future-collision",
+    );
     expect(wrapper.text().match(/future-collision/g)).toHaveLength(1);
+    expect(wrapper.text().match(/legacy-device-work/g)).toHaveLength(1);
+    expect(
+      wrapper.get('[data-test="other-compute-lane"]').text(),
+    ).not.toContain("HOST");
   });
 
   it("does not invent a host utility card without CPU-planned work", () => {
