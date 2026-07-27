@@ -1418,6 +1418,31 @@ Candidate partition sizes are capability-derived, not hard-coded
 `1,2,4,...`. The planner compares parallel singleton distribution, native
 microbatching, load duplication, VRAM, and predicted finish.
 
+The F1 planning foundation implements this boundary without routing a parent:
+
+- `mold-inference` owns one static pre-load registry for every production
+  factory family and alias. Runtime engine construction validates its declared
+  contract against that registry before load.
+- Every production generation family still declares `[1]`; synthetic planner
+  fixtures may declare sequences such as `[1,2,3,5]`, but this does not claim
+  that a current engine returns multiple outputs.
+- `mold-scheduler` canonicalizes and validates the declared sizes (including
+  required singleton coverage), then compares complete deterministic
+  schedules derived from each declared maximum size. It enforces per-device
+  partition capacity and VRAM plus conservative aggregate host RAM, accounts
+  for first-use cold/warm setup and later warm reloads, and compares predicted
+  parent makespan before sum of child completion times and setup duplication.
+- Homogeneous singleton fleets and independent singleton completion streams
+  use the exact balanced/earliest-completion optimum. Heterogeneous native
+  batching uses a bounded deterministic strategy comparison; it is not
+  described as a globally optimal solution to the unrelated-machine batching
+  problem. For `N` children, `D` devices, and `S` declared sizes, the strategy
+  bound is `O(N × D × S²)` time and `O(N + D × S)` retained memory; production
+  singleton declarations reduce this to `O(N × D)` time and `O(N + D)` memory.
+- The output carries exact contiguous child coverage and the existing
+  `PlannedBatchPartition` projection needed by future `BatchChild` work.
+  Production raw batches remain unrouted and `server_batch` remains false.
+
 ### 12.4 Determinism
 
 The guaranteed contract is:
@@ -2202,6 +2227,10 @@ F1 then delivers:
 - adaptive partition planning;
 - logical atomic commit/recovery;
 - fenced retry and cancellation.
+
+The static family registry and pure adaptive partition-planner foundation land
+as a non-routing F1 slice. Parent execution, raw-batch dispatch, and capability
+advertisement remain later F1 work.
 
 Gates:
 

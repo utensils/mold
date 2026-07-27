@@ -1555,7 +1555,8 @@ impl InferenceEngine for SD3Engine {
     }
 
     fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
-        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
+        crate::batch_execution_capability_for_family("sd3")
+            .expect("production SD3 batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

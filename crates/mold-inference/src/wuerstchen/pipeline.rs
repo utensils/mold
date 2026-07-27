@@ -1567,7 +1567,8 @@ impl InferenceEngine for WuerstchenEngine {
     }
 
     fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
-        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
+        crate::batch_execution_capability_for_family("wuerstchen")
+            .expect("production Wuerstchen batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {

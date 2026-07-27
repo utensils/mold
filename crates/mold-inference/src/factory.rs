@@ -328,6 +328,10 @@ pub fn create_engine_with_pool(
     )
 }
 
+fn boxed_inference_engine(engine: impl InferenceEngine + 'static) -> Box<dyn InferenceEngine> {
+    Box::new(engine)
+}
+
 /// Create an engine from scheduler-frozen construction inputs.
 ///
 /// Unlike [`create_engine_with_pool`], this path performs no live config or
@@ -375,9 +379,9 @@ pub fn create_engine_with_frozen_config(
     }
     validate_prepared_quantized_dependencies(frozen)?;
     validate_prepared_gemma_dependencies(&paths, frozen)?;
-    match frozen.family.as_str() {
+    let engine_result: Result<Box<dyn InferenceEngine>> = match frozen.family.as_str() {
         "flux" => {
-            Ok(Box::new(FluxEngine::new(
+            Ok(boxed_inference_engine(FluxEngine::new(
                 model_name,
                 paths,
                 frozen.is_schnell,
@@ -400,7 +404,7 @@ pub fn create_engine_with_frozen_config(
                         "single-file SD1.5 dispatch requires a companion-pulled clip_tokenizer"
                     ))?;
                 let single_file = paths.transformer.clone();
-                Ok(Box::new(SD15Engine::from_single_file(
+                Ok(boxed_inference_engine(SD15Engine::from_single_file(
                     model_name,
                     single_file,
                     clip_tokenizer,
@@ -410,7 +414,7 @@ pub fn create_engine_with_frozen_config(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(SD15Engine::new(
+                Ok(boxed_inference_engine(SD15Engine::new(
                     model_name,
                     paths,
                     scheduler,
@@ -442,7 +446,7 @@ pub fn create_engine_with_frozen_config(
                     )
                 })?;
                 let single_file = paths.transformer.clone();
-                Ok(Box::new(SDXLEngine::from_single_file(
+                Ok(boxed_inference_engine(SDXLEngine::from_single_file(
                     model_name,
                     single_file,
                     clip_l_tokenizer,
@@ -454,7 +458,7 @@ pub fn create_engine_with_frozen_config(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(SDXLEngine::new(
+                Ok(boxed_inference_engine(SDXLEngine::new(
                     model_name,
                     paths,
                     scheduler,
@@ -470,7 +474,7 @@ pub fn create_engine_with_frozen_config(
                 .is_turbo
                 .unwrap_or_else(|| model_name.contains("turbo"));
             let is_medium = model_name.contains("medium");
-            Ok(Box::new(SD3Engine::new(
+            Ok(boxed_inference_engine(SD3Engine::new(
                 model_name,
                 paths,
                 is_turbo,
@@ -483,7 +487,7 @@ pub fn create_engine_with_frozen_config(
             )))
         }
         "z-image" => {
-            Ok(Box::new(ZImageEngine::new(
+            Ok(boxed_inference_engine(ZImageEngine::new(
                 model_name,
                 paths,
                 frozen.qwen3_variant.clone(),
@@ -499,7 +503,7 @@ pub fn create_engine_with_frozen_config(
                 // safetensors. The VAE + Qwen3 text encoder come from the
                 // `flux2-vae` and `flux2-te*` companions wired by the
                 // catalog bridge — copy them through unchanged.
-                Ok(Box::new(Flux2Engine::from_single_file(
+                Ok(boxed_inference_engine(Flux2Engine::from_single_file(
                     model_name,
                     paths.transformer.clone(),
                     paths.vae.clone(),
@@ -512,7 +516,7 @@ pub fn create_engine_with_frozen_config(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(Flux2Engine::new(
+                Ok(boxed_inference_engine(Flux2Engine::new(
                     model_name,
                     paths,
                     frozen.qwen3_variant.clone(),
@@ -523,7 +527,7 @@ pub fn create_engine_with_frozen_config(
                 )))
             }
         }
-        "qwen-image" | "qwen_image" => Ok(Box::new(QwenImageEngine::new_with_preferences(
+        "qwen-image" | "qwen_image" => Ok(boxed_inference_engine(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
@@ -533,7 +537,7 @@ pub fn create_engine_with_frozen_config(
             frozen.qwen2_variant.clone(),
             frozen.qwen2_text_encoder_mode.clone(),
         ))),
-        "qwen-image-edit" => Ok(Box::new(QwenImageEngine::new_with_preferences(
+        "qwen-image-edit" => Ok(boxed_inference_engine(QwenImageEngine::new_with_preferences(
             model_name,
             paths,
             load_strategy,
@@ -553,7 +557,7 @@ pub fn create_engine_with_frozen_config(
                 } else {
                     None
                 };
-                Ok(Box::new(LtxVideoEngine::from_single_file(
+                Ok(boxed_inference_engine(LtxVideoEngine::from_single_file(
                     model_name,
                     paths.transformer.clone(),
                     vae_path,
@@ -565,7 +569,7 @@ pub fn create_engine_with_frozen_config(
                     shared_pool,
                 )?))
             } else {
-                Ok(Box::new(LtxVideoEngine::new(
+                Ok(boxed_inference_engine(LtxVideoEngine::new(
                     model_name,
                     paths,
                     frozen.t5_variant.clone(),
@@ -582,7 +586,7 @@ pub fn create_engine_with_frozen_config(
                 // Pass the full companion graph so both the Gemma encoder
                 // and version-matched VAE reach the runtime and chain stages.
                 let checkpoint = paths.transformer.clone();
-                Ok(Box::new(Ltx2Engine::from_single_file_with_gemma_variant(
+                Ok(boxed_inference_engine(Ltx2Engine::from_single_file_with_gemma_variant(
                     model_name,
                     checkpoint,
                     paths,
@@ -591,7 +595,7 @@ pub fn create_engine_with_frozen_config(
                     frozen.ltx2_gemma_variant.clone(),
                 )?))
             } else {
-                Ok(Box::new(Ltx2Engine::new_with_gemma_variant(
+                Ok(boxed_inference_engine(Ltx2Engine::new_with_gemma_variant(
                     model_name,
                     paths,
                     load_strategy,
@@ -600,7 +604,7 @@ pub fn create_engine_with_frozen_config(
                 )))
             }
         }
-        "wuerstchen" | "wuerstchen-v2" => Ok(Box::new(WuerstchenEngine::new(
+        "wuerstchen" | "wuerstchen-v2" => Ok(boxed_inference_engine(WuerstchenEngine::new(
             model_name,
             paths,
             load_strategy,
@@ -612,7 +616,10 @@ pub fn create_engine_with_frozen_config(
             other,
             model_name
         ),
-    }
+    };
+    let engine = engine_result?;
+    crate::validate_runtime_batch_capability(&frozen.family, engine.batch_execution_capability())?;
+    Ok(engine)
 }
 
 #[cfg(test)]
@@ -745,6 +752,43 @@ mod tests {
             },
         );
         assert_eq!(resolve_family("custom-model", &config), "sd15");
+    }
+
+    #[test]
+    fn every_factory_family_runtime_contract_matches_the_static_registry() {
+        for family in [
+            "flux",
+            "flux2",
+            "sd15",
+            "sdxl",
+            "sd3",
+            "z-image",
+            "qwen-image",
+            "qwen-image-edit",
+            "ltx-video",
+            "ltx2",
+            "wuerstchen",
+        ] {
+            let mut config = Config::default();
+            config.models.insert(
+                format!("test-{family}"),
+                mold_core::config::ModelConfig {
+                    family: Some(family.to_string()),
+                    ..Default::default()
+                },
+            );
+            let engine = create_engine(
+                format!("test-{family}"),
+                dummy_paths(),
+                &config,
+                LoadStrategy::Sequential,
+                0,
+                false,
+            )
+            .unwrap();
+            let expected = crate::batch_execution_capability_for_family(family).unwrap();
+            assert_eq!(engine.batch_execution_capability(), expected, "{family}");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub(crate) mod adaptive_offload;
 pub mod attention;
 pub mod audio;
+mod batch;
 mod cache;
 pub(crate) mod cfg_plus_ddim;
 pub mod chain;
@@ -38,6 +39,10 @@ pub(crate) mod weight_loader;
 pub mod wuerstchen;
 pub mod zimage;
 
+pub use batch::{
+    batch_execution_capability_for_family, production_batch_capabilities,
+    validate_runtime_batch_capability, FamilyBatchCapability,
+};
 pub use engine::{
     with_inference_cancellation, BatchExecutionCapability, InferenceEngine, LoadStrategy,
 };

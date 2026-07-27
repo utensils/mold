@@ -6,12 +6,18 @@
 //! plan-wide generations and the coordinator-owned work, worker, and device
 //! state immediately before dispatch.
 
+mod batch;
 mod eligibility;
 mod estimates;
 mod matching;
 mod planner;
 mod types;
 
+pub use batch::{
+    AdaptiveBatchPartition, AdaptiveBatchPlan, BatchDeviceProfile, BatchInfeasibilityReason,
+    BatchPartitionError, BatchPartitionPlanner, BatchPartitionRequest, BatchSetupDisposition,
+    BatchSizeEstimate, NativeBatchSizes,
+};
 pub use eligibility::EligibilityIndex;
 pub use estimates::{
     EstimateBucket, EstimateConfidence, EstimateKey, EstimateObservation, EstimateOutcome,

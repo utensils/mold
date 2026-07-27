@@ -1059,7 +1059,8 @@ impl InferenceEngine for Ltx2Engine {
     }
 
     fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
-        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
+        crate::batch_execution_capability_for_family("ltx2")
+            .expect("production LTX-2 batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&ModelPaths> {

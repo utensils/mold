@@ -145,7 +145,9 @@ pub struct PlacementCapabilities {
     pub supports_audio_components_cpu: bool,
     pub supports_block_offload: bool,
     pub supports_tiled_vae: bool,
-    pub native_batch_sizes: Vec<u32>,
+    /// Static family batch contract available before an engine is loaded.
+    /// Unknown families remain `None` and cannot opt into parent batching.
+    pub batch_execution: Option<mold_inference::BatchExecutionCapability>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -261,7 +263,7 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             supports_audio_components_cpu: false,
             supports_block_offload: true,
             supports_tiled_vae: true,
-            native_batch_sizes: vec![1],
+            batch_execution: mold_inference::batch_execution_capability_for_family(family),
         },
         "flux2" | "flux.2" | "flux2-klein" => PlacementCapabilities {
             supports_text_encoder_cpu: true,
@@ -269,7 +271,7 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             supports_audio_components_cpu: false,
             supports_block_offload: true,
             supports_tiled_vae: true,
-            native_batch_sizes: vec![1],
+            batch_execution: mold_inference::batch_execution_capability_for_family(family),
         },
         "ltx2" | "ltx-2" | "ltx2.3" => PlacementCapabilities {
             // Gemma CPU execution is tested; the transformer and video VAE
@@ -282,7 +284,7 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             // generic FLUX block-offload boolean.
             supports_block_offload: true,
             supports_tiled_vae: true,
-            native_batch_sizes: vec![1],
+            batch_execution: mold_inference::batch_execution_capability_for_family(family),
         },
         "z-image" | "qwen-image" | "qwen-image-edit" | "sd3" | "sd3.5" => PlacementCapabilities {
             supports_text_encoder_cpu: false,
@@ -290,7 +292,7 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             supports_audio_components_cpu: false,
             supports_block_offload: true,
             supports_tiled_vae: matches!(family, "z-image" | "qwen-image" | "qwen-image-edit"),
-            native_batch_sizes: vec![1],
+            batch_execution: mold_inference::batch_execution_capability_for_family(family),
         },
         _ => PlacementCapabilities {
             supports_text_encoder_cpu: false,
@@ -298,7 +300,7 @@ pub fn capabilities_for_family(family: &str) -> PlacementCapabilities {
             supports_audio_components_cpu: false,
             supports_block_offload: false,
             supports_tiled_vae: false,
-            native_batch_sizes: vec![1],
+            batch_execution: mold_inference::batch_execution_capability_for_family(family),
         },
     }
 }
@@ -1447,6 +1449,26 @@ mod tests {
     use super::*;
     use mold_core::{AdvancedPlacement, ModelConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn production_family_planning_uses_the_static_batch_registry_before_load() {
+        for entry in mold_inference::production_batch_capabilities() {
+            assert_eq!(
+                capabilities_for_family(entry.family).batch_execution,
+                Some(entry.execution),
+                "{}",
+                entry.family
+            );
+            for alias in entry.aliases {
+                assert_eq!(
+                    capabilities_for_family(alias).batch_execution,
+                    Some(entry.execution),
+                    "{alias}"
+                );
+            }
+        }
+        assert_eq!(capabilities_for_family("unknown").batch_execution, None);
+    }
 
     const GIB: u64 = 1024 * 1024 * 1024;
 

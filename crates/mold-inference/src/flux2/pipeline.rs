@@ -1743,7 +1743,8 @@ impl InferenceEngine for Flux2Engine {
     }
 
     fn batch_execution_capability(&self) -> crate::BatchExecutionCapability {
-        crate::BatchExecutionCapability::SINGLETON_COOPERATIVE
+        crate::batch_execution_capability_for_family("flux2")
+            .expect("production Flux.2 batch capability must be registered")
     }
 
     fn model_paths(&self) -> Option<&mold_core::ModelPaths> {
