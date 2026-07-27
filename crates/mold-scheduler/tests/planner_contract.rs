@@ -815,6 +815,10 @@ fn future_ready_at_is_a_hard_start_boundary_not_only_a_lateness_hint() {
         .expect("valid plan");
 
     assert!(plan.immediate_leases.is_empty());
+    assert_eq!(
+        plan.blocked_reason(&WorkId::from("dependent")),
+        Some(&BlockedReason::NotReady)
+    );
     let dependent = plan
         .lanes
         .iter()

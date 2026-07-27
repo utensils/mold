@@ -56,7 +56,7 @@ impl Planner {
         let mut prepared = BTreeMap::<WorkId, PreparedWork>::new();
         let mut blocked = work
             .iter()
-            .filter(|item| !item.ready)
+            .filter(|item| !item.ready || item.ready_at_ms > snapshot.now_ms)
             .map(|item| (item.id.clone(), BlockedReason::NotReady))
             .collect::<BTreeMap<_, _>>();
         let mut matcher = IncrementalMatcher::new(&idle_device_ids);
@@ -67,7 +67,10 @@ impl Planner {
         };
 
         for item in &work {
-            if !item.ready || accepted_ids.len() == idle_device_ids.len() {
+            if !item.ready
+                || item.ready_at_ms > snapshot.now_ms
+                || accepted_ids.len() == idle_device_ids.len()
+            {
                 continue;
             }
             let candidates = index.candidates_for(&item.id).unwrap_or_default();
