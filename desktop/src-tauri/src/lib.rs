@@ -77,8 +77,9 @@ pub fn run() {
     );
 
     tauri::Builder::default()
-        .register_uri_scheme_protocol("mold-local", |_context, request| {
-            gallery::protocol_response(request)
+        .register_uri_scheme_protocol("mold-local", |context, request| {
+            let state = context.app_handle().state::<commands::AppState>();
+            gallery::protocol_response(&state, request)
         })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -191,7 +192,7 @@ pub fn run() {
                         commands::LocalServer::External { .. } | commands::LocalServer::Off => None,
                     }
                 };
-                if let Some(engine) = engine {
+                if let Some(mut engine) = engine {
                     let url = format!("{}/api/shutdown", engine.base_url());
                     let key = state.local_api_key.clone();
                     std::thread::spawn(move || {
@@ -200,7 +201,9 @@ pub fn run() {
                             .header("X-Api-Key", &key)
                             .timeout(std::time::Duration::from_secs(3))
                             .send();
-                        engine.join(std::time::Duration::from_secs(5));
+                        if !engine.join(std::time::Duration::from_secs(5)) {
+                            tracing::warn!("embedded engine remained alive during app teardown");
+                        }
                     });
                 }
             }

@@ -1468,6 +1468,15 @@ The transaction root is deliberately inside the resolved gallery filesystem
 so every final no-replace rename stays on one filesystem; gallery scanners and
 reconcile must ignore that reserved directory.
 
+Desktop-to-local-server imports are one-child instances of this transaction.
+The immutable metadata descriptor is parsed and disk-preflighted before the
+first media byte; bytes stream directly into transaction-owned staging;
+gallery structure and embedded metadata are validated before `prepared`; and
+identical replay compares metadata plus its synthetic flag. Post-commit fault
+injection covers reservation release, private-staging cleanup, cleanup
+journaling, retained-manifest archival, attempt removal, and attempt-directory
+fsync.
+
 Each live v2 attempt holds two hashed authority files for its full lifetime:
 the predecessor v1 path under `.attempt-locks` and the current v2 path directly
 under the canonical gallery root. Both are opened and nonblockingly claimed in

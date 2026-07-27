@@ -1,9 +1,12 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::http::{header, Request, Response, StatusCode};
 
+use crate::commands::{AppState, LocalServer, LocalServerInfo};
+
 const MAX_SOURCE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
 
 #[derive(Debug, Serialize)]
 pub struct ImportedSourceImage {
@@ -114,25 +117,121 @@ fn scan(dir: &std::path::Path) -> Vec<mold_core::GalleryImage> {
     images
 }
 
+enum LocalGalleryAuthority<'a> {
+    Server(LocalServerInfo),
+    Offline(tokio::sync::MutexGuard<'a, LocalServer>),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalGallerySnapshot {
+    images: Vec<mold_core::GalleryImage>,
+    target: Option<LocalGalleryTarget>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalGalleryTarget {
+    base_url: String,
+    api_key: String,
+}
+
+impl LocalGalleryTarget {
+    fn from_server(info: &LocalServerInfo) -> Result<Self, String> {
+        Ok(Self {
+            base_url: info.base_url.clone(),
+            api_key: api_key(info)?.to_string(),
+        })
+    }
+}
+
+async fn local_gallery_authority(state: &AppState) -> LocalGalleryAuthority<'_> {
+    let guard = state.local_server.lock().await;
+    match guard.info(&state.local_api_key) {
+        Some(info) => LocalGalleryAuthority::Server(info),
+        None => LocalGalleryAuthority::Offline(guard),
+    }
+}
+
+fn server_url(info: &LocalServerInfo, path: &str) -> String {
+    format!("{}{}", info.base_url.trim_end_matches('/'), path)
+}
+
+fn api_key(info: &LocalServerInfo) -> Result<&str, String> {
+    info.api_key
+        .as_deref()
+        .ok_or_else(|| "The local gallery server has no API key.".to_string())
+}
+
+async fn response_error(response: reqwest::Response) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value["error"]
+                .as_str()
+                .or_else(|| value["message"].as_str())
+                .map(str::to_string)
+        })
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| format!("Local gallery server returned {status}."))
+}
+
 #[tauri::command]
-pub async fn local_gallery_list() -> Result<Vec<mold_core::GalleryImage>, String> {
-    let Some(dir) = output_dir() else {
-        return Ok(Vec::new());
+pub async fn local_gallery_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<LocalGallerySnapshot, String> {
+    let authority = local_gallery_authority(&state).await;
+    if let LocalGalleryAuthority::Server(info) = authority {
+        let target = LocalGalleryTarget::from_server(&info)?;
+        let response = reqwest::Client::new()
+            .get(server_url(&info, "/api/gallery"))
+            .header("X-Api-Key", api_key(&info)?)
+            .send()
+            .await
+            .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        let images = response
+            .json()
+            .await
+            .map_err(|error| format!("Invalid local gallery response: {error}"))?;
+        return Ok(LocalGallerySnapshot {
+            images,
+            target: Some(target),
+        });
+    }
+    let LocalGalleryAuthority::Offline(_guard) = authority else {
+        unreachable!()
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        if !dir.is_dir() {
-            return Ok(Vec::new());
-        }
-        if let Some(db) = mold_db::global_db() {
-            let rows = db.list(Some(&dir)).map_err(|error| format!("{error:#}"))?;
-            if !rows.is_empty() {
-                return Ok(rows.iter().map(|row| row.to_gallery_image()).collect());
+    let Some(dir) = output_dir() else {
+        return Ok(LocalGallerySnapshot {
+            images: Vec::new(),
+            target: None,
+        });
+    };
+    let images = tauri::async_runtime::spawn_blocking(
+        move || -> Result<Vec<mold_core::GalleryImage>, String> {
+            if !dir.is_dir() {
+                return Ok(Vec::new());
             }
-        }
-        Ok(scan(&dir))
-    })
+            if let Some(db) = mold_db::global_db() {
+                let rows = db.list(Some(&dir)).map_err(|error| format!("{error:#}"))?;
+                if !rows.is_empty() {
+                    return Ok(rows.iter().map(|row| row.to_gallery_image()).collect());
+                }
+            }
+            Ok(scan(&dir))
+        },
+    )
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())??;
+    Ok(LocalGallerySnapshot {
+        images,
+        target: None,
+    })
 }
 
 /// First free name for a new save: `name.png`, then `name-2.png`, `-3`, …
@@ -198,8 +297,138 @@ fn file_matches_bytes(path: &std::path::Path, bytes: &[u8]) -> bool {
 /// Saving the same print twice is idempotent: when the target name already
 /// holds a byte-identical file, no `-2` copy is minted — the existing file
 /// is re-recorded and its name returned, preserving cross-host identity.
+fn save_output_bytes_offline(
+    filename: String,
+    bytes: Vec<u8>,
+    metadata: Option<Box<mold_core::OutputMetadata>>,
+) -> Result<String, String> {
+    let dir = output_dir().ok_or_else(|| "Local output is disabled.".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let existing = dir.join(&filename);
+    // Idempotence requires byte-identical content, not just a matching
+    // name and length — a different print under the same name must not
+    // be silently dropped or re-recorded with the wrong provenance.
+    let path = if file_matches_bytes(&existing, &bytes) {
+        existing
+    } else {
+        let path = unique_output_path(&dir, &filename);
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        path
+    };
+
+    let saved_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&filename)
+        .to_string();
+    // Best-effort DB row so the file shows in the local gallery
+    // immediately instead of waiting for the next reconcile walk.
+    // Embedded metadata wins (it is the file's own record); the caller's
+    // wire metadata covers formats that embed nothing; filename
+    // synthesis remains the last resort.
+    if let (Some(db), Some(format)) = (
+        mold_db::global_db(),
+        mold_db::metadata_io::format_from_path(&path),
+    ) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let row_metadata = match mold_db::metadata_io::read_embedded(&path, format) {
+            Some(embedded) => embedded,
+            None => match metadata {
+                Some(provided) => *provided,
+                None => mold_db::metadata_io::synthesize_from_filename(&saved_name, timestamp),
+            },
+        };
+        let _ = mold_db::persist::record_saved_output(
+            db,
+            &dir,
+            &saved_name,
+            &path,
+            &mold_db::persist::OutputRecordParams {
+                format,
+                metadata: &row_metadata,
+                source: mold_db::RecordSource::Backfill,
+                generation_time_ms: None,
+                backend: None,
+            },
+        );
+    }
+    Ok(saved_name)
+}
+
+#[derive(Serialize)]
+struct GalleryImportDescriptor<'a> {
+    metadata: &'a mold_core::OutputMetadata,
+    metadata_synthetic: bool,
+}
+
+#[derive(Deserialize)]
+struct GalleryImportResponse {
+    filename: String,
+}
+
+async fn save_output_bytes_server(
+    info: LocalServerInfo,
+    filename: String,
+    bytes: Vec<u8>,
+    metadata: Option<Box<mold_core::OutputMetadata>>,
+) -> Result<String, String> {
+    let synthetic;
+    let (metadata, metadata_synthetic) = match metadata.as_deref() {
+        Some(metadata) => (metadata, false),
+        None => {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            synthetic = mold_db::metadata_io::synthesize_from_filename(&filename, timestamp);
+            (&synthetic, true)
+        }
+    };
+    let descriptor = serde_json::to_vec(&GalleryImportDescriptor {
+        metadata,
+        metadata_synthetic,
+    })
+    .map_err(|error| format!("Couldn't encode gallery metadata: {error}"))?;
+    let descriptor_len = u32::try_from(descriptor.len())
+        .map_err(|_| "Gallery metadata is too large.".to_string())?;
+    let file_len =
+        u64::try_from(bytes.len()).map_err(|_| "Gallery file is too large.".to_string())?;
+    let mut prefix = Vec::with_capacity(12 + descriptor.len());
+    prefix.extend_from_slice(&descriptor_len.to_be_bytes());
+    prefix.extend_from_slice(&file_len.to_be_bytes());
+    prefix.extend_from_slice(&descriptor);
+    let body = reqwest::Body::wrap_stream(futures_util::stream::iter([
+        Ok::<Vec<u8>, std::io::Error>(prefix),
+        Ok(bytes),
+    ]));
+    let encoded =
+        percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+    let response = reqwest::Client::new()
+        .put(server_url(&info, &format!("/api/gallery/import/{encoded}")))
+        .header("X-Api-Key", api_key(&info)?)
+        .header(reqwest::header::CONTENT_TYPE, GALLERY_IMPORT_CONTENT_TYPE)
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+    if !response.status().is_success() {
+        return Err(response_error(response).await);
+    }
+    response
+        .json::<GalleryImportResponse>()
+        .await
+        .map(|response| response.filename)
+        .map_err(|error| format!("Invalid local gallery import response: {error}"))
+}
+
 #[tauri::command]
 pub async fn save_output_bytes(
+    state: tauri::State<'_, AppState>,
     filename: String,
     data_b64: String,
     metadata: Option<Box<mold_core::OutputMetadata>>,
@@ -207,77 +436,46 @@ pub async fn save_output_bytes(
     if !valid_filename(&filename) {
         return Err("Invalid filename.".into());
     }
-    let dir = output_dir().ok_or_else(|| "Local output is disabled.".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data_b64.as_bytes())
-            .map_err(|e| format!("Invalid image data: {e}"))?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let existing = dir.join(&filename);
-        // Idempotence requires byte-identical content, not just a matching
-        // name and length — a different print under the same name must not
-        // be silently dropped or re-recorded with the wrong provenance.
-        let path = if file_matches_bytes(&existing, &bytes) {
-            existing
-        } else {
-            let path = unique_output_path(&dir, &filename);
-            let tmp = path.with_extension("tmp");
-            std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-            std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-            path
-        };
-
-        let saved_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&filename)
-            .to_string();
-        // Best-effort DB row so the file shows in the local gallery
-        // immediately instead of waiting for the next reconcile walk.
-        // Embedded metadata wins (it is the file's own record); the caller's
-        // wire metadata covers formats that embed nothing; filename
-        // synthesis remains the last resort.
-        if let (Some(db), Some(format)) = (
-            mold_db::global_db(),
-            mold_db::metadata_io::format_from_path(&path),
-        ) {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let row_metadata = match mold_db::metadata_io::read_embedded(&path, format) {
-                Some(embedded) => embedded,
-                None => match metadata {
-                    Some(provided) => *provided,
-                    None => mold_db::metadata_io::synthesize_from_filename(&saved_name, timestamp),
-                },
-            };
-            let _ = mold_db::persist::record_saved_output(
-                db,
-                &dir,
-                &saved_name,
-                &path,
-                &mold_db::persist::OutputRecordParams {
-                    format,
-                    metadata: &row_metadata,
-                    source: mold_db::RecordSource::Backfill,
-                    generation_time_ms: None,
-                    backend: None,
-                },
-            );
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("Invalid image data: {e}"))?;
+    match local_gallery_authority(&state).await {
+        LocalGalleryAuthority::Server(info) => {
+            save_output_bytes_server(info, filename, bytes, metadata).await
         }
-        Ok(saved_name)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        LocalGalleryAuthority::Offline(_guard) => {
+            save_output_bytes_offline(filename, bytes, metadata)
+        }
+    }
 }
 
 #[tauri::command]
-pub async fn local_gallery_delete(filename: String) -> Result<(), String> {
+pub async fn local_gallery_delete(
+    state: tauri::State<'_, AppState>,
+    filename: String,
+) -> Result<(), String> {
     if !valid_filename(&filename) {
         return Err("Invalid gallery filename.".into());
     }
+    let authority = local_gallery_authority(&state).await;
+    if let LocalGalleryAuthority::Server(info) = authority {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&filename, percent_encoding::NON_ALPHANUMERIC);
+        let response = reqwest::Client::new()
+            .delete(server_url(&info, &format!("/api/gallery/image/{encoded}")))
+            .header("X-Api-Key", api_key(&info)?)
+            .send()
+            .await
+            .map_err(|error| format!("Couldn't reach the local gallery server: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        return Ok(());
+    }
+    let LocalGalleryAuthority::Offline(_guard) = authority else {
+        unreachable!()
+    };
     let dir = output_dir().ok_or_else(|| "Local gallery is disabled.".to_string())?;
     let path = dir.join(&filename);
     if path.exists() {
@@ -319,7 +517,26 @@ fn error_response(status: StatusCode, message: &str) -> Response<Vec<u8>> {
         .expect("valid protocol response")
 }
 
-pub fn protocol_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+pub fn protocol_response(state: &AppState, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let guard = match state.local_server.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The local gallery server is changing state.",
+            )
+        }
+    };
+    if guard.info(&state.local_api_key).is_some() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "The running local gallery is available through its authenticated HTTP API.",
+        );
+    }
+    protocol_response_offline(request)
+}
+
+fn protocol_response_offline(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let encoded = request.uri().path().trim_start_matches('/');
     let filename = match percent_encoding::percent_decode_str(encoded).decode_utf8() {
         Ok(filename) if valid_filename(&filename) => filename.into_owned(),
@@ -428,6 +645,17 @@ fn parse_byte_range(value: &str, total: u64) -> Result<Option<(u64, u64)>, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::Conn;
+    use std::sync::Arc;
+
+    fn test_app_state(dir: &tempfile::TempDir) -> Arc<AppState> {
+        Arc::new(AppState {
+            conn: tokio::sync::Mutex::new(Conn::Off),
+            local_server: tokio::sync::Mutex::new(LocalServer::Off),
+            local_api_key: "desktop-test-key".into(),
+            secrets: crate::secrets::SecretStore::new(dir.path().to_path_buf()),
+        })
+    }
 
     #[test]
     fn imports_a_valid_png_as_base64() {
@@ -535,5 +763,57 @@ mod tests {
             unique_output_path(dir.path(), "raw"),
             dir.path().join("raw-2")
         );
+    }
+
+    #[tokio::test]
+    async fn offline_gallery_authority_blocks_off_to_starting_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&dir);
+        let authority = local_gallery_authority(&state).await;
+        assert!(matches!(authority, LocalGalleryAuthority::Offline(_)));
+
+        let transition_state = state.clone();
+        let mut transition = tokio::spawn(async move {
+            let mut local = transition_state.local_server.lock().await;
+            *local = LocalServer::External {
+                base_url: "http://127.0.0.1:49152".into(),
+            };
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut transition)
+                .await
+                .is_err(),
+            "server transition must wait for the entire direct gallery operation"
+        );
+
+        drop(authority);
+        tokio::time::timeout(std::time::Duration::from_secs(1), transition)
+            .await
+            .unwrap()
+            .unwrap();
+        let authority = local_gallery_authority(&state).await;
+        let LocalGalleryAuthority::Server(info) = authority else {
+            panic!("completed transition must route through HTTP");
+        };
+        assert_eq!(info.api_key.as_deref(), Some("desktop-test-key"));
+    }
+
+    #[tokio::test]
+    async fn native_protocol_never_reads_files_while_server_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&dir);
+        *state.local_server.lock().await = LocalServer::External {
+            base_url: "http://127.0.0.1:49152".into(),
+        };
+        let response = protocol_response(
+            &state,
+            Request::get("mold-local://localhost/anything.mp4")
+                .body(Vec::new())
+                .unwrap(),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(String::from_utf8(response.into_body())
+            .unwrap()
+            .contains("authenticated HTTP API"));
     }
 }

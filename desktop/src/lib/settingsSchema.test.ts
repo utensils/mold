@@ -53,6 +53,13 @@ describe("settings schema", () => {
     expect(schemaFor("env.MOLD_VAE_TILED")?.editor).toBe("select");
     expect(schemaFor("nope")).toBeNull();
   });
+
+  it("marks output_dir as startup-only with actionable CLI copy", () => {
+    const output = schemaFor("output_dir");
+    expect(output?.liveReadOnly).toBe(true);
+    expect(output?.help).toContain("mold config set output_dir <path>");
+    expect(output?.help).toContain("restart");
+  });
 });
 
 describe("Settings accordion sections", () => {

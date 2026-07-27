@@ -84,6 +84,8 @@ export interface ConfigSchema {
   max?: number;
   step?: number;
   options?: string[];
+  /** Visible over the live API but only editable before `mold serve` starts. */
+  liveReadOnly?: boolean;
 }
 
 export const CONFIG_SECTIONS: ConfigSection[] = [
@@ -105,8 +107,9 @@ export const CONFIG_SCHEMAS: ConfigSchema[] = [
     key: "output_dir",
     section: "Storage & server",
     label: "Output directory",
-    help: "Where finished prints are written on this host.",
+    help: "Where finished prints are written. Startup-only while mold serve is running; stop it, run `mold config set output_dir <path>`, then restart.",
     editor: "text",
+    liveReadOnly: true,
   },
   {
     key: "server_port",

@@ -399,6 +399,12 @@ enum CommitFailpoint {
     DatabaseTransaction,
     DatabaseJournalFsync,
     CommittedState,
+    ReservationsReleased,
+    PrivateStagingCleaned,
+    CleanupStartedJournal,
+    ArchivedManifest,
+    AttemptDirectoryRemoved,
+    AttemptsDirectoryFsync,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -706,6 +712,54 @@ impl BatchTransaction {
         self.persist_manifest()
     }
 
+    /// Seal a child that was streamed directly into its transaction-owned
+    /// staging path. Metadata is immutable from `begin`; this transition adds
+    /// only the staged file checksum and size before the normal journaled
+    /// commit.
+    pub fn seal_staged_file(&mut self, child_index: usize) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            self.manifest.state == BatchManifestState::Staging,
+            "children can only be staged while the attempt is staging"
+        );
+        let path = self.staging_path(child_index)?;
+        File::open(&path)?.sync_all()?;
+        sync_dir(path.parent().expect("staging path has parent"))?;
+
+        let size = fs::metadata(&path)?.len();
+        let child = &mut self.manifest.children[child_index];
+        child.checksum_sha256 = Some(checksum_file(&path)?);
+        child.size_bytes = Some(size);
+        child.record.file_size_bytes =
+            Some(i64::try_from(size).context("staged gallery import exceeds SQLite size range")?);
+        self.persist_manifest()
+    }
+
+    /// Retire an unpublished staging/prepared attempt immediately. Startup
+    /// recovery performs the same transition after a crash; this eager form is
+    /// used when an import discovers that its bytes already exist under the
+    /// requested cross-host identity.
+    pub fn rollback_unpublished(mut self) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            matches!(
+                self.manifest.state,
+                BatchManifestState::Staging | BatchManifestState::Prepared
+            ),
+            "only an unpublished batch attempt can be rolled back"
+        );
+        ensure!(
+            !self.any_final_exists(),
+            "unpublished batch attempt unexpectedly has a public final"
+        );
+        self.manifest.state = BatchManifestState::Failed;
+        self.persist_manifest()?;
+        self.release_reservations();
+        self.cleanup_private_staging();
+        remove_failed_attempt(&self);
+        Ok(())
+    }
+
     /// Verify every child and durably close the attempt to further staging.
     pub fn mark_prepared(&mut self) -> anyhow::Result<()> {
         self.ensure_usable()?;
@@ -890,7 +944,9 @@ impl BatchTransaction {
         self.persist_manifest()?;
         self.inject_commit_error(CommitFailpoint::CommittedState)?;
         self.release_reservations();
+        self.inject_commit_crash(CommitFailpoint::ReservationsReleased);
         self.cleanup_private_staging();
+        self.inject_commit_crash(CommitFailpoint::PrivateStagingCleaned);
         if let Err(error) = self.archive_committed_attempt(db.is_none()) {
             tracing::warn!(
                 attempt = %self.attempt_dir.display(),
@@ -914,6 +970,17 @@ impl BatchTransaction {
     fn inject_commit_error(&mut self, _point: CommitFailpoint) -> anyhow::Result<()> {
         Ok(())
     }
+
+    #[cfg(test)]
+    fn inject_commit_crash(&mut self, point: CommitFailpoint) {
+        if self.commit_failpoint == Some(point) {
+            self.commit_failpoint = None;
+            panic!("injected commit crash at {point:?}");
+        }
+    }
+
+    #[cfg(not(test))]
+    fn inject_commit_crash(&mut self, _point: CommitFailpoint) {}
 
     fn verify_all_staged(&self) -> anyhow::Result<()> {
         for child in &self.manifest.children {
@@ -1044,6 +1111,7 @@ impl BatchTransaction {
         if !self.cleanup_started {
             self.append_journal(BatchJournalEvent::CleanupStarted)?;
             self.cleanup_started = true;
+            self.inject_commit_crash(CommitFailpoint::CleanupStartedJournal);
         }
         if retain_manifest {
             let archive_dir = committed_manifests_dir(&self.output_dir, &self.manifest.parent_id);
@@ -1058,10 +1126,13 @@ impl BatchTransaction {
                 &archive_dir.join(format!("{}.json", self.manifest.attempt_generation)),
                 &self.manifest,
             )?;
+            self.inject_commit_crash(CommitFailpoint::ArchivedManifest);
         }
         fs::remove_dir_all(&self.attempt_dir)?;
+        self.inject_commit_crash(CommitFailpoint::AttemptDirectoryRemoved);
         if let Some(attempts_dir) = self.attempt_dir.parent() {
             sync_dir(attempts_dir)?;
+            self.inject_commit_crash(CommitFailpoint::AttemptsDirectoryFsync);
         }
         Ok(())
     }
@@ -6323,6 +6394,11 @@ mod tests {
             CommitFailpoint::DatabaseTransaction,
             CommitFailpoint::DatabaseJournalFsync,
             CommitFailpoint::CommittedState,
+            CommitFailpoint::ReservationsReleased,
+            CommitFailpoint::PrivateStagingCleaned,
+            CommitFailpoint::CleanupStartedJournal,
+            CommitFailpoint::AttemptDirectoryRemoved,
+            CommitFailpoint::AttemptsDirectoryFsync,
         ];
         for child_index in 0..2 {
             fault_points.extend([
@@ -6358,14 +6434,16 @@ mod tests {
                 "{fault_point:?} must be a post-committing fault"
             );
             let startup_error = error.into_startup_error();
-            assert!(startup_error.to_string().contains("injected commit fault"));
+            assert!(startup_error.to_string().contains("injected commit"));
             transaction.relinquish_attempt_authority_for_recovery();
 
             let report = recover_transactions(dir.path(), &gate, db.clone())
                 .await
                 .unwrap();
             assert!(
-                report.rolled_forward == 1 || report.healed_committed_rows == 2,
+                report.rolled_forward == 1
+                    || report.healed_committed_rows == 2
+                    || report == RecoveryReport::default(),
                 "unexpected recovery report for {fault_point:?}: {report:?}"
             );
             assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
@@ -6376,6 +6454,67 @@ mod tests {
                 "terminal attempt was not archived for {fault_point:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn crash_after_archived_manifest_is_terminal_without_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(None);
+        let gate = GalleryPublicationGate::default();
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
+        transaction.commit_failpoint = Some(CommitFailpoint::ArchivedManifest);
+
+        let error = transaction.commit(&gate, db.clone()).await.unwrap_err();
+        assert!(error.entered_committing());
+        assert!(error.to_string().contains("ArchivedManifest"));
+        let startup_error = error.into_startup_error();
+        assert!(startup_error.to_string().contains("ArchivedManifest"));
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let report = recover_transactions(dir.path(), &gate, db).await.unwrap();
+        assert!(
+            report.rolled_forward == 1 || report == RecoveryReport::default(),
+            "unexpected recovery report: {report:?}"
+        );
+        assert_eq!(fs::read(dir.path().join("one.png")).unwrap(), b"one");
+        assert!(!attempt_dir(dir.path(), "parent", 0).exists());
+        assert!(
+            committed_manifests_dir(dir.path(), "parent")
+                .join("0.json")
+                .is_file(),
+            "database-free recovery authority must survive attempt cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_owned_partial_stream_is_removed_on_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = GalleryPublicationGate::default();
+        let db = Arc::new(None);
+        let mut transaction = BatchTransaction::begin(
+            dir.path(),
+            "gallery-import-test",
+            0,
+            serde_json::json!({"declared_size": 4096}),
+            vec![record("partial.mp4", 0)],
+        )
+        .unwrap();
+        fs::write(transaction.staging_path(0).unwrap(), b"partial body").unwrap();
+        transaction.relinquish_attempt_authority_for_recovery();
+
+        let report = recover_transactions(dir.path(), &gate, db).await.unwrap();
+        assert_eq!(report.rolled_back, 1);
+        assert!(!dir.path().join("partial.mp4").exists());
+        assert!(!attempt_dir(dir.path(), "gallery-import-test", 0).exists());
     }
 
     #[test]

@@ -826,6 +826,12 @@ pub async fn run_server(
         downloads_shutdown.clone(),
     );
 
+    // Keep gallery observers owned by this server future. Shutdown cannot
+    // complete (and an embedded desktop cannot take direct filesystem
+    // authority) until both finite tasks have joined.
+    let mut thumbnail_warmup_handle = None;
+    let mut gallery_reconcile_handle = None;
+
     // Ensure output directory exists and pre-generate thumbnails.
     {
         let config = state.config.read().await;
@@ -838,7 +844,8 @@ pub async fn run_server(
             let output_dir = config.effective_output_dir();
             let _ = std::fs::create_dir_all(&output_dir);
             info!(output_dir = %output_dir.display(), "gallery output directory");
-            routes::spawn_thumbnail_warmup(&config, state.gallery_publication_gate.clone());
+            thumbnail_warmup_handle =
+                routes::spawn_thumbnail_warmup(&config, state.gallery_publication_gate.clone());
 
             // Async reconcile: import any existing files into the DB and
             // drop rows whose backing files are missing. Runs on a blocking
@@ -847,7 +854,7 @@ pub async fn run_server(
                 let db_arc = state.metadata_db.clone();
                 let dir = output_dir.clone();
                 let gallery_gate = state.gallery_publication_gate.clone();
-                tokio::spawn(async move {
+                gallery_reconcile_handle = Some(tokio::spawn(async move {
                     // Reconcile mutates SQLite but only observes gallery
                     // files. The shared side keeps publication atomic while
                     // allowing listings/media reads to remain available.
@@ -871,7 +878,7 @@ pub async fn run_server(
                         Ok(Err(e)) => tracing::warn!("metadata DB reconcile failed: {e:#}"),
                         Err(e) => tracing::warn!("metadata DB reconcile task join error: {e}"),
                     }
-                });
+                }));
             }
         }
     }
@@ -1067,12 +1074,25 @@ pub async fn run_server(
     }
     downloads_shutdown.cancel();
     downloads_driver.abort();
+    let _ = downloads_driver.await;
     if let Some(handle) = idle_evict_handle {
         handle.abort();
+        let _ = handle.await;
     }
     // Server has stopped accepting requests — stop the telemetry aggregator
     // so it doesn't outlive the server loop.
     resources_aggregator.abort();
+    let _ = resources_aggregator.await;
+
+    // These tasks may be inside spawn_blocking and therefore cannot be safely
+    // detached or cancelled. Await their actual completion before returning
+    // server authority to an in-process lifecycle owner.
+    if let Some(handle) = thumbnail_warmup_handle {
+        let _ = handle.await;
+    }
+    if let Some(handle) = gallery_reconcile_handle {
+        let _ = handle.await;
+    }
     scheduler_shutdown.cancel();
     if let Some(generation_worker_handle) = generation_worker_handle {
         if !uses_cooperative_gpu_dispatch {

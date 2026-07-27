@@ -23,7 +23,7 @@ const toasts = useToastStore();
 
 const schema = computed(() => schemaFor(props.schemaKey));
 const row = computed(() => config.row(props.schemaKey));
-const locked = computed(() => row.value?.source === "env");
+const locked = computed(() => row.value?.source === "env" || schema.value?.liveReadOnly);
 
 async function save(value: string | number | boolean | null) {
   const error = await config.save(props.schemaKey, value);
@@ -55,6 +55,11 @@ const asNumber = computed(() => {
     :source="row.source"
     :locked="locked"
     :locked-by="row.env_var ?? undefined"
+    :locked-reason="
+      schema.liveReadOnly
+        ? 'Startup-only while the server is running. Use the CLI while stopped, then restart.'
+        : undefined
+    "
     :needs-engine-restart="schema.needsEngineRestart"
     resettable
     @reset="reset"

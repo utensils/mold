@@ -134,7 +134,7 @@ async function mountView(
       loaded: true,
     };
   }
-  localGalleryList.mockResolvedValue([...prints]);
+  localGalleryList.mockResolvedValue({ images: [...prints], target: null });
   seed?.(gallery);
 
   const wrapper = mount(LibraryView, {

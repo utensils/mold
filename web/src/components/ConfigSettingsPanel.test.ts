@@ -4,6 +4,7 @@ import ConfigSettingsPanel from "./ConfigSettingsPanel.vue";
 
 const rows = [
   { key: "models_dir", value: "/models", source: "file" },
+  { key: "output_dir", value: "/prints", source: "file" },
   { key: "default_steps", value: 28, source: "db", profile: "default" },
   { key: "expand.enabled", value: true, source: "default" },
   {
@@ -61,6 +62,13 @@ describe("ConfigSettingsPanel", () => {
       wrapper.get('[data-test="config-default_width"]').attributes("disabled"),
     ).toBeDefined();
     expect(wrapper.text()).toContain("MOLD_DEFAULT_WIDTH");
+    expect(
+      wrapper.get('[data-test="config-output_dir"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(
+      wrapper.get('[data-test="save-output_dir"]').attributes("disabled"),
+    ).toBeDefined();
+    expect(wrapper.text()).toContain("Startup-only");
   });
 
   it("uses the shared icon-led, accented treatment for every All settings group", async () => {

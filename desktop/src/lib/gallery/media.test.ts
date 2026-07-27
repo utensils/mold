@@ -68,6 +68,33 @@ describe("streamableMediaUrl", () => {
     );
   });
 
+  it("uses a ticket for the desktop loopback server without leaking its durable key", async () => {
+    const target = { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" };
+    vi.mocked(apiFetchTo).mockResolvedValueOnce({
+      json: () =>
+        Promise.resolve({
+          token: "loopback-ticket",
+          expires_at: 1_800_000_000,
+          auth_required: true,
+        }),
+    } as Response);
+
+    const url = await streamableMediaUrl("/api/gallery/image/clip.mp4", {
+      target,
+      cacheKey: "local",
+    });
+
+    expect(url).toBe(
+      "http://127.0.0.1:49152/api/gallery/image/clip.mp4?media_token=loopback-ticket&expires=1800000000",
+    );
+    expect(url).not.toContain("desktop-key");
+    expect(apiFetchTo).toHaveBeenCalledWith(target, "/api/gallery/media-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "/api/gallery/image/clip.mp4" }),
+    });
+  });
+
   it("uses the direct URL when a current auth-disabled host sees a stale saved key", async () => {
     const target = { baseUrl: "http://studio:7680", apiKey: "stale-key" };
     vi.mocked(apiFetchTo).mockResolvedValueOnce({

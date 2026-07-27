@@ -22,6 +22,10 @@ export interface GalleryBucket {
   loading: boolean;
   error: string | null;
   loaded: boolean;
+  /** Authority that produced this snapshot. `null` means the lifecycle lock
+   *  proved the server was Off and native filesystem access was used. */
+  authorityTarget?: ApiTarget | null;
+  authorityResolved?: boolean;
 }
 
 /** A bucket that should exist right now. */
@@ -60,6 +64,8 @@ const emptyBucket = (): GalleryBucket => ({
   loading: false,
   error: null,
   loaded: false,
+  authorityTarget: null,
+  authorityResolved: false,
 });
 
 /**
@@ -355,10 +361,17 @@ export const useGalleryStore = defineStore("gallery", {
     },
     /** How a bucket's media is addressed: API paths vs mold-local files. */
     mediaSourceOf(sourceKey: string): GallerySource {
-      return this.hostFor(sourceKey) ? "host" : "local";
+      return this.targetOf(sourceKey) ? "host" : "local";
     },
     /** Auth target for a bucket's host; null for the This-Mac IPC bucket. */
     targetOf(sourceKey: string): ApiTarget | null {
+      const bucket = this.buckets[sourceKey];
+      if (sourceKey === "local" && bucket?.authorityResolved) {
+        if (bucket.authorityTarget === undefined) {
+          throw new Error("The local gallery snapshot is missing its authority target.");
+        }
+        return bucket.authorityTarget;
+      }
       const host = this.hostFor(sourceKey);
       return host?.baseUrl ? { baseUrl: host.baseUrl, apiKey: host.apiKey } : null;
     },
@@ -390,24 +403,37 @@ export const useGalleryStore = defineStore("gallery", {
       if (bucket.loading) return;
       bucket.loading = true;
       bucket.error = null;
+      const previousSource = this.mediaSourceOf(key);
       try {
         // Resolve the origin at call time: a key backed by a live host reads
         // that host's /api/gallery; the bare "local" key is this Mac via IPC.
-        const target = this.targetOf(key);
         let items: GalleryImage[];
-        if (target) items = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
-        else if (key === "local") items = await ipc.localGalleryList();
-        else throw new Error("Host is not connected.");
+        let authorityTarget: ApiTarget | null;
+        if (key === "local") {
+          const snapshot = await ipc.localGalleryList();
+          items = snapshot.images;
+          authorityTarget = snapshot.target;
+        } else {
+          const target = this.targetOf(key);
+          if (!target) throw new Error("Host is not connected.");
+          items = await apiJsonTo<GalleryImage[]>(target, "/api/gallery");
+          authorityTarget = target;
+        }
         // Prints that vanished out-of-band (deleted by another client) must
         // release their cached blob URLs — the media cache only evicts on
         // explicit remove()/host teardown otherwise.
-        const source = this.mediaSourceOf(key);
         const next = new Set(items.map((i) => i.filename));
+        const authorityChanged =
+          bucket.authorityResolved &&
+          (bucket.authorityTarget?.baseUrl !== authorityTarget?.baseUrl ||
+            bucket.authorityTarget?.apiKey !== authorityTarget?.apiKey);
         for (const old of bucket.items) {
-          if (next.has(old.filename)) continue;
-          evictMedia(galleryMediaPath(old.filename, source, true), key);
-          evictMedia(galleryMediaPath(old.filename, source), key);
+          if (!authorityChanged && next.has(old.filename)) continue;
+          evictMedia(galleryMediaPath(old.filename, previousSource, true), key);
+          evictMedia(galleryMediaPath(old.filename, previousSource), key);
         }
+        bucket.authorityTarget = authorityTarget;
+        bucket.authorityResolved = true;
         // Newest first, like a print drawer.
         bucket.items = items.sort((a, b) => b.timestamp - a.timestamp);
         bucket.loaded = true;

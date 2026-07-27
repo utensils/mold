@@ -27,6 +27,7 @@ vi.mock("../lib/api/client", () => ({
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import { sseStream } from "../lib/api/sse";
 import { apiJsonTo } from "../lib/api/client";
+import { ipc } from "../lib/ipc";
 import { useConnectionStore } from "./connection";
 
 const caps = (available: boolean) =>
@@ -45,6 +46,13 @@ function connectWithBucket() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  vi.mocked(ipc.localGalleryList).mockResolvedValue({
+    images: [],
+    target: {
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-test-key",
+    },
+  });
 });
 
 describe("events subscription", () => {
@@ -236,14 +244,14 @@ describe("old-server fallback poller", () => {
       // Queue busy → each tick refetches.
       generation.jobs.push({ status: "developing" } as never);
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJsonTo).toHaveBeenCalledTimes(1);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
 
       // Queue drains → exactly one trailing refetch, then quiet.
       generation.jobs.length = 0;
       await vi.advanceTimersByTimeAsync(5_100);
-      expect(apiJsonTo).toHaveBeenCalledTimes(2);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(10_200);
-      expect(apiJsonTo).toHaveBeenCalledTimes(2);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(2);
 
       events.unsubscribe();
     } finally {
@@ -261,6 +269,7 @@ describe("old-server fallback poller", () => {
       await events.subscribe();
       await vi.advanceTimersByTimeAsync(20_000);
 
+      expect(ipc.localGalleryList).not.toHaveBeenCalled();
       expect(apiJsonTo).not.toHaveBeenCalled();
       events.unsubscribe();
     } finally {

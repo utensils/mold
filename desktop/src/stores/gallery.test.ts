@@ -33,13 +33,19 @@ const loadedBucket = (items: GalleryImage[] = []): GalleryBucket => ({
   loading: false,
   error: null,
   loaded: true,
+  authorityTarget: null,
+  authorityResolved: false,
 });
 
 /** Primary = the built-in engine (host id "local", HTTP on loopback). */
 function connectLocal() {
   const conn = useConnectionStore();
-  conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
+  conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" };
   conn.status = "ready";
+  vi.mocked(ipc.localGalleryList).mockResolvedValue({
+    images: [],
+    target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+  });
 }
 
 function addExtra(id = "okra-7680", url = "http://okra:7680", apiKey: string | null = null) {
@@ -60,11 +66,18 @@ function connectLocalPlusHal() {
   addExtra("hal9000-7680", "http://hal9000:7680", "hk");
 }
 
+function localSnapshot(images: GalleryImage[], target = true) {
+  vi.mocked(ipc.localGalleryList).mockResolvedValue({
+    images,
+    target: target ? { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" } : null,
+  });
+}
+
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   vi.mocked(apiJsonTo).mockResolvedValue([]);
-  vi.mocked(ipc.localGalleryList).mockResolvedValue([]);
+  vi.mocked(ipc.localGalleryList).mockResolvedValue({ images: [], target: null });
 });
 
 describe("gallery sources", () => {
@@ -77,11 +90,11 @@ describe("gallery sources", () => {
     expect(gallery.sources.map((s) => s.key)).toEqual(["local"]);
 
     await gallery.fetchAll();
-    expect(ipc.localGalleryList).not.toHaveBeenCalled();
-    expect(apiJsonTo).toHaveBeenCalledWith(
-      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
-      "/api/gallery",
-    );
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
+    expect(gallery.targetOf("local")).toEqual({
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-key",
+    });
   });
 
   it("gives every connected host its own bucket", async () => {
@@ -91,10 +104,7 @@ describe("gallery sources", () => {
     expect(gallery.sources.map((s) => s.key)).toEqual(["local", "hal9000-7680"]);
 
     await gallery.fetchAll();
-    expect(apiJsonTo).toHaveBeenCalledWith(
-      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
-      "/api/gallery",
-    );
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
     expect(apiJsonTo).toHaveBeenCalledWith(
       { baseUrl: "http://hal9000:7680", apiKey: "hk" },
       "/api/gallery",
@@ -114,6 +124,10 @@ describe("merged grid", () => {
   it("merges buckets newest-first with host labels, filters, and counts chips", async () => {
     connectLocalPlusHal();
     addExtra();
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("l1.png", 200)],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
     vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000"))
@@ -151,7 +165,10 @@ describe("merged grid", () => {
 
   it("an unknown filter falls back to the full merged set", async () => {
     connectLocal();
-    vi.mocked(apiJsonTo).mockResolvedValue([img("a.png", 1)]);
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("a.png", 1)],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
     const gallery = useGalleryStore();
     await gallery.fetchAll();
     gallery.filter = "gone-host";
@@ -161,6 +178,10 @@ describe("merged grid", () => {
   it("dedupes matching filenames in All, prefers This device, and lists every location", async () => {
     connectLocalPlusHal();
     addExtra();
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("shared.png", 202)],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
     vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000"))
@@ -203,6 +224,10 @@ describe("identity dedupe", () => {
 
   it("collapses same-print copies whose filenames differ via seed + byte identity", async () => {
     connectLocalPlusHal();
+    localSnapshot([
+      identified("ltx-video-mirror.mp4", 301, 42, 9_000),
+      identified("unrelated.png", 100, 7, 1_234),
+    ]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       // The same LTX print: saved on hal9000 under the server's name, and
@@ -242,6 +267,7 @@ describe("identity dedupe", () => {
       metadata_synthetic: true,
       metadata: { prompt: "", seed: 0 },
     } as never as GalleryImage;
+    localSnapshot([mirror]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000")) return Promise.resolve([origin]) as never;
@@ -269,6 +295,7 @@ describe("identity dedupe", () => {
         metadata_synthetic: true,
         metadata: { prompt: "", seed: 0, model: "unknown" },
       }) as never;
+    localSnapshot([synth("clip-b.mp4")]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000")) return Promise.resolve([synth("clip-a.mp4")]) as never;
@@ -288,6 +315,7 @@ describe("identity dedupe", () => {
         size_bytes: 9_000,
         metadata: { prompt: "p", seed: 42, model },
       }) as never;
+    localSnapshot([withModel("b.png", "sd15:fp16")]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000"))
@@ -301,6 +329,7 @@ describe("identity dedupe", () => {
 
   it("never collapses identity matches written far apart (re-generations)", async () => {
     connectLocalPlusHal();
+    localSnapshot([identified("b.png", 27_200, 42, 9_000)]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       // Same seed, size, and model — but two days apart: a re-generation,
@@ -316,6 +345,7 @@ describe("identity dedupe", () => {
 
   it("never collapses rows that lack a seed or byte size", async () => {
     connectLocalPlusHal();
+    localSnapshot([img("b.png", 301)]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000")) return Promise.resolve([img("a.png", 300)]) as never;
@@ -328,6 +358,7 @@ describe("identity dedupe", () => {
 
   it("existsLocally spots a local copy by identity even on host-chip tiles", async () => {
     connectLocalPlusHal();
+    localSnapshot([identified("ltx-video-mirror.mp4", 301, 42, 9_000)]);
     vi.mocked(apiJsonTo).mockImplementation((target) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000"))
@@ -354,6 +385,10 @@ describe("per-bucket isolation", () => {
   it("one host failing never breaks the others", async () => {
     connectLocalPlusHal();
     addExtra();
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("l1.png", 20)],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
     vi.mocked(apiJsonTo).mockImplementation((target, _path) => {
       const url = (target as { baseUrl: string }).baseUrl;
       if (url.includes("hal9000")) return Promise.reject(new Error("connection refused"));
@@ -368,6 +403,24 @@ describe("per-bucket isolation", () => {
     expect(gallery.buckets["hal9000-7680"]!.loaded).toBe(false);
     expect(gallery.buckets["okra-7680"]!.loaded).toBe(true);
     expect(gallery.merged.map((e) => e.item.filename)).toEqual(["l1.png", "o1.png"]);
+  });
+
+  it("uses a remote host's changed endpoint and key on the next refresh", async () => {
+    addExtra("hal9000-7680", "http://hal9000:7680", "old-key");
+    vi.mocked(apiJsonTo).mockResolvedValue([img("same.png", 10)]);
+    const gallery = useGalleryStore();
+    await gallery.fetchBucket("hal9000-7680");
+
+    const host = useHostsStore().extras[0]!;
+    host.url = "https://hal9000.tailnet.ts.net:8443";
+    host.apiKey = "new-key";
+    await gallery.fetchBucket("hal9000-7680");
+
+    expect(apiJsonTo).toHaveBeenLastCalledWith(
+      { baseUrl: "https://hal9000.tailnet.ts.net:8443", apiKey: "new-key" },
+      "/api/gallery",
+    );
+    expect(evictMedia).toHaveBeenCalledWith("/api/gallery/image/same.png", "hal9000-7680");
   });
 });
 
@@ -421,7 +474,7 @@ describe("live server events", () => {
 
       await vi.advanceTimersByTimeAsync(600);
       // Two events inside the window collapse into one refetch.
-      expect(apiJsonTo).toHaveBeenCalledTimes(1);
+      expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -447,7 +500,10 @@ describe("local bucket while the engine is down", () => {
     conn.info = { mode: "local", baseUrl: "http://127.0.0.1:49152", apiKey: null };
     conn.status = "error";
     addExtra("hal9000-7680", "http://hal9000:7680", "hk");
-    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("saved-remote-print.png", 50)]);
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("saved-remote-print.png", 50)],
+      target: null,
+    });
     const gallery = useGalleryStore();
 
     expect(gallery.sources.map((s) => s.key)).toEqual(["local", "hal9000-7680"]);
@@ -473,7 +529,10 @@ describe("local bucket while the engine is down", () => {
   it("refreshHost('local') works over IPC while the engine is down (auto-save nudge)", async () => {
     const gallery = useGalleryStore();
     gallery.buckets["local"] = loadedBucket([]);
-    vi.mocked(ipc.localGalleryList).mockResolvedValue([img("just-saved.png", 9)]);
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("just-saved.png", 9)],
+      target: null,
+    });
 
     await gallery.refreshHost("local");
 
@@ -481,17 +540,87 @@ describe("local bucket while the engine is down", () => {
     expect(gallery.buckets["local"]!.items.map((i) => i.filename)).toEqual(["just-saved.png"]);
   });
 
-  it("returns to HTTP the moment the local server is ready again", async () => {
+  it("keeps the IPC-proven running-server target when host status is stale", async () => {
+    const conn = useConnectionStore();
+    conn.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-key",
+    };
+    conn.status = "error";
+    vi.mocked(ipc.localGalleryList).mockResolvedValue({
+      images: [img("clip.mp4", 9)],
+      target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+    });
+    vi.mocked(apiFetchTo).mockResolvedValue(new Response(null, { status: 204 }));
+    const gallery = useGalleryStore();
+
+    await gallery.fetchBucket("local");
+
+    expect(gallery.mediaSourceOf("local")).toBe("host");
+    expect(gallery.targetOf("local")).toEqual({
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-key",
+    });
+    await gallery.remove("local", "clip.mp4");
+    expect(apiFetchTo).toHaveBeenCalledWith(
+      { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+      "/api/gallery/image/clip.mp4",
+      { method: "DELETE" },
+    );
+    expect(ipc.localGalleryDelete).not.toHaveBeenCalled();
+  });
+
+  it("refreshes Running to Off authority and evicts server-addressed media", async () => {
+    const gallery = useGalleryStore();
+    vi.mocked(ipc.localGalleryList)
+      .mockResolvedValueOnce({
+        images: [img("print.png", 9)],
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+      })
+      .mockResolvedValueOnce({ images: [img("print.png", 9)], target: null });
+
+    await gallery.fetchBucket("local");
+    expect(gallery.mediaSourceOf("local")).toBe("host");
+    await gallery.fetchBucket("local");
+
+    expect(gallery.mediaSourceOf("local")).toBe("local");
+    expect(gallery.targetOf("local")).toBeNull();
+    expect(evictMedia).toHaveBeenCalledWith("/api/gallery/image/print.png", "local");
+  });
+
+  it("refreshes Off to Running authority and evicts native-protocol media", async () => {
+    const gallery = useGalleryStore();
+    vi.mocked(ipc.localGalleryList)
+      .mockResolvedValueOnce({ images: [img("print.png", 9)], target: null })
+      .mockResolvedValueOnce({
+        images: [img("print.png", 9)],
+        target: { baseUrl: "http://127.0.0.1:49152", apiKey: "desktop-key" },
+      });
+
+    await gallery.fetchBucket("local");
+    expect(gallery.mediaSourceOf("local")).toBe("local");
+    await gallery.fetchBucket("local");
+
+    expect(gallery.mediaSourceOf("local")).toBe("host");
+    expect(gallery.targetOf("local")).toEqual({
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-key",
+    });
+    expect(evictMedia).toHaveBeenCalledWith("mold-local://localhost/print.png", "local");
+  });
+
+  it("returns a server-backed snapshot the moment the local server is ready again", async () => {
     connectLocal();
     const gallery = useGalleryStore();
 
     await gallery.fetchBucket("local");
 
-    expect(apiJsonTo).toHaveBeenCalledWith(
-      { baseUrl: "http://127.0.0.1:49152", apiKey: null },
-      "/api/gallery",
-    );
-    expect(ipc.localGalleryList).not.toHaveBeenCalled();
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
+    expect(gallery.targetOf("local")).toEqual({
+      baseUrl: "http://127.0.0.1:49152",
+      apiKey: "desktop-key",
+    });
   });
 });
 
@@ -555,7 +684,7 @@ describe("refreshHost", () => {
     connectLocal();
     const gallery = useGalleryStore();
     gallery.buckets["local"] = loadedBucket([img("gone.png", 1), img("kept.png", 2)]);
-    vi.mocked(apiJsonTo).mockResolvedValue([img("kept.png", 2)]);
+    localSnapshot([img("kept.png", 2)]);
 
     await gallery.fetchBucket("local");
 
@@ -573,7 +702,7 @@ describe("refreshHost", () => {
 
     await gallery.refreshHost("local");
 
-    expect(apiJsonTo).toHaveBeenCalledTimes(1);
+    expect(ipc.localGalleryList).toHaveBeenCalledTimes(1);
   });
 
   it("never force-loads a bucket from a background event", async () => {

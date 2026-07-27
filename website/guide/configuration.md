@@ -26,6 +26,11 @@ future keys visible under Advanced, labels each value's DB/file/environment
 provenance, prevents writes that an environment variable would override, and
 supports per-key reset plus profile creation and switching.
 
+`output_dir` is a startup-only trust root for a running server. The live
+`PUT /api/config/output_dir` endpoint returns `409 RESTART_REQUIRED` without
+changing memory or disk. Stop the server, run
+`mold config set output_dir <path>`, then restart it.
+
 ## Managing Config from the CLI
 
 `mold config` routes writes to the right surface based on the key

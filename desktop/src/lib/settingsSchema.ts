@@ -117,6 +117,8 @@ export interface KeySchema {
   step?: number;
   /** Changing this requires an engine restart to take effect. */
   needsEngineRestart?: boolean;
+  /** The running server rejects mutation; edit through the CLI while stopped. */
+  liveReadOnly?: boolean;
 }
 
 /** Engine-config keys (`/api/config`) with curated editors. */
@@ -133,9 +135,10 @@ export const ENGINE_KEY_SCHEMAS: KeySchema[] = [
     key: "output_dir",
     section: "hosts",
     label: "Output directory",
-    help: "Where finished prints are written on this host. The Gallery reads from here.",
+    help: "Where finished prints are written. Startup-only: stop the engine, run `mold config set output_dir <path>`, then restart.",
     editor: "path",
     needsEngineRestart: true,
+    liveReadOnly: true,
   },
   {
     key: "server_port",

@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Extension, Path, Request, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use base64::Engine as _;
@@ -198,6 +199,7 @@ use crate::queue::clean_error_message;
         unload_model,
         delete_model,
         create_gallery_media_token,
+        import_gallery_file,
         server_status,
         list_devices,
         patch_device,
@@ -383,6 +385,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/models/unload", delete(unload_model))
         .route("/api/gallery", get(list_gallery))
         .route("/api/gallery/media-token", post(create_gallery_media_token))
+        .route(
+            "/api/gallery/import/:filename",
+            put(import_gallery_file).layer(DefaultBodyLimit::max(
+                usize::try_from(
+                    MAX_GALLERY_IMPORT_FILE_BYTES
+                        + MAX_GALLERY_IMPORT_METADATA_BYTES as u64
+                        + GALLERY_IMPORT_HEADER_BYTES as u64,
+                )
+                .unwrap_or(usize::MAX),
+            )),
+        )
         .route(
             "/api/gallery/image/:filename",
             get(get_gallery_image).delete(delete_gallery_image),
@@ -3442,6 +3455,571 @@ async fn shutdown_server(State(state): State<AppState>, request: Request) -> imp
 
 // ── /api/gallery ──────────────────────────────────────────────────────────────
 
+const GALLERY_IMPORT_CONTENT_TYPE: &str = "application/vnd.mold.gallery-import";
+const GALLERY_IMPORT_HEADER_BYTES: usize = 12;
+const MAX_GALLERY_IMPORT_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_GALLERY_IMPORT_FILE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GalleryImportResponse {
+    filename: String,
+}
+
+fn invalid_gallery_import(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(
+        message,
+        "INVALID_GALLERY_IMPORT",
+        StatusCode::UNPROCESSABLE_ENTITY,
+    )
+}
+
+fn gallery_import_too_large(message: impl Into<String>) -> ApiError {
+    ApiError::with_code(
+        message,
+        "GALLERY_IMPORT_TOO_LARGE",
+        StatusCode::PAYLOAD_TOO_LARGE,
+    )
+}
+
+fn validate_gallery_filename(filename: &str) -> Result<(), ApiError> {
+    let path = std::path::Path::new(filename);
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || path.components().count() != 1
+        || !matches!(
+            path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(ApiError::validation(
+            "gallery filename must be one normal path component",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GalleryImportDescriptor {
+    metadata: mold_core::OutputMetadata,
+    metadata_synthetic: bool,
+}
+
+struct ParsedGalleryImport {
+    descriptor: GalleryImportDescriptor,
+    file_len: u64,
+    pending_file_bytes: axum::body::Bytes,
+    stream: axum::body::BodyDataStream,
+}
+
+async fn parse_gallery_import_prefix(
+    output_dir: &std::path::Path,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<ParsedGalleryImport, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type != Some(GALLERY_IMPORT_CONTENT_TYPE) {
+        return Err(ApiError::with_code(
+            format!("gallery imports require Content-Type {GALLERY_IMPORT_CONTENT_TYPE}"),
+            "UNSUPPORTED_GALLERY_IMPORT",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ));
+    }
+    let maximum_body = MAX_GALLERY_IMPORT_FILE_BYTES
+        .saturating_add(MAX_GALLERY_IMPORT_METADATA_BYTES as u64)
+        .saturating_add(GALLERY_IMPORT_HEADER_BYTES as u64);
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > maximum_body)
+    {
+        return Err(gallery_import_too_large(format!(
+            "gallery import body exceeds {maximum_body} bytes"
+        )));
+    }
+
+    let mut stream = body.into_data_stream();
+    let mut prefix = Vec::with_capacity(GALLERY_IMPORT_HEADER_BYTES);
+    let mut metadata_len: Option<usize> = None;
+    let mut file_len: Option<u64> = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| invalid_gallery_import(format!("import body failed: {error}")))?;
+        let mut offset = 0;
+        if prefix.len() < GALLERY_IMPORT_HEADER_BYTES {
+            let take = (GALLERY_IMPORT_HEADER_BYTES - prefix.len()).min(chunk.len());
+            prefix.extend_from_slice(&chunk[..take]);
+            offset += take;
+            if prefix.len() == GALLERY_IMPORT_HEADER_BYTES {
+                let declared_metadata =
+                    u32::from_be_bytes(prefix[..4].try_into().expect("four-byte prefix")) as usize;
+                if declared_metadata == 0 {
+                    return Err(invalid_gallery_import(
+                        "gallery import descriptor cannot be empty",
+                    ));
+                }
+                if declared_metadata > MAX_GALLERY_IMPORT_METADATA_BYTES {
+                    return Err(gallery_import_too_large(format!(
+                        "gallery import metadata exceeds {MAX_GALLERY_IMPORT_METADATA_BYTES} bytes"
+                    )));
+                }
+                let declared_file =
+                    u64::from_be_bytes(prefix[4..].try_into().expect("eight-byte prefix"));
+                if declared_file == 0 {
+                    return Err(invalid_gallery_import(
+                        "gallery import file payload cannot be empty",
+                    ));
+                }
+                if declared_file > MAX_GALLERY_IMPORT_FILE_BYTES {
+                    return Err(gallery_import_too_large(format!(
+                        "gallery import file exceeds {MAX_GALLERY_IMPORT_FILE_BYTES} bytes"
+                    )));
+                }
+                metadata_len = Some(declared_metadata);
+                file_len = Some(declared_file);
+                prefix.reserve(declared_metadata);
+                let dir = output_dir.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    crate::batch_transaction::preflight_disk_space(&dir, declared_file)
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::internal(format!("gallery import preflight task failed: {error}"))
+                })?
+                .map_err(|error| {
+                    ApiError::with_code(
+                        format!("gallery import disk preflight failed: {error:#}"),
+                        "GALLERY_IMPORT_DISK_FULL",
+                        StatusCode::INSUFFICIENT_STORAGE,
+                    )
+                })?;
+            }
+        }
+        if let Some(declared_metadata) = metadata_len {
+            let descriptor_end = GALLERY_IMPORT_HEADER_BYTES + declared_metadata;
+            if prefix.len() < descriptor_end {
+                let take = (descriptor_end - prefix.len()).min(chunk.len() - offset);
+                prefix.extend_from_slice(&chunk[offset..offset + take]);
+                offset += take;
+            }
+            if prefix.len() == descriptor_end {
+                let descriptor = serde_json::from_slice(&prefix[GALLERY_IMPORT_HEADER_BYTES..])
+                    .map_err(|error| {
+                        invalid_gallery_import(format!(
+                            "invalid gallery import descriptor: {error}"
+                        ))
+                    })?;
+                return Ok(ParsedGalleryImport {
+                    descriptor,
+                    file_len: file_len.expect("file length parsed with metadata length"),
+                    pending_file_bytes: chunk.slice(offset..),
+                    stream,
+                });
+            }
+        }
+    }
+    Err(invalid_gallery_import(
+        "gallery import ended before its descriptor was complete",
+    ))
+}
+
+async fn stream_gallery_import_file(
+    transaction: &crate::batch_transaction::BatchTransaction,
+    mut parsed: ParsedGalleryImport,
+) -> Result<(GalleryImportDescriptor, u64), ApiError> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_path)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "failed to create gallery import staging file: {error}"
+            ))
+        })?;
+    let mut written = parsed.pending_file_bytes.len() as u64;
+    if written > parsed.file_len {
+        return Err(invalid_gallery_import(
+            "gallery import contains bytes after its declared file payload",
+        ));
+    }
+    file.write_all(&parsed.pending_file_bytes)
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to stage gallery import: {error}")))?;
+    while let Some(chunk) = parsed.stream.next().await {
+        let chunk = chunk
+            .map_err(|error| invalid_gallery_import(format!("import body failed: {error}")))?;
+        let next = written.saturating_add(chunk.len() as u64);
+        if next > parsed.file_len {
+            return Err(invalid_gallery_import(
+                "gallery import contains bytes after its declared file payload",
+            ));
+        }
+        file.write_all(&chunk).await.map_err(|error| {
+            ApiError::internal(format!("failed to stage gallery import: {error}"))
+        })?;
+        written = next;
+    }
+    if written != parsed.file_len {
+        return Err(invalid_gallery_import(format!(
+            "gallery import file ended at {written} bytes; expected {}",
+            parsed.file_len
+        )));
+    }
+    file.flush().await.map_err(|error| {
+        ApiError::internal(format!(
+            "failed to flush gallery import staging file: {error}"
+        ))
+    })?;
+    file.sync_all().await.map_err(|error| {
+        ApiError::internal(format!(
+            "failed to fsync gallery import staging file: {error}"
+        ))
+    })?;
+    Ok((parsed.descriptor, parsed.file_len))
+}
+
+fn files_match(left: &std::path::Path, right: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::Read as _;
+    if std::fs::metadata(left)?.len() != std::fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    let mut left = std::io::BufReader::new(std::fs::File::open(left)?);
+    let mut right = std::io::BufReader::new(std::fs::File::open(right)?);
+    let mut left_buf = [0_u8; 64 * 1024];
+    let mut right_buf = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left.read(&mut left_buf)?;
+        let right_read = right.read(&mut right_buf)?;
+        if left_read != right_read || left_buf[..left_read] != right_buf[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Stream an already-encoded image/video into the server-owned gallery.
+///
+/// The fixed binary envelope is `u32 metadata_len`, `u64 file_len`, metadata
+/// JSON, then exactly `file_len` bytes. It lets native mirroring preserve
+/// metadata and cross-host filename identity without buffering large videos
+/// in the server. Authentication is the ordinary API-key middleware; media
+/// reads remain on the existing short-lived ticket endpoint.
+#[utoipa::path(
+    put,
+    path = "/api/gallery/import/{filename}",
+    tag = "gallery",
+    params(("filename" = String, Path, description = "Preferred gallery basename")),
+    responses(
+        (status = 200, description = "An identical existing file was retained", body = GalleryImportResponse),
+        (status = 201, description = "Imported through journaled atomic no-replace publication", body = GalleryImportResponse),
+        (status = 409, description = "Identical bytes conflict with existing metadata"),
+        (status = 413, description = "Metadata or file exceeds the bounded import envelope"),
+        (status = 415, description = "Unsupported import content type"),
+        (status = 422, description = "Invalid filename, framing, metadata, or output format"),
+    )
+)]
+async fn import_gallery_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(filename): axum::extract::Path<String>,
+    body: Body,
+) -> Result<(StatusCode, Json<GalleryImportResponse>), ApiError> {
+    validate_gallery_filename(&filename)?;
+    let config = state.config.read().await;
+    if config.is_output_disabled() {
+        return Err(ApiError::not_found("image output is disabled"));
+    }
+    let output_dir = config.effective_output_dir();
+    drop(config);
+    let format = mold_db::metadata_io::format_from_path(std::path::Path::new(&filename))
+        .ok_or_else(|| {
+            invalid_gallery_import("gallery import must be PNG, JPEG, WebP, GIF, APNG, or MP4")
+        })?;
+    let parsed_import = parse_gallery_import_prefix(&output_dir, &headers, body).await?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let descriptor = parsed_import.descriptor.clone();
+    let mut record = mold_db::GenerationRecord::from_save(
+        &output_dir,
+        &filename,
+        format,
+        descriptor.metadata.clone(),
+        mold_db::RecordSource::Backfill,
+        i64::try_from(timestamp.saturating_mul(1000)).unwrap_or(i64::MAX),
+    );
+    record.metadata_synthetic = descriptor.metadata_synthetic;
+    let parent_id = format!("gallery-import-{}", uuid::Uuid::new_v4());
+    let begin_dir = output_dir.clone();
+    let requested_filename = filename.clone();
+    let mut transaction = tokio::task::spawn_blocking(move || {
+        crate::batch_transaction::BatchTransaction::begin(
+            &begin_dir,
+            &parent_id,
+            0,
+            serde_json::json!({
+                "kind": "gallery_import",
+                "requested_filename": requested_filename,
+            }),
+            vec![record],
+        )
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import begin task failed: {error}")))?
+    .map_err(|error| {
+        ApiError::internal(format!("failed to begin atomic gallery import: {error:#}"))
+    })?;
+
+    let (descriptor, declared_file_len) =
+        match stream_gallery_import_file(&transaction, parsed_import).await {
+            Ok(import) => import,
+            Err(error) => {
+                let _ =
+                    tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+                return Err(error);
+            }
+        };
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    let descriptor_for_validation = descriptor.clone();
+    let validation = tokio::task::spawn_blocking(move || {
+        let valid =
+            mold_db::metadata_io::is_valid_gallery_file(&staged_path, format, declared_file_len);
+        let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
+        let embedded_matches = embedded
+            .as_ref()
+            .is_none_or(|embedded| embedded == &descriptor_for_validation.metadata);
+        (valid, embedded_matches, embedded.is_some())
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "gallery import metadata validation task failed: {error}"
+        ))
+    })?;
+    if !validation.0 {
+        let _ = tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+        return Err(ApiError::with_code(
+            "gallery import payload is not a valid gallery media file",
+            "INVALID_GALLERY_MEDIA",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    if !validation.1 || (descriptor.metadata_synthetic && validation.2) {
+        let _ = tokio::task::spawn_blocking(move || transaction.rollback_unpublished()).await;
+        return Err(ApiError::with_code(
+            "embedded gallery metadata conflicts with the immutable import descriptor or its synthetic flag",
+            "GALLERY_METADATA_CONFLICT",
+            StatusCode::CONFLICT,
+        ));
+    }
+    transaction = tokio::task::spawn_blocking(move || {
+        if let Err(error) = transaction
+            .seal_staged_file(0)
+            .and_then(|()| transaction.mark_prepared())
+        {
+            let cleanup = transaction.rollback_unpublished();
+            return Err(error.context(format!(
+                "rolling back failed with: {}",
+                cleanup
+                    .err()
+                    .map(|error| format!("{error:#}"))
+                    .unwrap_or_else(|| "clean rollback".to_string())
+            )));
+        }
+        Ok::<_, anyhow::Error>(transaction)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import seal task failed: {error}")))?
+    .map_err(|error| {
+        ApiError::internal(format!("failed to seal atomic gallery import: {error:#}"))
+    })?;
+
+    let gallery_writer = state.gallery_publication_gate.write().await;
+    let db = state.metadata_db.clone();
+    let events = state.events.clone();
+    let db_for_existing = db.clone();
+    let filename_for_task = filename.clone();
+    let dir_for_task = output_dir.clone();
+    let staged_path = transaction.staging_path(0).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to resolve gallery import staging: {error:#}"
+        ))
+    })?;
+    enum PreparedGalleryImport {
+        Existing(String),
+        Transaction {
+            transaction: Box<crate::batch_transaction::BatchTransaction>,
+            filename: String,
+        },
+    }
+    let prepared = tokio::task::spawn_blocking(move || {
+        let desired_path = dir_for_task.join(&filename_for_task);
+        let identical = if desired_path.is_file() {
+            match files_match(&desired_path, &staged_path) {
+                Ok(identical) => identical,
+                Err(error) => {
+                    let _ = transaction.rollback_unpublished();
+                    return Err(ApiError::internal(format!(
+                        "failed to compare existing gallery file: {error}"
+                    )));
+                }
+            }
+        } else {
+            false
+        };
+        let embedded = mold_db::metadata_io::read_embedded(&staged_path, format);
+        if !identical {
+            let filename = transaction.manifest().children[0].final_name.clone();
+            return Ok(PreparedGalleryImport::Transaction {
+                transaction: Box::new(transaction),
+                filename,
+            });
+        }
+
+        let recorded = match db_for_existing
+            .as_ref()
+            .as_ref()
+            .map(|db| db.get(&dir_for_task, &filename_for_task))
+            .transpose()
+        {
+            Ok(recorded) => recorded.flatten(),
+            Err(error) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::internal(format!(
+                    "failed to inspect existing gallery metadata: {error:#}"
+                )));
+            }
+        };
+        let recorded_missing = recorded.is_none();
+        let recorded_descriptor =
+            recorded.map(|record| (record.metadata, record.metadata_synthetic));
+        let can_backfill_missing_row = recorded_missing && embedded.is_some();
+        let embedded_descriptor = embedded.map(|metadata| (metadata, false));
+        let authoritative = embedded_descriptor
+            .as_ref()
+            .or(recorded_descriptor.as_ref());
+        match authoritative {
+            Some((metadata, synthetic))
+                if metadata == &descriptor.metadata
+                    && synthetic == &descriptor.metadata_synthetic => {}
+            Some(_) => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::with_code(
+                    "identical gallery bytes already exist with different metadata",
+                    "GALLERY_METADATA_CONFLICT",
+                    StatusCode::CONFLICT,
+                ));
+            }
+            None => {
+                let _ = transaction.rollback_unpublished();
+                return Err(ApiError::with_code(
+                    "identical gallery bytes exist but their metadata cannot be verified",
+                    "GALLERY_METADATA_CONFLICT",
+                    StatusCode::CONFLICT,
+                ));
+            }
+        }
+        let metadata = embedded_descriptor
+            .map(|(metadata, _)| metadata)
+            .or_else(|| recorded_descriptor.map(|(metadata, _)| metadata))
+            .unwrap_or_else(|| descriptor.metadata.clone());
+        if db_for_existing.as_ref().as_ref().is_some() && can_backfill_missing_row {
+            let image = db_for_existing.as_ref().as_ref().and_then(|db| {
+                mold_db::persist::record_saved_output_returning(
+                    db,
+                    &dir_for_task,
+                    &filename_for_task,
+                    &desired_path,
+                    &mold_db::persist::OutputRecordParams {
+                        format,
+                        metadata: &metadata,
+                        source: mold_db::RecordSource::Backfill,
+                        generation_time_ms: None,
+                        backend: None,
+                    },
+                )
+                .map(|record| Box::new(record.to_gallery_image()))
+            });
+            events.publish(mold_core::ServerEvent::GalleryAdded {
+                filename: filename_for_task.clone(),
+                image,
+            });
+        }
+        transaction.rollback_unpublished().map_err(|error| {
+            ApiError::internal(format!(
+                "failed to retire idempotent gallery import transaction: {error:#}"
+            ))
+        })?;
+        Ok::<_, ApiError>(PreparedGalleryImport::Existing(filename_for_task))
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("gallery import task failed: {error}")))??;
+    drop(gallery_writer);
+
+    let (saved_name, created) = match prepared {
+        PreparedGalleryImport::Existing(filename) => (filename, false),
+        PreparedGalleryImport::Transaction {
+            mut transaction,
+            filename,
+        } => {
+            if let Err(error) = transaction
+                .commit(&state.gallery_publication_gate, db.clone())
+                .await
+            {
+                let message = error.to_string();
+                if error.entered_committing() {
+                    tracing::error!(%message, "atomic gallery import commit is unresolved");
+                    drop(error);
+                    unreachable!("unresolved commit aborts the process");
+                }
+                return Err(ApiError::internal(format!(
+                    "atomic gallery import commit failed before publication: {message}"
+                )));
+            }
+            let image = db
+                .as_ref()
+                .as_ref()
+                .and_then(|db| db.get(&output_dir, &filename).ok().flatten())
+                .map(|record| Box::new(record.to_gallery_image()));
+            state.events.publish(mold_core::ServerEvent::GalleryAdded {
+                filename: filename.clone(),
+                image,
+            });
+            (filename, true)
+        }
+    };
+    Ok((
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(GalleryImportResponse {
+            filename: saved_name,
+        }),
+    ))
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct GalleryMediaTokenRequest {
     path: String,
@@ -4076,28 +4654,27 @@ fn generate_video_thumbnail(
 }
 
 /// Pre-generate thumbnails for all gallery images on server startup.
-pub fn spawn_thumbnail_warmup(
-    config: &mold_core::Config,
-    gallery_gate: crate::batch_transaction::GalleryPublicationGate,
+fn warm_gallery_thumbnails(
+    output_dir: &std::path::Path,
+    thumb_dir: &std::path::Path,
+    gallery_gate: &crate::batch_transaction::GalleryPublicationGate,
+    after_acquire: &dyn Fn(usize),
+    after_release: &dyn Fn(usize),
 ) {
-    if !thumbnail_warmup_enabled() {
-        tracing::info!("thumbnail warmup disabled; thumbnails will be generated on demand");
-        return;
-    }
-
-    let output_dir = config.effective_output_dir();
-    tokio::spawn(async move {
-        let join = tokio::task::spawn_blocking(move || {
-            if !output_dir.is_dir() {
-                return;
-            }
-            let thumb_dir = server_thumbnail_dir();
-            let walker = walkdir::WalkDir::new(&output_dir).max_depth(1).into_iter();
-            for entry in walker.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
+    let mut walker = walkdir::WalkDir::new(output_dir).max_depth(1).into_iter();
+    let mut observation = 0_usize;
+    loop {
+        // One read authority owns the full observation: directory iterator
+        // advance, entry metadata, format classification, and source decode.
+        // A publisher can therefore run only before or after one entry, never
+        // in the middle of deciding what that entry contains.
+        let gallery_reader = gallery_gate.blocking_read();
+        after_acquire(observation);
+        let entry = walker.next();
+        let done = entry.is_none();
+        if let Some(Ok(entry)) = entry {
+            let path = entry.path();
+            if path.is_file() {
                 let ext = path
                     .extension()
                     .and_then(|e| e.to_str())
@@ -4107,37 +4684,58 @@ pub fn spawn_thumbnail_warmup(
                     Some("png" | "jpg" | "jpeg" | "gif" | "apng" | "webp")
                 );
                 let is_video = matches!(ext.as_deref(), Some("mp4"));
-                if !is_raster && !is_video {
-                    continue;
-                }
-                // Scope the barrier to one source check/decode. A large
-                // warmup must not monopolize the shared side and starve
-                // publication writers for its entire directory walk.
-                let _gallery_reader = gallery_gate.blocking_read();
-                let filename = path
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let thumb_path = thumb_dir.join(format!("{filename}.png"));
-                if thumb_path.is_file() {
-                    continue;
-                }
-                let result = if is_video {
-                    generate_video_thumbnail(path, &thumb_path)
-                } else {
-                    generate_server_thumbnail(path, &thumb_path)
-                };
-                if let Err(e) = result {
-                    tracing::warn!("failed to generate thumbnail for {}: {e}", path.display());
+                if is_raster || is_video {
+                    let filename = path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let thumb_path = thumb_dir.join(format!("{filename}.png"));
+                    if !thumb_path.is_file() {
+                        let result = if is_video {
+                            generate_video_thumbnail(path, &thumb_path)
+                        } else {
+                            generate_server_thumbnail(path, &thumb_path)
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!(
+                                "failed to generate thumbnail for {}: {e}",
+                                path.display()
+                            );
+                        }
+                    }
                 }
             }
+        }
+        drop(gallery_reader);
+        after_release(observation);
+        observation += 1;
+        if done {
+            break;
+        }
+    }
+}
+
+pub fn spawn_thumbnail_warmup(
+    config: &mold_core::Config,
+    gallery_gate: crate::batch_transaction::GalleryPublicationGate,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !thumbnail_warmup_enabled() {
+        tracing::info!("thumbnail warmup disabled; thumbnails will be generated on demand");
+        return None;
+    }
+
+    let output_dir = config.effective_output_dir();
+    Some(tokio::spawn(async move {
+        let join = tokio::task::spawn_blocking(move || {
+            let thumb_dir = server_thumbnail_dir();
+            warm_gallery_thumbnails(&output_dir, &thumb_dir, &gallery_gate, &|_| {}, &|_| {});
         })
         .await;
         if let Err(error) = join {
             tracing::warn!(%error, "thumbnail warmup task failed");
         }
         tracing::info!("thumbnail warmup complete");
-    });
+    }))
 }
 
 fn thumbnail_warmup_enabled() -> bool {
@@ -5244,5 +5842,74 @@ mod tests {
         assert!(entry.metadata_synthetic);
         assert_eq!(entry.metadata.width, 128);
         assert_eq!(entry.metadata.height, 96);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thumbnail_warmup_observes_one_entry_atomically_and_yields_to_writer() {
+        let output = TempDir::new("warmup-output");
+        let thumbs = TempDir::new("warmup-thumbs");
+        std::fs::write(output.path().join("print.png"), make_png_bytes(32, 32)).unwrap();
+        let gate = crate::batch_transaction::GalleryPublicationGate::default();
+        let worker_gate = gate.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let (warm_done_tx, warm_done_rx) = std::sync::mpsc::channel();
+        let output_path = output.path().to_path_buf();
+        let thumbs_path = thumbs.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let release_rx = release_rx.clone();
+            warm_gallery_thumbnails(
+                &output_path,
+                &thumbs_path,
+                &worker_gate,
+                &|observation| {
+                    if observation == 0 {
+                        entered_tx.send(()).unwrap();
+                        release_rx.lock().unwrap().recv().unwrap();
+                    }
+                },
+                &|_| {},
+            );
+            warm_done_tx.send(()).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let (writer_acquired_tx, writer_acquired_rx) = tokio::sync::oneshot::channel();
+        let (writer_release_tx, writer_release_rx) = tokio::sync::oneshot::channel();
+        let writer_gate = gate.clone();
+        let writer = tokio::spawn(async move {
+            let _writer = writer_gate.write().await;
+            let _ = writer_acquired_tx.send(());
+            let _ = writer_release_rx.await;
+        });
+        let mut writer_acquired_rx = writer_acquired_rx;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                &mut writer_acquired_rx
+            )
+            .await
+            .is_err(),
+            "writer observed the directory while one warmup entry was only partially inspected"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_acquired_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                warm_done_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "warmup reacquired the reader instead of yielding between entries"
+        );
+        let _ = writer_release_tx.send(());
+        writer.await.unwrap();
+        worker.join().unwrap();
     }
 }

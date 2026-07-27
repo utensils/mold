@@ -600,7 +600,7 @@ mod tests {
 
     /// Returns a valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND).
     fn minimal_png() -> Vec<u8> {
-        vec![
+        let mut bytes = vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + type
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
@@ -610,7 +610,84 @@ mod tests {
             0x01, // compressed
             0xE2, 0x21, 0xBC, 0x33, // IDAT CRC
             0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82, // IEND
-        ]
+        ];
+        // Gallery publication rejects undersized crash artifacts. PNG readers
+        // ignore bytes after IEND, so pad this tiny valid fixture past the
+        // ordinary gallery size floor without allocating a large image.
+        bytes.resize(320, 0);
+        bytes
+    }
+
+    fn output_metadata(prompt: &str) -> mold_core::OutputMetadata {
+        mold_core::OutputMetadata {
+            prompt: prompt.into(),
+            negative_prompt: None,
+            original_prompt: None,
+            batch_id: None,
+            batch_index: None,
+            batch_count: None,
+            model: "test-model".into(),
+            seed: 7,
+            steps: 4,
+            guidance: 1.0,
+            width: 1,
+            height: 1,
+            generation_width: None,
+            generation_height: None,
+            strength: None,
+            source_image_name: None,
+            source_image_sha256: None,
+            scheduler: None,
+            output_format: Some(mold_core::OutputFormat::Png),
+            cfg_plus: None,
+            lora: None,
+            lora_scale: None,
+            loras: None,
+            control_model: None,
+            control_scale: None,
+            upscale_model: None,
+            gif_preview: None,
+            enable_audio: None,
+            audio_file_path: None,
+            source_video_path: None,
+            pipeline: None,
+            retake_range: None,
+            spatial_upscale: None,
+            temporal_upscale: None,
+            frames: None,
+            fps: None,
+            version: "test".into(),
+        }
+    }
+
+    fn gallery_import_body(metadata: Option<&mold_core::OutputMetadata>, bytes: &[u8]) -> Vec<u8> {
+        let fallback;
+        let (metadata, metadata_synthetic) = match metadata {
+            Some(metadata) => (metadata, false),
+            None => {
+                fallback = output_metadata("synthetic fallback");
+                (&fallback, true)
+            }
+        };
+        gallery_import_body_with_descriptor(metadata, metadata_synthetic, bytes)
+    }
+
+    fn gallery_import_body_with_descriptor(
+        metadata: &mold_core::OutputMetadata,
+        metadata_synthetic: bool,
+        bytes: &[u8],
+    ) -> Vec<u8> {
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "metadata": metadata,
+            "metadata_synthetic": metadata_synthetic,
+        }))
+        .unwrap();
+        let mut body = Vec::with_capacity(12 + descriptor.len() + bytes.len());
+        body.extend_from_slice(&(descriptor.len() as u32).to_be_bytes());
+        body.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        body.extend_from_slice(&descriptor);
+        body.extend_from_slice(bytes);
+        body
     }
 
     // ── /health ──────────────────────────────────────────────────────────────
@@ -3505,6 +3582,62 @@ mod tests {
         assert!(
             written.contains("server_port = 8123"),
             "config.toml must carry the new value: {written}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_put_output_dir_is_restart_only_and_changes_neither_runtime_nor_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = MoldHomeGuard::set(tmp.path());
+        let boot_gallery = tmp.path().join("boot-gallery");
+        let rejected_gallery = tmp.path().join("rejected-gallery");
+        let config = mold_core::Config {
+            output_dir: Some(boot_gallery.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        config.save_bootstrap_only().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let live_config = state.config.clone();
+        let app = app_with_state(state);
+        let response = put_json(
+            &app,
+            "/api/config/output_dir",
+            &serde_json::json!({
+                "value": rejected_gallery.to_string_lossy()
+            })
+            .to_string(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "RESTART_REQUIRED");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("mold config set output_dir"));
+        assert_eq!(
+            live_config.read().await.effective_output_dir(),
+            boot_gallery,
+            "the running server must stay on its boot gallery namespace"
+        );
+        let persisted = mold_core::Config::load_or_default();
+        assert_eq!(
+            persisted.effective_output_dir(),
+            boot_gallery,
+            "a rejected live PUT must not persist the next-start namespace"
+        );
+        assert!(
+            !rejected_gallery.exists(),
+            "a rejected namespace must not be touched"
         );
     }
 
@@ -6421,6 +6554,367 @@ mod tests {
             body.as_array().unwrap().len(),
             0,
             "filesystem fallback must still apply size/header validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn gallery_import_uses_no_replace_publication_metadata_and_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = mold_db::MetadataDb::open_in_memory().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        state.metadata_db = Arc::new(Some(db));
+        let db = state.metadata_db.clone();
+        let mut events = state.events.subscribe();
+        let app = app_with_state(state);
+        let bytes = minimal_png();
+        let metadata = output_metadata("remote origin");
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(json_body(first).await["filename"], "print.png");
+        assert_eq!(std::fs::read(dir.path().join("print.png")).unwrap(), bytes);
+        assert_eq!(
+            db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata,
+            metadata
+        );
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            mold_core::ServerEvent::GalleryAdded { filename, .. } if filename == "print.png"
+        ));
+
+        // Identical bytes + identical metadata preserve cross-host filename
+        // identity instead of minting print-2.png.
+        let repeated = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(Some(&metadata), &bytes)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(json_body(repeated).await["filename"], "print.png");
+        assert!(!dir.path().join("print-2.png").exists());
+        let replay_event = events.try_recv();
+        assert!(
+            matches!(
+                replay_event,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "idempotent replay emitted an unexpected event: {replay_event:?}"
+        );
+
+        // Same bytes under the same identity may not silently rewrite
+        // provenance.
+        let conflict = app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body(
+                        Some(&output_metadata("conflicting origin")),
+                        &bytes,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["code"],
+            "GALLERY_METADATA_CONFLICT"
+        );
+        let conflict_event = events.try_recv();
+        assert!(
+            matches!(
+                conflict_event,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                    | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "conflicting replay emitted an unexpected event: {conflict_event:?}"
+        );
+        assert_eq!(
+            db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata,
+            metadata
+        );
+
+        let (synthetic_app, mut synthetic_events) = {
+            let config = mold_core::Config {
+                output_dir: Some(dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let mut state = AppState::empty(
+                config,
+                crate::state::QueueHandle::new(tx),
+                AppState::empty_gpu_pool_for_test(),
+                200,
+            );
+            state.metadata_db = db.clone();
+            let events = state.events.subscribe();
+            (app_with_state(state), events)
+        };
+        let synthetic_conflict = synthetic_app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(gallery_import_body_with_descriptor(
+                        &metadata, true, &bytes,
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(synthetic_conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(synthetic_conflict).await["code"],
+            "GALLERY_METADATA_CONFLICT"
+        );
+        assert!(
+            !db.as_ref()
+                .as_ref()
+                .unwrap()
+                .get(dir.path(), "print.png")
+                .unwrap()
+                .unwrap()
+                .metadata_synthetic
+        );
+        assert!(matches!(
+            synthetic_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gallery_import_requires_configured_key_before_creating_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let keys = std::collections::HashSet::from(["desktop-local-key".to_string()]);
+        let auth = Some(std::sync::Arc::new(crate::auth::ApiKeySet::new(keys)));
+        let app = create_router(state)
+            .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+            .layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::auth::inject_auth_state,
+            ));
+        let request_body = gallery_import_body(
+            Some(&output_metadata("authenticated desktop import")),
+            &minimal_png(),
+        );
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/auth.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(request_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert!(!dir.path().join("auth.png").exists());
+        assert!(
+            !dir.path().join(".mold-batch").exists(),
+            "auth must reject before transaction staging exists"
+        );
+
+        let authorized = app
+            .oneshot(
+                Request::put("/api/gallery/import/auth.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .header("x-api-key", "desktop-local-key")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::CREATED);
+        assert!(dir.path().join("auth.png").is_file());
+    }
+
+    #[tokio::test]
+    async fn gallery_import_accepts_chunked_declared_files_above_global_json_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "metadata": output_metadata("large streamed import"),
+            "metadata_synthetic": false,
+        }))
+        .unwrap();
+        let declared_len = 65_u64 * 1024 * 1024;
+        let mut prefix = Vec::with_capacity(12 + descriptor.len() + 1);
+        prefix.extend_from_slice(&(descriptor.len() as u32).to_be_bytes());
+        prefix.extend_from_slice(&declared_len.to_be_bytes());
+        prefix.extend_from_slice(&descriptor);
+        prefix.push(0x89);
+        let stream = futures::stream::iter([Ok::<_, std::convert::Infallible>(
+            axum::body::Bytes::from(prefix),
+        )]);
+
+        let response = app
+            .oneshot(
+                Request::put("/api/gallery/import/large.mp4")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from_stream(stream))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "route-specific streaming limit must admit a logical file above 64 MiB"
+        );
+        assert_eq!(json_body(response).await["code"], "INVALID_GALLERY_IMPORT");
+        assert!(!dir.path().join("large.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn gallery_import_framing_and_filename_are_bounded_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = mold_core::Config {
+            output_dir: Some(dir.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::empty(
+            config,
+            crate::state::QueueHandle::new(tx),
+            AppState::empty_gpu_pool_for_test(),
+            200,
+        );
+        let app = app_with_state(state);
+
+        let traversal = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/%2E%2E%2Fsecret.png")
+                    .body(Body::from(gallery_import_body(None, &minimal_png())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                traversal.status(),
+                StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY | StatusCode::NOT_FOUND
+            ),
+            "encoded traversal must never reach publication: {}",
+            traversal.status()
+        );
+
+        let mut oversized_metadata = Vec::new();
+        oversized_metadata.extend_from_slice(&(1024_u32 * 1024 + 1).to_be_bytes());
+        oversized_metadata.extend_from_slice(&0_u64.to_be_bytes());
+        let oversized_metadata = app
+            .clone()
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(oversized_metadata))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized_metadata.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            json_body(oversized_metadata).await["code"],
+            "GALLERY_IMPORT_TOO_LARGE"
+        );
+
+        for (filename, corrupt) in [
+            ("corrupt.png", vec![0_u8; 320]),
+            ("corrupt.mp4", vec![0_u8; 320]),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put(format!("/api/gallery/import/{filename}"))
+                        .header("content-type", "application/vnd.mold.gallery-import")
+                        .body(Body::from(gallery_import_body(
+                            Some(&output_metadata("corrupt import")),
+                            &corrupt,
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(json_body(response).await["code"], "INVALID_GALLERY_MEDIA");
+            assert!(!dir.path().join(filename).exists());
+        }
+
+        let short = app
+            .oneshot(
+                Request::put("/api/gallery/import/print.png")
+                    .header("content-type", "application/vnd.mold.gallery-import")
+                    .body(Body::from(vec![0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1, b'{']))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(short.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json_body(short).await["code"], "INVALID_GALLERY_IMPORT");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .all(|entry| entry.unwrap().file_name() != "print.png"),
+            "invalid framing must not publish a file"
         );
     }
 
