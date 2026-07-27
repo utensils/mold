@@ -12,7 +12,6 @@ use mold_scheduler::ExecutionEquivalenceFingerprint;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(any(unix, windows)))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -92,9 +91,15 @@ pub enum ComponentLoadStrategy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum QuantizationVariant {
+    Q2,
+    Q3,
     Q4,
+    Q5,
+    Q6,
     Q8,
     Fp8,
+    Nvfp4,
+    ConvRotW4A4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -126,6 +131,24 @@ pub enum DeterminismClass {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ContentFingerprint(pub String);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum EquivalenceContentIdentity {
+    Sha256(String),
+    /// The artifact could not be read. This opaque process-local token makes
+    /// the plan fail closed without treating a path or inode as content.
+    Unknown {
+        discriminator: String,
+    },
+}
+
+impl EquivalenceContentIdentity {
+    fn update_hash(&self, hash: &mut Sha256) {
+        hash.update(
+            serde_json::to_vec(self).expect("content fingerprint serialization is infallible"),
+        );
+    }
+}
 
 /// Stable architecture boundary for deterministic parent execution.
 ///
@@ -167,12 +190,166 @@ pub enum AttentionKernelClass {
 pub struct ExecutionCodeIdentity {
     pub package_version: String,
     pub source_revision: Option<String>,
+    pub scope: CodeIdentityScope,
+    pub process_discriminator: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum CodeIdentityScope {
+    ImmutableBuild,
+    CurrentProcessOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticAttentionBackend {
+    Math,
+    Flash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticAttentionChunk {
+    Auto,
+    Off,
+    Size(u64),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticVaeTiling {
+    Auto,
+    Force,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum SemanticVaeDType {
+    Auto,
+    Bf16,
+    F16,
+    F32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum RuntimeSemanticVariable {
+    Attn,
+    AttnChunk,
+    CfgPlus,
+    Device,
+    Eager,
+    FluxDeltaCache,
+    FluxKeepTransformer,
+    KeepTeRam,
+    LongPrompts,
+    LoraBypass,
+    LtxDebugAltPrompt,
+    LtxDebugCompareUncond,
+    LtxDebugDisableAudioBranch,
+    LtxDebugDisableCrossAttentionAdaLn,
+    Ltx2DebugDisableTransformerGatedAttention,
+    Ltx2DebugForceCpuPromptEncoder,
+    Ltx2DebugLoadBlocks,
+    Ltx2ForceEager,
+    Ltx2ForceStreaming,
+    Ltx2Fp8InputScaleMode,
+    Ltx2Fp8WeightScaleMode,
+    Ltx2GemmaDevice,
+    Ltx2GemmaVariant,
+    Ltx2VaeDecodeChunkFrames,
+    Ltx2VaeDecodeContextFrames,
+    Ltx2VaeForceFramewise,
+    Ltx2VaeForceFullDecode,
+    Nvfp4Backend,
+    Offload,
+    OffloadPrefetch,
+    PinnedVramMaxGb,
+    Qwen2TextEncoderMode,
+    Qwen2Variant,
+    Qwen3Variant,
+    ReserveVramMb,
+    T5Variant,
+    VaeDtype,
+    VaeTiled,
+    WuerstchenDecoderGuidance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum CanonicalRuntimeValue {
+    Unset,
+    Boolean(bool),
+    Presence(bool),
+    Unsigned(Option<u64>),
+    FloatBits(Option<u64>),
+    Token(String),
+    Text(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeSemanticSetting {
+    pub variable: RuntimeSemanticVariable,
+    pub value: CanonicalRuntimeValue,
+}
+
+/// Canonical, path-free engine construction and runtime semantics.
+///
+/// `from_frozen` fully destructures `FrozenEngineConfig`; adding a field to
+/// the source type is therefore a compile error until its equivalence effect
+/// is consciously classified here.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExecutionSemanticConfig {
+    pub family: String,
+    pub is_schnell: Option<bool>,
+    pub is_turbo: Option<bool>,
+    pub scheduler: Option<mold_core::Scheduler>,
+    pub t5_variant: Option<String>,
+    pub qwen3_variant: Option<String>,
+    pub qwen2_variant: Option<String>,
+    pub qwen2_text_encoder_mode: Option<String>,
+    pub ltx2_gemma_variant: Option<String>,
+    pub attention_backend: SemanticAttentionBackend,
+    pub attention_chunk: SemanticAttentionChunk,
+    pub vae_tiling: SemanticVaeTiling,
+    pub vae_dtype: SemanticVaeDType,
+    pub runtime: Vec<RuntimeSemanticSetting>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum EffectiveComponentDType {
+    NotApplicable,
+    Bf16,
+    F16,
+    F32,
+    QuantizedNative,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum ArtifactFormatUnknown {
+    Io,
+    UnsupportedContainer,
+    InvalidHeader,
+    UnsupportedTensorDType,
+    UnsupportedGgufTensorFormat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum ComponentStorageFormat {
+    Known(mold_inference::artifact_format::ArtifactStorageFormat),
+    Unknown {
+        reason: ArtifactFormatUnknown,
+        content_discriminator: EquivalenceContentIdentity,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EffectiveComponentPrecision {
+    pub storage: ComponentStorageFormat,
+    pub compute_dtype: EffectiveComponentDType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EquivalentComponentExecution {
     pub role: ComponentRole,
-    pub content_fingerprint: ContentFingerprint,
+    pub content_fingerprint: EquivalenceContentIdentity,
+    pub precision: EffectiveComponentPrecision,
     pub dtype: Option<PlannedDType>,
     pub quantization: Option<QuantizationVariant>,
     pub placement: SemanticComponentPlacement,
@@ -181,7 +358,7 @@ pub struct EquivalentComponentExecution {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EquivalentLoraExecution {
-    pub content_fingerprint: ContentFingerprint,
+    pub content_fingerprint: EquivalenceContentIdentity,
     pub scale_bits: u64,
 }
 
@@ -195,6 +372,7 @@ pub struct ExecutionEnvironmentDescriptor {
     pub architecture: DeviceArchitectureClass,
     pub attention_kernel_class: AttentionKernelClass,
     pub code: ExecutionCodeIdentity,
+    pub semantic_config: ExecutionSemanticConfig,
     pub model_family: String,
     pub model_fingerprint: String,
     pub components: Vec<EquivalentComponentExecution>,
@@ -210,10 +388,221 @@ impl ExecutionEnvironmentDescriptor {
         let encoded = serde_json::to_vec(self)
             .expect("execution environment descriptor serialization is infallible");
         let mut hash = Sha256::new();
-        hash.update(b"mold.execution-equivalence.v1\0");
+        hash.update(b"mold.execution-equivalence.v2\0");
         hash.update(encoded);
         ExecutionEquivalenceFingerprint::new(format!("{:x}", hash.finalize()))
     }
+}
+
+impl ExecutionSemanticConfig {
+    pub fn from_frozen(frozen: &mold_inference::FrozenEngineConfig) -> Self {
+        let mold_inference::FrozenEngineConfig {
+            family,
+            is_schnell,
+            is_turbo,
+            scheduler,
+            t5_variant,
+            qwen3_variant,
+            qwen2_variant,
+            qwen2_text_encoder_mode,
+            ltx2_gemma_variant,
+            // Artifact selections are represented by path-free component
+            // content and format facts in the enclosing descriptor.
+            selected_t5_path: _,
+            selected_qwen3_paths: _,
+            selected_qwen2_path: _,
+            selected_gemma_paths: _,
+            runtime_environment,
+            attention_backend,
+            attention_chunk,
+            vae_tiling,
+            vae_dtype,
+        } = frozen;
+        let runtime = mold_inference::runtime_env::ENGINE_SHAPING_VARIABLES
+            .iter()
+            .map(|name| runtime_semantic_setting(name, runtime_environment.value(name)))
+            .collect();
+        Self {
+            family: family.clone(),
+            is_schnell: *is_schnell,
+            is_turbo: *is_turbo,
+            scheduler: *scheduler,
+            t5_variant: t5_variant.clone(),
+            qwen3_variant: qwen3_variant.clone(),
+            qwen2_variant: qwen2_variant.clone(),
+            qwen2_text_encoder_mode: qwen2_text_encoder_mode.clone(),
+            ltx2_gemma_variant: ltx2_gemma_variant.clone(),
+            attention_backend: match attention_backend {
+                mold_inference::attention::AttentionBackend::Math => SemanticAttentionBackend::Math,
+                mold_inference::attention::AttentionBackend::Flash => {
+                    SemanticAttentionBackend::Flash
+                }
+            },
+            attention_chunk: match attention_chunk {
+                mold_inference::attention::AttentionChunkPolicy::Auto => {
+                    SemanticAttentionChunk::Auto
+                }
+                mold_inference::attention::AttentionChunkPolicy::Off => SemanticAttentionChunk::Off,
+                mold_inference::attention::AttentionChunkPolicy::Size(size) => {
+                    SemanticAttentionChunk::Size(*size as u64)
+                }
+            },
+            vae_tiling: match vae_tiling {
+                mold_inference::vae_tiling::TiledMode::Auto => SemanticVaeTiling::Auto,
+                mold_inference::vae_tiling::TiledMode::Force => SemanticVaeTiling::Force,
+                mold_inference::vae_tiling::TiledMode::Off => SemanticVaeTiling::Off,
+            },
+            vae_dtype: match vae_dtype {
+                mold_inference::device::VaeDtypePolicy::Auto => SemanticVaeDType::Auto,
+                mold_inference::device::VaeDtypePolicy::Bf16 => SemanticVaeDType::Bf16,
+                mold_inference::device::VaeDtypePolicy::F16 => SemanticVaeDType::F16,
+                mold_inference::device::VaeDtypePolicy::F32 => SemanticVaeDType::F32,
+            },
+            runtime,
+        }
+    }
+}
+
+fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticSetting {
+    let variable = match name {
+        "MOLD_ATTN" => RuntimeSemanticVariable::Attn,
+        "MOLD_ATTN_CHUNK" => RuntimeSemanticVariable::AttnChunk,
+        "MOLD_CFG_PLUS" => RuntimeSemanticVariable::CfgPlus,
+        "MOLD_DEVICE" => RuntimeSemanticVariable::Device,
+        "MOLD_EAGER" => RuntimeSemanticVariable::Eager,
+        "MOLD_FLUX_DELTA_CACHE" => RuntimeSemanticVariable::FluxDeltaCache,
+        "MOLD_FLUX_KEEP_TRANSFORMER" => RuntimeSemanticVariable::FluxKeepTransformer,
+        "MOLD_KEEP_TE_RAM" => RuntimeSemanticVariable::KeepTeRam,
+        "MOLD_LONG_PROMPTS" => RuntimeSemanticVariable::LongPrompts,
+        "MOLD_LORA_BYPASS" => RuntimeSemanticVariable::LoraBypass,
+        "MOLD_LTX_DEBUG_ALT_PROMPT" => RuntimeSemanticVariable::LtxDebugAltPrompt,
+        "MOLD_LTX_DEBUG_COMPARE_UNCOND" => RuntimeSemanticVariable::LtxDebugCompareUncond,
+        "MOLD_LTX_DEBUG_DISABLE_AUDIO_BRANCH" => {
+            RuntimeSemanticVariable::LtxDebugDisableAudioBranch
+        }
+        "MOLD_LTX_DEBUG_DISABLE_CROSS_ATTENTION_ADALN" => {
+            RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
+        }
+        "MOLD_LTX2_DEBUG_DISABLE_TRANSFORMER_GATED_ATTENTION" => {
+            RuntimeSemanticVariable::Ltx2DebugDisableTransformerGatedAttention
+        }
+        "MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER" => {
+            RuntimeSemanticVariable::Ltx2DebugForceCpuPromptEncoder
+        }
+        "MOLD_LTX2_DEBUG_LOAD_BLOCKS" => RuntimeSemanticVariable::Ltx2DebugLoadBlocks,
+        "MOLD_LTX2_FORCE_EAGER" => RuntimeSemanticVariable::Ltx2ForceEager,
+        "MOLD_LTX2_FORCE_STREAMING" => RuntimeSemanticVariable::Ltx2ForceStreaming,
+        "MOLD_LTX2_FP8_INPUT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8InputScaleMode,
+        "MOLD_LTX2_FP8_WEIGHT_SCALE_MODE" => RuntimeSemanticVariable::Ltx2Fp8WeightScaleMode,
+        "MOLD_LTX2_GEMMA_DEVICE" => RuntimeSemanticVariable::Ltx2GemmaDevice,
+        "MOLD_LTX2_GEMMA_VARIANT" => RuntimeSemanticVariable::Ltx2GemmaVariant,
+        "MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES" => RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames,
+        "MOLD_LTX2_VAE_DECODE_CONTEXT_FRAMES" => {
+            RuntimeSemanticVariable::Ltx2VaeDecodeContextFrames
+        }
+        "MOLD_LTX2_VAE_FORCE_FRAMEWISE" => RuntimeSemanticVariable::Ltx2VaeForceFramewise,
+        "MOLD_LTX2_VAE_FORCE_FULL_DECODE" => RuntimeSemanticVariable::Ltx2VaeForceFullDecode,
+        "MOLD_NVFP4_BACKEND" => RuntimeSemanticVariable::Nvfp4Backend,
+        "MOLD_OFFLOAD" => RuntimeSemanticVariable::Offload,
+        "MOLD_OFFLOAD_PREFETCH" => RuntimeSemanticVariable::OffloadPrefetch,
+        "MOLD_PINNED_VRAM_MAX_GB" => RuntimeSemanticVariable::PinnedVramMaxGb,
+        "MOLD_QWEN2_TEXT_ENCODER_MODE" => RuntimeSemanticVariable::Qwen2TextEncoderMode,
+        "MOLD_QWEN2_VARIANT" => RuntimeSemanticVariable::Qwen2Variant,
+        "MOLD_QWEN3_VARIANT" => RuntimeSemanticVariable::Qwen3Variant,
+        "MOLD_RESERVE_VRAM_MB" => RuntimeSemanticVariable::ReserveVramMb,
+        "MOLD_T5_VARIANT" => RuntimeSemanticVariable::T5Variant,
+        "MOLD_VAE_DTYPE" => RuntimeSemanticVariable::VaeDtype,
+        "MOLD_VAE_TILED" => RuntimeSemanticVariable::VaeTiled,
+        "MOLD_WUERSTCHEN_DECODER_GUIDANCE" => RuntimeSemanticVariable::WuerstchenDecoderGuidance,
+        // A new engine-shaping input must never silently collapse into an old
+        // equivalence class.
+        _ => panic!("unclassified frozen engine-shaping variable {name}"),
+    };
+    let value = match value {
+        None => CanonicalRuntimeValue::Unset,
+        Some(value)
+            if matches!(
+                variable,
+                RuntimeSemanticVariable::LtxDebugCompareUncond
+                    | RuntimeSemanticVariable::LtxDebugDisableAudioBranch
+                    | RuntimeSemanticVariable::LtxDebugDisableCrossAttentionAdaLn
+                    | RuntimeSemanticVariable::Ltx2DebugDisableTransformerGatedAttention
+                    | RuntimeSemanticVariable::Ltx2DebugLoadBlocks
+                    | RuntimeSemanticVariable::Ltx2ForceEager
+                    | RuntimeSemanticVariable::Ltx2ForceStreaming
+                    | RuntimeSemanticVariable::Ltx2VaeForceFramewise
+                    | RuntimeSemanticVariable::Ltx2VaeForceFullDecode
+                    | RuntimeSemanticVariable::Ltx2DebugForceCpuPromptEncoder
+            ) =>
+        {
+            let _ = value;
+            CanonicalRuntimeValue::Presence(true)
+        }
+        Some(value) if variable == RuntimeSemanticVariable::LtxDebugAltPrompt => {
+            CanonicalRuntimeValue::Text(value.to_string())
+        }
+        Some(value)
+            if matches!(
+                variable,
+                RuntimeSemanticVariable::Ltx2VaeDecodeChunkFrames
+                    | RuntimeSemanticVariable::Ltx2VaeDecodeContextFrames
+                    | RuntimeSemanticVariable::ReserveVramMb
+            ) =>
+        {
+            CanonicalRuntimeValue::Unsigned(value.trim().parse().ok())
+        }
+        Some(value)
+            if matches!(
+                variable,
+                RuntimeSemanticVariable::PinnedVramMaxGb
+                    | RuntimeSemanticVariable::WuerstchenDecoderGuidance
+            ) =>
+        {
+            CanonicalRuntimeValue::FloatBits(value.trim().parse::<f64>().ok().map(f64::to_bits))
+        }
+        Some(value) if variable == RuntimeSemanticVariable::CfgPlus => {
+            CanonicalRuntimeValue::Boolean(matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            ))
+        }
+        Some(value) if variable == RuntimeSemanticVariable::LongPrompts => {
+            CanonicalRuntimeValue::Boolean(value == "1")
+        }
+        Some(value) => CanonicalRuntimeValue::Token(value.trim().to_ascii_lowercase()),
+    };
+    RuntimeSemanticSetting { variable, value }
+}
+
+fn execution_code_identity_for(package_version: &str, git_sha: &str) -> ExecutionCodeIdentity {
+    let source_revision = (git_sha != "unknown").then(|| git_sha.to_string());
+    let (scope, process_discriminator) = if source_revision.is_some() {
+        (CodeIdentityScope::ImmutableBuild, None)
+    } else {
+        static PROCESS_DISCRIMINATOR: OnceLock<String> = OnceLock::new();
+        let discriminator = PROCESS_DISCRIMINATOR
+            .get_or_init(|| {
+                let mut bytes = [0_u8; 16];
+                getrandom::fill(&mut bytes)
+                    .expect("execution equivalence requires process-unique entropy");
+                bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+            })
+            .clone();
+        (CodeIdentityScope::CurrentProcessOnly, Some(discriminator))
+    };
+    ExecutionCodeIdentity {
+        package_version: package_version.to_string(),
+        source_revision,
+        scope,
+        process_discriminator,
+    }
+}
+
+fn execution_code_identity() -> ExecutionCodeIdentity {
+    execution_code_identity_for(
+        mold_core::build_info::VERSION,
+        mold_core::build_info::GIT_SHA,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -543,6 +932,7 @@ pub fn resolve_execution_plans_with_prepared(
                 artifacts: &artifacts,
                 effective: &effective,
                 offload_requested,
+                equivalence_cache_only: prepared.is_some(),
             };
             build_plan(&context, device)
         })
@@ -583,6 +973,44 @@ pub(crate) fn preparation_authority_fingerprint(
             .as_slice(),
     );
     format!("{:x}", hash.finalize())
+}
+
+/// Populate the byte-identity cache during asynchronous dependency preparation.
+///
+/// Execution-plan resolution runs in the scheduler coordinator and must only
+/// perform metadata checks plus cache lookups for normal prepared jobs. The
+/// caller is responsible for invoking this function through
+/// `tokio::task::spawn_blocking`, because hashing a multi-gigabyte checkpoint
+/// is blocking file I/O and CPU work.
+pub(crate) fn warm_execution_equivalence_cache(
+    config: &Config,
+    request: &GenerateRequest,
+    prepared: &PreparedExecutionInputs,
+) {
+    let family = config
+        .resolved_model_config(&request.model)
+        .family
+        .or_else(|| {
+            mold_core::manifest::find_manifest(&request.model)
+                .map(|manifest| manifest.family.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let loras = effective_loras(config, request);
+    let mut paths = BTreeSet::new();
+    for inputs in prepared.by_device.values() {
+        paths.extend(
+            concrete_artifacts_for_family(
+                &inputs.engine_paths,
+                &family,
+                &loras,
+                &inputs.engine_config,
+            )
+            .into_values(),
+        );
+    }
+    for path in paths {
+        let _ = equivalence_fingerprint_path(&path);
+    }
 }
 
 pub fn validate_before_cuda(
@@ -941,14 +1369,20 @@ struct PlanContext<'a> {
     artifacts: &'a BTreeMap<ComponentRole, PathBuf>,
     effective: &'a EffectivePlacement,
     offload_requested: bool,
+    /// Prepared production jobs have already hashed every artifact on the
+    /// blocking pool. A cache miss must fail closed instead of reading model
+    /// bytes on the coordinator thread.
+    equivalence_cache_only: bool,
 }
 
 fn build_plan(
     context: &PlanContext<'_>,
     device: &DeviceFact,
 ) -> Option<Result<ResolvedExecutionPlan, ExecutionPlanError>> {
-    let quantization = infer_quantization(context.model, context.artifacts);
-    let dtype = infer_dtype(context.model);
+    // These compatibility tokens preserve candidate-v1 exact lease identity.
+    // They are never used as precision authority or equivalence facts.
+    let exact_quantization = exact_v1_compatibility_quantization(context.model, context.artifacts);
+    let exact_dtype = exact_v1_compatibility_dtype(context.model);
     let hint = Some(crate::memory_preflight::ActivationHint::from_request(
         context.request,
         context.family,
@@ -1064,8 +1498,10 @@ fn build_plan(
                 role: role.clone(),
                 artifact_path: path.clone(),
                 content_fingerprint: fingerprint_path(path),
-                dtype: (!role.is_host_only()).then_some(dtype).flatten(),
-                quantization: (!role.is_host_only()).then_some(quantization).flatten(),
+                dtype: (!role.is_host_only()).then_some(exact_dtype).flatten(),
+                quantization: (!role.is_host_only())
+                    .then_some(exact_quantization)
+                    .flatten(),
                 placement,
                 load_strategy,
                 predicted_vram_bytes: vram,
@@ -1088,6 +1524,8 @@ fn build_plan(
         memory.block_offload,
     );
     let model_fingerprint = model_fingerprint(context.model, context.artifacts);
+    let equivalence_model_fingerprint =
+        equivalence_model_fingerprint(context.artifacts, context.equivalence_cache_only);
     let attention_backend = match context.engine_config.attention_backend {
         mold_inference::attention::AttentionBackend::Math => AttentionBackend::Math,
         mold_inference::attention::AttentionBackend::Flash => AttentionBackend::Flash,
@@ -1101,14 +1539,16 @@ fn build_plan(
     let execution_environment = execution_environment_descriptor(
         device,
         context.family,
-        &model_fingerprint,
+        &equivalence_model_fingerprint,
         &components,
         context.effective_loras,
+        context.engine_config,
         attention_backend,
         memory.load_strategy,
         offload_mode,
         context.request.resolved_output_format(),
         determinism_class,
+        context.equivalence_cache_only,
     );
     let execution_equivalence_fingerprint = execution_environment.fingerprint();
     Some(Ok(ResolvedExecutionPlan {
@@ -1143,11 +1583,13 @@ pub(crate) fn execution_environment_descriptor(
     model_fingerprint: &str,
     components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
     effective_loras: &[PlannedLora],
+    engine_config: &mold_inference::FrozenEngineConfig,
     attention_backend: AttentionBackend,
     engine_load_strategy: mold_inference::LoadStrategy,
     offload_mode: OffloadMode,
     output_format: OutputFormat,
     determinism_class: DeterminismClass,
+    equivalence_cache_only: bool,
 ) -> ExecutionEnvironmentDescriptor {
     let architecture = match (device.backend, device.compute_capability) {
         (GpuBackend::Cuda, Some((major, minor))) => {
@@ -1159,41 +1601,72 @@ pub(crate) fn execution_environment_descriptor(
             device_id: device.id.clone(),
         },
     };
+    let single_file = components
+        .get(&ComponentRole::Transformer)
+        .zip(components.get(&ComponentRole::Vae))
+        .is_some_and(|(transformer, vae)| transformer.artifact_path == vae.artifact_path);
     let components = components
         .iter()
-        .map(|(role, component)| EquivalentComponentExecution {
-            role: role.clone(),
-            content_fingerprint: component.content_fingerprint.clone(),
-            dtype: component.dtype,
-            quantization: component.quantization,
-            placement: match &component.placement {
-                ResolvedComponentPlacement::Cpu => SemanticComponentPlacement::Cpu,
-                ResolvedComponentPlacement::Device(_) => SemanticComponentPlacement::AssignedDevice,
-            },
-            load_strategy: component.load_strategy,
+        .map(|(role, component)| {
+            let content_fingerprint = equivalence_fingerprint_path_with_policy(
+                &component.artifact_path,
+                equivalence_cache_only,
+            );
+            let storage = component_storage_format(&component.artifact_path, &content_fingerprint);
+            let precision = effective_component_precision(
+                model_family,
+                role,
+                &component.placement,
+                device.backend,
+                engine_config.vae_dtype,
+                single_file,
+                storage,
+            );
+            let dtype = match precision.compute_dtype {
+                EffectiveComponentDType::Bf16 => Some(PlannedDType::Bf16),
+                EffectiveComponentDType::F16 => Some(PlannedDType::F16),
+                EffectiveComponentDType::F32 => Some(PlannedDType::F32),
+                EffectiveComponentDType::NotApplicable
+                | EffectiveComponentDType::QuantizedNative
+                | EffectiveComponentDType::Unknown => None,
+            };
+            let quantization = quantization_from_storage(&precision.storage);
+            EquivalentComponentExecution {
+                role: role.clone(),
+                content_fingerprint,
+                precision,
+                dtype,
+                quantization,
+                placement: match &component.placement {
+                    ResolvedComponentPlacement::Cpu => SemanticComponentPlacement::Cpu,
+                    ResolvedComponentPlacement::Device(_) => {
+                        SemanticComponentPlacement::AssignedDevice
+                    }
+                },
+                load_strategy: component.load_strategy,
+            }
         })
         .collect();
     let loras = effective_loras
         .iter()
         .map(|lora| EquivalentLoraExecution {
-            content_fingerprint: lora.content_fingerprint.clone(),
+            content_fingerprint: equivalence_fingerprint_path_with_policy(
+                &lora.path,
+                equivalence_cache_only,
+            ),
             scale_bits: lora.scale_bits,
         })
         .collect();
-    let source_revision = (mold_core::build_info::GIT_SHA != "unknown")
-        .then(|| mold_core::build_info::GIT_SHA.to_string());
     ExecutionEnvironmentDescriptor {
-        schema_version: 1,
+        schema_version: 2,
         backend: device.backend,
         architecture,
         attention_kernel_class: match attention_backend {
             AttentionBackend::Math => AttentionKernelClass::Math,
             AttentionBackend::Flash => AttentionKernelClass::Flash,
         },
-        code: ExecutionCodeIdentity {
-            package_version: mold_core::build_info::VERSION.to_string(),
-            source_revision,
-        },
+        code: execution_code_identity(),
+        semantic_config: ExecutionSemanticConfig::from_frozen(engine_config),
         model_family: model_family.to_string(),
         model_fingerprint: model_fingerprint.to_string(),
         components,
@@ -1266,7 +1739,43 @@ fn artifact_size(path: &Path) -> u64 {
         .unwrap_or(UNKNOWN_ARTIFACT_HOST_CHARGE)
 }
 
-fn infer_quantization(
+fn component_storage_format(
+    path: &Path,
+    content_fingerprint: &EquivalenceContentIdentity,
+) -> ComponentStorageFormat {
+    match mold_inference::artifact_format::probe(path) {
+        Ok(format) => ComponentStorageFormat::Known(format),
+        Err(reason) => {
+            use mold_inference::artifact_format::ArtifactProbeFailure;
+            let reason = match reason {
+                ArtifactProbeFailure::Io => ArtifactFormatUnknown::Io,
+                ArtifactProbeFailure::UnsupportedContainer => {
+                    ArtifactFormatUnknown::UnsupportedContainer
+                }
+                ArtifactProbeFailure::InvalidHeader => ArtifactFormatUnknown::InvalidHeader,
+                ArtifactProbeFailure::UnsupportedTensorDType => {
+                    ArtifactFormatUnknown::UnsupportedTensorDType
+                }
+                ArtifactProbeFailure::UnsupportedGgufTensorFormat => {
+                    ArtifactFormatUnknown::UnsupportedGgufTensorFormat
+                }
+            };
+            ComponentStorageFormat::Unknown {
+                reason,
+                content_discriminator: content_fingerprint.clone(),
+            }
+        }
+    }
+}
+
+/// Candidate-v1 exact fingerprint compatibility only.
+///
+/// The rejected candidate encoded these filename/model tokens inside the
+/// device/path-qualified lease fingerprint. Removing them would invalidate
+/// grants reconstructed from that exact identity. They are deliberately
+/// quarantined here and never exposed as component precision or equivalence
+/// authority; authoritative facts come only from `component_storage_format`.
+fn exact_v1_compatibility_quantization(
     model: &str,
     artifacts: &BTreeMap<ComponentRole, PathBuf>,
 ) -> Option<QuantizationVariant> {
@@ -1291,7 +1800,9 @@ fn infer_quantization(
     }
 }
 
-fn infer_dtype(model: &str) -> Option<PlannedDType> {
+/// Candidate-v1 exact fingerprint compatibility only; see
+/// `exact_v1_compatibility_quantization`.
+fn exact_v1_compatibility_dtype(model: &str) -> Option<PlannedDType> {
     let lower = model.to_ascii_lowercase();
     if lower.contains("bf16") {
         Some(PlannedDType::Bf16)
@@ -1299,6 +1810,144 @@ fn infer_dtype(model: &str) -> Option<PlannedDType> {
         Some(PlannedDType::F16)
     } else {
         None
+    }
+}
+
+fn quantization_from_storage(storage: &ComponentStorageFormat) -> Option<QuantizationVariant> {
+    use mold_inference::artifact_format::{
+        ArtifactStorageFormat, GgufTensorFormat, SafetensorsEncoding, TensorDType,
+    };
+    match storage {
+        ComponentStorageFormat::Known(ArtifactStorageFormat::Safetensors {
+            encoding: SafetensorsEncoding::Nvfp4,
+            ..
+        }) => Some(QuantizationVariant::Nvfp4),
+        ComponentStorageFormat::Known(ArtifactStorageFormat::Safetensors {
+            encoding: SafetensorsEncoding::ConvRotW4A4,
+            ..
+        }) => Some(QuantizationVariant::ConvRotW4A4),
+        ComponentStorageFormat::Known(ArtifactStorageFormat::Safetensors {
+            tensor_dtypes, ..
+        }) if tensor_dtypes
+            .iter()
+            .any(|dtype| matches!(dtype, TensorDType::F8E4M3 | TensorDType::F8E5M2)) =>
+        {
+            Some(QuantizationVariant::Fp8)
+        }
+        ComponentStorageFormat::Known(ArtifactStorageFormat::Gguf { tensor_formats }) => {
+            let has =
+                |predicate: fn(&GgufTensorFormat) -> bool| tensor_formats.iter().any(predicate);
+            if has(|format| matches!(format, GgufTensorFormat::Q2K)) {
+                Some(QuantizationVariant::Q2)
+            } else if has(|format| matches!(format, GgufTensorFormat::Q3K)) {
+                Some(QuantizationVariant::Q3)
+            } else if has(|format| {
+                matches!(
+                    format,
+                    GgufTensorFormat::Q4_0 | GgufTensorFormat::Q4_1 | GgufTensorFormat::Q4K
+                )
+            }) {
+                Some(QuantizationVariant::Q4)
+            } else if has(|format| {
+                matches!(
+                    format,
+                    GgufTensorFormat::Q5_0 | GgufTensorFormat::Q5_1 | GgufTensorFormat::Q5K
+                )
+            }) {
+                Some(QuantizationVariant::Q5)
+            } else if has(|format| matches!(format, GgufTensorFormat::Q6K)) {
+                Some(QuantizationVariant::Q6)
+            } else if has(|format| {
+                matches!(
+                    format,
+                    GgufTensorFormat::Q8_0 | GgufTensorFormat::Q8_1 | GgufTensorFormat::Q8K
+                )
+            }) {
+                Some(QuantizationVariant::Q8)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn effective_component_precision(
+    family: &str,
+    role: &ComponentRole,
+    placement: &ResolvedComponentPlacement,
+    backend: GpuBackend,
+    vae_dtype: mold_inference::device::VaeDtypePolicy,
+    single_file: bool,
+    storage: ComponentStorageFormat,
+) -> EffectiveComponentPrecision {
+    use mold_inference::artifact_format::{
+        ArtifactStorageFormat, SafetensorsEncoding, TensorDType,
+    };
+
+    let quantized = quantization_from_storage(&storage).is_some();
+    let compute_dtype = if role.is_host_only() {
+        EffectiveComponentDType::NotApplicable
+    } else if matches!(placement, ResolvedComponentPlacement::Cpu) {
+        if quantized && !matches!(role, ComponentRole::Vae) {
+            EffectiveComponentDType::QuantizedNative
+        } else {
+            EffectiveComponentDType::F32
+        }
+    } else if matches!(role, ComponentRole::Vae) {
+        match vae_dtype {
+            mold_inference::device::VaeDtypePolicy::Bf16 => EffectiveComponentDType::Bf16,
+            mold_inference::device::VaeDtypePolicy::F16 => EffectiveComponentDType::F16,
+            mold_inference::device::VaeDtypePolicy::F32 => EffectiveComponentDType::F32,
+            mold_inference::device::VaeDtypePolicy::Auto => {
+                if matches!(family, "qwen-image" | "qwen-image-edit")
+                    || (family == "sdxl" && single_file)
+                {
+                    EffectiveComponentDType::F32
+                } else if matches!(family, "sd15" | "sdxl" | "sd3" | "wuerstchen") {
+                    EffectiveComponentDType::F16
+                } else if backend == GpuBackend::Cuda {
+                    EffectiveComponentDType::Bf16
+                } else {
+                    EffectiveComponentDType::F32
+                }
+            }
+        }
+    } else if matches!(
+        &storage,
+        ComponentStorageFormat::Known(ArtifactStorageFormat::Safetensors {
+            encoding: SafetensorsEncoding::Nvfp4 | SafetensorsEncoding::ConvRotW4A4,
+            ..
+        })
+    ) {
+        if backend == GpuBackend::Cuda {
+            EffectiveComponentDType::Bf16
+        } else {
+            EffectiveComponentDType::F32
+        }
+    } else if family == "flux"
+        && backend == GpuBackend::Cuda
+        && matches!(
+            &storage,
+            ComponentStorageFormat::Known(ArtifactStorageFormat::Safetensors {
+                tensor_dtypes,
+                ..
+            }) if tensor_dtypes.contains(&TensorDType::F8E4M3)
+        )
+    {
+        EffectiveComponentDType::F16
+    } else if quantized {
+        EffectiveComponentDType::QuantizedNative
+    } else if matches!(family, "sd15" | "sdxl" | "sd3" | "wuerstchen") {
+        EffectiveComponentDType::F16
+    } else if backend == GpuBackend::Cuda {
+        EffectiveComponentDType::Bf16
+    } else {
+        EffectiveComponentDType::F32
+    };
+    EffectiveComponentPrecision {
+        storage,
+        compute_dtype,
     }
 }
 
@@ -1454,12 +2103,115 @@ fn fingerprint_path(path: &Path) -> ContentFingerprint {
     fingerprint
 }
 
+type EquivalenceFingerprintCache =
+    BTreeMap<PathBuf, (ArtifactMetadataIdentity, EquivalenceContentIdentity)>;
+
+fn equivalence_fingerprint_cache() -> &'static Mutex<EquivalenceFingerprintCache> {
+    static CACHE: OnceLock<Mutex<EquivalenceFingerprintCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn equivalence_fingerprint_path(path: &Path) -> EquivalenceContentIdentity {
+    equivalence_fingerprint_path_with_policy(path, false)
+}
+
+fn equivalence_fingerprint_path_with_policy(
+    path: &Path,
+    cache_only: bool,
+) -> EquivalenceContentIdentity {
+    let Ok(before_metadata) = std::fs::metadata(path) else {
+        return unknown_equivalence_content(path);
+    };
+    let before = artifact_metadata_identity(path, &before_metadata);
+    if let Some((_, fingerprint)) = equivalence_fingerprint_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .filter(|(identity, _)| identity == &before)
+    {
+        return fingerprint.clone();
+    }
+    if cache_only {
+        return unknown_equivalence_content(path);
+    }
+
+    // The current `.sha256-verified` sidecar protocol records a downloader
+    // check but does not cryptographically bind it to later local mutation.
+    // Hash current bytes once; metadata only invalidates this cache.
+    let fingerprint = hash_equivalence_artifact_contents(path)
+        .unwrap_or_else(|_| unknown_equivalence_content(path));
+    if std::fs::metadata(path)
+        .ok()
+        .map(|metadata| artifact_metadata_identity(path, &metadata))
+        .as_ref()
+        == Some(&before)
+    {
+        equivalence_fingerprint_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.to_path_buf(), (before, fingerprint.clone()));
+        fingerprint
+    } else {
+        // A digest spanning concurrent mutation is not the identity of one
+        // stable artifact. Fail closed and let asynchronous preparation hash
+        // the new metadata identity.
+        unknown_equivalence_content(path)
+    }
+}
+
+fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<EquivalenceContentIdentity> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(EquivalenceContentIdentity::Sha256(format!(
+        "{:x}",
+        hash.finalize()
+    )))
+}
+
+fn unknown_equivalence_content(path: &Path) -> EquivalenceContentIdentity {
+    static UNKNOWN_BY_PATH: OnceLock<Mutex<BTreeMap<PathBuf, String>>> = OnceLock::new();
+    let mut unknown = UNKNOWN_BY_PATH
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let discriminator = unknown
+        .entry(path.to_path_buf())
+        .or_insert_with(|| {
+            let mut bytes = [0_u8; 16];
+            getrandom::fill(&mut bytes)
+                .expect("unknown artifact identity requires process-unique entropy");
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        })
+        .clone();
+    EquivalenceContentIdentity::Unknown { discriminator }
+}
+
 fn model_fingerprint(model: &str, artifacts: &BTreeMap<ComponentRole, PathBuf>) -> String {
     let mut hash = Sha256::new();
     hash.update(model.as_bytes());
     for (role, path) in artifacts {
         hash.update(format!("{role:?}").as_bytes());
         hash.update(fingerprint_path(path).0.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn equivalence_model_fingerprint(
+    artifacts: &BTreeMap<ComponentRole, PathBuf>,
+    cache_only: bool,
+) -> String {
+    let mut hash = Sha256::new();
+    for (role, path) in artifacts {
+        hash.update(format!("{role:?}").as_bytes());
+        equivalence_fingerprint_path_with_policy(path, cache_only).update_hash(&mut hash);
     }
     format!("{:x}", hash.finalize())
 }
@@ -1668,6 +2420,18 @@ mod tests {
     fn sparse_file(path: &Path, bytes: u64) {
         let file = std::fs::File::create(path).unwrap();
         file.set_len(bytes).unwrap();
+        drop(file);
+        // Admission tests use logical multi-GiB sparse zero files solely for
+        // their metadata length. Seed their synthetic identity so unrelated
+        // memory-planning tests do not spend minutes hashing hole ranges.
+        let metadata = std::fs::metadata(path).unwrap();
+        equivalence_fingerprint_cache().lock().unwrap().insert(
+            path.to_path_buf(),
+            (
+                artifact_metadata_identity(path, &metadata),
+                EquivalenceContentIdentity::Sha256(format!("{bytes:064x}")),
+            ),
+        );
     }
 
     fn config(root: &Path, family: &str, persisted: Option<DevicePlacement>) -> Config {
@@ -2423,6 +3187,277 @@ mod tests {
         set_file_mtime(&path, original_mtime).unwrap();
 
         assert_ne!(before, fingerprint_path(&path));
+    }
+
+    #[test]
+    fn runtime_semantic_parser_matches_cfg_plus_and_long_prompt_contracts() {
+        assert_eq!(
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("true")).value,
+            CanonicalRuntimeValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("yes")).value,
+            CanonicalRuntimeValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("1")).value,
+            CanonicalRuntimeValue::Boolean(true)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("true")).value,
+            CanonicalRuntimeValue::Boolean(false)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("yes")).value,
+            CanonicalRuntimeValue::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn legacy_ltx2_cpu_prompt_encoder_flag_is_presence_based() {
+        for value in ["", "0", "false", "anything"] {
+            assert_eq!(
+                runtime_semantic_setting("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", Some(value),)
+                    .value,
+                CanonicalRuntimeValue::Presence(true)
+            );
+        }
+        assert_eq!(
+            runtime_semantic_setting("MOLD_LTX2_DEBUG_FORCE_CPU_PROMPT_ENCODER", None).value,
+            CanonicalRuntimeValue::Unset
+        );
+    }
+
+    #[test]
+    fn unknown_source_revision_is_equivalent_only_within_one_process() {
+        let first = execution_code_identity_for("0.20.2", "unknown");
+        let second = execution_code_identity_for("0.20.2", "unknown");
+        assert_eq!(first, second);
+        assert_eq!(first.scope, CodeIdentityScope::CurrentProcessOnly);
+        assert!(first.source_revision.is_none());
+        assert!(first.process_discriminator.is_some());
+
+        let immutable = execution_code_identity_for("0.20.2", "0bacf81d");
+        assert_eq!(immutable.scope, CodeIdentityScope::ImmutableBuild);
+        assert_eq!(immutable.source_revision.as_deref(), Some("0bacf81d"));
+        assert!(immutable.process_discriminator.is_none());
+    }
+
+    #[test]
+    fn component_map_insertion_order_does_not_change_equivalence_identity() {
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), name.as_bytes()).unwrap();
+        }
+        let config = config(root.path(), "flux2", None);
+        let plan = resolve_execution_plans(&config, &request(None), &devices(&[24 * GIB]), false)
+            .unwrap()
+            .remove(0);
+        let mut reverse_inserted = BTreeMap::new();
+        for (role, component) in plan.components.iter().rev() {
+            reverse_inserted.insert(role.clone(), component.clone());
+        }
+        let rebuild = |components: &BTreeMap<ComponentRole, ComponentExecutionPlan>| {
+            execution_environment_descriptor(
+                &DeviceFact {
+                    id: plan.device_id.clone(),
+                    ordinal: plan.device_ordinal,
+                    backend: plan.execution_environment.backend,
+                    compute_capability: Some((8, 6)),
+                    available_vram_bytes: plan.admitted_available_vram_bytes,
+                },
+                &plan.model_family,
+                &plan.execution_environment.model_fingerprint,
+                components,
+                &plan.effective_loras,
+                &plan.engine_config,
+                plan.attention_backend,
+                plan.engine_load_strategy,
+                plan.offload_mode,
+                plan.execution_environment.output_format,
+                plan.determinism_class,
+                false,
+            )
+        };
+
+        assert_eq!(
+            rebuild(&plan.components).fingerprint(),
+            rebuild(&reverse_inserted).fingerprint()
+        );
+    }
+
+    #[test]
+    fn same_size_in_place_overwrite_changes_equivalence_content_identity() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("weights.safetensors");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let original_mtime = FileTime::from_last_modification_time(&path.metadata().unwrap());
+        let before = equivalence_fingerprint_path(&path);
+
+        std::fs::write(&path, b"bbbb").unwrap();
+        set_file_mtime(&path, original_mtime).unwrap();
+
+        assert_ne!(before, equivalence_fingerprint_path(&path));
+    }
+
+    #[test]
+    fn cache_only_equivalence_lookup_never_hashes_on_the_coordinator_path() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("weights.safetensors");
+        std::fs::write(&path, b"current artifact bytes").unwrap();
+        equivalence_fingerprint_cache()
+            .lock()
+            .unwrap()
+            .remove(&path);
+
+        assert!(matches!(
+            equivalence_fingerprint_path_with_policy(&path, true),
+            EquivalenceContentIdentity::Unknown { .. }
+        ));
+        assert!(
+            !equivalence_fingerprint_cache()
+                .lock()
+                .unwrap()
+                .contains_key(&path),
+            "cache-only coordinator lookup must not perform byte hashing"
+        );
+        assert!(matches!(
+            equivalence_fingerprint_path(&path),
+            EquivalenceContentIdentity::Sha256(_)
+        ));
+    }
+
+    #[test]
+    fn exact_execution_fingerprint_matches_rejected_candidate_contract() {
+        let device = DeviceFact {
+            id: "cuda:stable-device".into(),
+            ordinal: 2,
+            backend: GpuBackend::Cuda,
+            compute_capability: Some((8, 6)),
+            available_vram_bytes: 24 * GIB,
+        };
+        let effective = EffectivePlacement {
+            components: BTreeMap::from([(
+                ComponentRole::Transformer,
+                ResolvedComponentConstraint::Auto,
+            )]),
+        };
+        let components = BTreeMap::from([(
+            ComponentRole::Transformer,
+            ComponentExecutionPlan {
+                role: ComponentRole::Transformer,
+                artifact_path: PathBuf::from("/models/transformer-q4.gguf"),
+                content_fingerprint: ContentFingerprint("exact-content".into()),
+                dtype: None,
+                quantization: Some(QuantizationVariant::Q4),
+                placement: ResolvedComponentPlacement::Device("cuda:stable-device".into()),
+                load_strategy: ComponentLoadStrategy::Resident,
+                predicted_vram_bytes: 1024,
+                predicted_host_bytes: 0,
+            },
+        )]);
+        let engine_config = mold_inference::FrozenEngineConfig {
+            family: "flux2".into(),
+            is_schnell: Some(false),
+            is_turbo: None,
+            scheduler: None,
+            t5_variant: Some("q4".into()),
+            qwen3_variant: None,
+            qwen2_variant: None,
+            qwen2_text_encoder_mode: None,
+            ltx2_gemma_variant: None,
+            selected_t5_path: None,
+            selected_qwen3_paths: Vec::new(),
+            selected_qwen2_path: None,
+            selected_gemma_paths: Vec::new(),
+            runtime_environment: mold_inference::runtime_env::FrozenRuntimeEnvironment::default(),
+            attention_backend: mold_inference::attention::AttentionBackend::Math,
+            attention_chunk: mold_inference::attention::AttentionChunkPolicy::Auto,
+            vae_tiling: mold_inference::vae_tiling::TiledMode::Auto,
+            vae_dtype: mold_inference::device::VaeDtypePolicy::Auto,
+        };
+        let fingerprint = execution_fingerprint(
+            "cv:opaque",
+            &device,
+            &effective,
+            &components,
+            &engine_config,
+            &[],
+            false,
+        );
+        assert_eq!(
+            fingerprint, "6148b3759215b8e2082e7e0ac02d0b31bc5d29841e73d4625f1140d77bb200d8",
+            "this is the exact path/device-qualified candidate 0bacf81d contract"
+        );
+    }
+
+    #[test]
+    fn execution_equivalence_v2_schema_and_hash_are_golden() {
+        let content = EquivalenceContentIdentity::Sha256("00".repeat(32));
+        let descriptor = ExecutionEnvironmentDescriptor {
+            schema_version: 2,
+            backend: GpuBackend::Cuda,
+            architecture: DeviceArchitectureClass::CudaComputeCapability { major: 8, minor: 6 },
+            attention_kernel_class: AttentionKernelClass::Math,
+            code: ExecutionCodeIdentity {
+                package_version: "0.20.2".into(),
+                source_revision: Some("0bacf81d".into()),
+                scope: CodeIdentityScope::ImmutableBuild,
+                process_discriminator: None,
+            },
+            semantic_config: ExecutionSemanticConfig {
+                family: "flux".into(),
+                is_schnell: Some(false),
+                is_turbo: None,
+                scheduler: None,
+                t5_variant: Some("q4".into()),
+                qwen3_variant: None,
+                qwen2_variant: None,
+                qwen2_text_encoder_mode: None,
+                ltx2_gemma_variant: None,
+                attention_backend: SemanticAttentionBackend::Math,
+                attention_chunk: SemanticAttentionChunk::Auto,
+                vae_tiling: SemanticVaeTiling::Auto,
+                vae_dtype: SemanticVaeDType::Auto,
+                runtime: vec![RuntimeSemanticSetting {
+                    variable: RuntimeSemanticVariable::CfgPlus,
+                    value: CanonicalRuntimeValue::Boolean(false),
+                }],
+            },
+            model_family: "flux".into(),
+            model_fingerprint: "model-content".into(),
+            components: vec![EquivalentComponentExecution {
+                role: ComponentRole::Transformer,
+                content_fingerprint: content.clone(),
+                precision: EffectiveComponentPrecision {
+                    storage: ComponentStorageFormat::Unknown {
+                        reason: ArtifactFormatUnknown::UnsupportedContainer,
+                        content_discriminator: content,
+                    },
+                    compute_dtype: EffectiveComponentDType::Bf16,
+                },
+                dtype: Some(PlannedDType::Bf16),
+                quantization: None,
+                placement: SemanticComponentPlacement::AssignedDevice,
+                load_strategy: ComponentLoadStrategy::Resident,
+            }],
+            loras: Vec::new(),
+            engine_load_strategy: EngineLoadStrategyClass::Eager,
+            offload_mode: OffloadMode::None,
+            output_format: OutputFormat::Png,
+            determinism_class: DeterminismClass::CpuSeededCrossBackend,
+        };
+        let encoded = serde_json::to_string(&descriptor).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"schema_version":2,"backend":"cuda","architecture":{"CudaComputeCapability":{"major":8,"minor":6}},"attention_kernel_class":"Math","code":{"package_version":"0.20.2","source_revision":"0bacf81d","scope":"ImmutableBuild","process_discriminator":null},"semantic_config":{"family":"flux","is_schnell":false,"is_turbo":null,"scheduler":null,"t5_variant":"q4","qwen3_variant":null,"qwen2_variant":null,"qwen2_text_encoder_mode":null,"ltx2_gemma_variant":null,"attention_backend":"Math","attention_chunk":"Auto","vae_tiling":"Auto","vae_dtype":"Auto","runtime":[{"variable":"CfgPlus","value":{"Boolean":false}}]},"model_family":"flux","model_fingerprint":"model-content","components":[{"role":"Transformer","content_fingerprint":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"precision":{"storage":{"Unknown":{"reason":"UnsupportedContainer","content_discriminator":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}},"compute_dtype":"Bf16"},"dtype":"Bf16","quantization":null,"placement":"AssignedDevice","load_strategy":"Resident"}],"loras":[],"engine_load_strategy":"Eager","offload_mode":"None","output_format":"png","determinism_class":"CpuSeededCrossBackend"}"#
+        );
+        assert_eq!(
+            descriptor.fingerprint().as_str(),
+            "c91243915527427b71febd105e9531ed9bb7d07c687b6acf7390937ff13a61b4"
+        );
     }
 
     #[test]

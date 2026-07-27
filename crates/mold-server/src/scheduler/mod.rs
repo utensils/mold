@@ -2431,11 +2431,13 @@ impl Coordinator {
                         &model_fingerprint,
                         &components,
                         &[],
+                        &engine_config,
                         crate::execution_plan::AttentionBackend::Math,
                         mold_inference::LoadStrategy::Eager,
                         crate::execution_plan::OffloadMode::None,
                         pending.job.request.resolved_output_format(),
                         determinism_class,
+                        false,
                     );
                     let equivalence = environment.fingerprint();
                     crate::execution_plan::ResolvedExecutionPlan {

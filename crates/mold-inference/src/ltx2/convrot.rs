@@ -9,7 +9,7 @@ use super::nvfp4::remap_ltx2_transformer_key;
 
 const CONVROT_GROUP_SIZE: usize = 256;
 
-pub(super) fn checkpoint_is_convrot_w4a4(path: &Path) -> bool {
+pub(crate) fn checkpoint_is_convrot_w4a4(path: &Path) -> bool {
     let Ok(st) = (unsafe { MmapedSafetensors::new(path) }) else {
         return false;
     };

@@ -1065,15 +1065,26 @@ reconstruction, and output provenance. Grants continue to validate it exactly.
 
 `execution_environment` is a separately serialized deterministic-output
 descriptor. It records the typed backend and architecture class (CUDA compute
-capability or Metal), attention/kernel class, model and code identity,
-component and LoRA content fingerprints, dtype/quantization, semantic
-CPU-versus-assigned-device placement, component and engine load strategies,
-offload mode, output format, and determinism class. It deliberately excludes
-device ID/ordinal, artifact paths, and transient capacity estimates.
+capability or Metal), attention/kernel class, the fully frozen engine/runtime
+semantic configuration, model and code identity, per-component and LoRA
+artifact format plus current-byte SHA-256 identity, effective compute dtype,
+semantic CPU-versus-assigned-device placement, component and engine load
+strategies, offload mode, output format, and determinism class. Catalog IDs,
+filenames, extensions, paths, inodes, device ID/ordinal, and transient capacity
+estimates are not equivalence facts. The existing `.sha256-verified` sidecar is
+not used as current-byte authority because it is not bound to later local file
+mutation. Full-byte hashing is performed once per artifact metadata identity
+during asynchronous dependency preparation on the blocking pool; coordinator
+planning normally performs only metadata validation and cache lookup.
 `execution_equivalence_fingerprint` is the domain-separated hash of that
 descriptor and is the identity a Phase F parent may share across compatible
 device-specific plans. Missing architecture facts fail closed with a
-device-specific `Unknown` class; display-name inference is forbidden.
+device-specific `Unknown` class; unrecognized artifact formats retain a typed
+failure reason plus byte identity, and display-name inference is forbidden.
+Builds with a known Git revision have an immutable code identity. Builds whose
+revision is `unknown` carry a process-unique discriminator and are equivalent
+only within that process; that identity must not be persisted or recovered
+across process boundaries.
 
 The engine receives and consumes this exact plan. It may not independently
 select another GPU, artifact, encoder variant, quantization, or placement. If

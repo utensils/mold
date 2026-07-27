@@ -1,4 +1,5 @@
 pub(crate) mod adaptive_offload;
+pub mod artifact_format;
 pub mod attention;
 pub mod audio;
 mod batch;

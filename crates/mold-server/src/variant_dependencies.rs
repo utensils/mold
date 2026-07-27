@@ -881,11 +881,24 @@ async fn prepare_inputs_for_devices(
                 .join("; ")
         ));
     }
-    Ok(PreparedExecutionInputs {
+    let prepared = PreparedExecutionInputs {
         authority_fingerprint,
         by_device,
         retryable_device_failures: failures,
+    };
+    let warm_config = config.clone();
+    let warm_request = request.clone();
+    let warm_prepared = prepared.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::execution_plan::warm_execution_equivalence_cache(
+            &warm_config,
+            &warm_request,
+            &warm_prepared,
+        );
     })
+    .await
+    .map_err(|error| format!("execution-equivalence artifact hashing failed: {error}"))?;
+    Ok(prepared)
 }
 
 pub async fn prepare_execution_inputs(
