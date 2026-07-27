@@ -15,8 +15,8 @@ use mold_scheduler::{
     AssignmentReason, Backend, BlockedReason, CandidatePlacement, DeviceActivity, DeviceAdminState,
     DeviceHealth, DeviceId, DeviceSnapshot, EstimateBucket, EstimateKey, EstimateObservation,
     EstimateOutcome, EstimatePhaseTimings, EstimateStore, ExecutionFingerprint,
-    GrantValidationSnapshot, HostMemorySnapshot, Plan, PlannedAssignment, Planner, PlannerSnapshot,
-    PriorityClass, StaticEstimate, WorkId, WorkSnapshot,
+    GrantValidationSnapshot, HostMemorySnapshot, Plan, PlannedAssignment, Planner, PlannerError,
+    PlannerSnapshot, PriorityClass, StaticEstimate, WorkId, WorkSnapshot,
 };
 
 use crate::gpu_pool::{GpuJob, GpuWorker, LeaseGrant, OwnerWork};
@@ -1025,6 +1025,43 @@ fn queue_plan_semantically_equal(
     normalized(left) == normalized(right)
 }
 
+#[derive(Debug)]
+enum PlanPublicationError {
+    Planner(PlannerError),
+    AuthorityConflict {
+        current_plan_version: u64,
+        current_state_version: u64,
+        produced_plan_version: u64,
+        produced_state_version: u64,
+    },
+}
+
+impl std::fmt::Display for PlanPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Planner(error) => write!(formatter, "{error}"),
+            Self::AuthorityConflict {
+                current_plan_version,
+                current_state_version,
+                produced_plan_version,
+                produced_state_version,
+            } => write!(
+                formatter,
+                "current queue-plan authority ({current_plan_version}/{current_state_version}) \
+                 conflicts with produced authority ({produced_plan_version}/{produced_state_version})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlanPublicationError {}
+
+impl From<PlannerError> for PlanPublicationError {
+    fn from(error: PlannerError) -> Self {
+        Self::Planner(error)
+    }
+}
+
 struct Coordinator {
     state: AppState,
     planner: Planner,
@@ -1053,6 +1090,8 @@ struct Coordinator {
     dispatch_retry_round: u8,
     dispatch_retry_not_before_ms: Option<u64>,
     estimates: EstimateStore,
+    #[cfg(test)]
+    next_plan_error: Option<PlannerError>,
     #[cfg(test)]
     before_grant_hook: Option<BeforeGrantHook>,
 }
@@ -1118,6 +1157,8 @@ impl Coordinator {
             dispatch_retry_round: 0,
             dispatch_retry_not_before_ms: None,
             estimates,
+            #[cfg(test)]
+            next_plan_error: None,
             #[cfg(test)]
             before_grant_hook: None,
         }
@@ -1783,16 +1824,28 @@ impl Coordinator {
                     );
                 }
                 self.mutate(immediate);
-                self.replan_and_publish();
+                let publication = self.try_replan_and_publish();
                 if let Some(completion) = completion {
-                    if valid {
-                        completion.finish();
-                    } else {
+                    if !valid {
                         completion.fail(
                             "GPU owner completion did not match an authoritative scheduler lease"
                                 .to_string(),
                         );
+                    } else if let Err(error) = publication.as_ref() {
+                        completion.fail(format!(
+                            "internal scheduler error: could not publish the authoritative \
+                             post-completion queue plan: {error}"
+                        ));
+                    } else {
+                        completion.finish();
                     }
+                }
+                if let Err(error) = publication {
+                    tracing::error!(
+                        state_version = self.state_version,
+                        %error,
+                        "scheduler could not publish an observational queue plan"
+                    );
                 }
             }
             WorkerEvent::Stopped {
@@ -3367,8 +3420,15 @@ impl Coordinator {
                     return None;
                 }
             };
+            if let Err(error) = self.publish_plan(&snapshot, &plan) {
+                tracing::error!(
+                    state_version = snapshot.state_version,
+                    %error,
+                    "scheduler could not publish the runtime queue plan; refusing to grant work"
+                );
+                return None;
+            }
             self.plan_version = plan.plan_version;
-            self.publish_plan(&snapshot, &plan);
             if plan.immediate_leases.is_empty() {
                 self.clear_dispatch_retry();
                 log_typed_blocks(&plan);
@@ -3893,23 +3953,37 @@ impl Coordinator {
         }
     }
 
-    fn replan_and_publish(&mut self) {
+    fn try_replan_and_publish(&mut self) -> Result<(), PlanPublicationError> {
         let owner_plan_cache = self.owner_plan_cache_and_settle_errors();
         let (snapshot, _) = self.planner_snapshot(&owner_plan_cache);
-        match self.planner.plan(&snapshot) {
-            Ok(plan) => {
-                self.plan_version = plan.plan_version;
-                self.publish_plan(&snapshot, &plan);
-            }
-            Err(error) => tracing::error!(
-                state_version = snapshot.state_version,
+        #[cfg(test)]
+        let plan_result = self
+            .next_plan_error
+            .take()
+            .map_or_else(|| self.planner.plan(&snapshot), Err);
+        #[cfg(not(test))]
+        let plan_result = self.planner.plan(&snapshot);
+        let plan = plan_result?;
+        self.publish_plan(&snapshot, &plan)?;
+        self.plan_version = plan.plan_version;
+        Ok(())
+    }
+
+    fn replan_and_publish(&mut self) {
+        if let Err(error) = self.try_replan_and_publish() {
+            tracing::error!(
+                state_version = self.state_version,
                 %error,
                 "scheduler could not publish an observational queue plan"
-            ),
+            );
         }
     }
 
-    fn publish_plan(&self, snapshot: &PlannerSnapshot, plan: &Plan) {
+    fn publish_plan(
+        &self,
+        snapshot: &PlannerSnapshot,
+        plan: &Plan,
+    ) -> Result<(), PlanPublicationError> {
         let mut confidence = plan
             .lanes
             .iter()
@@ -3971,10 +4045,28 @@ impl Coordinator {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) = current.as_ref() {
+            let exact_authority = existing.plan_version == wire.plan_version
+                && existing.state_version == wire.state_version;
+            let semantically_equal = queue_plan_semantically_equal(existing, &wire);
+            if exact_authority && semantically_equal {
+                return Ok(());
+            }
             if existing.plan_version >= wire.plan_version
-                || queue_plan_semantically_equal(existing, &wire)
+                || existing.state_version > wire.state_version
             {
-                return;
+                return Err(PlanPublicationError::AuthorityConflict {
+                    current_plan_version: existing.plan_version,
+                    current_state_version: existing.state_version,
+                    produced_plan_version: wire.plan_version,
+                    produced_state_version: wire.state_version,
+                });
+            }
+            if semantically_equal {
+                // Avoid a redundant event, but refresh the shared authority.
+                // Actor acknowledgement may treat a semantic no-op as
+                // published only when its version and state are current.
+                *current = Some(wire);
+                return Ok(());
             }
         }
         *current = Some(wire.clone());
@@ -3984,6 +4076,7 @@ impl Coordinator {
             .publish(mold_core::ServerEvent::QueuePlanChanged {
                 plan: Box::new(wire),
             });
+        Ok(())
     }
 
     fn publish_device_state_if_changed(&mut self) {
@@ -5563,6 +5656,55 @@ mod tests {
         let mut slower = shifted;
         slower.work_items[0].estimated_finish_unix_ms = Some(17_000);
         assert!(!queue_plan_semantically_equal(&first, &slower));
+    }
+
+    #[test]
+    fn semantic_noop_replan_refreshes_current_version_and_state_authority() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let mut events = coordinator.state.events.subscribe();
+        coordinator.replan_and_publish();
+        let initial = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("initial empty plan");
+        assert!(matches!(
+            events.try_recv(),
+            Ok(mold_core::ServerEvent::QueuePlanChanged { .. })
+        ));
+
+        let mut immediate = false;
+        coordinator.mutate(&mut immediate);
+        coordinator.replan_and_publish();
+        let refreshed = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("semantic no-op refreshes shared plan authority");
+
+        assert!(queue_plan_semantically_equal(&initial, &refreshed));
+        assert_eq!(refreshed.state_version, coordinator.state_version);
+        assert!(refreshed.state_version > initial.state_version);
+        assert!(refreshed.plan_version > initial.plan_version);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -7435,12 +7577,17 @@ mod tests {
         actor.await.unwrap();
         assert!(!coordinator.leases.contains_key(&stage_device_id));
         assert!(!coordinator.memory.reservations.contains_key(stage_id));
+        let published = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("actor acknowledgement requires an authoritative published plan");
+        assert_eq!(published.state_version, coordinator.state_version);
         assert!(
-            coordinator
-                .state
-                .scheduled_work
-                .latest_plan()
-                .is_none_or(|plan| plan.work_items.iter().all(|item| item.work_id != stage_id)),
+            published
+                .work_items
+                .iter()
+                .all(|item| item.work_id != stage_id),
             "settled stage must be absent from the published plan before actor acknowledgement"
         );
     }
@@ -7556,6 +7703,283 @@ mod tests {
             assert!(!coordinator.leases.contains_key(&device_id));
             assert!(coordinator.memory.reservations.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn chain_completion_fails_closed_when_current_state_plan_cannot_be_published() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let stage_id = "chain:publication-failure:attempt:1:stage:0";
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: stage_id.to_string(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+                estimated_finish_ms: 100,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(stage_id, 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+        coordinator.memory.reservations.insert(
+            stage_id.to_string(),
+            HostReservation {
+                bytes: 1 << 30,
+                state: ReservationState::CommittedAfterSample {
+                    commit_sequence: coordinator.memory.sequence,
+                },
+            },
+        );
+        coordinator.replan_and_publish();
+        let plan_before_completion = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("pre-completion lease plan");
+        assert!(plan_before_completion
+            .work_items
+            .iter()
+            .any(|item| item.work_id == stage_id));
+
+        coordinator.next_plan_error = Some(PlannerError::DuplicateWorkId {
+            work_id: WorkId::new("injected-plan-publication-failure"),
+        });
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let completion = crate::gpu_worker::DeferredOwnerCompletion::ChainStage {
+            tx: Some(result_tx),
+            result: Some(Ok(crate::chain_job_runner::StageExecution {
+                outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                device_ordinal: Some(0),
+            })),
+        };
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        let (successor_tx, mut successor_rx) = tokio::sync::mpsc::unbounded_channel();
+        let actor = tokio::spawn(async move {
+            let result = result_rx
+                .await
+                .expect("coordinator must settle the actor without hanging");
+            if result.is_ok() {
+                successor_tx.send("stage:1").unwrap();
+                successor_tx.send("finalize").unwrap();
+            }
+            result
+        });
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                successful: true,
+                phase_timings: EstimatePhaseTimings::default(),
+                completion: Some(completion),
+            },
+            &mut immediate,
+        );
+
+        assert!(!coordinator.leases.contains_key(&device_id));
+        assert!(!coordinator.memory.reservations.contains_key(stage_id));
+        let plan_after_failed_publication = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("last authoritative plan remains available");
+        assert_eq!(plan_after_failed_publication, plan_before_completion);
+        assert!(
+            plan_after_failed_publication.state_version < coordinator.state_version,
+            "failed planning must not masquerade as a current-state publication"
+        );
+        let actor_result = tokio::time::timeout(Duration::from_secs(1), actor)
+            .await
+            .expect("planner failure must not hang the actor")
+            .expect("actor task must not panic");
+        let error = match actor_result {
+            Ok(_) => panic!("actor must not advance after publication failure"),
+            Err(error) => error,
+        };
+        assert!(error.contains("scheduler"));
+        assert!(error.contains("publish"));
+        assert!(
+            successor_rx.try_recv().is_err(),
+            "failed publication must not produce a successor or finalize message"
+        );
+
+        coordinator.enqueue_owner_work(
+            ScheduledOwnerWork::new(
+                "unrelated-recovery-work",
+                "unrelated-recovery-work",
+                1 << 30,
+                OwnerWork::Probe {
+                    id: "unrelated-recovery-work".to_string(),
+                    kind: mold_scheduler::WorkKind::StandaloneUpscale,
+                    run: Box::new(|| {}),
+                },
+            ),
+            &mut immediate,
+        );
+        coordinator.replan_and_publish();
+        let recovered = coordinator
+            .state
+            .scheduled_work
+            .latest_plan()
+            .expect("one-shot injected failure must not poison later replanning");
+        assert_eq!(recovered.state_version, coordinator.state_version);
+        assert!(recovered.plan_version > plan_before_completion.plan_version);
+        assert!(recovered
+            .work_items
+            .iter()
+            .any(|item| item.work_id == "unrelated-recovery-work"));
+    }
+
+    #[tokio::test]
+    async fn chain_completion_fails_closed_on_queue_plan_authority_conflict() {
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let stage_id = "chain:authority-conflict:attempt:1:stage:0";
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: stage_id.to_string(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+                estimated_finish_ms: 100,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(stage_id, 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+        coordinator.memory.reservations.insert(
+            stage_id.to_string(),
+            HostReservation {
+                bytes: 1 << 30,
+                state: ReservationState::CommittedAfterSample {
+                    commit_sequence: coordinator.memory.sequence,
+                },
+            },
+        );
+        let conflicting_authority = mold_core::QueuePlan {
+            plan_version: 50,
+            state_version: 50,
+            ..Default::default()
+        };
+        *coordinator
+            .state
+            .scheduled_work
+            .latest_plan
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(conflicting_authority.clone());
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let completion = crate::gpu_worker::DeferredOwnerCompletion::ChainStage {
+            tx: Some(result_tx),
+            result: Some(Ok(crate::chain_job_runner::StageExecution {
+                outcome: crate::chain_job_runner::StageRenderOutcome::Cancelled,
+                device_ordinal: Some(0),
+            })),
+        };
+        let (successor_tx, mut successor_rx) = tokio::sync::mpsc::unbounded_channel();
+        let actor = tokio::spawn(async move {
+            let result = result_rx
+                .await
+                .expect("authority conflict must settle the actor without hanging");
+            if result.is_ok() {
+                successor_tx.send("stage:1").unwrap();
+                successor_tx.send("finalize").unwrap();
+            }
+            result
+        });
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                successful: true,
+                phase_timings: EstimatePhaseTimings::default(),
+                completion: Some(completion),
+            },
+            &mut immediate,
+        );
+
+        assert!(!coordinator.leases.contains_key(&device_id));
+        assert!(!coordinator.memory.reservations.contains_key(stage_id));
+        assert_eq!(
+            coordinator.state.scheduled_work.latest_plan(),
+            Some(conflicting_authority),
+            "a conflicting current authority must never be overwritten"
+        );
+        let actor_result = tokio::time::timeout(Duration::from_secs(1), actor)
+            .await
+            .expect("authority conflict must not hang the actor")
+            .expect("actor task must not panic");
+        let error = match actor_result {
+            Ok(_) => panic!("actor must not advance through an authority conflict"),
+            Err(error) => error,
+        };
+        assert!(error.contains("scheduler"));
+        assert!(error.contains("conflicts"));
+        assert!(
+            successor_rx.try_recv().is_err(),
+            "authority conflict must not produce a successor or finalize message"
+        );
     }
 
     #[tokio::test]

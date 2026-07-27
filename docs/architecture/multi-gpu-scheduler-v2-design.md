@@ -2026,7 +2026,9 @@ Deliver:
 - boundary release and sticky affinity;
 - coordinator-owned stage acknowledgement: the actor result remains unresolved
   until the completion reducer removes the exact lease and memory reservation,
-  updates learned timing, and republishes the authoritative plan;
+  updates learned timing, and successfully republishes the current-state
+  authoritative plan; planner/publication failure fails the actor closed, and a
+  semantic no-op counts only after shared plan version/state authority refresh;
 - legacy queue projection;
 - adapt the existing chain-safe cancellation points to leased stages.
 
@@ -2038,6 +2040,8 @@ Gates:
 - retake/resume/cancel;
 - adversarial completion ordering, including owner ingress selected before an
   already-queued completion and coordinator shutdown before acknowledgement;
+- injected planner failure and conflicting published authority after completion
+  settlement fail the actor closed without a successor or finalize transition;
 - external VAE/text-projection/audio paths survive every stage;
 - old chain endpoints and legacy queue position PATCH remain compatible.
 
