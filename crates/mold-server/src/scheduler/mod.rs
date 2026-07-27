@@ -4847,13 +4847,37 @@ fn queue_plan_projection(
     confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
     dirty_since: Option<Instant>,
 ) -> mold_core::QueuePlan {
-    let monotonic_now = monotonic_ms();
     let unix_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX);
+    queue_plan_projection_at_unix(
+        snapshot,
+        plan,
+        pool,
+        leases,
+        confidence_by_work,
+        dirty_since,
+        unix_now,
+    )
+}
+
+fn queue_plan_projection_at_unix(
+    snapshot: &PlannerSnapshot,
+    plan: &Plan,
+    pool: &crate::gpu_pool::GpuPool,
+    leases: &BTreeMap<String, ActiveLease>,
+    confidence_by_work: &BTreeMap<String, mold_core::QueueEstimateConfidence>,
+    dirty_since: Option<Instant>,
+    unix_now: u64,
+) -> mold_core::QueuePlan {
+    // Every assignment deadline in `plan` is relative to the single monotonic
+    // sample captured by `snapshot`. Sampling the clock again here silently
+    // shortened projected durations by the time spent planning and made exact
+    // ETA assertions load-dependent.
+    let monotonic_now = snapshot.now_ms;
     let to_unix = |deadline: u64| unix_now.saturating_add(deadline.saturating_sub(monotonic_now));
     let ordinals = pool
         .workers
@@ -6470,13 +6494,15 @@ mod tests {
             vec![queued_work],
         );
         let queued_plan = Planner::default().plan(&queued_snapshot).unwrap();
-        let queued = queue_plan_projection(
+        let projection_unix_now = 1_000_000;
+        let queued = queue_plan_projection_at_unix(
             &queued_snapshot,
             &queued_plan,
             &pool,
             &BTreeMap::new(),
             &BTreeMap::new(),
             None,
+            projection_unix_now,
         );
         assert_eq!(queued.work_items.len(), 1);
         assert_eq!(
@@ -6496,6 +6522,16 @@ mod tests {
             .contains_key("planned_device_id"));
         assert_eq!(queued_wire["planned_device_id"], serde_json::Value::Null);
         assert_eq!(queued.work_items[0].gpu, None);
+        assert_eq!(
+            queued.work_items[0].estimated_start_unix_ms,
+            Some(projection_unix_now),
+            "the projection clock must use the planner snapshot as its monotonic origin"
+        );
+        assert_eq!(
+            queued.work_items[0].estimated_finish_unix_ms,
+            Some(projection_unix_now + cpu_total),
+            "the projection clock must preserve the planner's exact duration"
+        );
         assert_eq!(
             queued.work_items[0]
                 .estimated_finish_unix_ms
