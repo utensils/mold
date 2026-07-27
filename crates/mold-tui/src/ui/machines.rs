@@ -614,7 +614,9 @@ fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
         Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => {
             parts.push(format!("assigned lane {order}"));
         }
-        None if work.activity_phase == mold_core::QueueActivityPhase::Cpu => {
+        None if work.is_host_utility_lane()
+            || work.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+        {
             parts.push(format!("host utility lane {order}"));
         }
         None => {
@@ -1090,6 +1092,33 @@ mod tests {
         });
         assert!(detail.contains("host utility lane 0"));
         assert!(!detail.contains("internal-id-must-not-render"));
+    }
+
+    #[test]
+    fn queue_plan_detail_hides_legacy_queued_host_utility_identity() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            planned_lane_kind: None,
+            planned_device_id: Some("cpu:utility:0".into()),
+            lane_order: Some(1),
+            ..Default::default()
+        });
+        assert!(detail.contains("host utility lane 1"));
+        assert!(!detail.contains("cpu:utility:0"));
+    }
+
+    #[test]
+    fn queue_plan_detail_keeps_future_typed_lane_opaque() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                "remote_utility".into(),
+            )),
+            planned_device_id: Some("future-internal-id".into()),
+            lane_order: Some(2),
+            ..Default::default()
+        });
+        assert!(detail.contains("assigned lane 2"));
+        assert!(!detail.contains("future-internal-id"));
     }
 
     #[test]

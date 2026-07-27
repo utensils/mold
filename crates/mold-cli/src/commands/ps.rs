@@ -191,7 +191,9 @@ fn format_work_item(item: &QueueWorkItem) -> String {
             .map(|device| format!("{device}/{order}"))
             .unwrap_or_else(|| format!("device/{order}")),
         Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => format!("assigned/{order}"),
-        None if item.activity_phase == mold_core::QueueActivityPhase::Cpu => {
+        None if item.is_host_utility_lane()
+            || item.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+        {
             format!("host-utility/{order}")
         }
         None => item
@@ -260,5 +262,43 @@ mod tests {
             assert!(formatted.contains("host-utility/0"));
             assert!(!formatted.contains("internal-id-must-not-render"));
         }
+    }
+
+    #[test]
+    fn legacy_queued_host_utility_lane_never_formats_its_internal_device_id() {
+        let item = QueueWorkItem {
+            work_id: "legacy-upscale".into(),
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            planned_lane_kind: None,
+            planned_device_id: Some("cpu:utility:0".into()),
+            lane_order: Some(1),
+            ..Default::default()
+        };
+
+        let formatted = format_work_item(&item);
+        assert!(formatted.contains("host-utility/1"));
+        assert!(!formatted.contains("cpu:utility:0"));
+    }
+
+    #[test]
+    fn typed_device_and_future_lanes_keep_public_lane_semantics() {
+        let gpu = format_work_item(&QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
+            planned_device_id: Some("cuda:stable-a".into()),
+            lane_order: Some(2),
+            ..Default::default()
+        });
+        assert!(gpu.contains("cuda:stable-a/2"));
+
+        let future = format_work_item(&QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                "remote_utility".into(),
+            )),
+            planned_device_id: Some("future-internal-id".into()),
+            lane_order: Some(3),
+            ..Default::default()
+        });
+        assert!(future.contains("assigned/3"));
+        assert!(!future.contains("future-internal-id"));
     }
 }

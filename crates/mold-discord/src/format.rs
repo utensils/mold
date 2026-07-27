@@ -436,7 +436,9 @@ pub fn format_server_status_pages(
                         Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => {
                             format!("assigned/{order}")
                         }
-                        None if work.activity_phase == mold_core::QueueActivityPhase::Cpu => {
+                        None if work.is_host_utility_lane()
+                            || work.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+                        {
                             format!("host utility/{order}")
                         }
                         None => work
@@ -1383,6 +1385,73 @@ mod tests {
         assert!(fields.contains("high confidence"));
         assert!(fields.contains("warm_model"));
         assert!(fields.contains("insufficient_vram"));
+    }
+
+    #[test]
+    fn queue_summary_hides_legacy_queued_host_utility_identity() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: true,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 1,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(3),
+            queue_capacity: Some(8),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![],
+            plan: Some(mold_core::QueuePlan {
+                work_items: vec![
+                    mold_core::QueueWorkItem {
+                        work_id: "legacy-upscale".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Queued,
+                        planned_lane_kind: None,
+                        planned_device_id: Some("cpu:utility:0".into()),
+                        lane_order: Some(1),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "typed-host".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::HostUtility),
+                        planned_device_id: Some("typed-host-internal".into()),
+                        lane_order: Some(2),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "future".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                            "remote_utility".into(),
+                        )),
+                        planned_device_id: Some("future-internal-id".into()),
+                        lane_order: Some(3),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        let fields = format_server_status_pages(&status, None, Some(&queue))
+            .iter()
+            .flat_map(|page| page.fields.iter())
+            .map(|(_, value, _)| value.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fields.contains("host utility/1"));
+        assert!(fields.contains("host utility/2"));
+        assert!(fields.contains("assigned/3"));
+        assert!(!fields.contains("cpu:utility:0"));
+        assert!(!fields.contains("typed-host-internal"));
+        assert!(!fields.contains("future-internal-id"));
     }
 
     #[test]
