@@ -1465,13 +1465,25 @@ the predecessor v1 path under `.attempt-locks` and the current v2 path directly
 under the canonical gallery root. Both are opened and nonblockingly claimed in
 the fixed v1-then-v2 order while gallery bookkeeping is held. A live v1 binary
 therefore blocks v2 begin/recovery, and a live v2 binary blocks a later v1
-claimant during a rolling deployment. Cleanup verifies and unlinks both names
-under stable bookkeeping while both OS locks remain held, then unlocks and
-closes both handles. Authority files are reclaimed on terminal drop or the
-next locked sweep; abandoned attempts retain their manifest and journal for
-startup recovery without retaining sidecars forever. A suspicious hardlinked
-or unverifiable stale sidecar is warn-skipped by the broad sweep so it cannot
-brick unrelated startup, but an exact attempt claim remains fail-closed.
+claimant during a rolling deployment. Cleanup retains both OS locks while it
+verifies and unlinks the current name under stable bookkeeping, then unlocks
+and closes both handles. The predecessor v1 name is never unlinked during
+rolling compatibility. A v1 process can open the legacy file before taking its
+OS lock and has no v2 bookkeeping guard. If v2
+swept that unlocked pathname in the gap, v1 could lock the detached inode while
+a later v2 claimant created and locked a replacement. Retaining the empty
+legacy pathname as one reusable stable inode is harmless and closes that race.
+It means `.attempt-locks` is persistent compatibility metadata rather than a
+bounded-cleanup directory.
+
+Broad sweeps derive every path from the bookkeeping guard's canonical gallery
+root, never from the caller's raw `output_dir`; Unix symlink aliases and
+Windows ordinary-versus-verbatim spellings therefore converge on one
+namespace. A suspicious hardlinked or unverifiable current sidecar is
+warn-skipped by the broad sweep so it cannot brick unrelated startup.
+Suspicious legacy namespaces and exact-shaped symlink, directory, or otherwise
+unverifiable entries are also warn-retained. An exact attempt claim remains
+fail-closed for all of them.
 
 The predecessor directory protocol cannot defend against a same-UID adversary
 that replaces a real `.attempt-locks` directory while a legacy v1 binary is
@@ -1482,8 +1494,10 @@ ownership remains protected by the independent canonical gallery-root
 authority even if that legacy directory is maliciously replaced.
 
 Windows authority and bookkeeping handles deny delete sharing, reject reparse
-points, and compare MSRV-compatible `GetFileInformationByHandle`
-volume/file identity plus link count before and after locking. Unix uses
+points, canonicalize both sides of path-provenance comparisons so ordinary and
+verbatim `\\?\` spellings agree, and compare MSRV-compatible
+`GetFileInformationByHandle` volume/file identity plus link count before and
+after locking. Unix uses
 no-follow descriptor walks, device/inode/link-count comparison, and verified
 directory-descriptor `unlinkat`. Every begin/recovery also proves that a second
 descriptor in the same process cannot acquire either supposedly exclusive
