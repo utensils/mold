@@ -1460,6 +1460,26 @@ The transaction root is deliberately inside the resolved gallery filesystem
 so every final no-replace rename stays on one filesystem; gallery scanners and
 reconcile must ignore that reserved directory.
 
+Each live attempt additionally holds one hashed authority file directly under
+the canonical gallery root. Authority open, claim, stale sweep, and terminal
+unlink are serialized by the gallery bookkeeping lock. Cleanup unlinks only
+while it still holds both locks, then releases the file lock, so no production
+opener can retain an old inode while another creates authority at the same
+path. The shared `.attempt-locks` directory is retired because replacing that
+directory could fork the namespace. Authority files are reclaimed on terminal
+drop or the next locked sweep; abandoned attempts retain their manifest and
+journal for startup recovery without retaining one file forever. Windows
+opens without delete sharing and compares `GetFileInformationByHandle`
+volume/file identity before and after claim; Unix uses no-follow descriptor
+walks plus device/inode/link-count comparison.
+
+The canonical resolved gallery directory is the filesystem trust root for this
+protocol. Mold never renames or replaces that directory while serving.
+Replacing the whole gallery directory behind a live server is an out-of-band
+filesystem mutation outside the logical API authority boundary and may make
+the server fail closed; replacing any transaction-owned child directory or
+authority file remains covered by the bookkeeping/identity protocol above.
+
 An error after entering `committing` does not release the writer barrier while
 the live server keeps serving. The commit handler must either roll forward to
 durable `committed`, roll back every final/DB change and durably mark the
