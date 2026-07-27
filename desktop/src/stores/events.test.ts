@@ -178,7 +178,7 @@ describe("event routing", () => {
     expect(jobs.queues["local"]?.paused).toBe(false);
   });
 
-  it("reactively applies versioned queue plans and authoritative device snapshots", async () => {
+  it("reactively applies versioned plans and treats device events as invalidations", async () => {
     connectWithBucket();
     const { useJobsStore } = await import("./jobs");
     const jobs = useJobsStore();
@@ -193,6 +193,7 @@ describe("event routing", () => {
       error: null,
     };
     const events = useEventsStore();
+    const refreshHost = vi.spyOn(jobs, "refreshHost").mockResolvedValue(undefined);
     const plan = {
       plan_version: 7,
       state_version: 9,
@@ -204,17 +205,14 @@ describe("event routing", () => {
     events.apply({ type: "queue_plan_changed", plan });
     expect(jobs.queues["local"]?.plan).toEqual(plan);
 
-    const device = {
-      id: "cuda:stable",
-      backend: "cuda",
-      ordinal: 0,
-      schedulable: false,
-    } as never;
     events.apply({
       type: "device_state_changed",
-      state: { devices: [device], plan_version: 7 },
+      device_id: "cuda:stable",
+      desired_enabled: false,
+      admin_state: "draining",
     });
-    expect(jobs.queues["local"]?.devices).toEqual([device]);
+    expect(jobs.queues["local"]?.devices).toEqual([]);
+    expect(refreshHost).toHaveBeenCalledTimes(2);
 
     events.apply({
       type: "queue_plan_changed",

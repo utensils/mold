@@ -28,7 +28,6 @@ import {
   pauseHostQueue,
   resumeHostQueue,
   setQueueJobLane,
-  setHostDeviceEnabled,
   useHostPoll,
   type HostCapabilities,
 } from "../components/machines/hostClient";
@@ -159,11 +158,25 @@ async function onToggleDevice(deviceId: string, enabled: boolean) {
   const epoch = sessionEpoch;
   mutatingDeviceId.value = deviceId;
   try {
-    const state = await setHostDeviceEnabled(entry, deviceId, enabled);
+    const accepted = await setDeviceEnabled(
+      { baseUrl: entry.url, apiKey: entry.apiKey ?? null },
+      deviceId,
+      enabled,
+    );
     if (isCurrentSession(entry, epoch)) {
-      poll.deviceState.value = state;
-      poll.devices.value = state.devices;
+      const devices = (poll.devices.value ?? []).map((device) =>
+        device.id === accepted.id ? accepted : device,
+      );
+      if (!devices.some((device) => device.id === accepted.id)) {
+        devices.push(accepted);
+      }
+      poll.devices.value = devices;
+      poll.deviceState.value = {
+        devices,
+        plan_version: poll.deviceState.value?.plan_version ?? 0,
+      };
     }
+    await poll.refresh();
     await reloadQueue();
   } catch (e) {
     toast(
@@ -291,22 +304,11 @@ async function onTogglePause() {
   }
 }
 
-async function onToggleDevice(device: DeviceInfo) {
-  if (!host || !canMutateDevice(device, caps.value)) return;
-  const enabled = !device.desired_enabled;
+async function onToggleLifecycleDevice(device: DeviceInfo) {
+  if (!canMutateDevice(device, caps.value)) return;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
-    await setDeviceEnabled(
-      { baseUrl: host.url, apiKey: host.apiKey ?? null },
-      device.id,
-      enabled,
-    );
-    await poll?.refresh();
-  } catch (e) {
-    toast(
-      "error",
-      `Couldn't ${enabled ? "enable" : "disable"} GPU: ${errMsg(e)}`,
-    );
+    await onToggleDevice(device.id, !device.desired_enabled);
   } finally {
     const next = new Set(deviceMutations.value);
     next.delete(device.id);
@@ -647,7 +649,7 @@ onBeforeUnmount(() => {
                   !canMutateDevice(device, caps) ||
                   deviceMutations.has(device.id)
                 "
-                @click="onToggleDevice(device)"
+                @click="onToggleLifecycleDevice(device)"
               >
                 {{ deviceActionLabel(device, caps) }}
               </button>
@@ -661,7 +663,10 @@ onBeforeUnmount(() => {
           <DevicePanel
             :devices="poll?.devices.value ?? []"
             :plan="queuePlan"
-            :mutable="caps?.devices?.lifecycle === true"
+            :mutable="
+              caps?.devices?.lifecycle === true &&
+              caps?.dispatch?.v2_authoritative === true
+            "
             :busy-device-id="mutatingDeviceId"
             @unpin="onUnpinWork"
             @toggle="onToggleDevice"

@@ -110,16 +110,6 @@ pub enum BackgroundEvent {
         host_id: String,
         queue: Option<mold_core::QueueListingWire>,
     },
-    /// Per-host stable-ID device inventory for the selected Machines row.
-    HostDevicesUpdate {
-        host_id: String,
-        devices: Option<mold_core::DeviceState>,
-    },
-    /// Per-host feature gates for the selected Machines row.
-    HostCapabilitiesUpdate {
-        host_id: String,
-        capabilities: Option<mold_core::ServerCapabilities>,
-    },
     /// Result of the connect-a-machine test fetch.
     MachineConnectTested {
         url: String,
@@ -3588,8 +3578,7 @@ impl App {
             }
             Action::MachinesToggleDevice
                 if self.active_view == View::Machines
-                    && self.machines.focus == crate::hosts::MachinesFocus::Detail
-                    && self.machines.selected_device_lifecycle_mutable() =>
+                    && self.machines.focus == crate::hosts::MachinesFocus::Detail =>
             {
                 let Some(device) = self.machines.selected_device().cloned() else {
                     return;
@@ -6129,15 +6118,6 @@ impl App {
                 }
                 BackgroundEvent::HostQueueUpdate { host_id, queue } => {
                     self.machines.apply_queue(host_id, queue);
-                }
-                BackgroundEvent::HostDevicesUpdate { host_id, devices } => {
-                    self.machines.apply_devices(host_id, devices);
-                }
-                BackgroundEvent::HostCapabilitiesUpdate {
-                    host_id,
-                    capabilities,
-                } => {
-                    self.machines.apply_capabilities(host_id, capabilities);
                 }
                 BackgroundEvent::MachineConnectTested {
                     url,
@@ -12068,6 +12048,7 @@ mod tests {
                     power_w: None,
                 },
                 desired_enabled: true,
+                restart_required: false,
                 admin_state: mold_core::DeviceAdminState::Enabled,
                 health: mold_core::DeviceHealth::Healthy,
                 activity: mold_core::DeviceActivity::Idle,

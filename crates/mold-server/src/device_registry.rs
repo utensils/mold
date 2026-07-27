@@ -896,7 +896,7 @@ mod tests {
             Arc::new(None),
         );
         let pool = GpuPool {
-            workers: vec![worker(0)],
+            workers: vec![worker(0)].into(),
         };
         let jobs = crate::job_registry::JobRegistry::new();
 

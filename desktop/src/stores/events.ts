@@ -109,14 +109,8 @@ export const useEventsStore = defineStore("events", {
           break;
         }
         case "device_state_changed": {
-          const primary = useHostsStore().primaryHost;
-          const queue = primary ? useJobsStore().queues[primary.id] : undefined;
-          if (queue) {
-            queue.devices = ev.state.devices;
-            queue.gpuOrdinals = ev.state.devices
-              .filter((device) => device.schedulable && device.ordinal !== null)
-              .map((device) => device.ordinal as number);
-          }
+          // This frame is deliberately a lean invalidation, not an
+          // authoritative inventory. Refetch against the exact primary.
           this.refreshAuthoritativePrimary();
           break;
         }

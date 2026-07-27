@@ -234,21 +234,9 @@ mod tests {
         assert!(format_device_line(&unavailable).contains("unavailable"));
     }
 
-    #[test]
-    fn lifecycle_mutation_is_capability_gated() {
-        let mut capabilities = mold_core::ServerCapabilities::default();
-        capabilities.dispatch.active_mode = Some("legacy".into());
-        let error = require_lifecycle(&capabilities).unwrap_err().to_string();
-        assert!(error.contains("authoritative scheduler V2 is inactive"));
-        assert!(error.contains("legacy"));
-
-        capabilities.devices.lifecycle = true;
-        assert!(require_lifecycle(&capabilities).is_ok());
-    }
-
     #[tokio::test]
-    async fn legacy_capability_refusal_never_reads_devices_or_sends_patch() {
-        use wiremock::matchers::{method, path_regex};
+    async fn legacy_live_disable_reads_the_target_but_never_sends_patch() {
+        use wiremock::matchers::{method, path, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -268,7 +256,19 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        Mock::given(path_regex(r"^/api/devices(?:/.*)?$"))
+        Mock::given(method("GET"))
+            .and(path("/api/devices"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mold_core::DeviceState {
+                    devices: vec![device("cuda:stable", 0)],
+                    plan_version: 0,
+                }),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/api/devices/.*$"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
             .mount(&server)
@@ -278,6 +278,6 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("authoritative scheduler V2 is inactive"));
+        assert!(error.contains("live GPU controls require Scheduler V2"));
     }
 }

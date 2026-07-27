@@ -113,6 +113,9 @@ export interface ServerCapabilities {
     available?: boolean;
     lifecycle?: boolean;
     restart_enable?: boolean;
+    stable_pins?: boolean;
+    planned_lanes?: boolean;
+    learned_eta?: boolean;
   };
   dispatch?: {
     active_mode?: string | null;
@@ -123,13 +126,6 @@ export interface ServerCapabilities {
     can_pause?: boolean;
     can_cancel_all?: boolean;
     can_reorder?: boolean;
-  };
-  devices?: {
-    available?: boolean;
-    lifecycle?: boolean;
-    stable_pins?: boolean;
-    planned_lanes?: boolean;
-    learned_eta?: boolean;
   };
 }
 

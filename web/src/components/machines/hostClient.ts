@@ -110,7 +110,7 @@ export function setHostDeviceEnabled(
   host: HostEntry,
   deviceId: string,
   enabled: boolean,
-): Promise<DeviceListResponse> {
+): Promise<DeviceInfo> {
   return setDeviceEnabled(
     { baseUrl: host.url, apiKey: host.apiKey ?? null },
     deviceId,

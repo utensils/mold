@@ -262,6 +262,7 @@ onBeforeUnmount(() => deviceEventsAbort?.abort());
         <p>{{ deviceLifecycleMessage(deviceCapabilities) }}</p>
       </div>
       <DevicePanel
+        v-if="plan?.work_items.length"
         :devices="devices"
         :plan="plan"
         :mutable="

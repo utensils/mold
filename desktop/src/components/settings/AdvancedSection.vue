@@ -46,7 +46,9 @@ async function loadDevices() {
   if (deviceResult.status === "fulfilled") devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled") plan.value = queueResult.value.plan;
   lifecycleMutable.value =
-    capabilityResult.status === "fulfilled" && capabilityResult.value.devices?.lifecycle === true;
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value.devices?.lifecycle === true &&
+    capabilityResult.value.dispatch?.v2_authoritative === true;
 }
 
 async function toggleDevice(deviceId: string, enabled: boolean) {
@@ -54,7 +56,8 @@ async function toggleDevice(deviceId: string, enabled: boolean) {
   if (!apiTarget) return;
   mutatingDeviceId.value = deviceId;
   try {
-    devices.value = (await setDeviceEnabled(apiTarget, deviceId, enabled)).devices;
+    const accepted = await setDeviceEnabled(apiTarget, deviceId, enabled);
+    devices.value = devices.value.map((device) => (device.id === accepted.id ? accepted : device));
     await loadDevices();
   } catch (error) {
     toasts.push(`Device state was not changed: ${String(error)}`, "error");
@@ -110,7 +113,7 @@ async function reset(row: ConfigRow) {
 <template>
   <div>
     <DevicePanel
-      v-if="!filter && devices.length"
+      v-if="!filter && devices.length && plan?.work_items.length"
       class="mb-5"
       :devices="devices"
       :plan="plan"

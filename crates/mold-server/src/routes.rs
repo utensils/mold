@@ -2632,13 +2632,6 @@ async fn patch_device(
         .into_iter()
         .find(|device| device.id == device_id)
         .ok_or_else(|| ApiError::internal("device disappeared during lifecycle mutation"))?;
-    state
-        .events
-        .publish(mold_core::ServerEvent::DeviceStateChanged {
-            device_id: device.id.clone(),
-            desired_enabled: device.desired_enabled,
-            admin_state: device.admin_state,
-        });
     if let Some(owner_epoch) = started_epoch {
         match state
             .gpu_pool

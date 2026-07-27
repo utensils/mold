@@ -585,20 +585,6 @@ pub enum JobsAction {
     Gc,
 }
 
-#[derive(Subcommand)]
-enum GpuAction {
-    /// List every runtime-visible device and lifecycle state
-    List {
-        /// Output the stable device API response as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Stop assigning work and disable after the current lease finishes
-    Disable { device: String },
-    /// Enable a device and start a fresh owner thread when needed
-    Enable { device: String },
-}
-
 #[derive(clap::ValueEnum, Clone, Copy)]
 pub enum RetakeModeArg {
     Cascade,

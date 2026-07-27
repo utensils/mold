@@ -2183,11 +2183,7 @@ impl Coordinator {
                             estimate.host_bytes,
                         )
                         .with_vram(estimate.vram_bytes)
-                        .with_timing(
-                            load_ms,
-                            0,
-                            estimate.total_ms.saturating_sub(load_ms),
-                        )
+                        .with_timing(load_ms, 0, estimate.total_ms.saturating_sub(load_ms))
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                     })
                     .collect::<Vec<_>>();
@@ -2232,8 +2228,11 @@ impl Coordinator {
                 .workers
                 .iter()
                 .map(|worker| {
-                    let key =
-                        owner_estimate_key(worker, pending.work.kind(), &pending.model_fingerprint);
+                    let key = owner_estimate_key(
+                        worker.as_ref(),
+                        pending.work.kind(),
+                        &pending.model_fingerprint,
+                    );
                     let estimate = self.estimates.estimate(
                         &key,
                         StaticEstimate {
@@ -2819,7 +2818,7 @@ impl Coordinator {
                         .and_then(|pending| {
                             worker.map(|worker| {
                                 generation_estimate_key(
-                                    worker,
+                                    worker.as_ref(),
                                     &pending.job.request,
                                     assignment.placement.execution_fingerprint.as_str(),
                                 )
@@ -2883,12 +2882,45 @@ impl Coordinator {
         if self.last_device_event_signature.as_ref() == Some(&signature) {
             return;
         }
+        let previous = self.last_device_event_signature.as_ref();
+        let mut changes = signature
+            .iter()
+            .zip(&state.devices)
+            .filter(|(current, _)| {
+                previous
+                    .and_then(|previous| previous.iter().find(|candidate| candidate.0 == current.0))
+                    != Some(*current)
+            })
+            .map(|(_, device)| {
+                (
+                    device.id.clone(),
+                    device.desired_enabled,
+                    device.admin_state,
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(previous) = previous {
+            changes.extend(
+                previous
+                    .iter()
+                    .filter(|old| {
+                        !signature
+                            .iter()
+                            .any(|current| current.0.as_str() == old.0.as_str())
+                    })
+                    .map(|old| (old.0.clone(), false, mold_core::DeviceAdminState::Disabled)),
+            );
+        }
         self.last_device_event_signature = Some(signature);
-        self.state
-            .events
-            .publish(mold_core::ServerEvent::DeviceStateChanged {
-                state: Box::new(state),
-            });
+        for (device_id, desired_enabled, admin_state) in changes {
+            self.state
+                .events
+                .publish(mold_core::ServerEvent::DeviceStateChanged {
+                    device_id,
+                    desired_enabled,
+                    admin_state,
+                });
+        }
     }
 
     fn reject_all_unstarted_for_fatal_cuda(&mut self) {
@@ -3146,7 +3178,7 @@ fn queue_plan_projection(
     let ordinals = pool
         .workers
         .iter()
-        .map(|worker| (worker_device_id(worker), worker.gpu.ordinal))
+        .map(|worker| (worker_device_id(worker.as_ref()), worker.gpu.ordinal))
         .collect::<BTreeMap<_, _>>();
 
     let work_items = snapshot
@@ -4086,6 +4118,7 @@ mod tests {
                     power_w: None,
                 },
                 desired_enabled: true,
+                restart_required: false,
                 admin_state: mold_core::DeviceAdminState::Enabled,
                 health: mold_core::DeviceHealth::Healthy,
                 activity: mold_core::DeviceActivity::Idle,
@@ -4161,7 +4194,7 @@ mod tests {
     fn device_events_publish_once_per_semantic_health_transition() {
         let (worker, _worker_rx) = test_worker(0);
         let pool = Arc::new(GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let mut state = AppState::empty(
@@ -4194,8 +4227,11 @@ mod tests {
         let first = receiver.try_recv().expect("initial semantic snapshot");
         assert!(matches!(
             first,
-            mold_core::ServerEvent::DeviceStateChanged { state }
-                if state.devices[0].health == mold_core::DeviceHealth::Healthy
+            mold_core::ServerEvent::DeviceStateChanged {
+                ref device_id,
+                desired_enabled: true,
+                admin_state: mold_core::DeviceAdminState::Enabled,
+            } if device_id == worker.gpu.stable_id.as_deref().unwrap()
         ));
         coordinator.publish_device_state_if_changed();
         assert!(
@@ -4213,8 +4249,11 @@ mod tests {
         let disabled = receiver.try_recv().expect("preference transition");
         assert!(matches!(
             disabled,
-            mold_core::ServerEvent::DeviceStateChanged { state }
-                if state.devices[0].admin_state == mold_core::DeviceAdminState::Disabled
+            mold_core::ServerEvent::DeviceStateChanged {
+                ref device_id,
+                desired_enabled: false,
+                admin_state: mold_core::DeviceAdminState::Draining,
+            } if device_id == worker.gpu.stable_id.as_deref().unwrap()
         ));
         assert!(!coordinator
             .state
@@ -4232,8 +4271,11 @@ mod tests {
         let poisoned = receiver.try_recv().expect("poison transition");
         assert!(matches!(
             poisoned,
-            mold_core::ServerEvent::DeviceStateChanged { state }
-                if state.devices[0].health == mold_core::DeviceHealth::Poisoned
+            mold_core::ServerEvent::DeviceStateChanged {
+                ref device_id,
+                desired_enabled: false,
+                admin_state: mold_core::DeviceAdminState::Draining,
+            } if device_id == worker.gpu.stable_id.as_deref().unwrap()
         ));
     }
 
@@ -4245,7 +4287,7 @@ mod tests {
                 mold_core::Config::default(),
                 QueueHandle::new(ingress_tx),
                 Arc::new(GpuPool {
-                    workers: Vec::new(),
+                    workers: Vec::new().into(),
                 }),
                 1,
             );
@@ -4267,10 +4309,15 @@ mod tests {
                 "cuda:stable".into(),
                 ActiveLease {
                     work_id: "post-upscale".into(),
+                    owner_epoch: 1,
                     plan_version: 1,
                     worker_generation: 1,
                     accepted: true,
                     previous_target: None,
+                    estimated_finish_ms: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
                     started_at: Instant::now(),
                     estimate_key: key.clone(),
                 },
@@ -4280,6 +4327,7 @@ mod tests {
                 WorkerEvent::Completed {
                     device_id: "cuda:stable".into(),
                     ordinal: 0,
+                    owner_epoch: 1,
                     worker_generation: 1,
                     successful,
                     load_ms: Some(250),
@@ -4315,7 +4363,7 @@ mod tests {
             mold_core::Config::default(),
             QueueHandle::new(ingress_tx),
             Arc::new(GpuPool {
-                workers: Vec::new(),
+                workers: Vec::new().into(),
             }),
             1,
         );
@@ -4516,6 +4564,14 @@ mod tests {
                 ready_at_ms: 0,
                 bypass_count: 0,
                 warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey {
+                    device_class: "cuda-sm86".into(),
+                    model_fingerprint: "resident-test".into(),
+                    work_kind: "generation".into(),
+                    shape_bucket: "test".into(),
+                    execution_fingerprint: "warm-plan".into(),
+                },
             },
         );
         let busy = coordinator.device_snapshots().remove(0);

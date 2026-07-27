@@ -34,10 +34,7 @@ describe("queue plan contract", () => {
   it("keeps a plan with no finite finish estimate unknown", () => {
     expect(predictedCompletionUnixMs(plan(null), 50_000)).toBeNull();
     expect(
-      predictedCompletionUnixMs(
-        { ...plan(null), work_items: [] },
-        50_000,
-      ),
+      predictedCompletionUnixMs({ ...plan(null), work_items: [] }, 50_000),
     ).toBeNull();
     expect(predictedCompletionUnixMs(plan(Number.NaN), 50_000)).toBeNull();
   });

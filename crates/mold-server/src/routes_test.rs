@@ -742,14 +742,10 @@ mod tests {
         assert_eq!(body["admin_state"], "disabled");
         assert!(pool.workers.is_empty());
         assert!(!registry.desired_enabled(id));
-        assert!(matches!(
-            events.recv().await.unwrap(),
-            mold_core::ServerEvent::DeviceStateChanged {
-                device_id,
-                desired_enabled: false,
-                admin_state: mold_core::DeviceAdminState::Disabled,
-            } if device_id == id
-        ));
+        assert!(
+            events.try_recv().is_err(),
+            "the request response is authoritative; the coordinator owns semantic events"
+        );
 
         let generation = app
             .oneshot(
@@ -1450,7 +1446,7 @@ mod tests {
         let worker = gpu_worker_stub(0);
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         install_worker_registry(&mut state);
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -1490,7 +1486,7 @@ mod tests {
             let worker = gpu_worker_stub(0);
             let mut state = AppState::with_engine(MockEngine::ready());
             state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-                workers: vec![worker.clone()],
+                workers: vec![worker.clone()].into(),
             });
             install_worker_registry(&mut state);
             state
@@ -1527,7 +1523,7 @@ mod tests {
                 "{label} must not rewrite registry routing eligibility"
             );
             assert_eq!(
-                inventory["devices"][0]["unschedulable_reason"], "device_disabled",
+                inventory["devices"][0]["unschedulable_reason"], "device_draining",
                 "{label} must not clear the registry reason"
             );
 
@@ -1543,7 +1539,7 @@ mod tests {
             assert_eq!(patch.status(), StatusCode::CONFLICT, "{label}");
             assert_eq!(
                 json_body(patch).await["code"],
-                "DEVICE_LIFECYCLE_UNAVAILABLE",
+                "DEVICE_LIFECYCLE_MODE_CONFLICT",
                 "{label}"
             );
         }
@@ -1557,7 +1553,7 @@ mod tests {
             Some(std::time::Instant::now() + Duration::from_secs(60));
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         install_worker_registry(&mut state);
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -1587,7 +1583,7 @@ mod tests {
         let id = worker.gpu.stable_id.clone().unwrap();
         let mut state = AppState::with_engine(MockEngine::ready());
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker],
+            workers: vec![worker].into(),
         });
         install_worker_registry(&mut state);
         assert!(state.device_registry.mark_unavailable(&id));
@@ -2006,7 +2002,7 @@ mod tests {
         let worker = gpu_worker_stub(0);
         let mut state = AppState::with_engine_and_queue(MockEngine::ready()).0;
         state.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
-            workers: vec![worker.clone()],
+            workers: vec![worker.clone()].into(),
         });
         install_worker_registry(&mut state);
         state.job_registry.register("aaaa", "flux-dev:fp16");
@@ -2786,7 +2782,7 @@ mod tests {
             assert_eq!(body["devices"]["restart_enable"], true, "{label}");
             assert_eq!(body["devices"]["stable_pins"], true, "{label}");
             assert_eq!(body["devices"]["planned_lanes"], false, "{label}");
-            assert_eq!(body["devices"]["learned_eta"], true, "{label}");
+            assert_eq!(body["devices"]["learned_eta"], false, "{label}");
         }
     }
 

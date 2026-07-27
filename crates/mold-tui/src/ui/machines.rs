@@ -44,7 +44,7 @@ fn kv_owned(
     ])
 }
 
-fn device_state_label(
+fn device_summary_state_label(
     admin_state: mold_core::DeviceAdminState,
     health: mold_core::DeviceHealth,
 ) -> String {
@@ -485,63 +485,64 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         lines.push(Line::from(Span::styled("— none visible.", app.theme.dim())));
         return;
     }
-    for (index, device) in state.devices.iter().enumerate() {
-        let selected =
-            app.machines.focus == MachinesFocus::Detail && index == app.machines.device_selected;
-        let marker = if selected { "›" } else { " " };
-        let ordinal = device
-            .ordinal
-            .map(|ordinal| format!("GPU {ordinal}"))
-            .unwrap_or_else(|| match device.backend {
-                mold_core::GpuBackend::Cuda => "CUDA".to_string(),
-                mold_core::GpuBackend::Metal => "METAL".to_string(),
-            });
-        let state = device_state_label(device);
-        let style = if selected {
-            app.theme.list_selected()
-        } else if device.restart_required
-            || device.admin_state == mold_core::DeviceAdminState::Draining
-        {
-            app.theme.warning()
-        } else if device_uses_error_style(device) {
-            app.theme.error()
-        } else {
-            Style::default().fg(app.theme.text)
-        };
+    let index = app
+        .machines
+        .device_selected
+        .min(state.devices.len().saturating_sub(1));
+    let device = &state.devices[index];
+    lines.push(Line::from(Span::styled(
+        format!("Device {} of {}", index + 1, state.devices.len()),
+        app.theme.dim(),
+    )));
+    let selected = app.machines.focus == MachinesFocus::Detail;
+    let marker = if selected { "›" } else { " " };
+    let ordinal = device
+        .ordinal
+        .map(|ordinal| format!("GPU {ordinal}"))
+        .unwrap_or_else(|| match device.backend {
+            mold_core::GpuBackend::Cuda => "CUDA".to_string(),
+            mold_core::GpuBackend::Metal => "METAL".to_string(),
+        });
+    let state = device_state_label(device);
+    let style = if selected {
+        app.theme.list_selected()
+    } else if device.restart_required || device.admin_state == mold_core::DeviceAdminState::Draining
+    {
+        app.theme.warning()
+    } else if device_uses_error_style(device) {
+        app.theme.error()
+    } else {
+        Style::default().fg(app.theme.text)
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{marker} {ordinal} · {} · {state}", device.name),
+        style,
+    )));
+    let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
+        (Some(used), Some(total)) => vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2)),
+        (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
+        _ => "VRAM unavailable".to_string(),
+    };
+    let utilization = device
+        .telemetry
+        .utilization_percent
+        .map(|value| format!(" · {value:.0}%"))
+        .unwrap_or_default();
+    lines.push(Line::from(Span::styled(
+        format!("  {vram}{utilization} · {}", short_device_id(&device.id)),
+        app.theme.dim(),
+    )));
+    if let Some(active) = &device.active_work_id {
         lines.push(Line::from(Span::styled(
-            format!("{marker} {ordinal} · {} · {state}", device.name),
-            style,
+            format!("  active {active}"),
+            app.theme.warning(),
         )));
-        let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
-            (Some(used), Some(total)) => {
-                vram_label(used / 1024_u64.pow(2), total / 1024_u64.pow(2))
-            }
-            (_, Some(total)) => format!("{:.1} GB total", total as f64 / 1_073_741_824.0),
-            _ => "VRAM unavailable".to_string(),
-        };
-        let utilization = device
-            .telemetry
-            .utilization_percent
-            .map(|value| format!(" · {value:.0}%"))
-            .unwrap_or_default();
+    }
+    if !device.loaded_models.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {vram}{utilization} · {}", short_device_id(&device.id)),
+            format!("  loaded {}", device.loaded_models.join(", ")),
             app.theme.dim(),
         )));
-        if selected {
-            if let Some(active) = &device.active_work_id {
-                lines.push(Line::from(Span::styled(
-                    format!("  active {active}"),
-                    app.theme.warning(),
-                )));
-            }
-            if !device.loaded_models.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("  loaded {}", device.loaded_models.join(", ")),
-                    app.theme.dim(),
-                )));
-            }
-        }
     }
     let action = device_action_label(
         app.machines.selected_device_restart_required(),
@@ -1056,21 +1057,21 @@ mod tests {
     #[test]
     fn device_labels_cover_disabled_draining_unavailable_and_mig() {
         assert_eq!(
-            device_state_label(
+            device_summary_state_label(
                 mold_core::DeviceAdminState::Disabled,
                 mold_core::DeviceHealth::Healthy
             ),
             "disabled"
         );
         assert_eq!(
-            device_state_label(
+            device_summary_state_label(
                 mold_core::DeviceAdminState::Draining,
                 mold_core::DeviceHealth::Healthy
             ),
             "finishing current work"
         );
         assert_eq!(
-            device_state_label(
+            device_summary_state_label(
                 mold_core::DeviceAdminState::Enabled,
                 mold_core::DeviceHealth::Unavailable
             ),

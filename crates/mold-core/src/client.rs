@@ -6,8 +6,8 @@ use crate::chain_job::{
 use crate::error::MoldError;
 use crate::types::{
     DeviceState, ExpandRequest, ExpandResponse, GalleryImage, GenerateRequest, GenerateResponse,
-    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerCapabilities,
-    ServerStatus, SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
+    ImageData, LoraInfo, ModelInfo, ModelInfoExtended, QueueListingWire, ServerStatus,
+    SseCompleteEvent, SseErrorEvent, SseProgressEvent, VideoData,
 };
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -1541,6 +1541,44 @@ mod tests {
         assert!(message.contains("409 Conflict"));
         assert!(message.contains("startup-excluded"));
         assert!(message.contains("requires a restart"));
+    }
+
+    #[tokio::test]
+    async fn set_device_enabled_encodes_the_stable_id_and_sends_auth() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/devices/cuda%3Aparent%2Fgpu"))
+            .and(header("x-api-key", "sekrit"))
+            .and(body_json(serde_json::json!({ "enabled": false })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "id": "cuda:parent/gpu",
+                "backend": "cuda",
+                "ordinal": 1,
+                "device_kind": "full_gpu",
+                "name": "GPU 1",
+                "memory": {},
+                "telemetry": {},
+                "desired_enabled": false,
+                "admin_state": "draining",
+                "health": "healthy",
+                "activity": "generating",
+                "schedulable": false,
+                "loaded_models": [],
+                "planned_work_ids": []
+            })))
+            .mount(&server)
+            .await;
+
+        let device = MoldClient::with_api_key(&server.uri(), "sekrit".to_string())
+            .set_device_enabled("cuda:parent/gpu", false)
+            .await
+            .unwrap();
+        assert_eq!(device.id, "cuda:parent/gpu");
+        assert_eq!(device.admin_state, crate::DeviceAdminState::Draining);
+        assert!(!device.desired_enabled);
     }
 
     // ── Queue endpoints ──────────────────────────────────────────────────

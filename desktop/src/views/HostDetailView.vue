@@ -6,7 +6,6 @@ import Chip from "@ui/components/Chip.vue";
 import Icon from "@ui/components/Icon.vue";
 import ModelMetadataBadges from "@studio/components/ModelMetadataBadges.vue";
 import DevicePanel from "@studio/components/DevicePanel.vue";
-import { setDeviceEnabled } from "@studio/api/devices";
 import { setQueueDevicePin } from "@studio/api/queuePlan";
 import { modelKindLabel, modelKindValue } from "@studio/lib/modelMetadata";
 import { setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
@@ -267,12 +266,13 @@ const queueSnapshot = computed(() => jobs.queues[hostId.value] ?? null);
 const mutatingDeviceId = ref<string | null>(null);
 const queuePaused = computed(() => queueSnapshot.value?.paused === true);
 
-async function toggleDevice(deviceId: string, enabled: boolean) {
+async function toggleDeviceById(deviceId: string, enabled: boolean) {
   const target = hostTarget();
   if (!target) return;
   mutatingDeviceId.value = deviceId;
   try {
     await setDeviceEnabled(target, deviceId, enabled);
+    await hosts.refresh();
     tickQueue();
   } catch (error) {
     toasts.push(
@@ -407,22 +407,10 @@ function toggleTarget() {
 }
 
 async function toggleDevice(device: DeviceInfo) {
-  const target = hostTarget();
-  if (!target || !canMutateDevice(device, deviceCapabilities.value)) return;
-  const enabled = !device.desired_enabled;
+  if (!canMutateDevice(device, deviceCapabilities.value)) return;
   deviceMutations.value = new Set(deviceMutations.value).add(device.id);
   try {
-    await setDeviceEnabled(
-      { baseUrl: target.baseUrl, apiKey: target.apiKey ?? null },
-      device.id,
-      enabled,
-    );
-    await hosts.refresh();
-  } catch (error) {
-    toasts.push(
-      `Could not ${enabled ? "enable" : "disable"} ${device.name}: ${String(error)}`,
-      "error",
-    );
+    await toggleDeviceById(device.id, !device.desired_enabled);
   } finally {
     const next = new Set(deviceMutations.value);
     next.delete(device.id);
@@ -743,11 +731,12 @@ async function forget() {
                 :plan="queueSnapshot?.plan ?? null"
                 :mutable="
                   queueSnapshot?.devices !== null &&
-                  hosts.capabilities[hostId]?.devices?.lifecycle === true
+                  hosts.capabilities[hostId]?.devices?.lifecycle === true &&
+                  hosts.capabilities[hostId]?.dispatch?.v2_authoritative === true
                 "
                 :busy-device-id="mutatingDeviceId"
                 @unpin="unpinWork"
-                @toggle="toggleDevice"
+                @toggle="toggleDeviceById"
               />
             </CardSurface>
 

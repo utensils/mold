@@ -359,15 +359,8 @@ pub(crate) struct MachinesState {
     pub device_selected: usize,
     /// Queue snapshot for the selected remote host.
     pub queue: Option<(String, mold_core::QueueListingWire)>,
-    /// Stable-ID device inventory for the selected remote host.
-    pub devices: Option<(String, mold_core::DeviceState)>,
-    /// Feature gates for the selected remote host. Missing/failed probes keep
-    /// optional administrative controls hidden.
-    pub capabilities: Option<(String, mold_core::ServerCapabilities)>,
     /// Job selection inside the detail pane's queue lanes.
     pub queue_selected: usize,
-    /// Stable device selection inside the detail pane.
-    pub device_selected: usize,
     /// Last host-poll instant (None = poll immediately).
     pub last_poll: Option<std::time::Instant>,
 }
@@ -437,8 +430,6 @@ impl MachinesState {
 
     fn on_selection_changed(&mut self) {
         self.queue = None;
-        self.devices = None;
-        self.capabilities = None;
         self.queue_selected = 0;
         self.device_selected = 0;
     }
@@ -527,6 +518,18 @@ impl MachinesState {
             .unwrap_or(0);
         if len > 0 {
             self.device_selected = (self.device_selected + 1) % len;
+        }
+    }
+
+    pub fn select_prev_device(&mut self) {
+        let id = self.selected_machine_id();
+        let len = self
+            .devices
+            .get(&id)
+            .map(|state| state.devices.len())
+            .unwrap_or(0);
+        if len > 0 {
+            self.device_selected = (self.device_selected + len - 1) % len;
         }
     }
 
@@ -668,68 +671,6 @@ impl MachinesState {
         }
     }
 
-    pub fn apply_devices(&mut self, host_id: String, devices: Option<mold_core::DeviceState>) {
-        let selected_id = match self.selected_row() {
-            MachineRowId::Host(id) => id,
-            MachineRowId::Local => return,
-        };
-        if selected_id == host_id {
-            if let Some(state) = &devices {
-                if self.device_selected >= state.devices.len() {
-                    self.device_selected = state.devices.len().saturating_sub(1);
-                }
-            }
-            self.devices = devices.map(|state| (host_id, state));
-        }
-    }
-
-    pub fn apply_capabilities(
-        &mut self,
-        host_id: String,
-        capabilities: Option<mold_core::ServerCapabilities>,
-    ) {
-        let selected_id = match self.selected_row() {
-            MachineRowId::Host(id) => id,
-            MachineRowId::Local => return,
-        };
-        if selected_id == host_id {
-            self.capabilities = capabilities.map(|value| (host_id, value));
-        }
-    }
-
-    pub fn selected_device_lifecycle_mutable(&self) -> bool {
-        let MachineRowId::Host(selected_id) = self.selected_row() else {
-            return false;
-        };
-        self.capabilities
-            .as_ref()
-            .is_some_and(|(host_id, value)| host_id == &selected_id && value.devices.lifecycle)
-    }
-
-    pub fn selected_device(&self) -> Option<&mold_core::DeviceInfo> {
-        let MachineRowId::Host(selected_id) = self.selected_row() else {
-            return None;
-        };
-        let (host_id, state) = self.devices.as_ref()?;
-        (host_id == &selected_id)
-            .then(|| state.devices.get(self.device_selected))
-            .flatten()
-    }
-
-    pub fn device_select_prev(&mut self) {
-        self.device_selected = self.device_selected.saturating_sub(1);
-    }
-
-    pub fn device_select_next(&mut self) {
-        let count = self
-            .devices
-            .as_ref()
-            .map_or(0, |(_, state)| state.devices.len());
-        if self.device_selected + 1 < count {
-            self.device_selected += 1;
-        }
-    }
-
     /// Forget a host: registry row, API key, cached status/queue, and
     /// selection clamp. The caller resets the generation target if it
     /// pointed at this host.
@@ -744,20 +685,8 @@ impl MachinesState {
                 self.queue_selected = 0;
             }
         }
-        if self
-            .devices
-            .as_ref()
-            .is_some_and(|(host_id, _)| host_id == id)
-        {
-            self.devices = None;
-        }
-        if self
-            .capabilities
-            .as_ref()
-            .is_some_and(|(host_id, _)| host_id == id)
-        {
-            self.capabilities = None;
-        }
+        self.capabilities.remove(id);
+        self.device_feedback.remove(id);
         if self.selected >= self.row_count() {
             self.selected = self.row_count() - 1;
         }
@@ -1064,45 +993,6 @@ pub(crate) async fn cancel_host_job(
     let _ = tx.send(BackgroundEvent::HostDevicesUpdate { host_id, devices });
 }
 
-/// Update one stable device and publish the server's authoritative state.
-pub(crate) async fn set_host_device_enabled(
-    entry: HostEntry,
-    device_id: String,
-    enabled: bool,
-    tx: mpsc::UnboundedSender<BackgroundEvent>,
-) {
-    let client = client_for_host(&entry);
-    let capabilities = match client.capabilities().await {
-        Ok(capabilities) if capabilities.devices.lifecycle => capabilities,
-        Ok(_) => {
-            let _ = tx.send(BackgroundEvent::Error(
-                "Device lifecycle controls are unavailable on this server".into(),
-            ));
-            return;
-        }
-        Err(error) => {
-            let _ = tx.send(BackgroundEvent::Error(format!(
-                "Capability check failed before device update: {error:#}"
-            )));
-            return;
-        }
-    };
-    debug_assert!(capabilities.devices.lifecycle);
-    match client.set_device_enabled(&device_id, enabled).await {
-        Ok(devices) => {
-            let _ = tx.send(BackgroundEvent::HostDevicesUpdate {
-                host_id: entry.id,
-                devices: Some(devices),
-            });
-        }
-        Err(error) => {
-            let _ = tx.send(BackgroundEvent::Error(format!(
-                "Device update failed for {device_id}: {error:#}"
-            )));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1359,11 +1249,13 @@ mod tests {
             }),
         );
         assert_eq!(st.selected_device().unwrap().id, "cuda:first");
-        st.device_select_next();
+        st.select_next_device();
         assert_eq!(st.selected_device().unwrap().id, "cuda:second");
-        st.device_select_next();
+        st.select_next_device();
+        assert_eq!(st.device_selected, 0);
+        st.select_prev_device();
         assert_eq!(st.device_selected, 1);
-        st.device_select_prev();
+        st.select_prev_device();
         assert_eq!(st.selected_device().unwrap().id, "cuda:first");
     }
 
@@ -1585,27 +1477,35 @@ mod tests {
         st.select_next();
         assert!(st.queue.is_none(), "stale queue must not leak across rows");
         assert!(
-            st.capabilities.is_none(),
-            "stale capabilities must not leak across rows"
+            !st.capabilities.contains_key("h1"),
+            "the selected host must not inherit another host's capabilities"
         );
     }
 
     #[test]
-    fn lifecycle_actions_require_the_selected_hosts_capability() {
+    fn lifecycle_actions_require_the_selected_hosts_device_and_capability() {
         let mut st = state_with_hosts(2);
         st.select_next();
+        st.apply_devices(
+            "h0".into(),
+            Some(mold_core::DeviceState {
+                devices: vec![test_device("cuda:first", 0)],
+                plan_version: 1,
+            }),
+        );
         let mut capabilities = mold_core::ServerCapabilities::default();
         st.apply_capabilities("h0".into(), Some(capabilities.clone()));
-        assert!(!st.selected_device_lifecycle_mutable());
+        assert!(!st.can_mutate_selected_device());
 
         capabilities.devices.lifecycle = true;
+        capabilities.dispatch.v2_authoritative = true;
         st.apply_capabilities("h1".into(), Some(capabilities.clone()));
         assert!(
-            !st.selected_device_lifecycle_mutable(),
+            !st.can_mutate_selected_device(),
             "a stale response for another host cannot expose controls"
         );
         st.apply_capabilities("h0".into(), Some(capabilities));
-        assert!(st.selected_device_lifecycle_mutable());
+        assert!(st.can_mutate_selected_device());
     }
 
     #[test]
@@ -1627,7 +1527,7 @@ mod tests {
                 plan_version: 1,
             }),
         );
-        assert_eq!(st.devices.as_ref().unwrap().1.devices.len(), 64);
+        assert_eq!(st.devices.get("h0").unwrap().devices.len(), 64);
         st.device_selected = 63;
         assert_eq!(st.selected_device().unwrap().ordinal, Some(63));
     }

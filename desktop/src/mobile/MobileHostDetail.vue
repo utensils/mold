@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
-import {
-  parseQueueListing,
-  setQueueDevicePin,
-  type QueuePlan,
-} from "@studio/api/queuePlan";
+import { parseQueueListing, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
 import {
   canMutateDevice,
@@ -490,8 +486,8 @@ onBeforeUnmount(() => {
           >
         </div>
         <DevicePanel
-          v-if="devices.length"
-          :devices="devices"
+          v-if="devices?.length"
+          :devices="devices ?? []"
           :plan="queuePlan"
           :mutable="
             deviceCapabilities?.devices?.lifecycle === true &&
