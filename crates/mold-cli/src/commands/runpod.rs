@@ -882,10 +882,15 @@ pub fn resolve_hf_token(opts: &CreateOptions) -> Option<String> {
     Some("{{ RUNPOD_SECRET_HF_TOKEN }}".to_string())
 }
 
-fn ensure_published_runpod_gpu_identity(gpu_type_id: &str, display_name: &str) -> Result<()> {
+/// Validate both provider fields, then retain the authoritative type ID as
+/// the single source for allocation and distribution-image architecture.
+fn ensure_published_runpod_gpu_identity<'a>(
+    gpu_type_id: &'a str,
+    display_name: &str,
+) -> Result<&'a str> {
     mold_core::cuda_distribution::ensure_published_image_platform(gpu_type_id)?;
     mold_core::cuda_distribution::ensure_published_image_platform(display_name)?;
-    Ok(())
+    Ok(gpu_type_id)
 }
 
 fn authoritative_runpod_gpu_type_id(gpu: &GpuType) -> String {
@@ -903,7 +908,7 @@ pub async fn build_create_request(
 ) -> Result<CreatePodRequest> {
     // Resolve GPU — either user-supplied, config default, or cheapest available.
     let (gpu_name, gpu_display) = resolve_gpu(opts, client, config).await?;
-    ensure_published_runpod_gpu_identity(&gpu_name, &gpu_display)?;
+    let distribution_gpu_name = ensure_published_runpod_gpu_identity(&gpu_name, &gpu_display)?;
 
     // Resolve image tag.
     let image = if let Some(image_tag) = opts.image_tag.clone() {
@@ -919,7 +924,7 @@ pub async fn build_create_request(
     } else {
         mold_core::cuda_distribution::resolve_distribution_image_reference(
             mold_core::cuda_distribution::OFFICIAL_IMAGE_REPOSITORY,
-            &gpu_display,
+            distribution_gpu_name,
             mold_core::cuda_distribution::distribution_image_version(),
         )
         .await?
@@ -2411,6 +2416,30 @@ mod tests {
             ensure_published_runpod_gpu_identity("NVIDIA A100 80GB PCIe", "NVIDIA GB200").is_err()
         );
         assert!(ensure_published_runpod_gpu_identity("NVIDIA B200", "NVIDIA B200").is_ok());
+    }
+
+    #[test]
+    fn authoritative_provider_id_also_owns_distribution_image_selection() {
+        assert_eq!(
+            ensure_published_runpod_gpu_identity(
+                "NVIDIA A100 80GB PCIe",
+                "NVIDIA GeForce RTX 5090"
+            )
+            .unwrap(),
+            "NVIDIA A100 80GB PCIe"
+        );
+    }
+
+    #[test]
+    fn absent_provider_id_retains_legacy_display_name_fallback() {
+        let gpu: GpuType = serde_json::from_value(serde_json::json!({
+            "displayName": "A100 PCIe"
+        }))
+        .unwrap();
+        assert_eq!(
+            authoritative_runpod_gpu_type_id(&gpu),
+            "NVIDIA A100 80GB PCIe"
+        );
     }
 
     #[tokio::test]
