@@ -33,11 +33,29 @@ def run(*command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def dump_section(binary: Path, section: str, output: Path) -> bytes:
     objcopy = os.environ.get("OBJCOPY", "objcopy")
-    result = run(objcopy, "--dump-section", f"{section}={output}", str(binary))
+    input_sha256 = sha256_file(binary)
+    rewritten_elf = output.with_name(f"{output.name}.elf")
+    result = run(
+        objcopy,
+        "--dump-section",
+        f"{section}={output}",
+        str(binary),
+        str(rewritten_elf),
+    )
     if result.returncode != 0 or not output.is_file():
         fail(f"could not extract ELF {section}: {result.stderr.strip()}")
+    if sha256_file(binary) != input_sha256:
+        fail("ELF section inventory mutated the unsealed input artifact")
     return output.read_bytes()
 
 

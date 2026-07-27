@@ -27,10 +27,20 @@ def load_probe_module():
     return module
 
 
+def load_seal_module():
+    spec = importlib.util.spec_from_file_location("mold_ptx_seal", SEAL_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load embedded PTX sealer")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class EmbeddedPtxParserContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.probe_module = load_probe_module()
+        cls.seal_module = load_seal_module()
         test_target = Path(os.environ.get("TMPDIR", tempfile.gettempdir()))
         test_target.mkdir(parents=True, exist_ok=True)
         cls.temp_dir_context = tempfile.TemporaryDirectory(
@@ -174,6 +184,40 @@ class EmbeddedPtxParserContract(unittest.TestCase):
                 self.probe_module.extract_elf_section(
                     fixture, ".mold_cuda_ptx", extracted
                 ),
+                b"section bytes",
+            )
+        finally:
+            if previous_objcopy is None:
+                os.environ.pop("OBJCOPY", None)
+            else:
+                os.environ["OBJCOPY"] = previous_objcopy
+        self.assertEqual(hashlib.sha256(fixture.read_bytes()).hexdigest(), before)
+
+    def test_sealer_inventory_read_does_not_mutate_the_unsealed_artifact(
+        self,
+    ) -> None:
+        fixture = self.temp_dir / "seal-input-is-immutable"
+        fixture.write_bytes(b"unsealed release artifact")
+        extracted = self.temp_dir / "seal-input-section"
+        fake_objcopy = self.temp_dir / "sealer-objcopy-mutates-without-output"
+        self._write_executable(
+            fake_objcopy,
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'section_path="${2#*=}"\n'
+            'printf "section bytes" > "$section_path"\n'
+            'if [[ "$#" -lt 4 ]]; then\n'
+            '  printf "mutated" >> "$3"\n'
+            "else\n"
+            '  cp "$3" "$4"\n'
+            "fi\n",
+        )
+        before = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        previous_objcopy = os.environ.get("OBJCOPY")
+        os.environ["OBJCOPY"] = str(fake_objcopy)
+        try:
+            self.assertEqual(
+                self.seal_module.dump_section(fixture, ".rodata", extracted),
                 b"section bytes",
             )
         finally:
