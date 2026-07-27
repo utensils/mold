@@ -281,6 +281,43 @@ describe("DevicePanel", () => {
     );
   });
 
+  it("lets a future typed lane win when its opaque device ID collides with a GPU", () => {
+    const visible = device(0);
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [visible],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "future-collision",
+              parent_id: "parent",
+              work_kind: "future_utility",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: visible.id,
+              planned_lane_kind: "future_accelerator_lane",
+              lane_order: 0,
+              estimate_confidence: "low",
+              activity_phase: "queued",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "future-collision",
+    );
+    expect(wrapper.find('[data-test="device-lane"]').exists()).toBe(false);
+    expect(wrapper.text().match(/future-collision/g)).toHaveLength(1);
+  });
+
   it("does not invent a host utility card without CPU-planned work", () => {
     const wrapper = mount(DevicePanel, {
       props: { devices: [device(0)], plan: null },
@@ -346,6 +383,7 @@ describe("DevicePanel", () => {
                 queue_rank: 0,
                 bypass_count: 0,
                 planned_device_id: device(0).id,
+                planned_lane_kind: "device",
                 lane_order: 0,
                 estimated_finish_unix_ms: 14_500,
                 estimate_confidence: "high",

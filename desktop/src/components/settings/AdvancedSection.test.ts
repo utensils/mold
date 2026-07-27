@@ -86,6 +86,93 @@ describe("AdvancedSection device snapshots", () => {
     expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
   });
 
+  it("keeps a colliding future typed lane out of the desktop GPU lane", async () => {
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "desktop-secret",
+    };
+    connection.status = "ready";
+    const device = {
+      id: "cuda:desktop-stable",
+      backend: "cuda",
+      ordinal: 0,
+      device_kind: "full_gpu",
+      nvml_uuid: "GPU-desktop",
+      physical_uuid: "GPU-desktop",
+      mig_uuid: null,
+      mig_parent_uuid: null,
+      mig_profile: null,
+      name: "Desktop GPU",
+      pci_bus_id: null,
+      compute_capability: "8.6",
+      memory: {
+        total_bytes: 24_000_000_000,
+        used_bytes: 0,
+        mold_used_bytes: 0,
+        other_used_bytes: 0,
+      },
+      telemetry: {
+        utilization_percent: 0,
+        temperature_c: null,
+        power_w: null,
+      },
+      desired_enabled: true,
+      restart_required: false,
+      admin_state: "enabled",
+      health: "healthy",
+      activity: "idle",
+      schedulable: true,
+      unschedulable_reason: null,
+      loaded_models: [],
+      active_work_id: null,
+      planned_work_ids: [],
+    };
+    listDevicesMock.mockResolvedValueOnce({ devices: [device], plan_version: 1 });
+    listQueueMock.mockResolvedValueOnce({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "desktop-future-collision",
+            parent_id: "parent",
+            work_kind: "future_utility",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            planned_device_id: device.id,
+            planned_lane_kind: "future_accelerator_lane",
+            lane_order: 0,
+            estimate_confidence: "low",
+          },
+        ],
+      },
+    });
+
+    const wrapper = mount(AdvancedSection, {
+      global: {
+        stubs: {
+          ConfigRowItem: true,
+          ConfigSettingRow: true,
+          PlacementSection: true,
+        },
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("desktop-future-collision"));
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "desktop-future-collision",
+    );
+    expect(wrapper.find('[data-test="device-lane"]').exists()).toBe(false);
+    expect(wrapper.text().match(/desktop-future-collision/g)).toHaveLength(1);
+  });
+
   it("subscribes to the exact authenticated target and refetches on invalidation", async () => {
     const connection = useConnectionStore();
     connection.info = {

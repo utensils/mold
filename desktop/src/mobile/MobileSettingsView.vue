@@ -76,11 +76,13 @@ async function loadDevices(): Promise<void> {
       listQueue(target),
     ]);
     if (!isCurrent()) return;
-    if (deviceResult.status !== "fulfilled") throw deviceResult.reason;
-    devices.value = parseDeviceListResponse(deviceResult.value).devices;
+    plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
     deviceCapabilities.value =
       capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
-    plan.value = queueResult.status === "fulfilled" ? queueResult.value.plan : null;
+    devices.value =
+      deviceResult.status === "fulfilled"
+        ? parseDeviceListResponse(deviceResult.value).devices
+        : null;
     deviceError.value = "";
   } catch {
     if (!isCurrent()) return;
@@ -260,7 +262,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section
-      v-if="devices !== null"
+      v-if="devices !== null || plan !== null"
       class="mobile-settings-section"
       aria-labelledby="mobile-settings-devices-title"
       data-test="mobile-settings-devices"
@@ -269,7 +271,7 @@ onBeforeUnmount(() => {
         <h2 id="mobile-settings-devices-title">Compute devices</h2>
       </div>
       <DevicePanel
-        :devices="devices"
+        :devices="devices ?? []"
         :plan="plan"
         :mutable="
           deviceCapabilities?.devices?.lifecycle === true &&

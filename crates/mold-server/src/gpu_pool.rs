@@ -272,7 +272,6 @@ pub struct GpuJob {
 pub struct PromptExpansionJob {
     pub id: String,
     pub parent_id: String,
-    pub attempt_generation: u64,
     pub config: mold_core::Config,
     pub settings: mold_core::ExpandSettings,
     /// Immutable prompt captured by the parent before the child is admitted.
@@ -358,6 +357,12 @@ impl UtilityExecutionPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UtilityPlacement {
     Cpu,
+    /// Backend/ordinal is safe for the lifetime of a frozen utility plan
+    /// because `WorkerSet` can only restart an entry from its immutable
+    /// `WorkerFactory.devices` map, keyed by stable device ID and retaining the
+    /// same `DiscoveredGpu`. The scheduler candidate and lease still carry and
+    /// validate that stable ID. Any future hotplug/re-enumeration support must
+    /// add stable identity to the inference plan and its fingerprint.
     Device {
         backend: mold_core::GpuBackend,
         ordinal: usize,
@@ -1885,6 +1890,11 @@ mod tests {
         assert_eq!(replacement_epoch, 2);
         assert_eq!(workers.len(), 1);
         assert_eq!(workers.snapshot()[0].owner_epoch, 2);
+        assert_eq!(
+            crate::scheduler::worker_device_id(&workers.snapshot()[0]),
+            device_id,
+            "in-process lifecycle restart must reuse the frozen inventory identity"
+        );
         workers.shutdown_and_join_all();
     }
 

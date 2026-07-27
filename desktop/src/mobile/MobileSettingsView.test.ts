@@ -153,6 +153,61 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("mobile-cpu-work");
   });
 
+  it("keeps a queue-plan compute lane visible when device inventory is unavailable", async () => {
+    const host = {
+      id: "older-device-api-host",
+      name: "Older Host",
+      baseUrl: "http://older-host:7680",
+      apiKey: "secret",
+      hostname: "older-host",
+      version: "0.20.2",
+      online: true,
+    };
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") throw new Error("device inventory unavailable");
+      if (path === "/api/capabilities") return {};
+      throw new Error(`Unexpected path ${path}`);
+    });
+    listQueueMock.mockResolvedValue({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "future-mobile-lane",
+            parent_id: "parent",
+            work_kind: "future_utility",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            planned_device_id: null,
+            planned_lane_kind: "future_host_lane",
+            lane_order: 0,
+            estimate_confidence: "low",
+          },
+        ],
+      },
+    });
+
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: { theme: "system", themeFamily: "mold", autoSavePhotos: true },
+        hostCount: 1,
+        appVersion: "0.20.2",
+        host,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(true),
+    );
+
+    expect(wrapper.get("[data-test='other-compute-lane']").text()).toContain("future-mobile-lane");
+  });
+
   it("opens the public privacy policy from About", async () => {
     const wrapper = mount(MobileSettingsView, {
       props: {

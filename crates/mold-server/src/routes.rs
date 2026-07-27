@@ -790,7 +790,6 @@ async fn schedule_local_expansion(
         crate::gpu_pool::PromptExpansionJob {
             id: id.clone(),
             parent_id: id.clone(),
-            attempt_generation: 0,
             config,
             settings,
             prompt,

@@ -501,6 +501,65 @@ describe("SettingsPage", () => {
     );
   });
 
+  it("keeps a colliding future typed lane out of the web GPU lane", async () => {
+    const device = deviceWire();
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [device], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "web-future-collision",
+                    parent_id: "parent",
+                    work_kind: "future_utility",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: device.id,
+                    planned_lane_kind: "future_accelerator_lane",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("web-future-collision"),
+    );
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "web-future-collision",
+    );
+    expect(wrapper.find('[data-test="device-lane"]').exists()).toBe(false);
+    expect(wrapper.text().match(/web-future-collision/g)).toHaveLength(1);
+  });
+
   it("clears a stale queue plan when a device-panel refresh fails", async () => {
     let failPanel = false;
     globalThis.fetch = vi.fn(async (input) => {

@@ -107,7 +107,10 @@ function planned(device: DeviceInfo): QueueWorkItem[] {
   return (
     props.plan?.work_items
       .filter(
-        (work) => work.planned_device_id === device.id && !blockedReason(work),
+        (work) =>
+          work.planned_lane_kind === "device" &&
+          work.planned_device_id === device.id &&
+          !blockedReason(work),
       )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? []
   );

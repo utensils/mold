@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use mold_scheduler::{
-    operation_budget, optimization_horizon, BlockedReason, CandidatePlacement, DeviceAdminState,
-    DeviceHealth, DeviceSnapshot, EligibilityIndex, GrantValidationSnapshot, OptimizerState,
-    PlanValidationError, Planner, PlannerConfig, PlannerError, PlannerSnapshot, PlanningMode,
-    PriorityClass, WorkId, WorkKind, WorkSnapshot,
+    operation_budget, optimization_horizon, Backend, BlockedReason, CandidatePlacement,
+    DeviceAdminState, DeviceHealth, DeviceSnapshot, EligibilityIndex, GrantValidationSnapshot,
+    OptimizerState, PlanValidationError, Planner, PlannerConfig, PlannerError, PlannerSnapshot,
+    PlanningMode, PriorityClass, WorkId, WorkKind, WorkSnapshot,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -1314,6 +1314,132 @@ fn static_timing_floor_is_shared_and_never_zero() {
         assert!(timing.predicted_run_ms > 0, "{kind:?}");
         assert!(timing.cold_setup_ms >= timing.warm_setup_ms, "{kind:?}");
     }
+}
+
+#[test]
+fn utility_static_timing_is_placement_aware_without_backend_special_cases() {
+    for kind in [
+        WorkKind::PromptExpansion,
+        WorkKind::PostUpscale,
+        WorkKind::StandaloneUpscale,
+    ] {
+        let cpu = mold_scheduler::static_timing_for_placement(kind, Backend::Cpu);
+        let cuda = mold_scheduler::static_timing_for_placement(kind, Backend::Cuda);
+        let metal = mold_scheduler::static_timing_for_placement(kind, Backend::Metal);
+
+        assert_eq!(cuda, metal, "{kind:?} accelerator floors must be portable");
+        assert!(
+            cpu.cold_setup_ms > cuda.cold_setup_ms,
+            "{kind:?} needs an honest CPU setup floor"
+        );
+        assert!(
+            cpu.predicted_run_ms > cuda.predicted_run_ms,
+            "{kind:?} needs an honest CPU runtime floor"
+        );
+    }
+}
+
+#[test]
+fn placement_aware_timing_does_not_change_non_utility_generation_costs() {
+    for kind in [
+        WorkKind::Generation,
+        WorkKind::PreparedSibling,
+        WorkKind::ChainStage,
+        WorkKind::BatchChild,
+        WorkKind::AdminModelLoad,
+        WorkKind::AdminModelUnload,
+    ] {
+        let baseline = mold_scheduler::static_timing_for(kind);
+        for backend in [Backend::Cpu, Backend::Cuda, Backend::Metal] {
+            assert_eq!(
+                mold_scheduler::static_timing_for_placement(kind, backend),
+                baseline,
+                "{kind:?} on {backend:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn utility_work_prefers_an_idle_accelerator_but_uses_cpu_while_it_is_busy() {
+    let cpu_timing =
+        mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Cpu);
+    let accelerator_timing =
+        mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Metal);
+    let candidates = || {
+        vec![
+            CandidatePlacement::new("host:cpu:utility", "cpu", 1)
+                .with_device_available_vram(u64::MAX)
+                .with_timing(
+                    cpu_timing.cold_setup_ms,
+                    cpu_timing.cold_setup_ms,
+                    cpu_timing.predicted_run_ms,
+                ),
+            CandidatePlacement::new("metal:stable", "metal", 1)
+                .with_vram(1)
+                .with_device_available_vram(24 * GIB)
+                .with_timing(
+                    accelerator_timing.cold_setup_ms,
+                    accelerator_timing.cold_setup_ms,
+                    accelerator_timing.predicted_run_ms,
+                ),
+        ]
+    };
+    let idle_devices = vec![
+        DeviceSnapshot::idle("host:cpu:utility", u64::MAX).with_backend(Backend::Cpu),
+        DeviceSnapshot::idle("metal:stable", 24 * GIB).with_backend(Backend::Metal),
+    ];
+    let idle_plan = Planner::default()
+        .plan(&snapshot(
+            idle_devices.clone(),
+            vec![work("utility", 0, candidates())],
+            8,
+        ))
+        .unwrap();
+    assert_eq!(
+        idle_plan.immediate_leases[0].device_id.as_str(),
+        "metal:stable"
+    );
+
+    let busy_devices = vec![
+        idle_devices[0].clone(),
+        DeviceSnapshot::busy("metal:stable", 24 * GIB, 120_000).with_backend(Backend::Metal),
+    ];
+    let busy_plan = Planner::default()
+        .plan(&snapshot(
+            busy_devices,
+            vec![work("utility", 0, candidates())],
+            8,
+        ))
+        .unwrap();
+    assert_eq!(
+        busy_plan.immediate_leases[0].device_id.as_str(),
+        "host:cpu:utility"
+    );
+    assert!(
+        busy_plan.immediate_leases[0].estimated_finish_ms < 120_000,
+        "CPU must remain work-conserving when it can finish before the busy GPU"
+    );
+
+    let parallel_plan = Planner::default()
+        .plan(&snapshot(
+            idle_devices,
+            vec![
+                work("utility-a", 0, candidates()),
+                work("utility-b", 1, candidates()),
+            ],
+            8,
+        ))
+        .unwrap();
+    assert_eq!(parallel_plan.immediate_leases.len(), 2);
+    assert_eq!(
+        parallel_plan
+            .immediate_leases
+            .iter()
+            .map(|lease| lease.device_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["host:cpu:utility", "metal:stable"])
+    );
 }
 
 #[test]

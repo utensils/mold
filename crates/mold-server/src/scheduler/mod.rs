@@ -601,7 +601,6 @@ impl DependencyPreparer for PostUpscalePreparer {
                 OwnerWork::PromptExpansion(Box::new(crate::gpu_pool::PromptExpansionJob {
                     id: utility_id,
                     parent_id: work_id.clone(),
-                    attempt_generation: 0,
                     config,
                     settings,
                     prompt: request.prompt.clone(),
@@ -2450,7 +2449,13 @@ impl Coordinator {
                 shape_bucket: owner.shape_bucket.into(),
                 execution_fingerprint: execution_fingerprint.to_string(),
             };
-            let static_timing = mold_scheduler::static_timing_for(owner.kind);
+            let placement_backend =
+                worker.map_or(Backend::Cpu, |worker| match worker.gpu.backend {
+                    mold_core::GpuBackend::Cuda => Backend::Cuda,
+                    mold_core::GpuBackend::Metal => Backend::Metal,
+                });
+            let static_timing =
+                mold_scheduler::static_timing_for_placement(owner.kind, placement_backend);
             let static_estimate = StaticEstimate {
                 total_ms: static_timing
                     .cold_setup_ms
@@ -5802,6 +5807,11 @@ mod tests {
         let pool = GpuPool {
             workers: Vec::new().into(),
         };
+        let cpu_timing =
+            mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Cpu);
+        let cpu_total = cpu_timing
+            .cold_setup_ms
+            .saturating_add(cpu_timing.predicted_run_ms);
         let mut active_work = WorkSnapshot::new("cpu-active", 0, Vec::new());
         active_work.kind = WorkKind::StandaloneUpscale;
         let cpu_key = owner_estimate_key_for_device(
@@ -5824,7 +5834,7 @@ mod tests {
                 worker_generation: 1,
                 accepted: true,
                 previous_target: None,
-                estimated_finish_ms: monotonic_ms().saturating_add(1_000),
+                estimated_finish_ms: monotonic_ms().saturating_add(cpu_total),
                 ready_at_ms: 0,
                 bypass_count: 0,
                 warm_wait_started_ms: None,
@@ -5873,15 +5883,26 @@ mod tests {
             .contains_key("planned_device_id"));
         assert_eq!(active_wire["planned_device_id"], serde_json::Value::Null);
         assert_eq!(active.work_items[0].gpu, None);
+        let active_eta = active.work_items[0]
+            .estimated_finish_unix_ms
+            .unwrap()
+            .saturating_sub(active.work_items[0].estimated_start_unix_ms.unwrap());
+        assert!(
+            active_eta >= cpu_total.saturating_sub(100) && active_eta <= cpu_total + 100,
+            "active utility ETA must retain the placement-aware CPU floor"
+        );
 
         let mut queued_work = WorkSnapshot::new(
             "cpu-queued",
             0,
-            vec![CandidatePlacement::new(
-                CPU_UTILITY_DEVICE_ID,
-                "queued-exact-cpu-plan",
-                1,
-            )],
+            vec![
+                CandidatePlacement::new(CPU_UTILITY_DEVICE_ID, "queued-exact-cpu-plan", 1)
+                    .with_timing(
+                        cpu_timing.cold_setup_ms,
+                        cpu_timing.cold_setup_ms,
+                        cpu_timing.predicted_run_ms,
+                    ),
+            ],
         );
         queued_work.kind = WorkKind::StandaloneUpscale;
         let queued_snapshot = PlannerSnapshot::new(
@@ -5919,6 +5940,14 @@ mod tests {
             .contains_key("planned_device_id"));
         assert_eq!(queued_wire["planned_device_id"], serde_json::Value::Null);
         assert_eq!(queued.work_items[0].gpu, None);
+        assert_eq!(
+            queued.work_items[0]
+                .estimated_finish_unix_ms
+                .unwrap()
+                .saturating_sub(queued.work_items[0].estimated_start_unix_ms.unwrap()),
+            cpu_total,
+            "queued utility ETA must retain the placement-aware CPU floor"
+        );
     }
 
     #[test]
@@ -8261,6 +8290,28 @@ mod tests {
         )
     }
 
+    fn utility_state_with_backend(backend: mold_core::GpuBackend) -> AppState {
+        let (mut worker, _rx) = test_worker(0);
+        {
+            let worker = Arc::get_mut(&mut worker).expect("fresh test worker");
+            worker.gpu.backend = backend;
+            worker.gpu.stable_id = Some(match backend {
+                mold_core::GpuBackend::Cuda => "cuda:utility-stable".to_string(),
+                mold_core::GpuBackend::Metal => "metal:utility-stable".to_string(),
+            });
+        }
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        )
+    }
+
     #[test]
     fn exact_upscale_candidates_are_deterministic_for_1_2_8_and_64_gpus() {
         let root = tempfile::tempdir().unwrap();
@@ -8372,15 +8423,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let weights = root.path().join("upscaler.safetensors");
         std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
-        let plan = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights)
-            .unwrap()
-            .into_iter()
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+        let plan = plans
+            .iter()
             .find(|plan| {
                 matches!(
                     plan.placement(),
                     UtilityPlacement::Device { ordinal: 0, .. }
                 )
             })
+            .cloned()
+            .unwrap();
+        let cpu_plan = plans
+            .iter()
+            .find(|plan| matches!(plan.placement(), UtilityPlacement::Cpu))
+            .cloned()
             .unwrap();
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let work = OwnerWork::StandaloneUpscale(Box::new(crate::gpu_pool::StandaloneUpscaleJob {
@@ -8427,6 +8484,47 @@ mod tests {
                 ..Default::default()
             },
         );
+        let cpu_low_shape = "cpu-low";
+        coordinator.observe_estimate(
+            owner_estimate_key_for_device(
+                CPU_UTILITY_DEVICE_ID.to_string(),
+                WorkKind::StandaloneUpscale,
+                "real-esrgan-x4plus:fp16",
+                cpu_low_shape,
+                cpu_plan.execution_fingerprint(),
+            ),
+            EstimateObservation {
+                total_ms: Some(100),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(10),
+                    warm_reload_ms: Some(10),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
+        let cpu_high_shape = "cpu-high";
+        coordinator.observe_estimate(
+            owner_estimate_key_for_device(
+                CPU_UTILITY_DEVICE_ID.to_string(),
+                WorkKind::StandaloneUpscale,
+                "real-esrgan-x4plus:fp16",
+                cpu_high_shape,
+                cpu_plan.execution_fingerprint(),
+            ),
+            EstimateObservation {
+                total_ms: Some(60_000),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(12_000),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
 
         let snapshot = coordinator.owner_work_snapshot(
             OwnerWorkSchedulingView {
@@ -8443,7 +8541,7 @@ mod tests {
                 kind: WorkKind::StandaloneUpscale,
                 shape_bucket: &shape_bucket,
             },
-            std::slice::from_ref(&plan),
+            &plans,
             &[DeviceSnapshot::idle(device_id.clone(), 24 << 30)],
         );
         let placement = snapshot
@@ -8460,6 +8558,178 @@ mod tests {
         assert_eq!(placement.cold_setup_ms, static_timing.cold_setup_ms);
         assert_eq!(placement.warm_setup_ms, static_timing.cold_setup_ms);
         assert_eq!(placement.predicted_run_ms, static_timing.predicted_run_ms);
+
+        let cpu_devices = [
+            DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu),
+            DeviceSnapshot::idle(device_id, 24 << 30),
+        ];
+        let cpu_low = coordinator.owner_work_snapshot(
+            OwnerWorkSchedulingView {
+                id: "cpu-low",
+                model_fingerprint: "real-esrgan-x4plus:fp16",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 1,
+                hard_ordinal: None,
+                priority: PriorityClass::User,
+                queue_rank: 0,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                kind: WorkKind::StandaloneUpscale,
+                shape_bucket: cpu_low_shape,
+            },
+            &plans,
+            &cpu_devices,
+        );
+        let cpu_low = cpu_low
+            .candidate_placements
+            .iter()
+            .find(|candidate| candidate.device_id.as_str() == CPU_UTILITY_DEVICE_ID)
+            .unwrap();
+        let cpu_floor =
+            mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Cpu);
+        assert_eq!(cpu_low.cold_setup_ms, cpu_floor.cold_setup_ms);
+        assert_eq!(cpu_low.warm_setup_ms, cpu_floor.cold_setup_ms);
+        assert_eq!(cpu_low.predicted_run_ms, cpu_floor.predicted_run_ms);
+
+        let cpu_high = coordinator.owner_work_snapshot(
+            OwnerWorkSchedulingView {
+                id: "cpu-high",
+                model_fingerprint: "real-esrgan-x4plus:fp16",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 1,
+                hard_ordinal: None,
+                priority: PriorityClass::User,
+                queue_rank: 0,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                kind: WorkKind::StandaloneUpscale,
+                shape_bucket: cpu_high_shape,
+            },
+            &plans,
+            &cpu_devices,
+        );
+        let cpu_high = cpu_high
+            .candidate_placements
+            .iter()
+            .find(|candidate| candidate.device_id.as_str() == CPU_UTILITY_DEVICE_ID)
+            .unwrap();
+        assert_eq!(cpu_high.cold_setup_ms, 12_000);
+        assert_eq!(cpu_high.warm_setup_ms, 12_000);
+        assert_eq!(cpu_high.predicted_run_ms, 48_000);
+        assert_eq!(
+            cpu_high.predicted_vram_bytes,
+            cpu_plan.predicted_vram_bytes()
+        );
+        assert_eq!(
+            cpu_high.incremental_host_ram_bytes,
+            cpu_plan.predicted_host_ram_bytes()
+        );
+    }
+
+    #[test]
+    fn exact_utility_planning_prefers_idle_accelerators_and_keeps_cpu_work_conserving() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+
+        for (gpu_backend, scheduler_backend) in [
+            (mold_core::GpuBackend::Cuda, Backend::Cuda),
+            (mold_core::GpuBackend::Metal, Backend::Metal),
+        ] {
+            let state = utility_state_with_backend(gpu_backend);
+            let worker = state.gpu_pool.worker_by_ordinal(0).unwrap();
+            let device_id = worker_device_id(&worker);
+            let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+            let coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let devices = vec![
+                DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu),
+                DeviceSnapshot::idle(device_id.clone(), 24 << 30).with_backend(scheduler_backend),
+            ];
+            let work = coordinator.owner_work_snapshot(
+                OwnerWorkSchedulingView {
+                    id: "utility-placement",
+                    model_fingerprint: "real-esrgan-x4plus:fp16",
+                    estimated_vram_bytes: 1,
+                    estimated_host_ram_bytes: 1,
+                    hard_ordinal: None,
+                    priority: PriorityClass::User,
+                    queue_rank: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    kind: WorkKind::StandaloneUpscale,
+                    shape_bucket: "fixture",
+                },
+                &plans,
+                &devices,
+            );
+            let idle = Planner::default()
+                .plan(&PlannerSnapshot {
+                    state_version: 1,
+                    next_plan_version: 1,
+                    now_ms: 1_000,
+                    next_replan_at_ms: None,
+                    host_memory: HostMemorySnapshot {
+                        headroom_bytes: 64 << 30,
+                        sample_generation: 1,
+                        ledger_sequence: 1,
+                    },
+                    devices: devices.clone(),
+                    work: vec![work.clone()],
+                })
+                .unwrap();
+            assert_eq!(idle.immediate_leases[0].device_id.as_str(), device_id);
+
+            let busy_devices = vec![
+                devices[0].clone(),
+                DeviceSnapshot::busy(device_id.clone(), 24 << 30, 120_000)
+                    .with_backend(scheduler_backend),
+            ];
+            let busy_work = coordinator.owner_work_snapshot(
+                OwnerWorkSchedulingView {
+                    id: "utility-placement",
+                    model_fingerprint: "real-esrgan-x4plus:fp16",
+                    estimated_vram_bytes: 1,
+                    estimated_host_ram_bytes: 1,
+                    hard_ordinal: None,
+                    priority: PriorityClass::User,
+                    queue_rank: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    kind: WorkKind::StandaloneUpscale,
+                    shape_bucket: "fixture",
+                },
+                &plans,
+                &busy_devices,
+            );
+            let busy = Planner::default()
+                .plan(&PlannerSnapshot {
+                    state_version: 2,
+                    next_plan_version: 2,
+                    now_ms: 1_000,
+                    next_replan_at_ms: None,
+                    host_memory: HostMemorySnapshot {
+                        headroom_bytes: 64 << 30,
+                        sample_generation: 2,
+                        ledger_sequence: 2,
+                    },
+                    devices: busy_devices,
+                    work: vec![busy_work],
+                })
+                .unwrap();
+            assert_eq!(
+                busy.immediate_leases[0].device_id.as_str(),
+                CPU_UTILITY_DEVICE_ID
+            );
+            assert!(busy.immediate_leases[0].estimated_finish_ms < 120_000);
+        }
     }
 
     #[test]
@@ -8532,14 +8802,13 @@ mod tests {
 
     #[cfg(feature = "expand")]
     #[test]
-    fn parent_owned_expansion_rejection_cancels_only_its_attempt_token() {
+    fn parent_owned_expansion_rejection_cancels_only_its_frozen_token() {
         let token = mold_inference::InferenceCancellationToken::default();
         let sibling = mold_inference::InferenceCancellationToken::default();
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
         let work = OwnerWork::PromptExpansion(Box::new(crate::gpu_pool::PromptExpansionJob {
             id: "parent::prompt-expansion".to_string(),
             parent_id: "parent".to_string(),
-            attempt_generation: 7,
             config: mold_core::Config::default(),
             settings: mold_core::ExpandSettings::default(),
             prompt: "frozen prompt".to_string(),
@@ -8551,7 +8820,6 @@ mod tests {
         match &work {
             OwnerWork::PromptExpansion(job) => {
                 assert_eq!(job.parent_id, "parent");
-                assert_eq!(job.attempt_generation, 7);
                 assert_eq!(job.prompt, "frozen prompt");
             }
             _ => unreachable!(),

@@ -203,6 +203,31 @@ pub const fn static_timing_for(kind: WorkKind) -> StaticTimingEstimate {
     }
 }
 
+/// Conservative static timing for a concrete placement.
+///
+/// CPU is an independent, capacity-one utility lane, not an accelerator with
+/// unlimited VRAM. Prompt expansion and image upscaling are materially slower
+/// there, so equal fallback costs would let the VRAM tie-break choose CPU over
+/// an idle accelerator and would publish implausibly short CPU ETAs. Learned
+/// estimates may raise each component but callers must retain these floors.
+pub const fn static_timing_for_placement(kind: WorkKind, backend: Backend) -> StaticTimingEstimate {
+    match (kind, backend) {
+        (WorkKind::PromptExpansion, Backend::Cpu) => StaticTimingEstimate {
+            cold_setup_ms: 5_000,
+            warm_setup_ms: 5_000,
+            predicted_run_ms: 10_000,
+        },
+        (WorkKind::PostUpscale | WorkKind::StandaloneUpscale, Backend::Cpu) => {
+            StaticTimingEstimate {
+                cold_setup_ms: 6_000,
+                warm_setup_ms: 6_000,
+                predicted_run_ms: 20_000,
+            }
+        }
+        _ => static_timing_for(kind),
+    }
+}
+
 impl CandidatePlacement {
     pub fn new(
         device_id: impl Into<DeviceId>,
