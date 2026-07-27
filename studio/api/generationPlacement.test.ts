@@ -57,6 +57,8 @@ describe("generation placement preview", () => {
       source_video: "video-bytes",
       edit_images: ["one", "two"],
       keyframes: [{ frame: 0, image: "keyframe-bytes", strength: 0.5 }],
+      lora: { path: "/models/legacy.safetensors", scale: 0.7 },
+      loras: [{ path: "/models/style.safetensors", scale: 1.1 }],
       width: 1024,
     });
     expect(result).toEqual({
@@ -73,6 +75,8 @@ describe("generation placement preview", () => {
       source_video: "",
       edit_images: ["", ""],
       keyframes: [{ frame: 0, image: "", strength: 0.5 }],
+      lora: { path: "/models/legacy.safetensors", scale: 0.7 },
+      loras: [{ path: "/models/style.safetensors", scale: 1.1 }],
       width: 1024,
     });
   });
