@@ -167,6 +167,7 @@ async function loadDevicePanel() {
     devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled")
     queuePlan.value = queueResult.value.plan ?? null;
+  else queuePlan.value = null;
   deviceCapabilities.value =
     capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
   if (deviceResult.status !== "fulfilled") devices.value = null;
@@ -256,10 +257,15 @@ onBeforeUnmount(() => {
       </div>
     </CardSurface>
 
-    <p v-if="devices?.length" class="kicker">Scheduler plan</p>
-    <CardSurface v-if="devices?.length" class="settings__card">
+    <p v-if="devices !== null || queuePlan !== null" class="kicker">
+      Scheduler plan
+    </p>
+    <CardSurface
+      v-if="devices !== null || queuePlan !== null"
+      class="settings__card"
+    >
       <DevicePanel
-        :devices="devices"
+        :devices="devices ?? []"
         :plan="queuePlan"
         :mutable="
           deviceCapabilities?.devices?.lifecycle === true &&

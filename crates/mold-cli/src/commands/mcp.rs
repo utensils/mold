@@ -54,6 +54,57 @@ struct McpServer {
     jobs: AsyncJobRegistry,
 }
 
+fn append_queue_plan_status_lines(lines: &mut Vec<String>, queue: &mold_core::QueueListingWire) {
+    let Some(plan) = &queue.plan else {
+        return;
+    };
+    lines.push(format!(
+        "queue plan: v{} state={} optimizer={} next_replan={}",
+        plan.plan_version,
+        plan.state_version,
+        plan.optimizer_state,
+        plan.next_replan_at_unix_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".into())
+    ));
+    for item in &plan.work_items {
+        let lane = match item.planned_lane_kind.as_ref() {
+            Some(mold_core::QueuePlannedLaneKind::HostUtility) => "host-utility".into(),
+            Some(mold_core::QueuePlannedLaneKind::Device) => item
+                .planned_device_id
+                .clone()
+                .unwrap_or_else(|| "device".into()),
+            Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => "assigned".into(),
+            None if item.is_host_utility_lane()
+                || item.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+            {
+                "host-utility".into()
+            }
+            None => item
+                .planned_device_id
+                .clone()
+                .unwrap_or_else(|| "unassigned".into()),
+        };
+        lines.push(format!(
+            "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
+            item.work_id,
+            item.activity_phase,
+            lane,
+            item.lane_order
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "—".into()),
+            item.blocked_reason
+                .as_ref()
+                .map(|reason| reason.as_str())
+                .unwrap_or("none"),
+            item.estimated_finish_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+            item.estimate_confidence,
+        ));
+    }
+}
+
 impl McpServer {
     fn new(host: Option<String>) -> Self {
         let client = match host {
@@ -467,7 +518,10 @@ impl McpServer {
             .await
             .map_err(|e| format!("failed to read server status: {e}"))?;
         let devices = self.client.devices().await.ok();
-        let queue = self.client.list_queue().await.ok();
+        let queue = self.client.list_queue().await.ok().map(|mut queue| {
+            queue.normalize_planned_lanes_for_presentation();
+            queue
+        });
 
         let mut lines = vec![
             format!("mold server {}", status.version),
@@ -517,35 +571,8 @@ impl McpServer {
         if let Some(depth) = status.queue_depth {
             lines.push(format!("queue depth: {depth}"));
         }
-        if let Some(plan) = queue.as_ref().and_then(|queue| queue.plan.as_ref()) {
-            lines.push(format!(
-                "queue plan: v{} state={} optimizer={} next_replan={}",
-                plan.plan_version,
-                plan.state_version,
-                plan.optimizer_state,
-                plan.next_replan_at_unix_ms
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".into())
-            ));
-            for item in &plan.work_items {
-                lines.push(format!(
-                    "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
-                    item.work_id,
-                    item.activity_phase,
-                    item.planned_device_id.as_deref().unwrap_or("unassigned"),
-                    item.lane_order
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "—".into()),
-                    item.blocked_reason
-                        .as_ref()
-                        .map(|reason| reason.as_str())
-                        .unwrap_or("none"),
-                    item.estimated_finish_unix_ms
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "unknown".into()),
-                    item.estimate_confidence,
-                ));
-            }
+        if let Some(queue) = &queue {
+            append_queue_plan_status_lines(&mut lines, queue);
         }
 
         Ok(json!({
@@ -1856,6 +1883,114 @@ mod tests {
         let tools = response["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "list_gallery"));
         assert!(tools.iter().any(|tool| tool["name"] == "get_gallery_image"));
+    }
+
+    #[tokio::test]
+    async fn server_status_queue_projection_sanitizes_legacy_host_utility_identity() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let queue = mold_core::QueueListingWire {
+            entries: vec![],
+            plan: Some(mold_core::QueuePlan {
+                work_items: vec![
+                    mold_core::QueueWorkItem {
+                        work_id: "legacy".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Queued,
+                        planned_device_id: Some("cpu:utility:0".into()),
+                        lane_order: Some(0),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "typed-host".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::HostUtility),
+                        planned_device_id: Some("typed-host-internal".into()),
+                        lane_order: Some(1),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "gpu".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
+                        planned_device_id: Some("cuda:stable-a".into()),
+                        lane_order: Some(2),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "future".into(),
+                        planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                            "remote_utility".into(),
+                        )),
+                        planned_device_id: Some("future-public-id".into()),
+                        lane_order: Some(3),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/status"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mold_core::ServerStatus {
+                    version: "test".into(),
+                    git_sha: None,
+                    build_date: None,
+                    models_loaded: vec![],
+                    busy: true,
+                    current_generation: None,
+                    gpu_info: None,
+                    uptime_secs: 1,
+                    hostname: None,
+                    memory_status: None,
+                    gpus: None,
+                    queue_depth: Some(4),
+                    queue_capacity: Some(8),
+                    queue_paused: Some(false),
+                    instance_id: None,
+                    models_disk: None,
+                }),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/devices"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(queue))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = McpServer::new(Some(server.uri()))
+            .tool_server_status()
+            .await
+            .unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("work legacy: phase=queued lane=host-utility/0"));
+        assert!(text.contains("work typed-host: phase=queued lane=host-utility/1"));
+        assert!(text.contains("work gpu: phase=queued lane=cuda:stable-a/2"));
+        assert!(text.contains("work future: phase=queued lane=assigned/3"));
+        assert!(!text.contains("cpu:utility:0"));
+        assert!(!text.contains("typed-host-internal"));
+        assert!(!text.contains("future-public-id"));
+
+        let work = result["structuredContent"]["queue"]["plan"]["work_items"]
+            .as_array()
+            .unwrap();
+        assert_eq!(work[0]["planned_lane_kind"], "host_utility");
+        assert_eq!(work[0]["planned_device_id"], Value::Null);
+        assert_eq!(work[1]["planned_lane_kind"], "host_utility");
+        assert_eq!(work[1]["planned_device_id"], Value::Null);
+        assert_eq!(work[2]["planned_lane_kind"], "device");
+        assert_eq!(work[2]["planned_device_id"], "cuda:stable-a");
+        assert_eq!(work[3]["planned_lane_kind"], "remote_utility");
+        assert_eq!(work[3]["planned_device_id"], "future-public-id");
     }
 
     #[test]

@@ -60,6 +60,38 @@ describe("queue plan contract", () => {
     expect(listing.plan).toBeNull();
   });
 
+  it("preserves typed host lanes without treating them as device identities", () => {
+    const listing = parseQueueListing({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "cpu-work",
+            parent_id: "parent",
+            work_kind: "prompt_expansion",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            planned_device_id: null,
+            planned_lane_kind: "host_utility",
+            lane_order: 0,
+            estimate_confidence: "low",
+          },
+        ],
+      },
+    });
+
+    expect(listing.plan?.work_items[0]).toMatchObject({
+      planned_device_id: null,
+      planned_lane_kind: "host_utility",
+    });
+  });
+
   it("reactively replaces only newer plan versions", () => {
     const current: QueueListing = {
       entries: [],

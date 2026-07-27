@@ -734,6 +734,12 @@ async fn schedule_standalone_upscale(
     let estimated_vram_bytes = std::fs::metadata(&weights_path)
         .map(|metadata| metadata.len().saturating_add(2 << 30))
         .unwrap_or(2 << 30);
+    let utility_plans = crate::scheduler::upscale_candidates(state, &model, &weights_path)
+        .map_err(|error| {
+            ApiError::generation_unavailable(format!(
+                "upscaler execution plan could not be frozen: {error}"
+            ))
+        })?;
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let job = crate::gpu_pool::StandaloneUpscaleJob {
         id: id.clone(),
@@ -741,17 +747,17 @@ async fn schedule_standalone_upscale(
         weights_path,
         request,
         progress_tx,
+        cancellation: mold_inference::InferenceCancellationToken::default(),
+        execution_plan: None,
         result_tx,
     };
     let work = crate::gpu_pool::OwnerWork::StandaloneUpscale(Box::new(job));
     state
         .scheduled_work
-        .submit(crate::scheduler::ScheduledOwnerWork::new(
-            id,
-            model,
-            estimated_vram_bytes,
-            work,
-        ))
+        .submit(
+            crate::scheduler::ScheduledOwnerWork::new(id, model, estimated_vram_bytes, work)
+                .with_utility_plans(utility_plans),
+        )
         .await
         .map_err(ApiError::generation_unavailable)?;
     result_rx
@@ -771,14 +777,26 @@ async fn schedule_local_expansion(
     let id = format!("prompt-expansion-{}", uuid::Uuid::new_v4());
     let estimated_vram_bytes = 6_000_000_000;
     let model = settings.model.clone();
+    #[cfg(feature = "expand")]
+    let utility_plans = crate::scheduler::prompt_expansion_candidates(state, &config, Some(&model))
+        .map_err(|error| {
+            ApiError::generation_unavailable(format!(
+                "prompt expansion execution plan could not be frozen: {error}"
+            ))
+        })?;
+    let cancellation = mold_inference::InferenceCancellationToken::default();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let work = crate::gpu_pool::OwnerWork::PromptExpansion(Box::new(
         crate::gpu_pool::PromptExpansionJob {
             id: id.clone(),
+            parent_id: id.clone(),
             config,
             settings,
             prompt,
             expand_config,
+            cancellation,
+            #[cfg(feature = "expand")]
+            execution_plan: None,
             result_tx,
         },
     ));
@@ -786,7 +804,17 @@ async fn schedule_local_expansion(
         .scheduled_work
         .submit(
             crate::scheduler::ScheduledOwnerWork::new(id, model, estimated_vram_bytes, work)
-                .with_hard_ordinal(preferred_gpu),
+                .with_hard_ordinal(preferred_gpu)
+                .with_utility_plans({
+                    #[cfg(feature = "expand")]
+                    {
+                        utility_plans
+                    }
+                    #[cfg(not(feature = "expand"))]
+                    {
+                        Vec::new()
+                    }
+                }),
         )
         .await
         .map_err(ApiError::generation_unavailable)?;
@@ -1010,7 +1038,9 @@ async fn maybe_expand_prompt(
     let config = state.config.read().await;
     let config_snapshot = config.clone();
     let expand_settings = config.expand.clone().with_env_overrides();
-    if state.gpu_pool.worker_count() > 0 && expand_settings.is_local() {
+    if (state.scheduled_work.v2_authoritative() || state.gpu_pool.worker_count() > 0)
+        && expand_settings.is_local()
+    {
         // The scheduler owns local expansion as a PromptExpansion dependency
         // stage. Leaving the request untouched lets the parent enter the
         // queue immediately; the coordinator freezes the expanded prompt
@@ -1174,7 +1204,9 @@ async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
-    ensure_schedulable_device(&state)?;
+    if !state.scheduled_work.v2_authoritative() {
+        ensure_schedulable_device(&state)?;
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1215,7 +1247,7 @@ async fn upscale(
     let model_name_owned = model_name.clone();
     drop(config);
 
-    let resp = if state.gpu_pool.worker_count() > 0 {
+    let resp = if state.scheduled_work.v2_authoritative() || state.gpu_pool.worker_count() > 0 {
         schedule_standalone_upscale(&state, model_name_owned, weights_path, req, None).await?
     } else {
         let upscaler_cache = state.upscaler_cache.clone();
@@ -1255,7 +1287,9 @@ async fn upscale_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    ensure_schedulable_device(&state)?;
+    if !state.scheduled_work.v2_authoritative() {
+        ensure_schedulable_device(&state)?;
+    }
     if let Err(msg) = mold_core::validate_upscale_request(&req) {
         return Err(ApiError::validation(msg));
     }
@@ -1385,7 +1419,8 @@ async fn upscale_stream(
             return;
         };
 
-        if state_clone.gpu_pool.worker_count() > 0 {
+        if state_clone.scheduled_work.v2_authoritative() || state_clone.gpu_pool.worker_count() > 0
+        {
             match schedule_standalone_upscale(
                 &state_clone,
                 model_name_owned,

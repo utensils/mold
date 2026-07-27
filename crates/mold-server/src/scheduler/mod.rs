@@ -16,10 +16,13 @@ use mold_scheduler::{
     DeviceHealth, DeviceId, DeviceSnapshot, EstimateBucket, EstimateKey, EstimateObservation,
     EstimateOutcome, EstimatePhaseTimings, EstimateStore, ExecutionFingerprint,
     GrantValidationSnapshot, HostMemorySnapshot, Plan, PlannedAssignment, Planner, PlannerError,
-    PlannerSnapshot, PriorityClass, StaticEstimate, WorkId, WorkSnapshot,
+    PlannerSnapshot, PriorityClass, ResolvedEstimate, StaticEstimate, WorkId, WorkKind,
+    WorkSnapshot,
 };
 
-use crate::gpu_pool::{GpuJob, GpuWorker, LeaseGrant, OwnerWork};
+use crate::gpu_pool::{
+    GpuJob, GpuWorker, LeaseGrant, OwnerWork, UtilityExecutionPlan, UtilityPlacement,
+};
 use crate::state::{AppState, GenerationJob, SseMessage};
 
 const REPLAN_DEBOUNCE: Duration = Duration::from_secs(2);
@@ -36,6 +39,7 @@ const PREPARATION_CAPACITY_DELTA_BYTES: u64 = 2 << 30;
 const MAX_DISPATCH_REPLANS_PER_TURN: u8 = 3;
 const DISPATCH_RETRY_BASE_MS: u64 = 25;
 const DISPATCH_RETRY_MAX_MS: u64 = 1_000;
+pub(crate) const CPU_UTILITY_DEVICE_ID: &str = "cpu:utility:0";
 
 fn wire_estimate_confidence(
     confidence: mold_scheduler::EstimateConfidence,
@@ -156,6 +160,15 @@ pub enum WorkerEvent {
     },
 }
 
+fn reject_owner_work_preserving_completed_generation(work: OwnerWork, error: String) {
+    match work {
+        OwnerWork::PostUpscale(job) => {
+            crate::gpu_worker::finish_post_generation_upscale_failure(job, error);
+        }
+        work => work.reject(error),
+    }
+}
+
 pub struct ScheduledOwnerWork {
     pub id: String,
     pub model_fingerprint: String,
@@ -168,6 +181,9 @@ pub struct ScheduledOwnerWork {
     /// Optional immutable per-device plans for work that loads an inference
     /// engine outside the ordinary generation payload.
     pub candidate_plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
+    /// Frozen alternatives for utility stages. Empty retains the legacy
+    /// GPU-only estimate path for administrative work.
+    pub utility_plans: Vec<UtilityExecutionPlan>,
     pub work: OwnerWork,
 }
 
@@ -187,6 +203,7 @@ impl ScheduledOwnerWork {
             priority: PriorityClass::User,
             preferred_ordinal: None,
             candidate_plans: Vec::new(),
+            utility_plans: Vec::new(),
             work,
         }
     }
@@ -211,6 +228,11 @@ impl ScheduledOwnerWork {
         plans: Vec<crate::execution_plan::ResolvedExecutionPlan>,
     ) -> Self {
         self.candidate_plans = plans;
+        self
+    }
+
+    pub fn with_utility_plans(mut self, utility_plans: Vec<UtilityExecutionPlan>) -> Self {
+        self.utility_plans = utility_plans;
         self
     }
 }
@@ -531,6 +553,7 @@ struct PendingOwnerWork {
     bypass_count: u8,
     warm_wait_started_ms: Option<u64>,
     retry_not_before_ms: Option<u64>,
+    utility_plans: Vec<UtilityExecutionPlan>,
     work: OwnerWork,
 }
 
@@ -575,6 +598,19 @@ enum PreparationEvent {
 struct PreparedGeneration {
     expanded_prompt: Option<String>,
     execution_inputs: Option<crate::execution_plan::PreparedExecutionInputs>,
+}
+
+/// Private composition seam for scheduler-owned pre-stages.
+///
+/// Phase E's typed phase timings are recorded by the utility owner callbacks.
+/// Keep all pre-stage output reduction here so that execution never exposes a
+/// preview whose later stages have not yet frozen and executed the same plans.
+fn compose_prepared_generation(pending: &mut PendingGeneration, prepared: PreparedGeneration) {
+    if let Some(expanded_prompt) = prepared.expanded_prompt {
+        pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
+        pending.job.request.prompt = expanded_prompt;
+    }
+    pending.prepared_inputs = prepared.execution_inputs;
 }
 
 type PreparationFuture = Pin<Box<dyn Future<Output = Result<PreparedGeneration, String>> + Send>>;
@@ -638,6 +674,10 @@ impl DependencyPreparer for PostUpscalePreparer {
                 .gpu_pool
                 .resolve_explicit_placement_gpu(request.placement.as_ref())?;
             let utility_id = format!("{work_id}::prompt-expansion");
+            let cancellation = mold_inference::InferenceCancellationToken::default();
+            #[cfg(feature = "expand")]
+            let utility_plans =
+                prompt_expansion_candidates(&state, &config, Some(&settings.model))?;
             let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
             let utility = ScheduledOwnerWork::new(
                 utility_id.clone(),
@@ -645,14 +685,28 @@ impl DependencyPreparer for PostUpscalePreparer {
                 6_000_000_000,
                 OwnerWork::PromptExpansion(Box::new(crate::gpu_pool::PromptExpansionJob {
                     id: utility_id,
+                    parent_id: work_id.clone(),
                     config,
                     settings,
                     prompt: request.prompt.clone(),
                     expand_config,
+                    cancellation: cancellation.clone(),
+                    #[cfg(feature = "expand")]
+                    execution_plan: None,
                     result_tx,
                 })),
             )
-            .with_hard_ordinal(preferred_gpu);
+            .with_hard_ordinal(preferred_gpu)
+            .with_utility_plans({
+                #[cfg(feature = "expand")]
+                {
+                    utility_plans
+                }
+                #[cfg(not(feature = "expand"))]
+                {
+                    Vec::new()
+                }
+            });
             state.scheduled_work.submit(utility).await?;
 
             let registry_notify = state.job_registry.mutation_notifier();
@@ -664,6 +718,7 @@ impl DependencyPreparer for PostUpscalePreparer {
                     }
                     _ = registry_notify.notified() => {
                         if state.job_registry.entry(&work_id).is_none() {
+                            cancellation.cancel();
                             return Err(format!(
                                 "generation job {work_id} was cancelled during prompt expansion"
                             ));
@@ -1090,6 +1145,7 @@ struct Coordinator {
     dispatch_retry_round: u8,
     dispatch_retry_not_before_ms: Option<u64>,
     estimates: EstimateStore,
+    cpu_utility_tx: Option<std::sync::mpsc::SyncSender<crate::gpu_pool::GpuWorkerCommand>>,
     #[cfg(test)]
     next_plan_error: Option<PlannerError>,
     #[cfg(test)]
@@ -1157,11 +1213,19 @@ impl Coordinator {
             dispatch_retry_round: 0,
             dispatch_retry_not_before_ms: None,
             estimates,
+            cpu_utility_tx: None,
             #[cfg(test)]
             next_plan_error: None,
             #[cfg(test)]
             before_grant_hook: None,
         }
+    }
+
+    fn install_cpu_utility_lane(
+        &mut self,
+        tx: std::sync::mpsc::SyncSender<crate::gpu_pool::GpuWorkerCommand>,
+    ) {
+        self.cpu_utility_tx = Some(tx);
     }
 
     fn mutate(&mut self, immediate: &mut bool) {
@@ -1231,7 +1295,7 @@ impl Coordinator {
         self.mutate(immediate);
     }
 
-    fn enqueue_owner_work(&mut self, submission: ScheduledOwnerWork, immediate: &mut bool) {
+    fn enqueue_owner_work(&mut self, mut submission: ScheduledOwnerWork, immediate: &mut bool) {
         if submission.id != submission.work.id() {
             let payload_id = submission.work.id().to_string();
             submission.work.reject(format!(
@@ -1242,6 +1306,20 @@ impl Coordinator {
         }
         if submission.work.is_cancelled() {
             return;
+        }
+        if matches!(
+            submission.work.kind(),
+            WorkKind::PromptExpansion | WorkKind::StandaloneUpscale | WorkKind::PostUpscale
+        ) {
+            match self.freeze_utility_candidates(&submission.work, &submission.utility_plans) {
+                Ok(plans) => submission.utility_plans = plans,
+                Err(error) => {
+                    submission.work.reject(format!(
+                        "utility execution plan could not be frozen: {error}"
+                    ));
+                    return;
+                }
+            }
         }
         if self.pending.contains_key(&submission.id)
             || self.pending_owner_work.contains_key(&submission.id)
@@ -1272,10 +1350,63 @@ impl Coordinator {
                 bypass_count: 0,
                 warm_wait_started_ms: None,
                 retry_not_before_ms: None,
+                utility_plans: submission.utility_plans,
                 work: submission.work,
             },
         );
         self.mutate(immediate);
+    }
+
+    fn freeze_utility_candidates(
+        &self,
+        work: &OwnerWork,
+        supplied: &[UtilityExecutionPlan],
+    ) -> Result<Vec<UtilityExecutionPlan>, String> {
+        let placements = std::iter::once(UtilityPlacement::Cpu)
+            .chain(
+                self.state
+                    .gpu_pool
+                    .schedulable_workers()
+                    .into_iter()
+                    .map(|worker| UtilityPlacement::Device {
+                        backend: worker.gpu.backend,
+                        ordinal: worker.gpu.ordinal,
+                    }),
+            )
+            .collect::<Vec<_>>();
+        match work {
+            #[cfg(feature = "expand")]
+            OwnerWork::PromptExpansion(job) => {
+                prompt_expansion_candidates(&self.state, &job.config, Some(&job.settings.model))
+            }
+            #[cfg(not(feature = "expand"))]
+            OwnerWork::PromptExpansion(_) => {
+                Err("local prompt expansion is unavailable in this build".to_string())
+            }
+            OwnerWork::StandaloneUpscale(job) => {
+                upscale_candidates(&self.state, &job.model, &job.weights_path)
+            }
+            OwnerWork::PostUpscale(_) => {
+                #[cfg(feature = "expand")]
+                let base = supplied.iter().find_map(|plan| match plan {
+                    UtilityExecutionPlan::Upscale(plan) => Some(plan),
+                    UtilityExecutionPlan::PromptExpansion(_) => None,
+                });
+                #[cfg(not(feature = "expand"))]
+                let base = supplied.first().map(|plan| match plan {
+                    UtilityExecutionPlan::Upscale(plan) => plan,
+                });
+                let base = base.ok_or_else(|| {
+                    "post-generation upscaling lacked a frozen artifact candidate".to_string()
+                })?;
+                Ok(upscale_utility_candidates(
+                    &base.model_name,
+                    &base.weights,
+                    placements,
+                ))
+            }
+            _ => Ok(supplied.to_vec()),
+        }
     }
 
     fn start_needed_preparations(&mut self) {
@@ -1317,11 +1448,7 @@ impl Coordinator {
                 if pending.preparation != PreparationState::Preparing {
                     return;
                 }
-                if let Some(expanded_prompt) = prepared.expanded_prompt {
-                    pending.job.request.original_prompt = Some(pending.job.request.prompt.clone());
-                    pending.job.request.prompt = expanded_prompt;
-                }
-                pending.prepared_inputs = prepared.execution_inputs;
+                compose_prepared_generation(pending, prepared);
                 pending.preparation = PreparationState::Ready;
                 pending.preparation_refresh_observation = None;
                 if pending
@@ -1356,12 +1483,15 @@ impl Coordinator {
                 owner_epoch,
                 worker_generation,
             } => {
-                let was_starting = self.state.gpu_pool.workers.is_starting(&device_id);
-                if !self
-                    .state
-                    .gpu_pool
-                    .workers
-                    .mark_ready(&device_id, owner_epoch)
+                let is_cpu_utility = device_id == CPU_UTILITY_DEVICE_ID;
+                let was_starting =
+                    !is_cpu_utility && self.state.gpu_pool.workers.is_starting(&device_id);
+                if !is_cpu_utility
+                    && !self
+                        .state
+                        .gpu_pool
+                        .workers
+                        .mark_ready(&device_id, owner_epoch)
                 {
                     tracing::warn!(
                         device_id,
@@ -1547,9 +1677,10 @@ impl Coordinator {
                         work_id = %rejected_work_id,
                         "rejecting payload returned by an unknown or stale owner"
                     );
-                    grant
-                        .work
-                        .reject("GPU owner returned work from a stale lifecycle epoch".to_string());
+                    reject_owner_work_preserving_completed_generation(
+                        grant.work,
+                        "GPU owner returned work from a stale lifecycle epoch".to_string(),
+                    );
                     return;
                 }
                 // A rejection returns ownership of the transported payload
@@ -1624,7 +1755,7 @@ impl Coordinator {
                     OwnerWork::Generation(job) => {
                         let (generation_job, prepared_inputs) =
                             generation_and_prepared_from_gpu_job(*job);
-                        if matches!(reason, LeaseRejection::FatalCuda) {
+                        if matches!(&reason, LeaseRejection::FatalCuda) {
                             self.plan_invalidations.remove(&generation_job.id);
                             reject_generation(
                                 &self.state,
@@ -1699,11 +1830,30 @@ impl Coordinator {
                         }
                     }
                     work => {
-                        if matches!(reason, LeaseRejection::FatalCuda) {
+                        if matches!(&reason, LeaseRejection::FatalCuda) {
                             self.plan_invalidations.remove(&work_id);
-                            work.reject(
+                            reject_owner_work_preserving_completed_generation(
+                                work,
                                 "CUDA context is fatally poisoned; server restart required"
                                     .to_string(),
+                            );
+                        } else if matches!(&reason, LeaseRejection::PlanInvalidated(_))
+                            && matches!(
+                                work.kind(),
+                                WorkKind::PromptExpansion
+                                    | WorkKind::PostUpscale
+                                    | WorkKind::StandaloneUpscale
+                            )
+                        {
+                            let LeaseRejection::PlanInvalidated(error) = &reason else {
+                                unreachable!("matched plan-invalidated utility rejection")
+                            };
+                            self.plan_invalidations.remove(&work_id);
+                            reject_owner_work_preserving_completed_generation(
+                                work,
+                                format!(
+                                    "utility execution plan was invalidated; refusing fallback: {error}"
+                                ),
                             );
                         } else {
                             // A stale worker generation means this payload was
@@ -1722,6 +1872,7 @@ impl Coordinator {
                                 bypass_count: preserved_bypass_count,
                                 warm_wait_started_ms: preserved_warm_wait_started_ms,
                                 retry_not_before_ms: None,
+                                utility_plans: Vec::new(),
                             });
                             let mut retry_not_before_ms = retry.retry_not_before_ms;
                             if let LeaseRejection::PlanInvalidated(error) = &reason {
@@ -1758,6 +1909,7 @@ impl Coordinator {
                                     bypass_count: retry.bypass_count,
                                     warm_wait_started_ms: retry.warm_wait_started_ms,
                                     retry_not_before_ms,
+                                    utility_plans: retry.utility_plans,
                                     work,
                                 },
                             );
@@ -2079,7 +2231,8 @@ impl Coordinator {
                     .collect::<BTreeMap<_, _>>()
             })
             .unwrap_or_default();
-        self.state
+        let mut snapshots = self
+            .state
             .gpu_pool
             .schedulable_workers()
             .into_iter()
@@ -2156,7 +2309,31 @@ impl Coordinator {
                     warm_execution_fingerprints: warm,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if self.cpu_utility_tx.is_some() {
+            let ready = self.ready.get(CPU_UTILITY_DEVICE_ID);
+            let active_lease = self.leases.get(CPU_UTILITY_DEVICE_ID);
+            snapshots.push(DeviceSnapshot {
+                id: DeviceId::new(CPU_UTILITY_DEVICE_ID),
+                backend: Backend::Cpu,
+                admin_state: DeviceAdminState::Enabled,
+                health: if self.unavailable.contains(CPU_UTILITY_DEVICE_ID) {
+                    DeviceHealth::Unavailable
+                } else {
+                    DeviceHealth::Healthy
+                },
+                activity: if ready.is_some() && active_lease.is_none() {
+                    DeviceActivity::Idle
+                } else {
+                    DeviceActivity::Busy
+                },
+                available_at_ms: active_lease.map(|lease| lease.estimated_finish_ms),
+                worker_generation: ready.map_or(0, |ready| ready.generation),
+                available_vram_bytes: u64::MAX,
+                warm_execution_fingerprints: BTreeSet::new(),
+            });
+        }
+        snapshots
     }
 
     fn device_facts(&self) -> Vec<crate::execution_plan::DeviceFact> {
@@ -2565,6 +2742,7 @@ impl Coordinator {
     fn owner_work_snapshot(
         &self,
         owner: OwnerWorkSchedulingView<'_>,
+        utility_plans: &[UtilityExecutionPlan],
         device_snapshots: &[DeviceSnapshot],
     ) -> WorkSnapshot {
         let authoritative_available_vram = device_snapshots
@@ -2572,80 +2750,119 @@ impl Coordinator {
             .cloned()
             .map(|device| (device.id, device.available_vram_bytes))
             .collect::<BTreeMap<_, _>>();
-        let candidate = |worker: &GpuWorker,
-                         device_id: DeviceId,
-                         execution_fingerprint: &str,
-                         static_vram_bytes: u64,
-                         static_host_bytes: u64,
-                         available_vram_bytes: u64| {
-            let mut key = owner_estimate_key(
-                worker,
-                owner.kind,
-                owner.model_fingerprint,
-                owner.shape_bucket,
-            );
-            key.execution_fingerprint = execution_fingerprint.to_string();
-            let static_timing = mold_scheduler::static_timing_for(owner.kind);
-            let estimate = self.estimates.estimate(
-                &key,
-                StaticEstimate {
-                    total_ms: static_timing
-                        .cold_setup_ms
-                        .saturating_add(static_timing.predicted_run_ms),
-                    cold_setup_ms: static_timing.cold_setup_ms,
-                    warm_setup_ms: static_timing.warm_setup_ms,
-                    vram_bytes: static_vram_bytes,
-                    host_bytes: static_host_bytes,
-                },
-            );
+        let estimate_candidate = |device_id: DeviceId,
+                                  worker: Option<&GpuWorker>,
+                                  execution_fingerprint: &str,
+                                  exact_vram_bytes: u64,
+                                  exact_host_bytes: u64,
+                                  exact_memory: bool| {
+            let key = EstimateKey {
+                device_class: worker
+                    .map(device_class)
+                    .unwrap_or_else(|| CPU_UTILITY_DEVICE_ID.to_string()),
+                model_family: owner.model_fingerprint.to_string(),
+                model_fingerprint: owner.model_fingerprint.to_string(),
+                work_kind: snake_debug(owner.kind),
+                shape_bucket: owner.shape_bucket.into(),
+                execution_fingerprint: execution_fingerprint.to_string(),
+            };
+            let placement_backend =
+                worker.map_or(Backend::Cpu, |worker| match worker.gpu.backend {
+                    mold_core::GpuBackend::Cuda => Backend::Cuda,
+                    mold_core::GpuBackend::Metal => Backend::Metal,
+                });
+            let static_timing =
+                mold_scheduler::static_timing_for_placement(owner.kind, placement_backend);
+            let static_estimate = StaticEstimate {
+                total_ms: static_timing
+                    .cold_setup_ms
+                    .saturating_add(static_timing.predicted_run_ms),
+                cold_setup_ms: static_timing.cold_setup_ms,
+                warm_setup_ms: static_timing.warm_setup_ms,
+                predicted_run_ms: static_timing.predicted_run_ms,
+                vram_bytes: exact_vram_bytes,
+                host_bytes: exact_host_bytes,
+            };
+            let estimate = self.estimates.estimate(&key, static_estimate);
+            let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                timing_with_static_floors(estimate, static_estimate);
+            let (planned_vram_bytes, planned_host_bytes) = if exact_memory {
+                (exact_vram_bytes, exact_host_bytes)
+            } else {
+                (estimate.vram_bytes, estimate.host_bytes)
+            };
             CandidatePlacement::new(
-                device_id,
+                device_id.clone(),
                 ExecutionFingerprint::new(execution_fingerprint),
-                estimate.host_bytes,
+                planned_host_bytes,
             )
-            .with_vram(estimate.vram_bytes)
+            .with_vram(planned_vram_bytes)
             .with_timing(
-                estimate.cold_setup_ms,
+                cold_setup_ms,
                 if matches!(
                     owner.kind,
                     mold_scheduler::WorkKind::PromptExpansion
                         | mold_scheduler::WorkKind::PostUpscale
                         | mold_scheduler::WorkKind::StandaloneUpscale
                 ) {
-                    estimate.cold_setup_ms
+                    cold_setup_ms
                 } else {
-                    estimate.warm_setup_ms
+                    warm_setup_ms
                 },
-                estimate.predicted_run_ms,
+                predicted_run_ms,
             )
-            .with_device_available_vram(available_vram_bytes)
-            .with_affinity_penalty(
+            .with_device_available_vram(
+                authoritative_available_vram
+                    .get(&device_id)
+                    .copied()
+                    .unwrap_or(0),
+            )
+            .with_affinity_penalty(worker.map_or(0, |worker| {
                 owner
                     .preferred_ordinal
-                    .map_or(0, |preferred| u8::from(preferred != worker.gpu.ordinal)),
-            )
+                    .map_or(0, |preferred| u8::from(preferred != worker.gpu.ordinal))
+            }))
         };
-        let candidates = if owner.resolved_plans.is_empty() && !owner.requires_exact_plan {
-            self.state
-                .gpu_pool
-                .workers
+        let candidates = if !utility_plans.is_empty() {
+            utility_plans
                 .iter()
-                .map(|worker| {
-                    let device_id = DeviceId::new(worker_device_id(worker.as_ref()));
-                    candidate(
-                        worker.as_ref(),
-                        device_id.clone(),
-                        owner.model_fingerprint,
-                        owner.estimated_vram_bytes,
-                        owner.estimated_host_ram_bytes,
+                .filter_map(|plan| match plan.placement() {
+                    UtilityPlacement::Cpu => {
+                        let device_id = DeviceId::new(CPU_UTILITY_DEVICE_ID);
                         authoritative_available_vram
-                            .get(&device_id)
-                            .copied()
-                            .unwrap_or(0),
-                    )
+                            .contains_key(&device_id)
+                            .then(|| {
+                                estimate_candidate(
+                                    device_id,
+                                    None,
+                                    plan.execution_fingerprint(),
+                                    plan.predicted_vram_bytes(),
+                                    plan.predicted_host_ram_bytes(),
+                                    true,
+                                )
+                            })
+                    }
+                    UtilityPlacement::Device { backend, ordinal } => {
+                        let worker = self.state.gpu_pool.workers.iter().find(|worker| {
+                            worker.gpu.backend == backend && worker.gpu.ordinal == ordinal
+                        })?;
+                        let device_id = DeviceId::new(worker_device_id(worker.as_ref()));
+                        authoritative_available_vram
+                            .contains_key(&device_id)
+                            .then(|| {
+                                estimate_candidate(
+                                    device_id,
+                                    Some(worker.as_ref()),
+                                    plan.execution_fingerprint(),
+                                    plan.predicted_vram_bytes(),
+                                    plan.predicted_host_ram_bytes(),
+                                    true,
+                                )
+                            })
+                    }
                 })
                 .collect::<Vec<_>>()
-        } else {
+        } else if !owner.resolved_plans.is_empty() || owner.requires_exact_plan {
             owner
                 .resolved_plans
                 .iter()
@@ -2654,15 +2871,32 @@ impl Coordinator {
                         .gpu_pool
                         .worker_by_ordinal(plan.device_ordinal)
                         .map(|worker| {
-                            candidate(
-                                worker.as_ref(),
+                            estimate_candidate(
                                 DeviceId::new(plan.device_id.clone()),
+                                Some(worker.as_ref()),
                                 &plan.execution_fingerprint,
                                 plan.predicted_vram_peak_bytes,
                                 plan.predicted_host_increment_bytes,
-                                plan.admitted_available_vram_bytes,
+                                true,
                             )
                         })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.state
+                .gpu_pool
+                .workers
+                .iter()
+                .map(|worker| {
+                    let device_id = DeviceId::new(worker_device_id(worker.as_ref()));
+                    estimate_candidate(
+                        device_id,
+                        Some(worker.as_ref()),
+                        owner.model_fingerprint,
+                        owner.estimated_vram_bytes,
+                        owner.estimated_host_ram_bytes,
+                        false,
+                    )
                 })
                 .collect::<Vec<_>>()
         };
@@ -2746,25 +2980,21 @@ impl Coordinator {
                                 shape_bucket: generation_shape_bucket(&pending.job.request),
                                 execution_fingerprint: plan.execution_fingerprint.clone(),
                             });
-                        let estimate = self.estimates.estimate(
-                            &key,
-                            static_generation_estimate(
-                                &pending.job.request,
-                                plan.predicted_vram_peak_bytes,
-                                plan.predicted_host_increment_bytes,
-                            ),
+                        let static_estimate = static_generation_estimate(
+                            &pending.job.request,
+                            plan.predicted_vram_peak_bytes,
+                            plan.predicted_host_increment_bytes,
                         );
+                        let estimate = self.estimates.estimate(&key, static_estimate);
+                        let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                            timing_with_static_floors(estimate, static_estimate);
                         CandidatePlacement::new(
                             DeviceId::new(plan.device_id),
                             ExecutionFingerprint::new(plan.execution_fingerprint),
                             estimate.host_bytes,
                         )
                         .with_vram(estimate.vram_bytes)
-                        .with_timing(
-                            estimate.cold_setup_ms,
-                            estimate.warm_setup_ms,
-                            estimate.predicted_run_ms,
-                        )
+                        .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                         .with_device_available_vram(plan.admitted_available_vram_bytes)
                     })
                     .collect::<Vec<_>>();
@@ -2848,10 +3078,36 @@ impl Coordinator {
                     resolved_plans,
                     requires_exact_plan: pending.work.chain_plan_inputs().is_some(),
                 },
+                &pending.utility_plans,
                 device_snapshots,
             ))
         }));
         snapshots
+    }
+
+    fn utility_plan_for_lease(
+        &self,
+        pending: &PendingOwnerWork,
+        device_id: &str,
+        placement: &CandidatePlacement,
+    ) -> Option<UtilityExecutionPlan> {
+        pending.utility_plans.iter().find_map(|plan| {
+            let planned_device_id = match plan.placement() {
+                UtilityPlacement::Cpu => CPU_UTILITY_DEVICE_ID.to_string(),
+                UtilityPlacement::Device { backend, ordinal } => self
+                    .state
+                    .gpu_pool
+                    .workers
+                    .iter()
+                    .find(|worker| worker.gpu.backend == backend && worker.gpu.ordinal == ordinal)
+                    .map(|worker| worker_device_id(&worker))?,
+            };
+            (planned_device_id == device_id
+                && plan.execution_fingerprint() == placement.execution_fingerprint.as_str()
+                && plan.predicted_vram_bytes() == placement.predicted_vram_bytes
+                && plan.predicted_host_ram_bytes() == placement.incremental_host_ram_bytes)
+                .then(|| plan.clone())
+        })
     }
 
     fn planner_snapshot(
@@ -3047,14 +3303,14 @@ impl Coordinator {
                     request,
                     &plan.execution_fingerprint,
                 );
-                let estimate = self.estimates.estimate(
-                    &key,
-                    static_generation_estimate(
-                        request,
-                        plan.predicted_vram_peak_bytes,
-                        plan.predicted_host_increment_bytes,
-                    ),
+                let static_estimate = static_generation_estimate(
+                    request,
+                    plan.predicted_vram_peak_bytes,
+                    plan.predicted_host_increment_bytes,
                 );
+                let estimate = self.estimates.estimate(&key, static_estimate);
+                let (cold_setup_ms, warm_setup_ms, predicted_run_ms) =
+                    timing_with_static_floors(estimate, static_estimate);
                 confidence_by_edge.insert(
                     (plan.device_id.clone(), plan.execution_fingerprint.clone()),
                     wire_estimate_confidence(estimate.confidence),
@@ -3066,11 +3322,7 @@ impl Coordinator {
                         estimate.host_bytes,
                     )
                     .with_vram(estimate.vram_bytes)
-                    .with_timing(
-                        estimate.cold_setup_ms,
-                        estimate.warm_setup_ms,
-                        estimate.predicted_run_ms,
-                    )
+                    .with_timing(cold_setup_ms, warm_setup_ms, predicted_run_ms)
                     .with_device_available_vram(plan.admitted_available_vram_bytes),
                 )
             })
@@ -3118,6 +3370,7 @@ impl Coordinator {
                     resolved_plans: &[],
                     requires_exact_plan: false,
                 },
+                &[],
                 &snapshot.devices,
             ));
             rank_cursor = rank_cursor.saturating_add(1);
@@ -3253,6 +3506,7 @@ impl Coordinator {
                         resolved_plans: &[],
                         requires_exact_plan: false,
                     },
+                    &[],
                     &snapshot.devices,
                 ));
                 rank_cursor = rank_cursor.saturating_add(1);
@@ -3536,9 +3790,14 @@ impl Coordinator {
                     let Some(utility) = utility else {
                         return false;
                     };
-                    if utility.work.chain_plan_inputs().is_none() {
-                        ExecutionFingerprint::new(utility.model_fingerprint.clone())
-                    } else {
+                    if !utility.utility_plans.is_empty() {
+                        let Some(exact) =
+                            self.utility_plan_for_lease(utility, &device_id, &lease.placement)
+                        else {
+                            return false;
+                        };
+                        ExecutionFingerprint::new(exact.execution_fingerprint())
+                    } else if utility.work.chain_plan_inputs().is_some() {
                         let planned_execution =
                             owner_plan_cache.get(&work_id).into_iter().flatten().find(
                                 |execution| {
@@ -3567,6 +3826,8 @@ impl Coordinator {
                                 .expect("checked equal owner execution plans")
                                 .execution_fingerprint,
                         )
+                    } else {
+                        ExecutionFingerprint::new(utility.model_fingerprint.clone())
                     }
                 };
                 plan.validate_lease_for_grant(
@@ -3629,10 +3890,6 @@ impl Coordinator {
                     grant_failed = true;
                     break;
                 };
-                let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ready.ordinal) else {
-                    grant_failed = true;
-                    break;
-                };
                 let id = lease.work_id.to_string();
                 let Some(projection) = snapshot
                     .work
@@ -3640,7 +3897,6 @@ impl Coordinator {
                     .find(|work| work.id == lease.work_id)
                     .cloned()
                 else {
-                    worker.release_in_flight();
                     grant_failed = true;
                     break;
                 };
@@ -3653,6 +3909,135 @@ impl Coordinator {
                     worker_generation: ready.generation,
                     memory_sample_generation: plan.reservation.sample_generation,
                     memory_ledger_sequence: plan.reservation.ledger_sequence,
+                };
+                if device_id == CPU_UTILITY_DEVICE_ID {
+                    let Some(mut pending) = self.pending_owner_work.remove(&id) else {
+                        grant_failed = true;
+                        break;
+                    };
+                    let shape_bucket = pending.work.scheduling_shape_bucket();
+                    let work_kind = pending.work.kind();
+                    let Some(selected) =
+                        self.utility_plan_for_lease(&pending, &device_id, &lease.placement)
+                    else {
+                        self.pending_owner_work.insert(id.clone(), pending);
+                        grant_failed = true;
+                        break;
+                    };
+                    let execution_fingerprint = selected.execution_fingerprint().to_string();
+                    if let Err(error) = pending.work.install_utility_plan(selected) {
+                        reject_owner_work_preserving_completed_generation(pending.work, error);
+                        grant_failed = true;
+                        break;
+                    }
+                    let estimate_key = owner_estimate_key_for_device(
+                        CPU_UTILITY_DEVICE_ID.to_string(),
+                        work_kind,
+                        &pending.model_fingerprint,
+                        &shape_bucket,
+                        &execution_fingerprint,
+                    );
+                    let retry = crate::gpu_pool::OwnerWorkRetry {
+                        model_fingerprint: pending.model_fingerprint.clone(),
+                        estimated_vram_bytes: pending.estimated_vram_bytes,
+                        estimated_host_ram_bytes: pending.estimated_host_ram_bytes,
+                        hard_ordinal: pending.hard_ordinal,
+                        priority: pending.priority,
+                        preferred_ordinal: pending.preferred_ordinal,
+                        candidate_plans: pending.candidate_plans.clone(),
+                        queue_rank: pending.queue_rank,
+                        ready_at_ms: pending.ready_at_ms,
+                        bypass_count: pending.bypass_count,
+                        warm_wait_started_ms: pending.warm_wait_started_ms,
+                        retry_not_before_ms: pending.retry_not_before_ms,
+                        utility_plans: pending.utility_plans.clone(),
+                    };
+                    let ready_at_ms = pending.ready_at_ms;
+                    let bypass_count = pending.bypass_count;
+                    let warm_wait_started_ms = pending.warm_wait_started_ms;
+                    let grant = Box::new(LeaseGrant {
+                        fence,
+                        work: pending.work,
+                        retry: Some(retry),
+                    });
+                    let Some(cpu_tx) = &self.cpu_utility_tx else {
+                        reject_owner_work_preserving_completed_generation(
+                            grant.work,
+                            "CPU utility lane is unavailable".to_string(),
+                        );
+                        grant_failed = true;
+                        break;
+                    };
+                    match cpu_tx.try_send(crate::gpu_pool::GpuWorkerCommand::Grant(grant)) {
+                        Ok(()) => {
+                            self.ready.remove(&device_id);
+                            self.leases.insert(
+                                device_id.clone(),
+                                ActiveLease {
+                                    work_id: id.clone(),
+                                    owner_epoch: ready.owner_epoch,
+                                    plan_version: plan.plan_version,
+                                    worker_generation: ready.generation,
+                                    accepted: false,
+                                    previous_target: None,
+                                    estimated_finish_ms: lease.estimated_finish_ms,
+                                    ready_at_ms,
+                                    bypass_count,
+                                    warm_wait_started_ms,
+                                    started_at: Instant::now(),
+                                    estimate_key,
+                                    vram_high_water_bytes: None,
+                                    host_incremental_high_water_bytes: None,
+                                    fallback_reason: None,
+                                    projection,
+                                    assignment_reason: lease.reason,
+                                },
+                            );
+                            granted.push(id);
+                        }
+                        Err(error) => {
+                            let returned = match error {
+                                std::sync::mpsc::TrySendError::Full(command)
+                                | std::sync::mpsc::TrySendError::Disconnected(command) => command,
+                            };
+                            let crate::gpu_pool::GpuWorkerCommand::Grant(returned) = returned
+                            else {
+                                unreachable!("CPU utility dispatch sends only grants")
+                            };
+                            let retry = returned
+                                .retry
+                                .expect("CPU utility grant carries exact retry metadata");
+                            self.pending_owner_work.insert(
+                                id,
+                                PendingOwnerWork {
+                                    model_fingerprint: retry.model_fingerprint,
+                                    estimated_vram_bytes: retry.estimated_vram_bytes,
+                                    estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
+                                    hard_ordinal: retry.hard_ordinal,
+                                    priority: retry.priority,
+                                    preferred_ordinal: retry.preferred_ordinal,
+                                    candidate_plans: retry.candidate_plans,
+                                    queue_rank: retry.queue_rank,
+                                    ready_at_ms: retry.ready_at_ms,
+                                    bypass_count: retry.bypass_count,
+                                    warm_wait_started_ms: retry.warm_wait_started_ms,
+                                    retry_not_before_ms: retry.retry_not_before_ms,
+                                    utility_plans: retry.utility_plans,
+                                    work: returned.work,
+                                },
+                            );
+                            self.unavailable.insert(device_id.clone());
+                            grant_failed = true;
+                        }
+                    }
+                    if grant_failed {
+                        break;
+                    }
+                    continue;
+                }
+                let Some(worker) = self.state.gpu_pool.worker_by_ordinal(ready.ordinal) else {
+                    grant_failed = true;
+                    break;
                 };
                 if !worker.try_claim_owner_in_flight() {
                     grant_failed = true;
@@ -3783,16 +4168,35 @@ impl Coordinator {
                             break;
                         }
                     }
-                } else if let Some(pending) = self.pending_owner_work.remove(&id) {
+                } else if let Some(mut pending) = self.pending_owner_work.remove(&id) {
                     let shape_bucket = pending.work.scheduling_shape_bucket();
-                    let mut estimate_key = owner_estimate_key(
+                    let work_kind = pending.work.kind();
+                    if !pending.utility_plans.is_empty() {
+                        let Some(selected) =
+                            self.utility_plan_for_lease(&pending, &device_id, &lease.placement)
+                        else {
+                            self.pending_owner_work.insert(id.clone(), pending);
+                            worker.release_in_flight();
+                            self.state_version = self.state_version.saturating_add(1);
+                            grant_failed = true;
+                            break;
+                        };
+                        if let Err(error) = pending.work.install_utility_plan(selected) {
+                            worker.release_in_flight();
+                            reject_owner_work_preserving_completed_generation(pending.work, error);
+                            self.memory.release(&id);
+                            self.state_version = self.state_version.saturating_add(1);
+                            grant_failed = true;
+                            break;
+                        }
+                    }
+                    let estimate_key = owner_estimate_key(
                         &worker,
-                        pending.work.kind(),
+                        work_kind,
                         &pending.model_fingerprint,
                         &shape_bucket,
+                        lease.placement.execution_fingerprint.as_str(),
                     );
-                    estimate_key.execution_fingerprint =
-                        lease.placement.execution_fingerprint.to_string();
                     let resolved_plans = owner_plan_cache.get(&id).cloned().unwrap_or_default();
                     let chosen_plan = exact_leased_execution_plan(&resolved_plans, lease);
                     let metadata = (
@@ -3808,6 +4212,7 @@ impl Coordinator {
                         pending.bypass_count,
                         pending.warm_wait_started_ms,
                         pending.retry_not_before_ms,
+                        pending.utility_plans,
                     );
                     let mut work = pending.work;
                     if let Some(plan) = chosen_plan {
@@ -3829,6 +4234,7 @@ impl Coordinator {
                             bypass_count: metadata.9,
                             warm_wait_started_ms: metadata.10,
                             retry_not_before_ms: metadata.11,
+                            utility_plans: metadata.12.clone(),
                         }),
                     });
                     match worker.try_send_job(grant) {
@@ -3879,6 +4285,7 @@ impl Coordinator {
                                     bypass_count: metadata.9,
                                     warm_wait_started_ms: metadata.10,
                                     retry_not_before_ms: metadata.11,
+                                    utility_plans: metadata.12,
                                     work: returned.work,
                                 },
                             );
@@ -4148,6 +4555,7 @@ pub async fn run_scheduler_coordinator(
     mut owner_work_rx: tokio::sync::mpsc::Receiver<ScheduledOwnerWork>,
     mut preview_rx: tokio::sync::mpsc::Receiver<PlacementPreviewQuery>,
     mut worker_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>,
+    worker_tx: tokio::sync::mpsc::UnboundedSender<WorkerEvent>,
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
@@ -4155,7 +4563,10 @@ pub async fn run_scheduler_coordinator(
         workers = state.gpu_pool.worker_count(),
         "multi-GPU scheduler coordinator started"
     );
+    let (cpu_utility_tx, cpu_utility_rx) = std::sync::mpsc::sync_channel(1);
+    let cpu_utility_handle = crate::gpu_worker::spawn_cpu_utility_thread(cpu_utility_rx, worker_tx);
     let mut coordinator = Coordinator::new(state);
+    coordinator.install_cpu_utility_lane(cpu_utility_tx.clone());
     let registry_notify = coordinator.state.job_registry.mutation_notifier();
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4290,6 +4701,10 @@ pub async fn run_scheduler_coordinator(
         }
     }
     coordinator.stop_preparations().await;
+    let _ = cpu_utility_tx.send(crate::gpu_pool::GpuWorkerCommand::Shutdown);
+    if cpu_utility_handle.join().is_err() {
+        tracing::error!("CPU utility owner panicked during shutdown");
+    }
     for worker in &coordinator.state.gpu_pool.workers {
         worker.request_shutdown();
     }
@@ -4452,6 +4867,7 @@ fn queue_plan_projection(
         .map(|(device_id, lease)| {
             let work = &lease.projection;
             let hard_id = work.hard_device_id.as_ref().map(ToString::to_string);
+            let host_utility = device_id == CPU_UTILITY_DEVICE_ID;
             mold_core::QueueWorkItem {
                 work_id: work.id.to_string(),
                 parent_id: work.parent_id.to_string(),
@@ -4471,7 +4887,12 @@ fn queue_plan_projection(
                 hard_pinned_device_id: hard_id,
                 // Legacy clients have always omitted target_gpu after dispatch.
                 target_gpu: None,
-                planned_device_id: Some(device_id.clone()),
+                planned_lane_kind: Some(if host_utility {
+                    mold_core::QueuePlannedLaneKind::HostUtility
+                } else {
+                    mold_core::QueuePlannedLaneKind::Device
+                }),
+                planned_device_id: (!host_utility).then(|| device_id.clone()),
                 lane_order: Some(0),
                 estimated_start_unix_ms: Some(
                     unix_now.saturating_sub(
@@ -4492,7 +4913,9 @@ fn queue_plan_projection(
                 blocked_reason: None,
                 assignment_reason: Some(snake_debug(lease.assignment_reason)),
                 warm_wait_deadline_unix_ms: None,
-                activity_phase: if lease.accepted {
+                activity_phase: if lease.accepted && host_utility {
+                    mold_core::QueueActivityPhase::Cpu
+                } else if lease.accepted {
                     mold_core::QueueActivityPhase::Active
                 } else {
                     mold_core::QueueActivityPhase::Dispatching
@@ -4527,18 +4950,29 @@ fn queue_plan_projection(
                             .find(|lease| lease.work_id == work.id)
                             .map(|lease| snake_debug(lease.reason))
                     });
-                let (planned_device_id, lane_order, start, finish) =
-                    planned.map_or((None, None, None, None), |(lane, order, assignment)| {
-                        (
-                            Some(lane.device_id.to_string()),
-                            Some(
-                                order
-                                    + usize::from(active_devices.contains(lane.device_id.as_str())),
-                            ),
-                            Some(to_unix(assignment.estimated_start_ms)),
-                            Some(to_unix(assignment.estimated_finish_ms)),
-                        )
-                    });
+                let (planned_lane_kind, planned_device_id, lane_order, start, finish) = planned
+                    .map_or(
+                        (None, None, None, None, None),
+                        |(lane, order, assignment)| {
+                            let host_utility = lane.device_id.as_str() == CPU_UTILITY_DEVICE_ID;
+                            (
+                                Some(if host_utility {
+                                    mold_core::QueuePlannedLaneKind::HostUtility
+                                } else {
+                                    mold_core::QueuePlannedLaneKind::Device
+                                }),
+                                (!host_utility).then(|| lane.device_id.to_string()),
+                                Some(
+                                    order
+                                        + usize::from(
+                                            active_devices.contains(lane.device_id.as_str()),
+                                        ),
+                                ),
+                                Some(to_unix(assignment.estimated_start_ms)),
+                                Some(to_unix(assignment.estimated_finish_ms)),
+                            )
+                        },
+                    );
                 let hard_id = work.hard_device_id.as_ref().map(ToString::to_string);
                 let planned_gpu = planned_device_id
                     .as_ref()
@@ -4565,6 +4999,7 @@ fn queue_plan_projection(
                     gpu: planned_gpu,
                     hard_pinned_device_id: hard_id,
                     target_gpu,
+                    planned_lane_kind,
                     planned_device_id,
                     lane_order,
                     estimated_start_unix_ms: start,
@@ -4712,14 +5147,31 @@ fn owner_estimate_key(
     kind: mold_scheduler::WorkKind,
     fingerprint: &str,
     shape_bucket: &str,
+    execution_fingerprint: &str,
+) -> EstimateKey {
+    owner_estimate_key_for_device(
+        device_class(worker),
+        kind,
+        fingerprint,
+        shape_bucket,
+        execution_fingerprint,
+    )
+}
+
+fn owner_estimate_key_for_device(
+    device_class: String,
+    kind: mold_scheduler::WorkKind,
+    fingerprint: &str,
+    shape_bucket: &str,
+    execution_fingerprint: &str,
 ) -> EstimateKey {
     EstimateKey {
-        device_class: device_class(worker),
+        device_class,
         model_family: fingerprint.to_string(),
         model_fingerprint: fingerprint.to_string(),
         work_kind: snake_debug(kind),
         shape_bucket: shape_bucket.into(),
-        execution_fingerprint: fingerprint.to_string(),
+        execution_fingerprint: execution_fingerprint.to_string(),
     }
 }
 
@@ -4825,9 +5277,23 @@ fn static_generation_estimate(
         total_ms: timing.cold_setup_ms.saturating_add(predicted_run_ms),
         cold_setup_ms: timing.cold_setup_ms,
         warm_setup_ms: timing.warm_setup_ms,
+        predicted_run_ms,
         vram_bytes,
         host_bytes,
     }
+}
+
+fn timing_with_static_floors(
+    estimate: ResolvedEstimate,
+    static_estimate: StaticEstimate,
+) -> (u64, u64, u64) {
+    (
+        estimate.cold_setup_ms.max(static_estimate.cold_setup_ms),
+        estimate.warm_setup_ms.max(static_estimate.warm_setup_ms),
+        estimate
+            .predicted_run_ms
+            .max(static_estimate.predicted_run_ms),
+    )
 }
 
 fn unix_seconds() -> i64 {
@@ -4853,6 +5319,101 @@ fn snake_debug(value: impl std::fmt::Debug) -> String {
         }
     }
     out
+}
+
+pub(crate) fn upscale_utility_candidates(
+    model_name: &str,
+    weights: &mold_inference::upscaler::ResolvedUpscaleArtifact,
+    placements: impl IntoIterator<Item = UtilityPlacement>,
+) -> Vec<UtilityExecutionPlan> {
+    placements
+        .into_iter()
+        .map(|placement| {
+            UtilityExecutionPlan::Upscale(
+                mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
+                    model_name,
+                    weights.clone(),
+                    match placement {
+                        UtilityPlacement::Cpu => {
+                            mold_inference::upscaler::ExactUpscalePlacement::Cpu
+                        }
+                        UtilityPlacement::Device { backend, ordinal } => {
+                            mold_inference::upscaler::ExactUpscalePlacement::Device {
+                                backend,
+                                ordinal,
+                            }
+                        }
+                    },
+                ),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "expand")]
+pub(crate) fn prompt_expansion_candidates(
+    state: &AppState,
+    config: &mold_core::Config,
+    expand_model: Option<&str>,
+) -> Result<Vec<UtilityExecutionPlan>, String> {
+    let artifacts = mold_inference::expand::resolve_local_expand_artifacts(config, expand_model)
+        .map_err(|error| error.to_string())?;
+    let placements = std::iter::once(UtilityPlacement::Cpu).chain(
+        state
+            .gpu_pool
+            .schedulable_workers()
+            .into_iter()
+            .map(|worker| UtilityPlacement::Device {
+                backend: worker.gpu.backend,
+                ordinal: worker.gpu.ordinal,
+            }),
+    );
+    Ok(placements
+        .map(|placement| {
+            UtilityExecutionPlan::PromptExpansion(
+                mold_inference::expand::resolve_expand_execution_plan_from_artifacts(
+                    artifacts.clone(),
+                    match placement {
+                        UtilityPlacement::Cpu => mold_inference::expand::ExactExpandPlacement::Cpu,
+                        UtilityPlacement::Device { backend, ordinal } => {
+                            mold_inference::expand::ExactExpandPlacement::Device {
+                                backend,
+                                ordinal,
+                            }
+                        }
+                    },
+                ),
+            )
+        })
+        .collect())
+}
+
+pub(crate) fn upscale_candidates(
+    state: &AppState,
+    model_name: &str,
+    weights_path: &std::path::Path,
+) -> Result<Vec<UtilityExecutionPlan>, String> {
+    let base = mold_inference::upscaler::resolve_upscale_execution_plan(
+        model_name,
+        weights_path,
+        mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+    )
+    .map_err(|error| error.to_string())?;
+    let placements = std::iter::once(UtilityPlacement::Cpu).chain(
+        state
+            .gpu_pool
+            .schedulable_workers()
+            .into_iter()
+            .map(|worker| UtilityPlacement::Device {
+                backend: worker.gpu.backend,
+                ordinal: worker.gpu.ordinal,
+            }),
+    );
+    Ok(upscale_utility_candidates(
+        &base.model_name,
+        &base.weights,
+        placements,
+    ))
 }
 
 pub(crate) fn monotonic_ms() -> u64 {
@@ -5782,6 +6343,10 @@ mod tests {
             active.planned_device_id.as_deref(),
             Some(device_id.as_str())
         );
+        assert_eq!(
+            active.planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::Device)
+        );
         assert_eq!(active.gpu, Some(0));
         assert_eq!(active.lane_order, Some(0));
         assert_eq!(active.activity_phase, mold_core::QueueActivityPhase::Active);
@@ -5790,6 +6355,154 @@ mod tests {
         assert_eq!(
             active.estimate_confidence,
             mold_core::QueueEstimateConfidence::Medium
+        );
+    }
+
+    #[test]
+    fn queue_projection_exposes_cpu_utility_identity_and_activity() {
+        let pool = GpuPool {
+            workers: Vec::new().into(),
+        };
+        let cpu_timing =
+            mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Cpu);
+        let cpu_total = cpu_timing
+            .cold_setup_ms
+            .saturating_add(cpu_timing.predicted_run_ms);
+        let mut active_work = WorkSnapshot::new("cpu-active", 0, Vec::new());
+        active_work.kind = WorkKind::StandaloneUpscale;
+        let cpu_key = owner_estimate_key_for_device(
+            CPU_UTILITY_DEVICE_ID.to_string(),
+            WorkKind::StandaloneUpscale,
+            "real-esrgan-x4plus:fp16",
+            "upscale:auto",
+            "exact-cpu-plan",
+        );
+        assert_eq!(cpu_key.device_class, CPU_UTILITY_DEVICE_ID);
+        assert_eq!(cpu_key.execution_fingerprint, "exact-cpu-plan");
+        assert_eq!(cpu_key.shape_bucket, "upscale:auto");
+
+        let leases = BTreeMap::from([(
+            CPU_UTILITY_DEVICE_ID.to_string(),
+            ActiveLease {
+                work_id: "cpu-active".into(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: true,
+                previous_target: None,
+                estimated_finish_ms: monotonic_ms().saturating_add(cpu_total),
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: cpu_key,
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: active_work,
+                assignment_reason: AssignmentReason::Priority,
+            },
+        )]);
+        let empty_plan = Planner::default()
+            .plan(&PlannerSnapshot::new(
+                1,
+                1,
+                monotonic_ms(),
+                64 << 30,
+                Vec::new(),
+                Vec::new(),
+            ))
+            .unwrap();
+        let active = queue_plan_projection(
+            &PlannerSnapshot::new(1, 1, monotonic_ms(), 64 << 30, Vec::new(), Vec::new()),
+            &empty_plan,
+            &pool,
+            &leases,
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(active.work_items.len(), 1);
+        assert_eq!(
+            active.work_items[0].planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::HostUtility)
+        );
+        assert_eq!(active.work_items[0].planned_device_id, None);
+        assert_eq!(
+            active.work_items[0].activity_phase,
+            mold_core::QueueActivityPhase::Cpu
+        );
+        let active_wire = serde_json::to_value(&active.work_items[0]).unwrap();
+        assert_eq!(active_wire["planned_lane_kind"], "host_utility");
+        assert!(active_wire
+            .as_object()
+            .unwrap()
+            .contains_key("planned_device_id"));
+        assert_eq!(active_wire["planned_device_id"], serde_json::Value::Null);
+        assert_eq!(active.work_items[0].gpu, None);
+        let active_eta = active.work_items[0]
+            .estimated_finish_unix_ms
+            .unwrap()
+            .saturating_sub(active.work_items[0].estimated_start_unix_ms.unwrap());
+        assert!(
+            active_eta >= cpu_total.saturating_sub(100) && active_eta <= cpu_total + 100,
+            "active utility ETA must retain the placement-aware CPU floor"
+        );
+
+        let mut queued_work = WorkSnapshot::new(
+            "cpu-queued",
+            0,
+            vec![
+                CandidatePlacement::new(CPU_UTILITY_DEVICE_ID, "queued-exact-cpu-plan", 1)
+                    .with_timing(
+                        cpu_timing.cold_setup_ms,
+                        cpu_timing.cold_setup_ms,
+                        cpu_timing.predicted_run_ms,
+                    ),
+            ],
+        );
+        queued_work.kind = WorkKind::StandaloneUpscale;
+        let queued_snapshot = PlannerSnapshot::new(
+            2,
+            2,
+            monotonic_ms(),
+            64 << 30,
+            vec![DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu)],
+            vec![queued_work],
+        );
+        let queued_plan = Planner::default().plan(&queued_snapshot).unwrap();
+        let queued = queue_plan_projection(
+            &queued_snapshot,
+            &queued_plan,
+            &pool,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(queued.work_items.len(), 1);
+        assert_eq!(
+            queued.work_items[0].planned_lane_kind,
+            Some(mold_core::QueuePlannedLaneKind::HostUtility)
+        );
+        assert_eq!(queued.work_items[0].planned_device_id, None);
+        assert_eq!(
+            queued.work_items[0].activity_phase,
+            mold_core::QueueActivityPhase::Queued
+        );
+        let queued_wire = serde_json::to_value(&queued.work_items[0]).unwrap();
+        assert_eq!(queued_wire["planned_lane_kind"], "host_utility");
+        assert!(queued_wire
+            .as_object()
+            .unwrap()
+            .contains_key("planned_device_id"));
+        assert_eq!(queued_wire["planned_device_id"], serde_json::Value::Null);
+        assert_eq!(queued.work_items[0].gpu, None);
+        assert_eq!(
+            queued.work_items[0]
+                .estimated_finish_unix_ms
+                .unwrap()
+                .saturating_sub(queued.work_items[0].estimated_start_unix_ms.unwrap()),
+            cpu_total,
+            "queued utility ETA must retain the placement-aware CPU floor"
         );
     }
 
@@ -8300,6 +9013,15 @@ mod tests {
         };
         let gpu_job = gpu_job_from_generation(&state, generation, parent_fence.clone(), None, None);
         let child_id = "parent::post-upscale".to_string();
+        let upscale_fixture = tempfile::tempdir().unwrap();
+        let upscale_weights = upscale_fixture.path().join("upscaler.safetensors");
+        std::fs::write(&upscale_weights, b"fixture").unwrap();
+        let frozen_upscale_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &upscale_weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
         let followup = ScheduledOwnerWork::new(
             child_id.clone(),
             "real-esrgan-x4plus:fp16",
@@ -8322,8 +9044,11 @@ mod tests {
                     height: 64,
                     index: 0,
                 },
+                cancellation: mold_inference::InferenceCancellationToken::default(),
+                execution_plan: None,
             })),
-        );
+        )
+        .with_utility_plans(vec![UtilityExecutionPlan::Upscale(frozen_upscale_plan)]);
         let sampler =
             ScriptedHostMemorySampler::new([memory_reading(128, 112), memory_reading(128, 104)]);
         let mut coordinator = Coordinator::with_preparer_and_sampler(
@@ -8419,6 +9144,264 @@ mod tests {
             crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
             crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_v2_post_upscale_preserves_f0_and_ignores_late_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let output_dir = root.path().join("gallery");
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, b"frozen-before-owner-validation").unwrap();
+        let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+
+        let (worker, _worker_rx) = test_worker(0);
+        let device_id = worker_device_id(&worker);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(1);
+        let queue = QueueHandle::new(ingress_tx);
+        let (slot_tx, _slot_rx) = tokio::sync::oneshot::channel();
+        let (slot_job, _) = fake_generation("held-slot");
+        queue
+            .submit(
+                GenerationJob {
+                    result_tx: slot_tx,
+                    ..slot_job
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let _held_slot = ingress_rx.try_recv().unwrap();
+        let state = AppState::empty(mold_core::Config::default(), queue.clone(), pool, 1);
+        state.job_registry.register("v2-f0-parent", "flux-dev:q4");
+
+        let (mut generation, mut result) = fake_generation("v2-f0-parent");
+        generation.output_dir = Some(output_dir.clone());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        generation.progress_tx = Some(progress_tx);
+        let fence = LeaseFence {
+            work_id: "v2-f0-parent::post-upscale".to_string(),
+            device_id: device_id.clone(),
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        let gpu_job = gpu_job_from_generation(&state, generation, fence.clone(), None, None);
+        let original = mold_core::ImageData {
+            data: vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+        let post = OwnerWork::PostUpscale(Box::new(crate::gpu_pool::PostGenerationUpscaleJob {
+            id: fence.work_id.clone(),
+            generation: Box::new(gpu_job),
+            response: mold_core::GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                generation_time_ms: 1,
+                model: "flux-dev:q4".to_string(),
+                seed_used: 7,
+                gpu: Some(0),
+            },
+            image: original.clone(),
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: Some(plan),
+        }));
+        std::fs::remove_file(&weights).unwrap();
+
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state.clone(),
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        coordinator.leases.insert(
+            device_id.clone(),
+            ActiveLease {
+                work_id: fence.work_id.clone(),
+                owner_epoch: 1,
+                plan_version: 1,
+                worker_generation: 1,
+                accepted: false,
+                previous_target: None,
+                estimated_finish_ms: 1,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                started_at: Instant::now(),
+                estimate_key: EstimateKey::default(),
+                vram_high_water_bytes: None,
+                host_incremental_high_water_bytes: None,
+                fallback_reason: None,
+                projection: WorkSnapshot::new(fence.work_id.clone(), 0, Vec::new()),
+                assignment_reason: AssignmentReason::Priority,
+            },
+        );
+
+        let mut immediate = false;
+        coordinator.handle_worker_event(
+            WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                grant: Box::new(LeaseGrant {
+                    fence,
+                    work: post,
+                    retry: None,
+                }),
+                reason: LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                        "upscale weights disappeared".to_string(),
+                    ),
+                ),
+            },
+            &mut immediate,
+        );
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), &mut result)
+            .await
+            .expect("V2 rejection settles the parent promptly")
+            .expect("result sender remains alive")
+            .expect("completed F0 is not converted into a generation error");
+        assert_eq!(completed.image.data, original.data);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while queue.pending() != 0 || !state.job_registry.snapshot().entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-upscale fallback cleanup settles");
+        assert_eq!(queue.pending(), 0);
+        assert!(state.job_registry.snapshot().entries.is_empty());
+        assert!(coordinator.leases.is_empty());
+        let files_before = std::fs::read_dir(&output_dir).unwrap().count();
+        assert_eq!(files_before, 1, "F0 is published exactly once");
+        let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SseMessage::Progress(mold_core::SseProgressEvent::Info { message })
+                if message.contains("post-generation upscale failed")
+        )));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, SseMessage::Error(_))));
+        assert!(matches!(events.last(), Some(SseMessage::Complete(_))));
+
+        coordinator.handle_worker_event(
+            WorkerEvent::Completed {
+                device_id,
+                ordinal: 0,
+                owner_epoch: 1,
+                worker_generation: 1,
+                successful: false,
+                phase_timings: EstimatePhaseTimings::default(),
+                completion: None,
+            },
+            &mut immediate,
+        );
+        assert_eq!(
+            std::fs::read_dir(&output_dir).unwrap().count(),
+            files_before,
+            "a late completion cannot publish or settle the parent twice"
+        );
+        assert_eq!(queue.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_cpu_owner_rejection_preserves_post_upscale_f0() {
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            Arc::new(GpuPool {
+                workers: Vec::new().into(),
+            }),
+            1,
+        );
+        state
+            .job_registry
+            .register("cpu-owner-parent", "flux-dev:q4");
+        let (mut generation, mut result) = fake_generation("cpu-owner-parent");
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        generation.progress_tx = Some(progress_tx);
+        let child_id = "cpu-owner-parent::post-upscale".to_string();
+        let fence = LeaseFence {
+            work_id: child_id.clone(),
+            device_id: CPU_UTILITY_DEVICE_ID.to_string(),
+            owner_epoch: 1,
+            state_version: 1,
+            plan_version: 1,
+            worker_generation: 1,
+            memory_sample_generation: 1,
+            memory_ledger_sequence: 1,
+        };
+        let gpu_job = gpu_job_from_generation(&state, generation, fence, None, None);
+        let original = mold_core::ImageData {
+            data: vec![1, 2, 3],
+            format: mold_core::OutputFormat::Png,
+            width: 64,
+            height: 64,
+            index: 0,
+        };
+        let work = OwnerWork::PostUpscale(Box::new(crate::gpu_pool::PostGenerationUpscaleJob {
+            id: child_id.clone(),
+            generation: Box::new(gpu_job),
+            response: mold_core::GenerateResponse {
+                images: Vec::new(),
+                video: None,
+                generation_time_ms: 1,
+                model: "flux-dev:q4".to_string(),
+                seed_used: 9,
+                gpu: Some(0),
+            },
+            image: original.clone(),
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: None,
+        }));
+
+        reject_owner_work_preserving_completed_generation(
+            work,
+            "CPU utility lane is unavailable".to_string(),
+        );
+
+        let completed = tokio::time::timeout(Duration::from_secs(2), &mut result)
+            .await
+            .expect("missing CPU owner fallback settles promptly")
+            .expect("result sender remains alive")
+            .expect("missing CPU utility owner cannot discard F0");
+        assert_eq!(completed.image.data, original.data);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.job_registry.snapshot().entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("missing CPU owner cleanup settles");
+        let events = std::iter::from_fn(|| progress_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SseMessage::Progress(mold_core::SseProgressEvent::Info { message })
+                if message.contains("CPU utility lane is unavailable")
+        )));
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, SseMessage::Error(_))));
+        assert!(matches!(events.last(), Some(SseMessage::Complete(_))));
     }
 
     #[tokio::test]
@@ -9244,7 +10227,7 @@ mod tests {
         });
         let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
         let state = AppState::empty(config.clone(), QueueHandle::new(ingress_tx), pool, 1);
-        let coordinator = Coordinator::with_preparer_and_memory(
+        let mut coordinator = Coordinator::with_preparer_and_memory(
             state,
             Arc::new(ImmediatePreparer),
             ample_memory(),
@@ -9260,6 +10243,42 @@ mod tests {
         )
         .await
         .unwrap();
+        let device_facts = vec![crate::execution_plan::DeviceFact {
+            id: stable_id.clone(),
+            ordinal: 0,
+            available_vram_bytes: 24 << 30,
+        }];
+        let execution = crate::execution_plan::resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &device_facts,
+            false,
+            Some(&prepared),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let worker = coordinator.state.gpu_pool.worker_by_ordinal(0).unwrap();
+        coordinator.observe_estimate(
+            generation_estimate_key(
+                &coordinator.state,
+                &worker,
+                &request,
+                &execution.execution_fingerprint,
+            ),
+            EstimateObservation {
+                total_ms: Some(100),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(10),
+                    warm_reload_ms: Some(5),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
         let before = (
             coordinator.state_version,
             coordinator.plan_version,
@@ -9570,5 +10589,610 @@ mod tests {
         assert_eq!(dispatch_retry_delay_ms(2), 50);
         assert_eq!(dispatch_retry_delay_ms(3), 100);
         assert_eq!(dispatch_retry_delay_ms(u8::MAX), DISPATCH_RETRY_MAX_MS);
+    }
+
+    fn utility_state_with_workers(count: usize) -> AppState {
+        let workers = (0..count)
+            .map(|ordinal| test_worker(ordinal).0)
+            .collect::<Vec<_>>();
+        let pool = Arc::new(GpuPool {
+            workers: workers.into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(count.max(1));
+        AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            count.max(1),
+        )
+    }
+
+    fn utility_state_with_backend(backend: mold_core::GpuBackend) -> AppState {
+        let (mut worker, _rx) = test_worker(0);
+        {
+            let worker = Arc::get_mut(&mut worker).expect("fresh test worker");
+            worker.gpu.backend = backend;
+            worker.gpu.stable_id = Some(match backend {
+                mold_core::GpuBackend::Cuda => "cuda:utility-stable".to_string(),
+                mold_core::GpuBackend::Metal => "metal:utility-stable".to_string(),
+            });
+        }
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        )
+    }
+
+    #[test]
+    fn exact_upscale_candidates_are_deterministic_for_1_2_8_and_64_gpus() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+
+        for count in [1, 2, 8, 64] {
+            let state = utility_state_with_workers(count);
+            let first = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+            let second = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+
+            assert_eq!(first, second, "candidate order drifted at {count} GPUs");
+            assert_eq!(first.len(), count + 1);
+            assert_eq!(first[0].placement(), UtilityPlacement::Cpu);
+            for (ordinal, plan) in first.iter().skip(1).enumerate() {
+                assert_eq!(
+                    plan.placement(),
+                    UtilityPlacement::Device {
+                        backend: mold_core::GpuBackend::Cuda,
+                        ordinal,
+                    }
+                );
+            }
+            assert_eq!(
+                first
+                    .iter()
+                    .map(UtilityExecutionPlan::execution_fingerprint)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                count + 1,
+                "every exact backend/ordinal plan needs a distinct fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn utility_preview_candidates_recover_the_identical_execution_plan() {
+        let state = utility_state_with_workers(2);
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let work = OwnerWork::StandaloneUpscale(Box::new(crate::gpu_pool::StandaloneUpscaleJob {
+            id: "preview-equality".to_string(),
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            weights_path: weights,
+            request: mold_core::UpscaleRequest {
+                model: "real-esrgan-x4plus:fp16".to_string(),
+                image: vec![1],
+                output_format: mold_core::OutputFormat::Png,
+                tile_size: None,
+                metadata: None,
+            },
+            progress_tx: None,
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: None,
+            result_tx,
+        }));
+        let pending = PendingOwnerWork {
+            model_fingerprint: "unused-estimate".to_string(),
+            estimated_vram_bytes: 1,
+            estimated_host_ram_bytes: 1,
+            hard_ordinal: None,
+            priority: PriorityClass::User,
+            preferred_ordinal: None,
+            candidate_plans: Vec::new(),
+            queue_rank: 0,
+            ready_at_ms: 0,
+            bypass_count: 0,
+            warm_wait_started_ms: None,
+            retry_not_before_ms: None,
+            utility_plans: plans.clone(),
+            work,
+        };
+        let coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+
+        for plan in plans {
+            let device_id = match plan.placement() {
+                UtilityPlacement::Cpu => CPU_UTILITY_DEVICE_ID.to_string(),
+                UtilityPlacement::Device { ordinal, .. } => worker_device_id(
+                    &coordinator
+                        .state
+                        .gpu_pool
+                        .worker_by_ordinal(ordinal)
+                        .unwrap(),
+                ),
+            };
+            let placement = CandidatePlacement::new(
+                DeviceId::new(device_id.clone()),
+                ExecutionFingerprint::new(plan.execution_fingerprint()),
+                plan.predicted_host_ram_bytes(),
+            )
+            .with_vram(plan.predicted_vram_bytes());
+            assert_eq!(
+                coordinator.utility_plan_for_lease(&pending, &device_id, &placement),
+                Some(plan),
+                "the execution transport must consume the exact preview candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn static_timing_floor_uses_explicit_runtime_instead_of_total_subtraction() {
+        let estimate = ResolvedEstimate {
+            total_ms: 1,
+            cold_setup_ms: 1,
+            warm_setup_ms: 1,
+            predicted_run_ms: 1,
+            vram_bytes: 1,
+            host_bytes: 1,
+            confidence: mold_scheduler::EstimateConfidence::Low,
+            learned: false,
+        };
+        let static_estimate = StaticEstimate {
+            total_ms: 9_999,
+            cold_setup_ms: 900,
+            warm_setup_ms: 90,
+            predicted_run_ms: 1_234,
+            vram_bytes: 1,
+            host_bytes: 1,
+        };
+
+        assert_eq!(
+            timing_with_static_floors(estimate, static_estimate),
+            (900, 90, 1_234)
+        );
+    }
+
+    #[test]
+    fn learned_utility_observation_refines_timing_without_weakening_exact_memory() {
+        let state = utility_state_with_workers(1);
+        let worker = state.gpu_pool.worker_by_ordinal(0).unwrap();
+        let device_id = worker_device_id(&worker);
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+        let plan = plans
+            .iter()
+            .find(|plan| {
+                matches!(
+                    plan.placement(),
+                    UtilityPlacement::Device { ordinal: 0, .. }
+                )
+            })
+            .cloned()
+            .unwrap();
+        let cpu_plan = plans
+            .iter()
+            .find(|plan| matches!(plan.placement(), UtilityPlacement::Cpu))
+            .cloned()
+            .unwrap();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let work = OwnerWork::StandaloneUpscale(Box::new(crate::gpu_pool::StandaloneUpscaleJob {
+            id: "exact-memory".to_string(),
+            model: "real-esrgan-x4plus:fp16".to_string(),
+            weights_path: weights,
+            request: mold_core::UpscaleRequest {
+                model: "real-esrgan-x4plus:fp16".to_string(),
+                image: vec![1],
+                output_format: mold_core::OutputFormat::Png,
+                tile_size: None,
+                metadata: None,
+            },
+            progress_tx: None,
+            cancellation: mold_inference::InferenceCancellationToken::default(),
+            execution_plan: None,
+            result_tx,
+        }));
+        let shape_bucket = work.scheduling_shape_bucket();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        let estimate_key = owner_estimate_key_for_device(
+            device_class(&worker),
+            WorkKind::StandaloneUpscale,
+            "real-esrgan-x4plus:fp16",
+            &shape_bucket,
+            plan.execution_fingerprint(),
+        );
+        coordinator.observe_estimate(
+            estimate_key,
+            EstimateObservation {
+                total_ms: Some(100),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(10),
+                    ..Default::default()
+                },
+                vram_high_water_bytes: Some(1),
+                host_incremental_high_water_bytes: Some(1),
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
+        let cpu_low_shape = "cpu-low";
+        coordinator.observe_estimate(
+            owner_estimate_key_for_device(
+                CPU_UTILITY_DEVICE_ID.to_string(),
+                WorkKind::StandaloneUpscale,
+                "real-esrgan-x4plus:fp16",
+                cpu_low_shape,
+                cpu_plan.execution_fingerprint(),
+            ),
+            EstimateObservation {
+                total_ms: Some(100),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(10),
+                    warm_reload_ms: Some(10),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
+        let cpu_high_shape = "cpu-high";
+        coordinator.observe_estimate(
+            owner_estimate_key_for_device(
+                CPU_UTILITY_DEVICE_ID.to_string(),
+                WorkKind::StandaloneUpscale,
+                "real-esrgan-x4plus:fp16",
+                cpu_high_shape,
+                cpu_plan.execution_fingerprint(),
+            ),
+            EstimateObservation {
+                total_ms: Some(60_000),
+                phases: EstimatePhaseTimings {
+                    cold_load_ms: Some(12_000),
+                    ..Default::default()
+                },
+                outcome: EstimateOutcome::Success,
+                observed_at_unix_s: unix_seconds(),
+                ..Default::default()
+            },
+        );
+
+        let snapshot = coordinator.owner_work_snapshot(
+            OwnerWorkSchedulingView {
+                id: "exact-memory",
+                model_fingerprint: "real-esrgan-x4plus:fp16",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 1,
+                hard_ordinal: None,
+                priority: PriorityClass::User,
+                queue_rank: 0,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                kind: WorkKind::StandaloneUpscale,
+                shape_bucket: &shape_bucket,
+                preferred_ordinal: None,
+                resolved_plans: &[],
+                requires_exact_plan: false,
+            },
+            &plans,
+            &[DeviceSnapshot::idle(device_id.clone(), 24 << 30)],
+        );
+        let placement = snapshot
+            .candidate_placements
+            .iter()
+            .find(|candidate| candidate.device_id.as_str() == device_id)
+            .unwrap();
+        assert_eq!(placement.predicted_vram_bytes, plan.predicted_vram_bytes());
+        assert_eq!(
+            placement.incremental_host_ram_bytes,
+            plan.predicted_host_ram_bytes()
+        );
+        let static_timing = mold_scheduler::static_timing_for(WorkKind::StandaloneUpscale);
+        assert_eq!(placement.cold_setup_ms, static_timing.cold_setup_ms);
+        assert_eq!(placement.warm_setup_ms, static_timing.cold_setup_ms);
+        assert_eq!(placement.predicted_run_ms, static_timing.predicted_run_ms);
+
+        let cpu_devices = [
+            DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu),
+            DeviceSnapshot::idle(device_id, 24 << 30),
+        ];
+        let cpu_low = coordinator.owner_work_snapshot(
+            OwnerWorkSchedulingView {
+                id: "cpu-low",
+                model_fingerprint: "real-esrgan-x4plus:fp16",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 1,
+                hard_ordinal: None,
+                priority: PriorityClass::User,
+                queue_rank: 0,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                kind: WorkKind::StandaloneUpscale,
+                shape_bucket: cpu_low_shape,
+                preferred_ordinal: None,
+                resolved_plans: &[],
+                requires_exact_plan: false,
+            },
+            &plans,
+            &cpu_devices,
+        );
+        let cpu_low = cpu_low
+            .candidate_placements
+            .iter()
+            .find(|candidate| candidate.device_id.as_str() == CPU_UTILITY_DEVICE_ID)
+            .unwrap();
+        let cpu_floor =
+            mold_scheduler::static_timing_for_placement(WorkKind::StandaloneUpscale, Backend::Cpu);
+        assert_eq!(cpu_low.cold_setup_ms, cpu_floor.cold_setup_ms);
+        assert_eq!(cpu_low.warm_setup_ms, cpu_floor.cold_setup_ms);
+        assert_eq!(cpu_low.predicted_run_ms, cpu_floor.predicted_run_ms);
+
+        let cpu_high = coordinator.owner_work_snapshot(
+            OwnerWorkSchedulingView {
+                id: "cpu-high",
+                model_fingerprint: "real-esrgan-x4plus:fp16",
+                estimated_vram_bytes: 1,
+                estimated_host_ram_bytes: 1,
+                hard_ordinal: None,
+                priority: PriorityClass::User,
+                queue_rank: 0,
+                ready_at_ms: 0,
+                bypass_count: 0,
+                warm_wait_started_ms: None,
+                kind: WorkKind::StandaloneUpscale,
+                shape_bucket: cpu_high_shape,
+                preferred_ordinal: None,
+                resolved_plans: &[],
+                requires_exact_plan: false,
+            },
+            &plans,
+            &cpu_devices,
+        );
+        let cpu_high = cpu_high
+            .candidate_placements
+            .iter()
+            .find(|candidate| candidate.device_id.as_str() == CPU_UTILITY_DEVICE_ID)
+            .unwrap();
+        assert_eq!(cpu_high.cold_setup_ms, 12_000);
+        assert_eq!(cpu_high.warm_setup_ms, 12_000);
+        assert_eq!(cpu_high.predicted_run_ms, 48_000);
+        assert_eq!(
+            cpu_high.predicted_vram_bytes,
+            cpu_plan.predicted_vram_bytes()
+        );
+        assert_eq!(
+            cpu_high.incremental_host_ram_bytes,
+            cpu_plan.predicted_host_ram_bytes()
+        );
+    }
+
+    #[test]
+    fn exact_utility_planning_prefers_idle_accelerators_and_keeps_cpu_work_conserving() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+
+        for (gpu_backend, scheduler_backend) in [
+            (mold_core::GpuBackend::Cuda, Backend::Cuda),
+            (mold_core::GpuBackend::Metal, Backend::Metal),
+        ] {
+            let state = utility_state_with_backend(gpu_backend);
+            let worker = state.gpu_pool.worker_by_ordinal(0).unwrap();
+            let device_id = worker_device_id(&worker);
+            let plans = upscale_candidates(&state, "real-esrgan-x4plus:fp16", &weights).unwrap();
+            let coordinator = Coordinator::with_preparer_and_memory(
+                state,
+                Arc::new(ImmediatePreparer),
+                ample_memory(),
+            );
+            let devices = vec![
+                DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu),
+                DeviceSnapshot::idle(device_id.clone(), 24 << 30).with_backend(scheduler_backend),
+            ];
+            let work = coordinator.owner_work_snapshot(
+                OwnerWorkSchedulingView {
+                    id: "utility-placement",
+                    model_fingerprint: "real-esrgan-x4plus:fp16",
+                    estimated_vram_bytes: 1,
+                    estimated_host_ram_bytes: 1,
+                    hard_ordinal: None,
+                    priority: PriorityClass::User,
+                    queue_rank: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    kind: WorkKind::StandaloneUpscale,
+                    shape_bucket: "fixture",
+                    preferred_ordinal: None,
+                    resolved_plans: &[],
+                    requires_exact_plan: false,
+                },
+                &plans,
+                &devices,
+            );
+            let idle = Planner::default()
+                .plan(&PlannerSnapshot {
+                    state_version: 1,
+                    next_plan_version: 1,
+                    now_ms: 1_000,
+                    next_replan_at_ms: None,
+                    host_memory: HostMemorySnapshot {
+                        headroom_bytes: 64 << 30,
+                        sample_generation: 1,
+                        ledger_sequence: 1,
+                    },
+                    devices: devices.clone(),
+                    work: vec![work.clone()],
+                })
+                .unwrap();
+            assert_eq!(idle.immediate_leases[0].device_id.as_str(), device_id);
+
+            let busy_devices = vec![
+                devices[0].clone(),
+                DeviceSnapshot::busy(device_id.clone(), 24 << 30, 120_000)
+                    .with_backend(scheduler_backend),
+            ];
+            let busy_work = coordinator.owner_work_snapshot(
+                OwnerWorkSchedulingView {
+                    id: "utility-placement",
+                    model_fingerprint: "real-esrgan-x4plus:fp16",
+                    estimated_vram_bytes: 1,
+                    estimated_host_ram_bytes: 1,
+                    hard_ordinal: None,
+                    priority: PriorityClass::User,
+                    queue_rank: 0,
+                    ready_at_ms: 0,
+                    bypass_count: 0,
+                    warm_wait_started_ms: None,
+                    kind: WorkKind::StandaloneUpscale,
+                    shape_bucket: "fixture",
+                    preferred_ordinal: None,
+                    resolved_plans: &[],
+                    requires_exact_plan: false,
+                },
+                &plans,
+                &busy_devices,
+            );
+            let busy = Planner::default()
+                .plan(&PlannerSnapshot {
+                    state_version: 2,
+                    next_plan_version: 2,
+                    now_ms: 1_000,
+                    next_replan_at_ms: None,
+                    host_memory: HostMemorySnapshot {
+                        headroom_bytes: 64 << 30,
+                        sample_generation: 2,
+                        ledger_sequence: 2,
+                    },
+                    devices: busy_devices,
+                    work: vec![busy_work],
+                })
+                .unwrap();
+            assert_eq!(
+                busy.immediate_leases[0].device_id.as_str(),
+                CPU_UTILITY_DEVICE_ID
+            );
+            assert!(busy.immediate_leases[0].estimated_finish_ms < 120_000);
+        }
+    }
+
+    #[test]
+    fn utility_aggregate_ram_admission_and_missing_sample_fail_closed() {
+        let devices = vec![
+            DeviceSnapshot::idle(CPU_UTILITY_DEVICE_ID, u64::MAX).with_backend(Backend::Cpu),
+            DeviceSnapshot::idle("cuda:1", 24 << 30),
+        ];
+        let work = (0..2)
+            .map(|index| {
+                WorkSnapshot::new(
+                    WorkId::new(format!("utility-{index}")),
+                    index,
+                    vec![
+                        CandidatePlacement::new(
+                            DeviceId::new(CPU_UTILITY_DEVICE_ID),
+                            ExecutionFingerprint::new(format!("cpu-{index}")),
+                            8 << 30,
+                        ),
+                        CandidatePlacement::new(
+                            DeviceId::new("cuda:1"),
+                            ExecutionFingerprint::new(format!("gpu-{index}")),
+                            8 << 30,
+                        )
+                        .with_vram(1),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let planner = Planner::default();
+        let admitted = planner
+            .plan(&PlannerSnapshot {
+                state_version: 1,
+                next_plan_version: 1,
+                now_ms: 0,
+                next_replan_at_ms: None,
+                host_memory: HostMemorySnapshot {
+                    headroom_bytes: 12 << 30,
+                    sample_generation: 1,
+                    ledger_sequence: 1,
+                },
+                devices: devices.clone(),
+                work: work.clone(),
+            })
+            .unwrap();
+        assert_eq!(admitted.immediate_leases.len(), 1);
+        assert_eq!(admitted.reservation.total_host_ram_bytes, 8 << 30);
+
+        let missing_sample = planner
+            .plan(&PlannerSnapshot {
+                state_version: 1,
+                next_plan_version: 2,
+                now_ms: 0,
+                next_replan_at_ms: None,
+                host_memory: HostMemorySnapshot {
+                    headroom_bytes: 0,
+                    sample_generation: 0,
+                    ledger_sequence: 0,
+                },
+                devices,
+                work,
+            })
+            .unwrap();
+        assert!(missing_sample.immediate_leases.is_empty());
+        assert!(missing_sample
+            .blocked
+            .iter()
+            .all(|blocked| blocked.reason == BlockedReason::InsufficientHostRam));
+    }
+
+    #[cfg(feature = "expand")]
+    #[test]
+    fn parent_owned_expansion_rejection_cancels_only_its_frozen_token() {
+        let token = mold_inference::InferenceCancellationToken::default();
+        let sibling = mold_inference::InferenceCancellationToken::default();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let work = OwnerWork::PromptExpansion(Box::new(crate::gpu_pool::PromptExpansionJob {
+            id: "parent::prompt-expansion".to_string(),
+            parent_id: "parent".to_string(),
+            config: mold_core::Config::default(),
+            settings: mold_core::ExpandSettings::default(),
+            prompt: "frozen prompt".to_string(),
+            expand_config: mold_core::ExpandConfig::default(),
+            cancellation: token.clone(),
+            execution_plan: None,
+            result_tx,
+        }));
+        match &work {
+            OwnerWork::PromptExpansion(job) => {
+                assert_eq!(job.parent_id, "parent");
+                assert_eq!(job.prompt, "frozen prompt");
+            }
+            _ => unreachable!(),
+        }
+
+        work.reject("parent cancelled".to_string());
+
+        assert!(token.is_cancelled());
+        assert!(
+            !sibling.is_cancelled(),
+            "attempt cancellation must not leak to a sibling or retry"
+        );
     }
 }

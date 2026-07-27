@@ -5,7 +5,8 @@
 
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::device::create_device;
@@ -17,6 +18,236 @@ use super::arch::{detect_architecture, UpscalerArch};
 use super::rrdbnet::RRDBNet;
 use super::srvggnet::SRVGGNetCompact;
 use super::tiling::{upscale_with_tiling, TilingConfig};
+
+pub const UPSCALE_ACTIVATION_HEADROOM: u64 = 2 << 30;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedUpscaleArtifact {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    /// Metadata identity/stat fence, not a content digest.
+    pub identity_fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactUpscalePlacement {
+    Cpu,
+    Device {
+        backend: mold_core::GpuBackend,
+        ordinal: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedUpscaleExecutionPlan {
+    pub model_name: String,
+    pub weights: ResolvedUpscaleArtifact,
+    pub placement: ExactUpscalePlacement,
+    pub predicted_vram_peak_bytes: u64,
+    pub predicted_host_increment_bytes: u64,
+    pub execution_fingerprint: String,
+}
+
+impl ResolvedUpscaleExecutionPlan {
+    pub fn validate(&self) -> Result<()> {
+        let current = freeze_upscale_artifact(&self.weights.path)
+            .map_err(|error| anyhow::anyhow!("upscaler artifact changed: {error}"))?;
+        if current != self.weights {
+            bail!("upscaler artifact changed after planning");
+        }
+        let (predicted_vram_peak_bytes, predicted_host_increment_bytes) =
+            upscale_plan_memory_floors(&self.weights, self.placement);
+        let execution_fingerprint = upscale_execution_fingerprint(
+            &self.model_name,
+            &self.weights,
+            self.placement,
+            predicted_vram_peak_bytes,
+            predicted_host_increment_bytes,
+        );
+        if self.predicted_vram_peak_bytes != predicted_vram_peak_bytes
+            || self.predicted_host_increment_bytes != predicted_host_increment_bytes
+            || self.execution_fingerprint != execution_fingerprint
+        {
+            bail!("upscaler execution plan changed after resolution");
+        }
+        Ok(())
+    }
+}
+
+fn upscale_artifact_identity(path: &Path, size_bytes: u64) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    let mut hash = Sha256::new();
+    hash.update(path.as_os_str().as_encoded_bytes());
+    hash.update(size_bytes.to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hash.update(metadata.dev().to_le_bytes());
+        hash.update(metadata.ino().to_le_bytes());
+        hash.update(metadata.ctime().to_le_bytes());
+        hash.update(metadata.ctime_nsec().to_le_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        hash.update(metadata.creation_time().to_le_bytes());
+        hash.update(metadata.last_write_time().to_le_bytes());
+        hash.update(metadata.file_size().to_le_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        hash.update(modified.to_le_bytes());
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn freeze_upscale_artifact(path: &Path) -> Result<ResolvedUpscaleArtifact> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|error| anyhow::anyhow!("could not resolve {}: {error}", path.display()))?;
+    let size_bytes = std::fs::metadata(&path)?.len();
+    Ok(ResolvedUpscaleArtifact {
+        identity_fingerprint: upscale_artifact_identity(&path, size_bytes)?,
+        path,
+        size_bytes,
+    })
+}
+
+fn upscale_plan_memory_floors(
+    weights: &ResolvedUpscaleArtifact,
+    placement: ExactUpscalePlacement,
+) -> (u64, u64) {
+    match placement {
+        ExactUpscalePlacement::Cpu => (
+            0,
+            weights
+                .size_bytes
+                .saturating_add(UPSCALE_ACTIVATION_HEADROOM),
+        ),
+        ExactUpscalePlacement::Device {
+            backend: mold_core::GpuBackend::Metal,
+            ..
+        } => (
+            weights
+                .size_bytes
+                .saturating_add(UPSCALE_ACTIVATION_HEADROOM),
+            weights
+                .size_bytes
+                .saturating_add(UPSCALE_ACTIVATION_HEADROOM),
+        ),
+        ExactUpscalePlacement::Device {
+            backend: mold_core::GpuBackend::Cuda,
+            ..
+        } => (
+            weights
+                .size_bytes
+                .saturating_add(UPSCALE_ACTIVATION_HEADROOM),
+            weights.size_bytes,
+        ),
+    }
+}
+
+fn upscale_execution_fingerprint(
+    model_name: &str,
+    weights: &ResolvedUpscaleArtifact,
+    placement: ExactUpscalePlacement,
+    predicted_vram_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"mold.upscale.execution.v1");
+    hash.update(model_name.as_bytes());
+    hash.update(weights.path.as_os_str().as_encoded_bytes());
+    hash.update(weights.size_bytes.to_le_bytes());
+    hash.update(weights.identity_fingerprint.as_bytes());
+    match placement {
+        ExactUpscalePlacement::Cpu => hash.update(b"cpu"),
+        ExactUpscalePlacement::Device { backend, ordinal } => {
+            hash.update(match backend {
+                mold_core::GpuBackend::Cuda => b"cuda".as_slice(),
+                mold_core::GpuBackend::Metal => b"metal".as_slice(),
+            });
+            hash.update(ordinal.to_le_bytes());
+        }
+    }
+    hash.update(predicted_vram_peak_bytes.to_le_bytes());
+    hash.update(predicted_host_increment_bytes.to_le_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+pub fn resolve_upscale_execution_plan(
+    model_name: impl Into<String>,
+    weights_path: &Path,
+    placement: ExactUpscalePlacement,
+) -> Result<ResolvedUpscaleExecutionPlan> {
+    let model_name = model_name.into();
+    let weights = freeze_upscale_artifact(weights_path)?;
+    Ok(resolve_upscale_execution_plan_from_artifact(
+        model_name, weights, placement,
+    ))
+}
+
+pub fn resolve_upscale_execution_plan_from_artifact(
+    model_name: impl Into<String>,
+    weights: ResolvedUpscaleArtifact,
+    placement: ExactUpscalePlacement,
+) -> ResolvedUpscaleExecutionPlan {
+    let model_name = model_name.into();
+    let (predicted_vram_peak_bytes, predicted_host_increment_bytes) =
+        upscale_plan_memory_floors(&weights, placement);
+    let execution_fingerprint = upscale_execution_fingerprint(
+        &model_name,
+        &weights,
+        placement,
+        predicted_vram_peak_bytes,
+        predicted_host_increment_bytes,
+    );
+    ResolvedUpscaleExecutionPlan {
+        model_name,
+        weights,
+        placement,
+        predicted_vram_peak_bytes,
+        predicted_host_increment_bytes,
+        execution_fingerprint,
+    }
+}
+
+fn create_exact_upscale_device_with<F>(
+    plan: &ResolvedUpscaleExecutionPlan,
+    progress: &ProgressReporter,
+    gpu_factory: F,
+) -> Result<Device>
+where
+    F: FnOnce(mold_core::GpuBackend, usize) -> Result<Device>,
+{
+    plan.validate()?;
+    progress.checkpoint()?;
+    match plan.placement {
+        ExactUpscalePlacement::Cpu => {
+            progress.info("Using exact CPU placement for upscaling");
+            crate::device::preflight_memory_check(
+                "Upscaler",
+                plan.weights.size_bytes,
+                UPSCALE_ACTIVATION_HEADROOM,
+            )?;
+            Ok(Device::Cpu)
+        }
+        ExactUpscalePlacement::Device { backend, ordinal } => {
+            if backend == mold_core::GpuBackend::Metal {
+                crate::device::preflight_memory_check(
+                    "Upscaler",
+                    plan.weights.size_bytes,
+                    UPSCALE_ACTIVATION_HEADROOM,
+                )?;
+            }
+            gpu_factory(backend, ordinal)
+        }
+    }
+}
 
 /// Trait for upscaling inference backends.
 pub trait UpscaleEngine: Send + Sync {
@@ -107,6 +338,7 @@ pub struct UpscalerEngine {
     /// `Ltx2Engine::gpu_ordinal` — hardcoding `0` would corrupt a sibling
     /// GPU's CUDA context on unload.
     gpu_ordinal: usize,
+    exact_plan: Option<ResolvedUpscaleExecutionPlan>,
 }
 
 impl UpscalerEngine {
@@ -123,6 +355,26 @@ impl UpscalerEngine {
             progress: ProgressReporter::default(),
             load_strategy,
             gpu_ordinal,
+            exact_plan: None,
+        }
+    }
+
+    pub fn from_resolved_plan(
+        plan: ResolvedUpscaleExecutionPlan,
+        load_strategy: LoadStrategy,
+    ) -> Self {
+        let gpu_ordinal = match plan.placement {
+            ExactUpscalePlacement::Cpu => 0,
+            ExactUpscalePlacement::Device { ordinal, .. } => ordinal,
+        };
+        Self {
+            name: plan.model_name.clone(),
+            weights_path: plan.weights.path.clone(),
+            loaded: None,
+            progress: ProgressReporter::default(),
+            load_strategy,
+            gpu_ordinal,
+            exact_plan: Some(plan),
         }
     }
 
@@ -278,7 +530,13 @@ impl UpscaleEngine for UpscalerEngine {
         let load_start = Instant::now();
         self.progress.stage_start("Loading upscaler model");
 
-        let device = create_device(self.gpu_ordinal, &self.progress)?;
+        let device = if let Some(plan) = &self.exact_plan {
+            create_exact_upscale_device_with(plan, &self.progress, |backend, ordinal| {
+                crate::device::create_exact_gpu_device(backend, ordinal, &self.progress)
+            })?
+        } else {
+            create_device(self.gpu_ordinal, &self.progress)?
+        };
 
         // Determine dtype: prefer F16 on GPU, F32 on CPU
         let dtype = if matches!(device, Device::Cpu) {
@@ -347,15 +605,22 @@ impl UpscaleEngine for UpscalerEngine {
             scale,
         });
 
-        self.progress
-            .stage_done("Loading upscaler model", load_start.elapsed());
+        self.progress.phase_done(
+            crate::ProgressPhase::ModelLoad,
+            "Loading upscaler model",
+            load_start.elapsed(),
+        );
         Ok(())
     }
 
     fn unload(&mut self) {
         if self.loaded.is_some() {
             self.loaded = None;
-            let free_after_drop = crate::device::post_drop_free_vram_bytes(self.gpu_ordinal);
+            let free_after_drop = self
+                .exact_plan
+                .as_ref()
+                .is_none_or(|plan| !matches!(plan.placement, ExactUpscalePlacement::Cpu))
+                .then(|| crate::device::post_drop_free_vram_bytes(self.gpu_ordinal));
             tracing::info!(
                 free_vram_bytes = ?free_after_drop,
                 "Upscaler model unloaded: {}",
@@ -404,6 +669,17 @@ pub fn create_upscale_engine(
         weights_path,
         load_strategy,
         gpu_ordinal,
+    )))
+}
+
+pub fn create_upscale_engine_from_resolved_plan(
+    plan: ResolvedUpscaleExecutionPlan,
+    load_strategy: LoadStrategy,
+) -> Result<Box<dyn UpscaleEngine>> {
+    plan.validate()?;
+    Ok(Box::new(UpscalerEngine::from_resolved_plan(
+        plan,
+        load_strategy,
     )))
 }
 
@@ -488,5 +764,112 @@ mod tests {
             cleared.load(Ordering::SeqCst),
             "an unwinding upscale must clear its attempt token before engine reuse"
         );
+    }
+
+    #[test]
+    fn exact_upscale_plan_freezes_artifact_placement_and_memory() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+
+        let cpu = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        let gpu = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 7,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cpu.predicted_vram_peak_bytes, 0);
+        assert!(cpu.predicted_host_increment_bytes > gpu.predicted_host_increment_bytes);
+        assert_eq!(
+            gpu.predicted_vram_peak_bytes,
+            4096 + UPSCALE_ACTIVATION_HEADROOM
+        );
+        assert_ne!(cpu.execution_fingerprint, gpu.execution_fingerprint);
+        cpu.validate().unwrap();
+        gpu.validate().unwrap();
+    }
+
+    #[test]
+    fn exact_upscale_plan_rejects_artifact_drift_before_device_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let plan = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 3,
+            },
+        )
+        .unwrap();
+        std::fs::write(&weights, b"replacement").unwrap();
+
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let error =
+            create_exact_upscale_device_with(&plan, &ProgressReporter::default(), |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Device::Cpu)
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("artifact changed"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn exact_cpu_upscale_never_touches_gpu_and_exact_gpu_never_falls_back() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, vec![0_u8; 4096]).unwrap();
+        let cpu = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        let gpu = resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            ExactUpscalePlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 5,
+            },
+        )
+        .unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let device =
+            create_exact_upscale_device_with(&cpu, &ProgressReporter::default(), |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("CPU plan touched a GPU")
+            })
+            .unwrap();
+        assert!(device.is_cpu());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let error = create_exact_upscale_device_with(
+            &gpu,
+            &ProgressReporter::default(),
+            |backend, ordinal| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("exact {backend:?}:{ordinal} unavailable")
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("exact Cuda:5 unavailable"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -180,11 +180,28 @@ fn format_vram(used: Option<u64>, total: Option<u64>) -> String {
 }
 
 fn format_work_item(item: &QueueWorkItem) -> String {
-    let lane = item
-        .planned_device_id
-        .as_deref()
-        .map(|device| format!("{device}/{}", item.lane_order.unwrap_or_default()))
-        .unwrap_or_else(|| "unassigned".into());
+    let order = item.lane_order.unwrap_or_default();
+    let lane = match item.planned_lane_kind.as_ref() {
+        Some(mold_core::QueuePlannedLaneKind::HostUtility) => {
+            format!("host-utility/{order}")
+        }
+        Some(mold_core::QueuePlannedLaneKind::Device) => item
+            .planned_device_id
+            .as_deref()
+            .map(|device| format!("{device}/{order}"))
+            .unwrap_or_else(|| format!("device/{order}")),
+        Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => format!("assigned/{order}"),
+        None if item.is_host_utility_lane()
+            || item.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+        {
+            format!("host-utility/{order}")
+        }
+        None => item
+            .planned_device_id
+            .as_deref()
+            .map(|device| format!("{device}/{order}"))
+            .unwrap_or_else(|| "unassigned".into()),
+    };
     let blocked = item
         .blocked_reason
         .as_ref()
@@ -228,5 +245,60 @@ mod tests {
     fn unknown_vram_is_an_em_dash_instead_of_fake_zero() {
         assert_eq!(format_vram(None, Some(24 << 30)), "—");
         assert_eq!(format_vram(Some(0), None), "—");
+    }
+
+    #[test]
+    fn host_utility_lane_never_formats_an_internal_device_id() {
+        for planned_lane_kind in [Some(mold_core::QueuePlannedLaneKind::HostUtility), None] {
+            let item = QueueWorkItem {
+                work_id: "upscale".into(),
+                activity_phase: mold_core::QueueActivityPhase::Cpu,
+                planned_lane_kind,
+                planned_device_id: Some("internal-id-must-not-render".into()),
+                lane_order: Some(0),
+                ..Default::default()
+            };
+            let formatted = format_work_item(&item);
+            assert!(formatted.contains("host-utility/0"));
+            assert!(!formatted.contains("internal-id-must-not-render"));
+        }
+    }
+
+    #[test]
+    fn legacy_queued_host_utility_lane_never_formats_its_internal_device_id() {
+        let item = QueueWorkItem {
+            work_id: "legacy-upscale".into(),
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            planned_lane_kind: None,
+            planned_device_id: Some("cpu:utility:0".into()),
+            lane_order: Some(1),
+            ..Default::default()
+        };
+
+        let formatted = format_work_item(&item);
+        assert!(formatted.contains("host-utility/1"));
+        assert!(!formatted.contains("cpu:utility:0"));
+    }
+
+    #[test]
+    fn typed_device_and_future_lanes_keep_public_lane_semantics() {
+        let gpu = format_work_item(&QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
+            planned_device_id: Some("cuda:stable-a".into()),
+            lane_order: Some(2),
+            ..Default::default()
+        });
+        assert!(gpu.contains("cuda:stable-a/2"));
+
+        let future = format_work_item(&QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                "remote_utility".into(),
+            )),
+            planned_device_id: Some("future-internal-id".into()),
+            lane_order: Some(3),
+            ..Default::default()
+        });
+        assert!(future.contains("assigned/3"));
+        assert!(!future.contains("future-internal-id"));
     }
 }

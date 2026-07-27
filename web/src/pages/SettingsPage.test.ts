@@ -445,6 +445,200 @@ describe("SettingsPage", () => {
     expect(wrapper.text()).not.toContain("Show NSFW");
   });
 
+  it("shows CPU utility work when the server reports no GPUs", async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "cpu-expand",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                    activity_phase: "cpu",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
+
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
+    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
+      "cpu-expand",
+    );
+  });
+
+  it("keeps a colliding future typed lane out of the web GPU lane", async () => {
+    const device = deviceWire();
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [device], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "web-future-collision",
+                    parent_id: "parent",
+                    work_kind: "future_utility",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: device.id,
+                    planned_lane_kind: "future_accelerator_lane",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                  {
+                    work_id: "web-legacy-device",
+                    parent_id: "legacy-parent",
+                    work_kind: "generation",
+                    priority_class: "user",
+                    queue_rank: 1,
+                    bypass_count: 0,
+                    planned_device_id: device.id,
+                    planned_lane_kind: null,
+                    lane_order: 1,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("web-future-collision"),
+    );
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "web-future-collision",
+    );
+    expect(wrapper.get('[data-test="device-lane"]').text()).toContain(
+      "web-legacy-device",
+    );
+    expect(wrapper.get('[data-test="device-lane"]').text()).not.toContain(
+      "web-future-collision",
+    );
+    expect(wrapper.text().match(/web-future-collision/g)).toHaveLength(1);
+    expect(wrapper.text().match(/web-legacy-device/g)).toHaveLength(1);
+  });
+
+  it("clears a stale queue plan when a device-panel refresh fails", async () => {
+    let failPanel = false;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (
+        failPanel &&
+        (url.endsWith("/api/devices") || url.endsWith("/api/queue"))
+      ) {
+        throw new Error("host offline");
+      }
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "stale-work",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("stale-work"));
+    failPanel = true;
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
+    refresh();
+    await vi.waitFor(() => expect(wrapper.text()).not.toContain("stale-work"));
+  });
+
   it("controls the origin server GPU from Advanced settings", async () => {
     let enabled = true;
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;

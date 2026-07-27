@@ -1364,6 +1364,48 @@ pub struct QueueBatchPartition {
     pub size: u32,
 }
 
+/// Public class of scheduler lane used by a planned work item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum QueuePlannedLaneKind {
+    #[default]
+    Device,
+    HostUtility,
+    Unknown(String),
+}
+
+impl QueuePlannedLaneKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Device => "device",
+            Self::HostUtility => "host_utility",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for QueuePlannedLaneKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueuePlannedLaneKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "device" => Self::Device,
+            "host_utility" => Self::HostUtility,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
 /// One internal scheduler unit in the additive queue-plan projection.
 ///
 /// Strings are used for extensible scheduler states/reasons so an older
@@ -1386,7 +1428,12 @@ pub struct QueueWorkItem {
     pub hard_pinned_device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_gpu: Option<usize>,
+    /// Public lane class. A host utility lane is not a hardware device, so its
+    /// `planned_device_id` serializes as `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub planned_lane_kind: Option<QueuePlannedLaneKind>,
+    #[serde(default)]
     pub planned_device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_order: Option<usize>,
@@ -1415,6 +1462,32 @@ pub struct QueueWorkItem {
     pub execution_fingerprint: Option<String>,
 }
 
+impl QueueWorkItem {
+    /// Whether this work belongs to the host utility lane.
+    ///
+    /// Current servers provide the typed lane class. The exact legacy
+    /// scheduler sentinel is recognized only when that class is absent so a
+    /// future typed lane always remains authoritative.
+    pub fn is_host_utility_lane(&self) -> bool {
+        matches!(
+            self.planned_lane_kind.as_ref(),
+            Some(&QueuePlannedLaneKind::HostUtility)
+        ) || (self.planned_lane_kind.is_none()
+            && self.planned_device_id.as_deref() == Some("cpu:utility:0"))
+    }
+
+    /// Normalize the legacy host-utility sentinel for public presentation.
+    ///
+    /// This removes an internal scheduler identity while retaining device and
+    /// unknown future typed lanes exactly as received.
+    pub fn normalize_planned_lane_for_presentation(&mut self) {
+        if self.is_host_utility_lane() {
+            self.planned_lane_kind = Some(QueuePlannedLaneKind::HostUtility);
+            self.planned_device_id = None;
+        }
+    }
+}
+
 /// Versioned scheduler plan appended to `GET /api/queue`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueuePlan {
@@ -1441,6 +1514,18 @@ pub struct QueueListingWire {
     /// its first plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<QueuePlan>,
+}
+
+impl QueueListingWire {
+    /// Normalize legacy internal lane identities before presenting this
+    /// client-side projection to another consumer.
+    pub fn normalize_planned_lanes_for_presentation(&mut self) {
+        if let Some(plan) = &mut self.plan {
+            for work in &mut plan.work_items {
+                work.normalize_planned_lane_for_presentation();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -5169,6 +5254,85 @@ mod queue_plan_wire_tests {
     }
 
     #[test]
+    fn planned_lane_kind_is_typed_and_retains_future_wire_values() {
+        let device: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("device")).unwrap();
+        let host: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("host_utility")).unwrap();
+        let future: QueuePlannedLaneKind =
+            serde_json::from_value(serde_json::json!("remote_utility")).unwrap();
+
+        assert_eq!(device, QueuePlannedLaneKind::Device);
+        assert_eq!(host, QueuePlannedLaneKind::HostUtility);
+        assert_eq!(future.as_str(), "remote_utility");
+        assert_eq!(
+            serde_json::to_value(future).unwrap(),
+            serde_json::json!("remote_utility")
+        );
+    }
+
+    #[test]
+    fn presentation_normalization_only_rewrites_host_utility_identities() {
+        let mut listing = QueueListingWire {
+            entries: vec![],
+            plan: Some(QueuePlan {
+                work_items: vec![
+                    QueueWorkItem {
+                        work_id: "legacy".into(),
+                        activity_phase: QueueActivityPhase::Queued,
+                        planned_device_id: Some("cpu:utility:0".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "typed-host".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::HostUtility),
+                        planned_device_id: Some("must-not-leak".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "gpu".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::Device),
+                        planned_device_id: Some("cuda:stable-a".into()),
+                        ..Default::default()
+                    },
+                    QueueWorkItem {
+                        work_id: "future".into(),
+                        planned_lane_kind: Some(QueuePlannedLaneKind::Unknown(
+                            "remote_utility".into(),
+                        )),
+                        planned_device_id: Some("future-public-id".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        listing.normalize_planned_lanes_for_presentation();
+        let work = &listing.plan.unwrap().work_items;
+        for item in &work[..2] {
+            assert_eq!(
+                item.planned_lane_kind,
+                Some(QueuePlannedLaneKind::HostUtility)
+            );
+            assert_eq!(item.planned_device_id, None);
+        }
+        assert_eq!(
+            work[2].planned_lane_kind,
+            Some(QueuePlannedLaneKind::Device)
+        );
+        assert_eq!(work[2].planned_device_id.as_deref(), Some("cuda:stable-a"));
+        assert_eq!(
+            work[3].planned_lane_kind,
+            Some(QueuePlannedLaneKind::Unknown("remote_utility".into()))
+        );
+        assert_eq!(
+            work[3].planned_device_id.as_deref(),
+            Some("future-public-id")
+        );
+    }
+
+    #[test]
     fn legacy_reason_only_queue_item_remains_readable() {
         let parsed: QueueWorkItem = serde_json::from_value(serde_json::json!({
             "work_id": "job-1",
@@ -5184,6 +5348,7 @@ mod queue_plan_wire_tests {
 
         assert_eq!(parsed.reason.as_deref(), Some("insufficient_vram"));
         assert_eq!(parsed.blocked_reason, None);
+        assert_eq!(parsed.planned_lane_kind, None);
         assert_eq!(parsed.activity_phase, QueueActivityPhase::Queued);
     }
 }

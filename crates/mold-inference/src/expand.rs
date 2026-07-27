@@ -6,6 +6,7 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_transformers::models::quantized_qwen3::ModelWeights;
+use sha2::{Digest, Sha256};
 use std::io::Seek;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -17,8 +18,394 @@ use crate::device::{
     discover_gpus, expand_vram_threshold, memory_status_string, preflight_memory_check,
     resolve_gpu_selection, select_expand_device_with_preference, ExpandPlacement,
 };
-use crate::progress::{ProgressCallback, ProgressReporter};
+use crate::progress::{InferenceCancellationToken, ProgressCallback, ProgressReporter};
 use mold_core::types::GpuSelection;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedExpandArtifact {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    /// A metadata identity/stat fence (canonical path, size, and filesystem
+    /// identity/change-time fields), not a digest of the artifact contents.
+    pub identity_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedExpandArtifacts {
+    pub model_name: String,
+    pub model: ResolvedExpandArtifact,
+    pub tokenizer: ResolvedExpandArtifact,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactExpandPlacement {
+    Cpu,
+    Device {
+        backend: mold_core::GpuBackend,
+        ordinal: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedExpandExecutionPlan {
+    pub artifacts: ResolvedExpandArtifacts,
+    pub placement: ExactExpandPlacement,
+    pub predicted_vram_peak_bytes: u64,
+    pub predicted_host_increment_bytes: u64,
+    pub execution_fingerprint: String,
+}
+
+impl ResolvedExpandExecutionPlan {
+    /// Validate both artifact identity/stat fences and every admitted execution
+    /// field before any device is constructed.
+    pub fn validate(&self) -> Result<()> {
+        validate_frozen_artifact("expand model", &self.artifacts.model)?;
+        validate_frozen_artifact("expand tokenizer", &self.artifacts.tokenizer)?;
+        let (expected_vram, expected_host) =
+            expand_plan_memory_floors(&self.artifacts, self.placement);
+        let expected_fingerprint = expand_execution_fingerprint(
+            &self.artifacts,
+            self.placement,
+            expected_vram,
+            expected_host,
+        );
+        if self.predicted_vram_peak_bytes != expected_vram
+            || self.predicted_host_increment_bytes != expected_host
+            || self.execution_fingerprint != expected_fingerprint
+        {
+            bail!("expand execution plan changed after resolution");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpandSafePoint {
+    BeforeLoad,
+    AfterLoad,
+    AfterTokenization,
+    BeforePromptForward,
+    TokenIteration,
+    BeforeDecode,
+}
+
+fn expansion_checkpoint(progress: &ProgressReporter, _safe_point: ExpandSafePoint) -> Result<()> {
+    progress.checkpoint().map_err(anyhow::Error::from)
+}
+
+fn artifact_identity_fingerprint(path: &Path, size_bytes: u64) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    let mut hash = Sha256::new();
+    hash.update(path.as_os_str().as_encoded_bytes());
+    hash.update(size_bytes.to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        hash.update(metadata.dev().to_le_bytes());
+        hash.update(metadata.ino().to_le_bytes());
+        hash.update(metadata.ctime().to_le_bytes());
+        hash.update(metadata.ctime_nsec().to_le_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        hash.update(metadata.creation_time().to_le_bytes());
+        hash.update(metadata.last_write_time().to_le_bytes());
+        hash.update(metadata.file_size().to_le_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        hash.update(modified.to_le_bytes());
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn freeze_artifact(path: PathBuf) -> Result<ResolvedExpandArtifact> {
+    let path = std::fs::canonicalize(&path)
+        .map_err(|error| anyhow::anyhow!("could not resolve {}: {error}", path.display()))?;
+    let size_bytes = std::fs::metadata(&path)?.len();
+    let identity_fingerprint = artifact_identity_fingerprint(&path, size_bytes)?;
+    Ok(ResolvedExpandArtifact {
+        path,
+        size_bytes,
+        identity_fingerprint,
+    })
+}
+
+fn validate_frozen_artifact(label: &str, frozen: &ResolvedExpandArtifact) -> Result<()> {
+    let current = freeze_artifact(frozen.path.clone())
+        .map_err(|error| anyhow::anyhow!("{label} artifact changed: {error}"))?;
+    if &current != frozen {
+        bail!(
+            "{label} artifact changed after planning: expected {} bytes identity fingerprint {}, \
+             found {} bytes identity fingerprint {}",
+            frozen.size_bytes,
+            frozen.identity_fingerprint,
+            current.size_bytes,
+            current.identity_fingerprint
+        );
+    }
+    Ok(())
+}
+
+fn expand_candidate_dirs(expand_model: &str) -> Vec<String> {
+    let tag = expand_model.split(':').nth(1).unwrap_or("q8");
+    if expand_model.contains("small") {
+        vec![
+            format!("qwen3-expand-small-{tag}"),
+            format!("qwen3-expand-{tag}"),
+            "qwen3-expand".to_string(),
+        ]
+    } else {
+        vec![
+            format!("qwen3-expand-{tag}"),
+            format!("qwen3-expand-small-{tag}"),
+            "qwen3-expand".to_string(),
+        ]
+    }
+}
+
+fn expand_plan_memory_floors(
+    artifacts: &ResolvedExpandArtifacts,
+    placement: ExactExpandPlacement,
+) -> (u64, u64) {
+    let model_and_tokenizer = artifacts
+        .model
+        .size_bytes
+        .saturating_add(artifacts.tokenizer.size_bytes);
+    let activation_bytes = crate::device::EXPAND_ACTIVATION_HEADROOM;
+    let predicted_vram_peak_bytes = match placement {
+        ExactExpandPlacement::Cpu => 0,
+        ExactExpandPlacement::Device { .. } => {
+            artifacts.model.size_bytes.saturating_add(activation_bytes)
+        }
+    };
+    let predicted_host_increment_bytes = match placement {
+        ExactExpandPlacement::Cpu
+        | ExactExpandPlacement::Device {
+            backend: mold_core::GpuBackend::Metal,
+            ..
+        } => model_and_tokenizer.saturating_add(activation_bytes),
+        ExactExpandPlacement::Device {
+            backend: mold_core::GpuBackend::Cuda,
+            ..
+        } => model_and_tokenizer,
+    };
+    (predicted_vram_peak_bytes, predicted_host_increment_bytes)
+}
+
+fn expand_execution_fingerprint(
+    artifacts: &ResolvedExpandArtifacts,
+    placement: ExactExpandPlacement,
+    predicted_vram_peak_bytes: u64,
+    predicted_host_increment_bytes: u64,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"mold.expand.execution.v1");
+    hash.update(artifacts.model_name.as_bytes());
+    for artifact in [&artifacts.model, &artifacts.tokenizer] {
+        hash.update(artifact.path.as_os_str().as_encoded_bytes());
+        hash.update(artifact.size_bytes.to_le_bytes());
+        hash.update(artifact.identity_fingerprint.as_bytes());
+    }
+    match placement {
+        ExactExpandPlacement::Cpu => hash.update(b"cpu"),
+        ExactExpandPlacement::Device { backend, ordinal } => {
+            hash.update(match backend {
+                mold_core::GpuBackend::Cuda => b"cuda".as_slice(),
+                mold_core::GpuBackend::Metal => b"metal".as_slice(),
+            });
+            hash.update(ordinal.to_le_bytes());
+        }
+    }
+    hash.update(predicted_vram_peak_bytes.to_le_bytes());
+    hash.update(predicted_host_increment_bytes.to_le_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+/// Resolve and freeze the exact local prompt-expansion artifacts without
+/// discovering or constructing any execution device.
+pub fn resolve_local_expand_artifacts(
+    config: &mold_core::Config,
+    expand_model: Option<&str>,
+) -> Result<ResolvedExpandArtifacts> {
+    let models_dir = config.resolved_models_dir();
+    let expand_model = expand_model.unwrap_or(&config.expand.model);
+    let candidate_dirs = expand_candidate_dirs(expand_model);
+    let model_path = candidate_dirs
+        .iter()
+        .find_map(|dir_name| find_gguf_in_dir(&models_dir.join(dir_name), expand_model))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "local expand model '{expand_model}' not found — run: mold pull {expand_model}"
+            )
+        })?;
+    let shared_tokenizer = models_dir.join("shared/qwen3-expand/tokenizer.json");
+    let tokenizer_path = if shared_tokenizer.exists() {
+        shared_tokenizer
+    } else {
+        candidate_dirs
+            .iter()
+            .find_map(|dir_name| find_tokenizer_in_dir(&models_dir.join(dir_name)))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "local expand tokenizer for '{expand_model}' was not found — \
+                     re-pull the expand model"
+                )
+            })?
+    };
+    Ok(ResolvedExpandArtifacts {
+        model_name: expand_model.to_string(),
+        model: freeze_artifact(model_path)?,
+        tokenizer: freeze_artifact(tokenizer_path)?,
+    })
+}
+
+/// Resolve one immutable prompt-expansion execution plan.
+///
+/// CPU and Metal charge model, tokenizer, and activation/KV memory to the
+/// host. CUDA conservatively charges model and tokenizer bytes as load
+/// staging while reserving the model plus activation floor in VRAM.
+pub fn resolve_expand_execution_plan(
+    config: &mold_core::Config,
+    expand_model: Option<&str>,
+    placement: ExactExpandPlacement,
+) -> Result<ResolvedExpandExecutionPlan> {
+    let artifacts = resolve_local_expand_artifacts(config, expand_model)?;
+    Ok(resolve_expand_execution_plan_from_artifacts(
+        artifacts, placement,
+    ))
+}
+
+/// Build another placement candidate from one already-frozen artifact set.
+///
+/// Server scheduling uses this to guarantee that every CPU/GPU candidate for
+/// one utility child has the same model/tokenizer identity fence.
+pub fn resolve_expand_execution_plan_from_artifacts(
+    artifacts: ResolvedExpandArtifacts,
+    placement: ExactExpandPlacement,
+) -> ResolvedExpandExecutionPlan {
+    let (predicted_vram_peak_bytes, predicted_host_increment_bytes) =
+        expand_plan_memory_floors(&artifacts, placement);
+    let execution_fingerprint = expand_execution_fingerprint(
+        &artifacts,
+        placement,
+        predicted_vram_peak_bytes,
+        predicted_host_increment_bytes,
+    );
+    ResolvedExpandExecutionPlan {
+        artifacts,
+        placement,
+        predicted_vram_peak_bytes,
+        predicted_host_increment_bytes,
+        execution_fingerprint,
+    }
+}
+
+fn create_exact_device_with<F>(
+    plan: &ResolvedExpandExecutionPlan,
+    progress: &ProgressReporter,
+    gpu_factory: F,
+) -> Result<Device>
+where
+    F: FnOnce(mold_core::GpuBackend, usize, &ProgressReporter) -> Result<Device>,
+{
+    plan.validate()?;
+    expansion_checkpoint(progress, ExpandSafePoint::BeforeLoad)?;
+    match plan.placement {
+        ExactExpandPlacement::Cpu => {
+            progress.info("Using exact CPU placement for prompt expansion");
+            preflight_memory_check(
+                "Expand LLM",
+                plan.artifacts
+                    .model
+                    .size_bytes
+                    .saturating_add(plan.artifacts.tokenizer.size_bytes),
+                crate::device::EXPAND_ACTIVATION_HEADROOM,
+            )?;
+            Ok(Device::Cpu)
+        }
+        ExactExpandPlacement::Device { backend, ordinal } => {
+            if backend == mold_core::GpuBackend::Metal {
+                preflight_memory_check(
+                    "Expand LLM",
+                    plan.artifacts
+                        .model
+                        .size_bytes
+                        .saturating_add(plan.artifacts.tokenizer.size_bytes),
+                    crate::device::EXPAND_ACTIVATION_HEADROOM,
+                )?;
+            }
+            gpu_factory(backend, ordinal, progress)
+        }
+    }
+}
+
+fn select_legacy_dynamic_expand_device(
+    threshold: u64,
+    model_size: u64,
+    gpu_selection: &GpuSelection,
+    preferred_gpu: Option<usize>,
+    progress: &ProgressReporter,
+) -> Result<Device> {
+    let discovered = discover_gpus();
+    let gpus = resolve_gpu_selection(&discovered, gpu_selection)?;
+    let is_metal = candle_core::utils::metal_is_available();
+    let placement = select_expand_device_with_preference(&gpus, threshold, is_metal, preferred_gpu);
+    match placement {
+        ExpandPlacement::Gpu(ordinal) => {
+            let device = crate::device::create_device(ordinal, progress)?;
+            if device.is_cpu() || device.is_metal() {
+                preflight_memory_check(
+                    "Expand LLM",
+                    model_size,
+                    crate::device::EXPAND_ACTIVATION_HEADROOM,
+                )?;
+            }
+            Ok(device)
+        }
+        ExpandPlacement::Cpu => {
+            if gpus.is_empty() {
+                progress.info("Using CPU for prompt expansion (no GPU detected)");
+            } else {
+                progress.info(&format!(
+                    "Using CPU for prompt expansion (needed {:.1} GB, no GPU had room)",
+                    threshold as f64 / 1_000_000_000.0,
+                ));
+            }
+            preflight_memory_check(
+                "Expand LLM",
+                model_size,
+                crate::device::EXPAND_ACTIVATION_HEADROOM,
+            )?;
+            Ok(Device::Cpu)
+        }
+    }
+}
+
+fn report_expand_memory_status_with<F>(
+    exact_plan: Option<&ResolvedExpandExecutionPlan>,
+    progress: &ProgressReporter,
+    probe: F,
+) where
+    F: FnOnce() -> Option<String>,
+{
+    // `memory_status_string()` probes CUDA ordinal 0 in CUDA builds. Exact
+    // execution must not initialize a CUDA context for a CPU lane or touch a
+    // sibling of the admitted GPU merely for diagnostics. Scheduler telemetry
+    // owns per-device memory reporting for exact plans.
+    if exact_plan.is_some() {
+        return;
+    }
+    if let Some(memory_status) = probe() {
+        progress.info(&memory_status);
+    }
+}
 
 /// Local prompt expander using quantized Qwen3 GGUF.
 pub struct LocalExpander {
@@ -27,6 +414,7 @@ pub struct LocalExpander {
     progress: ProgressReporter,
     gpu_selection: GpuSelection,
     preferred_gpu: Option<usize>,
+    exact_plan: Option<ResolvedExpandExecutionPlan>,
 }
 
 impl LocalExpander {
@@ -38,12 +426,56 @@ impl LocalExpander {
             progress: ProgressReporter::default(),
             gpu_selection: GpuSelection::All,
             preferred_gpu: None,
+            exact_plan: None,
+        }
+    }
+
+    /// Construct an expander that consumes one immutable admitted plan.
+    ///
+    /// This path never discovers devices, reads `MOLD_DEVICE`, walks sibling
+    /// GPUs, or silently falls back. Artifact drift and device-construction
+    /// failure are returned to the caller for an explicit scheduler replan.
+    pub fn from_resolved_plan(plan: ResolvedExpandExecutionPlan) -> Self {
+        Self {
+            model_path: plan.artifacts.model.path.clone(),
+            tokenizer_path: plan.artifacts.tokenizer.path.clone(),
+            progress: ProgressReporter::default(),
+            gpu_selection: GpuSelection::None,
+            preferred_gpu: None,
+            exact_plan: Some(plan),
         }
     }
 
     /// Set a progress callback for reporting device selection, loading, and generation status.
     pub fn set_on_progress(&mut self, callback: ProgressCallback) {
         self.progress.set_callback(callback);
+    }
+
+    pub fn set_cancellation_token(&mut self, token: InferenceCancellationToken) {
+        self.progress.set_cancellation_token(token);
+    }
+
+    pub fn clear_cancellation_token(&mut self) {
+        self.progress.clear_cancellation_token();
+    }
+
+    /// Run one attempt with cooperative cancellation installed, then clear the
+    /// token on success, error, or panic so the expander is safe to reuse.
+    pub fn expand_with_cancellation(
+        &mut self,
+        prompt: &str,
+        config: &ExpandConfig,
+        token: InferenceCancellationToken,
+    ) -> Result<ExpandResult> {
+        self.set_cancellation_token(token);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PromptExpander::expand(self, prompt, config)
+        }));
+        self.clear_cancellation_token();
+        match result {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// Restrict local expansion to the GPU ordinals selected by the caller.
@@ -70,62 +502,18 @@ impl LocalExpander {
     ///
     /// Returns `None` if the model hasn't been pulled yet.
     pub fn from_config(config: &mold_core::Config, expand_model: Option<&str>) -> Option<Self> {
-        let models_dir = config.resolved_models_dir();
-        let expand_model = expand_model.unwrap_or(&config.expand.model);
+        Self::from_config_legacy_dynamic(config, expand_model)
+    }
 
-        // Determine the tag from the model spec (e.g., "qwen3-expand:q4" → "q4")
-        let tag = expand_model.split(':').nth(1).unwrap_or("q8");
-
-        // Search model-specific directories for GGUF files.
-        // Manifest storage places transformers under <model-name>/ with colons
-        // replaced by dashes, e.g., "qwen3-expand-q8/" or "qwen3-expand-small-q8/".
-        // Order candidates so the explicitly requested variant is checked first —
-        // otherwise if both qwen3-expand and qwen3-expand-small are installed,
-        // the larger model would always win regardless of user's choice.
-        let candidate_dirs = if expand_model.contains("small") {
-            vec![
-                format!("qwen3-expand-small-{tag}"),
-                format!("qwen3-expand-{tag}"),
-                "qwen3-expand".to_string(),
-            ]
-        } else {
-            vec![
-                format!("qwen3-expand-{tag}"),
-                format!("qwen3-expand-small-{tag}"),
-                "qwen3-expand".to_string(),
-            ]
-        };
-
-        let mut gguf_path = None;
-        for dir_name in &candidate_dirs {
-            let dir = models_dir.join(dir_name);
-            if dir.exists() {
-                if let Some(path) = find_gguf_in_dir(&dir, expand_model) {
-                    gguf_path = Some(path);
-                    break;
-                }
-            }
-        }
-        let gguf_path = gguf_path?;
-
-        // Search for tokenizer: shared location first, then model-specific dirs
-        let shared_tokenizer = models_dir.join("shared/qwen3-expand/tokenizer.json");
-        let tokenizer_path = if shared_tokenizer.exists() {
-            shared_tokenizer
-        } else {
-            // Search candidate dirs for tokenizer
-            let mut found = None;
-            for dir_name in &candidate_dirs {
-                let dir = models_dir.join(dir_name);
-                if let Some(path) = find_tokenizer_in_dir(&dir) {
-                    found = Some(path);
-                    break;
-                }
-            }
-            found?
-        };
-
-        Some(Self::new(gguf_path, tokenizer_path))
+    /// Legacy device-discovering adapter for CLI and pre-V2 server paths.
+    ///
+    /// New scheduler-owned work must use [`Self::from_resolved_plan`].
+    pub fn from_config_legacy_dynamic(
+        config: &mold_core::Config,
+        expand_model: Option<&str>,
+    ) -> Option<Self> {
+        let artifacts = resolve_local_expand_artifacts(config, expand_model).ok()?;
+        Some(Self::new(artifacts.model.path, artifacts.tokenizer.path))
     }
 
     /// Load model, generate text, drop model.
@@ -133,59 +521,29 @@ impl LocalExpander {
         // Size the VRAM/RAM budget off the actual GGUF file (weights + 2 GB
         // activations), not a static constant — a 4 GB q8 model needs ~6 GB
         // to fit, not 2 GB.
-        let model_size = std::fs::metadata(&self.model_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let model_size = self.exact_plan.as_ref().map_or_else(
+            || {
+                std::fs::metadata(&self.model_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+            },
+            |plan| plan.artifacts.model.size_bytes,
+        );
         let threshold = expand_vram_threshold(model_size);
 
-        // Cascade: main GPU → remaining GPUs (ordinal order) → CPU.
-        // `discover_gpus()` returns an empty list on CPU-only builds, which
-        // lands us directly on CPU.
-        let discovered = discover_gpus();
-        let gpus = resolve_gpu_selection(&discovered, &self.gpu_selection)?;
-        let is_metal = candle_core::utils::metal_is_available();
-        let placement =
-            select_expand_device_with_preference(&gpus, threshold, is_metal, self.preferred_gpu);
-
-        let device = match placement {
-            ExpandPlacement::Gpu(ordinal) => {
-                // Metal is always ordinal 0 (single device). CUDA may pick any
-                // ordinal; create_device() respects MOLD_DEVICE=cpu override.
-                let dev = crate::device::create_device(ordinal, &self.progress)?;
-                // Metal and CPU fallback both draw from system RAM — preflight
-                // either way. Pure CUDA allocation doesn't touch RAM and is
-                // already bounded by the VRAM threshold check above.
-                if dev.is_cpu() || dev.is_metal() {
-                    // Expand LLMs generate ≤ 512 tokens; the existing
-                    // `EXPAND_ACTIVATION_HEADROOM` (2 GB) covers KV cache +
-                    // residuals on the worst-case prompt.
-                    preflight_memory_check(
-                        "Expand LLM",
-                        model_size,
-                        crate::device::EXPAND_ACTIVATION_HEADROOM,
-                    )?;
-                }
-                dev
-            }
-            ExpandPlacement::Cpu => {
-                if gpus.is_empty() {
-                    self.progress
-                        .info("Using CPU for prompt expansion (no GPU detected)");
-                } else {
-                    self.progress.info(&format!(
-                        "Using CPU for prompt expansion (needed {:.1} GB, no GPU had room)",
-                        threshold as f64 / 1_000_000_000.0,
-                    ));
-                }
-                // Final guard: if system RAM can't hold the model, fail fast
-                // with a clear message rather than OOM mid-load.
-                preflight_memory_check(
-                    "Expand LLM",
-                    model_size,
-                    crate::device::EXPAND_ACTIVATION_HEADROOM,
-                )?;
-                Device::Cpu
-            }
+        let device = if let Some(plan) = &self.exact_plan {
+            create_exact_device_with(plan, &self.progress, |backend, ordinal, progress| {
+                crate::device::create_exact_gpu_device(backend, ordinal, progress)
+            })?
+        } else {
+            expansion_checkpoint(&self.progress, ExpandSafePoint::BeforeLoad)?;
+            select_legacy_dynamic_expand_device(
+                threshold,
+                model_size,
+                &self.gpu_selection,
+                self.preferred_gpu,
+                &self.progress,
+            )?
         };
 
         let device_label = if device.is_metal() {
@@ -197,9 +555,9 @@ impl LocalExpander {
         };
 
         // Report memory status
-        if let Some(mem_status) = memory_status_string() {
-            self.progress.info(&mem_status);
-        }
+        report_expand_memory_status_with(self.exact_plan.as_ref(), &self.progress, || {
+            memory_status_string()
+        });
 
         // Load GGUF model
         let load_start = std::time::Instant::now();
@@ -213,6 +571,7 @@ impl LocalExpander {
         file.seek(std::io::SeekFrom::Start(0))?;
         let mut model = ModelWeights::from_gguf(ct, &mut file, &device)
             .map_err(|e| anyhow::anyhow!("failed to load expand model weights: {e}"))?;
+        expansion_checkpoint(&self.progress, ExpandSafePoint::AfterLoad)?;
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(&self.tokenizer_path)
@@ -229,6 +588,7 @@ impl LocalExpander {
             .encode(prompt_text, false)
             .map_err(|e| anyhow::anyhow!("failed to tokenize expand prompt: {e}"))?;
         let input_ids = encoding.get_ids();
+        expansion_checkpoint(&self.progress, ExpandSafePoint::AfterTokenization)?;
 
         // Generate tokens autoregressively
         let gen_start = std::time::Instant::now();
@@ -246,6 +606,7 @@ impl LocalExpander {
         let mut in_thinking = false;
 
         // Process the prompt through the model first
+        expansion_checkpoint(&self.progress, ExpandSafePoint::BeforePromptForward)?;
         let prompt_offset = {
             let input = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
             let _logits = model.forward(&input, 0)?;
@@ -255,6 +616,7 @@ impl LocalExpander {
         // Generate new tokens one at a time
         let mut last_token = *input_ids.last().unwrap_or(&0);
         for generated_offset in 0..max_new_tokens {
+            expansion_checkpoint(&self.progress, ExpandSafePoint::TokenIteration)?;
             let input = Tensor::new(&[last_token], &device)?.unsqueeze(0)?;
             let logits = model.forward(&input, prompt_offset + generated_offset)?;
 
@@ -300,6 +662,7 @@ impl LocalExpander {
         ));
 
         // Decode generated tokens
+        expansion_checkpoint(&self.progress, ExpandSafePoint::BeforeDecode)?;
         let output = tokenizer
             .decode(&generated_tokens, true)
             .map_err(|e| anyhow::anyhow!("failed to decode generated tokens: {e}"))?;
@@ -423,7 +786,7 @@ fn sample_token(logits: &Tensor, temperature: f64, top_p: f64) -> Result<u32> {
 /// Find a GGUF file in a directory, preferring one matching the model spec's
 /// quantization tag (e.g., "q8" from "qwen3-expand:q8").
 fn find_gguf_in_dir(dir: &Path, model_spec: &str) -> Option<PathBuf> {
-    let entries: Vec<_> = std::fs::read_dir(dir)
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -433,6 +796,7 @@ fn find_gguf_in_dir(dir: &Path, model_spec: &str) -> Option<PathBuf> {
                 .unwrap_or(false)
         })
         .collect();
+    entries.sort_by_key(|entry| entry.file_name());
 
     // Extract quantization tag from model spec (e.g., "qwen3-expand:q8" → "q8")
     let quant_tag = model_spec.split(':').nth(1).unwrap_or("q8").to_uppercase();
@@ -464,7 +828,9 @@ fn find_tokenizer_in_dir(dir: &Path) -> Option<PathBuf> {
     }
     // Search subdirectories
     if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.contains("tokenizer") && fname.ends_with(".json") {
                 return Some(entry.path());
@@ -472,4 +838,292 @@ fn find_tokenizer_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod exact_plan_tests {
+    use super::*;
+    use crate::progress::{InferenceCancellationToken, InferenceCancelled, ProgressReporter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn write_fixture(path: &Path, size: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![b'x'; size]).unwrap();
+    }
+
+    fn fixture_config(root: &Path) -> mold_core::Config {
+        let config = mold_core::Config {
+            models_dir: root.display().to_string(),
+            ..mold_core::Config::default()
+        };
+        write_fixture(&root.join("shared/qwen3-expand/tokenizer.json"), 128);
+        config
+    }
+
+    fn fixture_plan(root: &Path, placement: ExactExpandPlacement) -> ResolvedExpandExecutionPlan {
+        let config = fixture_config(root);
+        write_fixture(&root.join("qwen3-expand-q4/model-Q4_K_M.gguf"), 1_024);
+        resolve_expand_execution_plan(&config, Some("qwen3-expand:q4"), placement).unwrap()
+    }
+
+    #[test]
+    fn artifact_resolution_and_memory_floors_follow_the_selected_quantization() {
+        let root = tempfile::tempdir().unwrap();
+        let config = fixture_config(root.path());
+        write_fixture(
+            &root.path().join("qwen3-expand-q4/model-Q4_K_M.gguf"),
+            1_024,
+        );
+        write_fixture(&root.path().join("qwen3-expand-q8/model-Q8_0.gguf"), 4_096);
+
+        let q4 = resolve_expand_execution_plan(
+            &config,
+            Some("qwen3-expand:q4"),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+        let q8 = resolve_expand_execution_plan(
+            &config,
+            Some("qwen3-expand:q8"),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(q4.artifacts.model.size_bytes, 1_024);
+        assert_eq!(q8.artifacts.model.size_bytes, 4_096);
+        assert_eq!(
+            q4.predicted_vram_peak_bytes,
+            1_024 + crate::device::EXPAND_ACTIVATION_HEADROOM
+        );
+        assert_eq!(
+            q8.predicted_vram_peak_bytes,
+            4_096 + crate::device::EXPAND_ACTIVATION_HEADROOM
+        );
+        assert!(q8.predicted_host_increment_bytes > q4.predicted_host_increment_bytes);
+        assert_ne!(
+            q4.artifacts.model.identity_fingerprint,
+            q8.artifacts.model.identity_fingerprint
+        );
+        assert_ne!(q4.execution_fingerprint, q8.execution_fingerprint);
+    }
+
+    #[test]
+    fn exact_gpu_placement_ignores_mold_device_cpu_and_preserves_ordinal() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env = ENV_LOCK.lock().unwrap();
+        let _restore = EnvVarGuard::set("MOLD_DEVICE", "cpu");
+
+        let root = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(
+            root.path(),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 7,
+            },
+        );
+        let reporter = ProgressReporter::default();
+        let observed = std::sync::Mutex::new(None);
+        let device = create_exact_device_with(&plan, &reporter, |backend, ordinal, _| {
+            *observed.lock().unwrap() = Some((backend, ordinal));
+            Ok(Device::Cpu)
+        })
+        .unwrap();
+
+        assert!(
+            device.is_cpu(),
+            "test factory returns a sentinel CPU device"
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((mold_core::GpuBackend::Cuda, 7))
+        );
+    }
+
+    #[test]
+    fn exact_cpu_plan_never_calls_gpu_device_factory() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(root.path(), ExactExpandPlacement::Cpu);
+        let reporter = ProgressReporter::default();
+        let calls = AtomicUsize::new(0);
+
+        let device = create_exact_device_with(&plan, &reporter, |_, _, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("GPU factory must not run for CPU placement")
+        })
+        .unwrap();
+
+        assert!(device.is_cpu());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn exact_reporting_never_probes_generic_gpu_memory() {
+        let root = tempfile::tempdir().unwrap();
+        for placement in [
+            ExactExpandPlacement::Cpu,
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 7,
+            },
+        ] {
+            let plan = fixture_plan(root.path(), placement);
+            let reporter = ProgressReporter::default();
+            let calls = AtomicUsize::new(0);
+
+            report_expand_memory_status_with(Some(&plan), &reporter, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some("must not be queried".to_string())
+            });
+
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "placement {placement:?}");
+        }
+    }
+
+    #[test]
+    fn artifact_drift_invalidates_before_device_construction() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(
+            root.path(),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 3,
+            },
+        );
+        std::fs::write(&plan.artifacts.model.path, b"replacement").unwrap();
+        let reporter = ProgressReporter::default();
+        let calls = AtomicUsize::new(0);
+
+        let error = create_exact_device_with(&plan, &reporter, |_, _, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Device::Cpu)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("artifact changed"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn execution_plan_mutation_is_rejected_before_device_construction() {
+        let root = tempfile::tempdir().unwrap();
+        let mut plan = fixture_plan(
+            root.path(),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 3,
+            },
+        );
+        plan.placement = ExactExpandPlacement::Device {
+            backend: mold_core::GpuBackend::Cuda,
+            ordinal: 4,
+        };
+        let reporter = ProgressReporter::default();
+        let calls = AtomicUsize::new(0);
+
+        let error = create_exact_device_with(&plan, &reporter, |_, _, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Device::Cpu)
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("execution plan changed"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_gpu_factory_error_is_returned_without_cpu_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(
+            root.path(),
+            ExactExpandPlacement::Device {
+                backend: mold_core::GpuBackend::Cuda,
+                ordinal: 5,
+            },
+        );
+        let reporter = ProgressReporter::default();
+        let calls = AtomicUsize::new(0);
+
+        let error = create_exact_device_with(&plan, &reporter, |backend, ordinal, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("failed after touching {backend:?}:{ordinal}")
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("failed after touching Cuda:5"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn every_named_expansion_safe_point_observes_cancellation() {
+        for checkpoint in [
+            ExpandSafePoint::BeforeLoad,
+            ExpandSafePoint::AfterLoad,
+            ExpandSafePoint::AfterTokenization,
+            ExpandSafePoint::BeforePromptForward,
+            ExpandSafePoint::TokenIteration,
+            ExpandSafePoint::BeforeDecode,
+        ] {
+            let token = InferenceCancellationToken::default();
+            token.cancel();
+            let mut reporter = ProgressReporter::default();
+            reporter.set_cancellation_token(token);
+            assert_eq!(
+                expansion_checkpoint(&reporter, checkpoint)
+                    .unwrap_err()
+                    .downcast_ref::<InferenceCancelled>(),
+                Some(&InferenceCancelled),
+                "checkpoint {checkpoint:?} did not preserve typed cancellation"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_exact_attempt_clears_token_before_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = fixture_plan(root.path(), ExactExpandPlacement::Cpu);
+        let mut expander = LocalExpander::from_resolved_plan(plan);
+        let token = InferenceCancellationToken::default();
+        token.cancel();
+
+        let error = expander
+            .expand_with_cancellation("a cat", &ExpandConfig::default(), token)
+            .unwrap_err();
+
+        assert!(crate::is_inference_cancelled(&error));
+        assert!(
+            expander.progress.checkpoint().is_ok(),
+            "cancelled token leaked into the next attempt"
+        );
+    }
 }

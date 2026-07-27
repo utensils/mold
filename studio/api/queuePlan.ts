@@ -1,6 +1,7 @@
 import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 
 export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
+export type QueueLaneKind = "device" | "host_utility" | (string & {});
 
 export interface QueueEntry {
   id: string;
@@ -29,6 +30,7 @@ export interface QueueWorkItem {
   hard_pinned_device_id?: string | null;
   target_gpu?: number | null;
   planned_device_id?: string | null;
+  planned_lane_kind?: QueueLaneKind | null;
   lane_order?: number | null;
   estimated_start_unix_ms?: number | null;
   estimated_finish_unix_ms?: number | null;
@@ -44,7 +46,7 @@ export interface QueueWorkItem {
     | "dispatching"
     | "active"
     | "cpu"
-    | string;
+    | (string & {});
   execution_fingerprint?: string | null;
 }
 

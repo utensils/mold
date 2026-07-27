@@ -271,10 +271,15 @@ pub struct GpuJob {
 
 pub struct PromptExpansionJob {
     pub id: String,
+    pub parent_id: String,
     pub config: mold_core::Config,
     pub settings: mold_core::ExpandSettings,
+    /// Immutable prompt captured by the parent before the child is admitted.
     pub prompt: String,
     pub expand_config: mold_core::ExpandConfig,
+    pub cancellation: mold_inference::InferenceCancellationToken,
+    #[cfg(feature = "expand")]
+    pub execution_plan: Option<mold_inference::expand::ResolvedExpandExecutionPlan>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<mold_core::ExpandResult, String>>,
 }
 
@@ -284,6 +289,8 @@ pub struct StandaloneUpscaleJob {
     pub weights_path: std::path::PathBuf,
     pub request: mold_core::UpscaleRequest,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::state::SseMessage>>,
+    pub cancellation: mold_inference::InferenceCancellationToken,
+    pub execution_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
     pub result_tx: tokio::sync::oneshot::Sender<Result<mold_core::UpscaleResponse, String>>,
 }
 
@@ -292,20 +299,74 @@ pub struct PostGenerationUpscaleJob {
     pub generation: Box<GpuJob>,
     pub response: mold_core::GenerateResponse,
     pub image: mold_core::ImageData,
+    pub cancellation: mold_inference::InferenceCancellationToken,
+    pub execution_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
 }
 
-impl PostGenerationUpscaleJob {
-    fn reject(self, error: String) {
-        if let Some(progress) = &self.generation.progress_tx {
-            let _ = progress.send(crate::state::SseMessage::Error(mold_core::SseErrorEvent {
-                message: error.clone(),
-            }));
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UtilityExecutionPlan {
+    #[cfg(feature = "expand")]
+    PromptExpansion(mold_inference::expand::ResolvedExpandExecutionPlan),
+    Upscale(mold_inference::upscaler::ResolvedUpscaleExecutionPlan),
+}
+
+impl UtilityExecutionPlan {
+    pub(crate) fn execution_fingerprint(&self) -> &str {
+        match self {
+            #[cfg(feature = "expand")]
+            Self::PromptExpansion(plan) => &plan.execution_fingerprint,
+            Self::Upscale(plan) => &plan.execution_fingerprint,
         }
-        let generation_id = self.generation.id.clone();
-        let _ = self.generation.result_tx.send(Err(error));
-        self.generation.queue.decrement();
-        self.generation.registry.remove(&generation_id);
     }
+
+    pub(crate) fn predicted_vram_bytes(&self) -> u64 {
+        match self {
+            #[cfg(feature = "expand")]
+            Self::PromptExpansion(plan) => plan.predicted_vram_peak_bytes,
+            Self::Upscale(plan) => plan.predicted_vram_peak_bytes,
+        }
+    }
+
+    pub(crate) fn predicted_host_ram_bytes(&self) -> u64 {
+        match self {
+            #[cfg(feature = "expand")]
+            Self::PromptExpansion(plan) => plan.predicted_host_increment_bytes,
+            Self::Upscale(plan) => plan.predicted_host_increment_bytes,
+        }
+    }
+
+    pub(crate) fn placement(&self) -> UtilityPlacement {
+        match self {
+            #[cfg(feature = "expand")]
+            Self::PromptExpansion(plan) => match plan.placement {
+                mold_inference::expand::ExactExpandPlacement::Cpu => UtilityPlacement::Cpu,
+                mold_inference::expand::ExactExpandPlacement::Device { backend, ordinal } => {
+                    UtilityPlacement::Device { backend, ordinal }
+                }
+            },
+            Self::Upscale(plan) => match plan.placement {
+                mold_inference::upscaler::ExactUpscalePlacement::Cpu => UtilityPlacement::Cpu,
+                mold_inference::upscaler::ExactUpscalePlacement::Device { backend, ordinal } => {
+                    UtilityPlacement::Device { backend, ordinal }
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UtilityPlacement {
+    Cpu,
+    /// Backend/ordinal is safe for the lifetime of a frozen utility plan
+    /// because `WorkerSet` can only restart an entry from its immutable
+    /// `WorkerFactory.devices` map, keyed by stable device ID and retaining the
+    /// same `DiscoveredGpu`. The scheduler candidate and lease still carry and
+    /// validate that stable ID. Any future hotplug/re-enumeration support must
+    /// add stable identity to the inference plan and its fingerprint.
+    Device {
+        backend: mold_core::GpuBackend,
+        ordinal: usize,
+    },
 }
 
 pub struct AdminModelLoadJob {
@@ -461,12 +522,14 @@ impl OwnerWork {
                 }
             }
             Self::PromptExpansion(job) => {
+                job.cancellation.cancel();
                 let _ = job.result_tx.send(Err(error));
             }
             Self::PostUpscale(job) => {
-                job.reject(error);
+                crate::gpu_worker::finish_post_generation_upscale_failure(job, error);
             }
             Self::StandaloneUpscale(job) => {
+                job.cancellation.cancel();
                 let _ = job.result_tx.send(Err(error));
             }
             Self::AdminModelLoad(job) => {
@@ -493,6 +556,31 @@ impl OwnerWork {
             work => work.reject("scheduled GPU work was cancelled while queued".to_string()),
         }
     }
+
+    pub(crate) fn install_utility_plan(
+        &mut self,
+        selected: UtilityExecutionPlan,
+    ) -> Result<(), String> {
+        match (self, selected) {
+            #[cfg(feature = "expand")]
+            (Self::PromptExpansion(job), UtilityExecutionPlan::PromptExpansion(plan)) => {
+                job.execution_plan = Some(plan);
+                Ok(())
+            }
+            (Self::StandaloneUpscale(job), UtilityExecutionPlan::Upscale(plan)) => {
+                job.execution_plan = Some(plan);
+                Ok(())
+            }
+            (Self::PostUpscale(job), UtilityExecutionPlan::Upscale(plan)) => {
+                job.execution_plan = Some(plan);
+                Ok(())
+            }
+            (work, _) => Err(format!(
+                "utility execution plan did not match {:?} work",
+                work.kind()
+            )),
+        }
+    }
 }
 
 pub struct LeaseGrant {
@@ -515,6 +603,7 @@ pub struct OwnerWorkRetry {
     pub bypass_count: u8,
     pub warm_wait_started_ms: Option<u64>,
     pub retry_not_before_ms: Option<u64>,
+    pub utility_plans: Vec<UtilityExecutionPlan>,
 }
 
 pub enum GpuWorkerCommand {
@@ -1839,6 +1928,11 @@ mod tests {
         assert_eq!(replacement_epoch, 2);
         assert_eq!(workers.len(), 1);
         assert_eq!(workers.snapshot()[0].owner_epoch, 2);
+        assert_eq!(
+            crate::scheduler::worker_device_id(&workers.snapshot()[0]),
+            device_id,
+            "in-process lifecycle restart must reuse the frozen inventory identity"
+        );
         workers.shutdown_and_join_all();
     }
 

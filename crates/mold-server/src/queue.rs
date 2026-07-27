@@ -1616,9 +1616,13 @@ pub async fn run_legacy_scheduled_work_dispatcher(
 
 async fn dispatch_legacy_scheduled_work(
     state: &AppState,
-    work: crate::scheduler::ScheduledOwnerWork,
+    mut work: crate::scheduler::ScheduledOwnerWork,
     shutdown: &tokio_util::sync::CancellationToken,
 ) -> bool {
+    if let Err(error) = freeze_legacy_post_upscale_candidates(state, &mut work) {
+        work.work.reject(error);
+        return true;
+    }
     let mut pending = Some(work);
     let mut skip = Vec::new();
     loop {
@@ -1685,7 +1689,27 @@ async fn dispatch_legacy_scheduled_work(
             },
             &worker,
         );
-        let current = pending.take().expect("legacy scheduled work is present");
+        let mut current = pending.take().expect("legacy scheduled work is present");
+        if !current.utility_plans.is_empty() {
+            let selected = current.utility_plans.iter().find(|plan| {
+                matches!(
+                    plan.placement(),
+                    crate::gpu_pool::UtilityPlacement::Device { backend, ordinal }
+                        if backend == worker.gpu.backend && ordinal == worker.gpu.ordinal
+                )
+            });
+            let Some(selected) = selected.cloned() else {
+                current.work.reject(format!(
+                    "legacy GPU owner {} had no exact utility execution plan",
+                    worker.gpu.ordinal
+                ));
+                return true;
+            };
+            if let Err(error) = current.work.install_utility_plan(selected) {
+                current.work.reject(error);
+                return true;
+            }
+        }
         let retry = crate::gpu_pool::OwnerWorkRetry {
             model_fingerprint: current.model_fingerprint,
             estimated_vram_bytes: current.estimated_vram_bytes,
@@ -1699,6 +1723,7 @@ async fn dispatch_legacy_scheduled_work(
             bypass_count: 0,
             warm_wait_started_ms: None,
             retry_not_before_ms: None,
+            utility_plans: current.utility_plans.clone(),
         };
         let fence = crate::scheduler::LeaseFence {
             work_id: current.id,
@@ -1741,6 +1766,7 @@ async fn dispatch_legacy_scheduled_work(
                     priority: retry.priority,
                     preferred_ordinal: retry.preferred_ordinal,
                     candidate_plans: retry.candidate_plans,
+                    utility_plans: retry.utility_plans,
                     work: grant.work,
                 });
                 if pending
@@ -1756,6 +1782,40 @@ async fn dispatch_legacy_scheduled_work(
             }
         }
     }
+}
+
+fn freeze_legacy_post_upscale_candidates(
+    state: &AppState,
+    work: &mut crate::scheduler::ScheduledOwnerWork,
+) -> Result<(), String> {
+    if !matches!(&work.work, crate::gpu_pool::OwnerWork::PostUpscale(_)) {
+        return Ok(());
+    }
+    #[cfg(feature = "expand")]
+    let base = work.utility_plans.iter().find_map(|plan| match plan {
+        crate::gpu_pool::UtilityExecutionPlan::Upscale(plan) => Some(plan),
+        crate::gpu_pool::UtilityExecutionPlan::PromptExpansion(_) => None,
+    });
+    #[cfg(not(feature = "expand"))]
+    let base = work.utility_plans.first().map(|plan| match plan {
+        crate::gpu_pool::UtilityExecutionPlan::Upscale(plan) => plan,
+    });
+    let base = base.ok_or_else(|| {
+        "post-generation upscaling lacked a frozen artifact candidate".to_string()
+    })?;
+    let placements = std::iter::once(crate::gpu_pool::UtilityPlacement::Cpu).chain(
+        state
+            .gpu_pool
+            .schedulable_workers()
+            .into_iter()
+            .map(|worker| crate::gpu_pool::UtilityPlacement::Device {
+                backend: worker.gpu.backend,
+                ordinal: worker.gpu.ordinal,
+            }),
+    );
+    work.utility_plans =
+        crate::scheduler::upscale_utility_candidates(&base.model_name, &base.weights, placements);
+    Ok(())
 }
 
 async fn wait_for_legacy_dispatch(
@@ -3116,6 +3176,149 @@ mod tests {
         drop(scheduled_tx);
         drop(owner_event_tx);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_post_upscale_moves_to_idle_sibling_with_same_frozen_artifact_and_f0_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        std::fs::write(&weights, b"frozen-but-not-a-real-upscaler").unwrap();
+        let cpu_plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        let frozen_artifact = cpu_plan.weights.clone();
+
+        let (origin, _origin_rx) = test_worker(0, 1);
+        let (sibling, sibling_rx) = test_worker(1, 1);
+        origin.in_flight.store(1, Ordering::SeqCst);
+        let mut state = empty_test_state(mold_core::Config::default());
+        state.gpu_pool = Arc::new(GpuPool {
+            workers: vec![origin.clone(), sibling.clone()].into(),
+        });
+
+        let output_dir = root.path().join("gallery");
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (queue_tx, _queue_rx) = tokio::sync::mpsc::channel(1);
+        let mut request = fake_request("flux-dev:q4");
+        request.upscale_model = Some("real-esrgan-x4plus:fp16".to_string());
+        let original = fake_image();
+        let generation = crate::gpu_pool::GpuJob {
+            id: "legacy-sibling-post-upscale".to_string(),
+            model: request.model.clone(),
+            request,
+            completion_payload: SseCompletionPayload::Full,
+            progress_tx: None,
+            result_tx,
+            output_dir: Some(output_dir.clone()),
+            config: state.config.clone(),
+            metadata_db: state.metadata_db.clone(),
+            gallery_publication_gate: state.gallery_publication_gate.clone(),
+            queue: QueueHandle::new(queue_tx),
+            registry: state.job_registry.clone(),
+            events: state.events.clone(),
+            execution_plan: None,
+            prepared_execution_inputs: None,
+            lease: None,
+        };
+        let response = mold_core::GenerateResponse {
+            images: Vec::new(),
+            video: None,
+            generation_time_ms: 1,
+            model: generation.model.clone(),
+            seed_used: 7,
+            gpu: Some(origin.gpu.ordinal),
+        };
+        let work = crate::scheduler::ScheduledOwnerWork::new(
+            "legacy-sibling-post-upscale",
+            "real-esrgan-x4plus:fp16",
+            1,
+            crate::gpu_pool::OwnerWork::PostUpscale(Box::new(
+                crate::gpu_pool::PostGenerationUpscaleJob {
+                    id: "legacy-sibling-post-upscale".to_string(),
+                    generation: Box::new(generation),
+                    response,
+                    image: original.clone(),
+                    cancellation: mold_inference::InferenceCancellationToken::default(),
+                    execution_plan: None,
+                },
+            )),
+        )
+        .with_utility_plans(vec![
+            crate::gpu_pool::UtilityExecutionPlan::Upscale(cpu_plan.clone()),
+            crate::gpu_pool::UtilityExecutionPlan::Upscale(
+                mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
+                    cpu_plan.model_name.clone(),
+                    cpu_plan.weights.clone(),
+                    mold_inference::upscaler::ExactUpscalePlacement::Device {
+                        backend: origin.gpu.backend,
+                        ordinal: origin.gpu.ordinal,
+                    },
+                ),
+            ),
+        ]);
+
+        // Drift after the dependency boundary. Every sibling candidate must
+        // retain the original artifact identity and fail closed at execution.
+        std::fs::write(&weights, b"changed-after-freeze").unwrap();
+        assert!(
+            dispatch_legacy_scheduled_work(
+                &state,
+                work,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        );
+        let command = sibling_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("idle sibling must receive the post-upscale followup");
+        let grant = match command {
+            crate::gpu_pool::GpuWorkerCommand::Grant(grant) => grant,
+            crate::gpu_pool::GpuWorkerCommand::Drain => panic!("unexpected drain"),
+            crate::gpu_pool::GpuWorkerCommand::Shutdown => panic!("unexpected shutdown"),
+        };
+        let selected = match &grant.work {
+            crate::gpu_pool::OwnerWork::PostUpscale(job) => job.execution_plan.as_ref().unwrap(),
+            _ => panic!("expected post-upscale work"),
+        };
+        assert_eq!(
+            selected.placement,
+            mold_inference::upscaler::ExactUpscalePlacement::Device {
+                backend: sibling.gpu.backend,
+                ordinal: sibling.gpu.ordinal,
+            }
+        );
+        assert_eq!(selected.weights, frozen_artifact);
+        assert!(
+            selected.validate().is_err(),
+            "artifact drift must invalidate"
+        );
+
+        let (owner_event_tx, _owner_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = crate::gpu_worker::spawn_legacy_gpu_thread(
+            sibling.clone(),
+            sibling_rx,
+            owner_event_tx,
+            std::time::Duration::from_secs(60),
+        );
+        sibling.try_send_job(grant).unwrap();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), result_rx)
+            .await
+            .expect("post-upscale fallback must settle")
+            .expect("result sender must settle")
+            .expect("F0 keeps the original when exact upscale invalidates");
+        assert_eq!(completed.image.data, original.data);
+        assert_eq!(completed.image.width, original.width);
+        assert!(
+            std::fs::read_dir(&output_dir)
+                .unwrap()
+                .any(|entry| entry.unwrap().path().is_file()),
+            "F0 must still publish the original to the gallery"
+        );
+        sibling.request_shutdown();
+        owner.join().unwrap();
     }
 
     fn recv_worker_job(

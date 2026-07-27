@@ -702,6 +702,14 @@ Administrative loads also use leases so they cannot race generation. They
 have lower default priority than user-visible generation but honor explicit
 administrator hard pins.
 
+Implementation composition note: Phase E's typed phase timings flow through
+the exact prompt-expansion and upscaler owner callbacks and into learned
+estimates. Those plans still compose through one private prepared-generation
+reducer seam. The server must not publish an authoritative utility preview
+until generation, chain, and post-processing stages all freeze, transport,
+and execute the same plan identities; internal candidate lists are not a
+public plan contract.
+
 ## 9. Scheduler and replanning
 
 ### 9.1 Event model
@@ -1600,7 +1608,9 @@ internal chain stages, utility work, and future batch children; legacy
 - `optimizer_state`, `dirty_since`, `next_replan_at`;
 - stable `device_id` plus legacy ordinal `gpu`;
 - `hard_pinned_device_id` plus legacy `target_gpu`;
-- `planned_device_id`;
+- `planned_device_id` only when the planned lane is an advertised device;
+- additive `planned_lane_kind` (`device`, `host_utility`, or a future opaque
+  string) so clients never infer lane semantics from a device ID;
 - lane and planned order;
 - estimated start/finish and confidence;
 - assignment/warm-wait/blocked reason;
@@ -1626,7 +1636,12 @@ that eager load already made resident.
 Preserve legacy `state`, `position`, `gpu`, and `target_gpu`. Preserve
 the current omission of `target_gpu` once running for old clients; do not
 change it to explicit JSON `null`. Retain the new stable pin field separately
-for new UIs.
+for new UIs. The bounded host utility owner is one capacity-one lane:
+its work uses `planned_lane_kind=host_utility` and
+`planned_device_id=null`. Internal scheduler lane identities such as
+`cpu:utility:0` never enter the public device-ID namespace or client display.
+Clients may group known typed lanes and must keep future non-device lane kinds
+visible without parsing their spelling.
 
 New queue mutation APIs operate by stable job/work ID. Continue accepting
 legacy ordinal pins. If both stable ID and ordinal are supplied and resolve to

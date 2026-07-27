@@ -117,7 +117,18 @@ async function refreshQueue(epoch = loadEpoch): Promise<void> {
       queueApiAvailable.value = true;
     }
   } catch {
-    // Older hosts can omit the queue API. Status depth still renders above.
+    if (
+      epoch === loadEpoch &&
+      generation === queueRequestGeneration &&
+      requestTarget.baseUrl === target.value.baseUrl &&
+      requestTarget.apiKey === target.value.apiKey
+    ) {
+      // A plan is tentative server authority, so it cannot survive a failed
+      // refresh. Older hosts still fall back to status queue depth.
+      queue.value = [];
+      queuePlan.value = null;
+      queueApiAvailable.value = false;
+    }
   }
 }
 
@@ -461,7 +472,7 @@ onBeforeUnmount(() => {
             }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
           >
         </div>
-        <div v-if="devices?.length" data-test="host-detail-devices">
+        <div v-if="devices !== null || queuePlan !== null" data-test="host-detail-devices">
           <DevicePanel
             :devices="devices ?? []"
             :plan="queuePlan"

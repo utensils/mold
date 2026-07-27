@@ -15,6 +15,24 @@ fn key(suffix: &str) -> EstimateKey {
 }
 
 #[test]
+fn static_runtime_is_explicit_and_not_rederived_from_total() {
+    let estimate = EstimateStore::default().estimate(
+        &key("explicit-static-runtime"),
+        StaticEstimate {
+            total_ms: 9_999,
+            cold_setup_ms: 900,
+            warm_setup_ms: 90,
+            predicted_run_ms: 1_234,
+            vram_bytes: 1,
+            host_bytes: 1,
+        },
+    );
+
+    assert_eq!(estimate.total_ms, 9_999);
+    assert_eq!(estimate.predicted_run_ms, 1_234);
+}
+
+#[test]
 fn learned_timing_never_lowers_the_static_memory_floor() {
     let mut store = EstimateStore::default();
     store.observe(
@@ -73,6 +91,7 @@ fn resolved_estimate_exposes_learned_setup_and_run_phases_for_planning() {
             total_ms: 9_000,
             cold_setup_ms: 2_000,
             warm_setup_ms: 500,
+            predicted_run_ms: 7_000,
             vram_bytes: 1,
             host_bytes: 1,
         },
@@ -162,6 +181,7 @@ fn alternating_setup_dispositions_learn_one_runtime_and_distinct_setup_costs() {
             total_ms: 9_000,
             cold_setup_ms: 900,
             warm_setup_ms: 90,
+            predicted_run_ms: 8_100,
             vram_bytes: 1,
             host_bytes: 1,
         },
@@ -195,6 +215,7 @@ fn runtime_subtracts_both_typed_setup_dispositions_when_both_are_reported() {
             total_ms: 9_000,
             cold_setup_ms: 900,
             warm_setup_ms: 90,
+            predicted_run_ms: 8_100,
             vram_bytes: 1,
             host_bytes: 1,
         },
@@ -232,6 +253,7 @@ fn legacy_total_without_learned_load_remains_a_nonzero_run_estimate() {
             total_ms: 38_000,
             cold_setup_ms: 8_000,
             warm_setup_ms: 250,
+            predicted_run_ms: 30_000,
             vram_bytes: 1,
             host_bytes: 1,
         },

@@ -596,14 +596,34 @@ fn short_device_id(id: &str) -> String {
 
 fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
     let mut parts = vec![work.activity_phase.to_string().replace('_', " ")];
-    if let Some(device) = &work.planned_device_id {
-        parts.push(format!(
-            "{} lane {}",
-            short_device_id(device),
-            work.lane_order
-                .map(|order| order.to_string())
-                .unwrap_or_else(|| "—".to_string())
-        ));
+    let order = work
+        .lane_order
+        .map(|order| order.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    match work.planned_lane_kind.as_ref() {
+        Some(mold_core::QueuePlannedLaneKind::HostUtility) => {
+            parts.push(format!("host utility lane {order}"));
+        }
+        Some(mold_core::QueuePlannedLaneKind::Device) => {
+            if let Some(device) = &work.planned_device_id {
+                parts.push(format!("{} lane {order}", short_device_id(device)));
+            } else {
+                parts.push(format!("device lane {order}"));
+            }
+        }
+        Some(mold_core::QueuePlannedLaneKind::Unknown(_)) => {
+            parts.push(format!("assigned lane {order}"));
+        }
+        None if work.is_host_utility_lane()
+            || work.activity_phase == mold_core::QueueActivityPhase::Cpu =>
+        {
+            parts.push(format!("host utility lane {order}"));
+        }
+        None => {
+            if let Some(device) = &work.planned_device_id {
+                parts.push(format!("{} lane {order}", short_device_id(device)));
+            }
+        }
     }
     if let Some(finish) = work.estimated_finish_unix_ms {
         let now = std::time::SystemTime::now()
@@ -1046,6 +1066,7 @@ mod tests {
             + 3_000;
         let detail = queue_plan_detail(&mold_core::QueueWorkItem {
             activity_phase: mold_core::QueueActivityPhase::Blocked,
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Device),
             planned_device_id: Some("cuda:0123456789abcdef".into()),
             lane_order: Some(2),
             estimated_finish_unix_ms: Some(finish),
@@ -1059,6 +1080,45 @@ mod tests {
         assert!(detail.contains('~'));
         assert!(detail.contains("medium confidence"));
         assert!(detail.contains("insufficient vram"));
+    }
+
+    #[test]
+    fn queue_plan_detail_hides_internal_host_utility_identity() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::HostUtility),
+            planned_device_id: Some("internal-id-must-not-render".into()),
+            lane_order: Some(0),
+            ..Default::default()
+        });
+        assert!(detail.contains("host utility lane 0"));
+        assert!(!detail.contains("internal-id-must-not-render"));
+    }
+
+    #[test]
+    fn queue_plan_detail_hides_legacy_queued_host_utility_identity() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            planned_lane_kind: None,
+            planned_device_id: Some("cpu:utility:0".into()),
+            lane_order: Some(1),
+            ..Default::default()
+        });
+        assert!(detail.contains("host utility lane 1"));
+        assert!(!detail.contains("cpu:utility:0"));
+    }
+
+    #[test]
+    fn queue_plan_detail_keeps_future_typed_lane_opaque() {
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            planned_lane_kind: Some(mold_core::QueuePlannedLaneKind::Unknown(
+                "remote_utility".into(),
+            )),
+            planned_device_id: Some("future-internal-id".into()),
+            lane_order: Some(2),
+            ..Default::default()
+        });
+        assert!(detail.contains("assigned lane 2"));
+        assert!(!detail.contains("future-internal-id"));
     }
 
     #[test]

@@ -753,6 +753,7 @@ pub async fn run_server(
             scheduled_work_rx,
             placement_preview_rx,
             scheduler_worker_rx,
+            scheduler_worker_tx.clone(),
             worker_state,
             scheduler_shutdown.clone(),
         )))
