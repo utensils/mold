@@ -67,7 +67,7 @@ pub fn thread_gpu_ordinal() -> Option<usize> {
 /// A mismatch means a call site is ignoring its engine's `gpu_ordinal` and
 /// reaching for another GPU's context — the SD3.5/LTX-2 crash pattern.
 #[inline]
-fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
+pub(crate) fn debug_assert_ordinal_matches_thread(ordinal: usize, context: &'static str) {
     if cfg!(debug_assertions) {
         if let Some(expected) = thread_gpu_ordinal() {
             assert_eq!(
@@ -522,6 +522,53 @@ pub fn create_device(
         progress.info("No GPU detected, using CPU");
         tracing::warn!("No GPU detected, falling back to CPU");
         Ok(Device::Cpu)
+    }
+}
+
+/// Construct exactly the backend and ordinal selected by an admitted plan.
+///
+/// Unlike [`create_device`], this function deliberately ignores `MOLD_DEVICE`
+/// and never falls back to CPU or another backend. Callers must propagate an
+/// error so the scheduler can explicitly replan.
+pub(crate) fn create_exact_gpu_device(
+    backend: mold_core::GpuBackend,
+    ordinal: usize,
+    progress: &ProgressReporter,
+) -> anyhow::Result<candle_core::Device> {
+    debug_assert_ordinal_matches_thread(ordinal, "create_exact_gpu_device");
+    match backend {
+        mold_core::GpuBackend::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                progress.info(&format!("Using exact CUDA device {ordinal}"));
+                candle_core::Device::new_cuda(ordinal).map_err(|error| {
+                    anyhow::anyhow!("failed to open exact CUDA device {ordinal}: {error}")
+                })
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = progress;
+                anyhow::bail!(
+                    "exact CUDA device {ordinal} requested but this build has no CUDA support"
+                )
+            }
+        }
+        mold_core::GpuBackend::Metal => {
+            #[cfg(feature = "metal")]
+            {
+                progress.info(&format!("Using exact Metal device {ordinal}"));
+                candle_core::Device::new_metal(ordinal).map_err(|error| {
+                    anyhow::anyhow!("failed to open exact Metal device {ordinal}: {error}")
+                })
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                let _ = progress;
+                anyhow::bail!(
+                    "exact Metal device {ordinal} requested but this build has no Metal support"
+                )
+            }
+        }
     }
 }
 

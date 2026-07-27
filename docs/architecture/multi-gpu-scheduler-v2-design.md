@@ -702,6 +702,14 @@ Administrative loads also use leases so they cannot race generation. They
 have lower default priority than user-visible generation but honor explicit
 administrator hard pins.
 
+Implementation composition note: Phase E's typed phase timings flow through
+the exact prompt-expansion and upscaler owner callbacks and into learned
+estimates. Those plans still compose through one private prepared-generation
+reducer seam. The server must not publish an authoritative utility preview
+until generation, chain, and post-processing stages all freeze, transport,
+and execute the same plan identities; internal candidate lists are not a
+public plan contract.
+
 ## 9. Scheduler and replanning
 
 ### 9.1 Event model

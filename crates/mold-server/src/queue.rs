@@ -1605,7 +1605,27 @@ async fn dispatch_legacy_scheduled_work(
             },
             &worker,
         );
-        let current = pending.take().expect("legacy scheduled work is present");
+        let mut current = pending.take().expect("legacy scheduled work is present");
+        if !current.utility_plans.is_empty() {
+            let selected = current.utility_plans.iter().find(|plan| {
+                matches!(
+                    plan.placement(),
+                    crate::gpu_pool::UtilityPlacement::Device { backend, ordinal }
+                        if backend == worker.gpu.backend && ordinal == worker.gpu.ordinal
+                )
+            });
+            let Some(selected) = selected.cloned() else {
+                current.work.reject(format!(
+                    "legacy GPU owner {} had no exact utility execution plan",
+                    worker.gpu.ordinal
+                ));
+                return true;
+            };
+            if let Err(error) = current.work.install_utility_plan(selected) {
+                current.work.reject(error);
+                return true;
+            }
+        }
         let retry = crate::gpu_pool::OwnerWorkRetry {
             model_fingerprint: current.model_fingerprint,
             estimated_vram_bytes: current.estimated_vram_bytes,
@@ -1616,6 +1636,7 @@ async fn dispatch_legacy_scheduled_work(
             ready_at_ms: 0,
             bypass_count: 0,
             warm_wait_started_ms: None,
+            utility_plans: current.utility_plans.clone(),
         };
         let fence = crate::scheduler::LeaseFence {
             work_id: current.id,
@@ -1656,6 +1677,7 @@ async fn dispatch_legacy_scheduled_work(
                     estimated_host_ram_bytes: retry.estimated_host_ram_bytes,
                     hard_ordinal: retry.hard_ordinal,
                     priority: retry.priority,
+                    utility_plans: retry.utility_plans,
                     work: grant.work,
                 });
                 if pending

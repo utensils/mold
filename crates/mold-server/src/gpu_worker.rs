@@ -1,6 +1,7 @@
 use crate::gpu_pool::{
     ActiveGeneration, AdminModelUnloadJob, GpuJob, GpuWorker, GpuWorkerCommand, LeaseGrant,
     OwnerWork, PostGenerationUpscaleJob, PromptExpansionJob, StandaloneUpscaleJob,
+    UtilityExecutionPlan,
 };
 use crate::model_cache::ModelResidency;
 use crate::queue::{
@@ -256,6 +257,149 @@ pub fn spawn_gpu_thread(
             );
         })
         .expect("failed to spawn GPU worker thread")
+}
+
+/// Start the single bounded CPU utility owner. Its capacity-one transport is
+/// a rendezvous after `Ready`, exactly like a GPU owner, but it accepts only
+/// utility work carrying an immutable CPU plan and never initializes CUDA.
+pub fn spawn_cpu_utility_thread(
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("cpu-utility-worker-0".to_string())
+        .spawn(move || run_cpu_utility_owner(job_rx, scheduler_tx))
+        .expect("failed to spawn CPU utility worker thread")
+}
+
+fn run_cpu_utility_owner(
+    job_rx: std::sync::mpsc::Receiver<GpuWorkerCommand>,
+    scheduler_tx: tokio::sync::mpsc::UnboundedSender<crate::scheduler::WorkerEvent>,
+) {
+    let device_id = crate::scheduler::CPU_UTILITY_DEVICE_ID.to_string();
+    let owner_epoch = 1;
+    let ordinal = usize::MAX;
+    let mut generation = 1_u64;
+    loop {
+        if scheduler_tx
+            .send(crate::scheduler::WorkerEvent::Ready {
+                device_id: device_id.clone(),
+                ordinal,
+                owner_epoch,
+                worker_generation: generation,
+            })
+            .is_err()
+        {
+            break;
+        }
+        let grant = match job_rx.recv() {
+            Ok(GpuWorkerCommand::Grant(grant)) => grant,
+            Ok(GpuWorkerCommand::Drain | GpuWorkerCommand::Shutdown) | Err(_) => break,
+        };
+        if grant.fence.device_id != device_id
+            || grant.fence.owner_epoch != owner_epoch
+            || grant.fence.worker_generation != generation
+        {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal,
+                owner_epoch,
+                worker_generation: generation,
+                grant,
+                reason: crate::scheduler::LeaseRejection::StaleWorkerGeneration,
+            });
+            continue;
+        }
+        if let Err(error) = validate_cpu_utility_grant(&grant) {
+            let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Rejected {
+                device_id: device_id.clone(),
+                ordinal,
+                owner_epoch,
+                worker_generation: generation,
+                grant,
+                reason: crate::scheduler::LeaseRejection::PlanInvalidated(
+                    crate::execution_plan::ExecutionPlanError::PlanInvalidated(error),
+                ),
+            });
+            continue;
+        }
+        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Accepted {
+            device_id: device_id.clone(),
+            ordinal,
+            owner_epoch,
+            worker_generation: generation,
+            work_id: grant.fence.work_id.clone(),
+            plan_version: grant.fence.plan_version,
+        });
+        commit_utility_allocation(&scheduler_tx, &grant.fence);
+        reset_lease_load_ms();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_cpu_utility_work(grant.work)
+        }));
+        let load_ms = take_lease_load_ms();
+        let phase_timings = take_lease_phase_timings(load_ms);
+        if outcome.is_err() {
+            tracing::error!("CPU utility owner panicked; rejecting the attempt without GPU retry");
+        }
+        let _ = scheduler_tx.send(crate::scheduler::WorkerEvent::Completed {
+            device_id: device_id.clone(),
+            ordinal,
+            owner_epoch,
+            worker_generation: generation,
+            successful: matches!(outcome, Ok(true)),
+            phase_timings,
+        });
+        generation = generation.saturating_add(1);
+    }
+}
+
+fn validate_cpu_utility_grant(grant: &LeaseGrant) -> Result<(), String> {
+    match &grant.work {
+        #[cfg(feature = "expand")]
+        OwnerWork::PromptExpansion(job) => {
+            let plan = job
+                .execution_plan
+                .as_ref()
+                .ok_or_else(|| "CPU prompt expansion lacked an exact plan".to_string())?;
+            plan.validate().map_err(|error| error.to_string())?;
+            matches!(
+                plan.placement,
+                mold_inference::expand::ExactExpandPlacement::Cpu
+            )
+            .then_some(())
+            .ok_or_else(|| "CPU utility lane received a GPU expansion plan".to_string())
+        }
+        OwnerWork::StandaloneUpscale(job) => validate_cpu_upscale_plan(&job.execution_plan),
+        OwnerWork::PostUpscale(job) => validate_cpu_upscale_plan(&job.execution_plan),
+        _ => Err("CPU utility lane accepts only expansion and upscaling".to_string()),
+    }
+}
+
+fn validate_cpu_upscale_plan(
+    plan: &Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
+) -> Result<(), String> {
+    let plan = plan
+        .as_ref()
+        .ok_or_else(|| "CPU upscaling lacked an exact plan".to_string())?;
+    plan.validate().map_err(|error| error.to_string())?;
+    matches!(
+        plan.placement,
+        mold_inference::upscaler::ExactUpscalePlacement::Cpu
+    )
+    .then_some(())
+    .ok_or_else(|| "CPU utility lane received a GPU upscaler plan".to_string())
+}
+
+fn process_cpu_utility_work(work: OwnerWork) -> bool {
+    match work {
+        OwnerWork::PromptExpansion(job) => process_cpu_prompt_expansion(*job),
+        OwnerWork::StandaloneUpscale(job) => process_cpu_standalone_upscale(*job),
+        OwnerWork::PostUpscale(job) => process_cpu_post_generation_upscale(*job),
+        work => {
+            work.reject("CPU utility lane received non-utility work".to_string());
+            false
+        }
+    }
 }
 
 /// Spawn a replacement owner without waiting for its context probe. The
@@ -705,21 +849,81 @@ fn validate_grant_before_acceptance(
     worker: &GpuWorker,
     grant: &LeaseGrant,
 ) -> Result<(), crate::execution_plan::ExecutionPlanError> {
-    let OwnerWork::Generation(job) = &grant.work else {
-        return Ok(());
-    };
-    let Some(plan) = job.execution_plan.as_ref() else {
-        return Ok(());
-    };
-    let worker_id = crate::scheduler::worker_device_id(worker);
-    let config = job.config.blocking_read();
-    crate::execution_plan::validate_before_cuda(
-        plan,
-        &worker_id,
-        worker.gpu.ordinal,
-        &config,
-        &job.request,
+    match &grant.work {
+        OwnerWork::Generation(job) => {
+            let Some(plan) = job.execution_plan.as_ref() else {
+                return Ok(());
+            };
+            let worker_id = crate::scheduler::worker_device_id(worker);
+            let config = job.config.blocking_read();
+            crate::execution_plan::validate_before_cuda(
+                plan,
+                &worker_id,
+                worker.gpu.ordinal,
+                &config,
+                &job.request,
+            )
+        }
+        #[cfg(feature = "expand")]
+        OwnerWork::PromptExpansion(job) => {
+            let plan = job.execution_plan.as_ref().ok_or_else(|| {
+                crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+                    "prompt expansion lacked an exact execution plan".to_string(),
+                )
+            })?;
+            plan.validate().map_err(|error| {
+                crate::execution_plan::ExecutionPlanError::PlanInvalidated(error.to_string())
+            })?;
+            validate_gpu_utility_placement(
+                worker,
+                match plan.placement {
+                    mold_inference::expand::ExactExpandPlacement::Cpu => None,
+                    mold_inference::expand::ExactExpandPlacement::Device { backend, ordinal } => {
+                        Some((backend, ordinal))
+                    }
+                },
+            )
+        }
+        OwnerWork::StandaloneUpscale(job) => validate_gpu_upscale_plan(worker, &job.execution_plan),
+        OwnerWork::PostUpscale(job) => validate_gpu_upscale_plan(worker, &job.execution_plan),
+        _ => Ok(()),
+    }
+}
+
+fn validate_gpu_upscale_plan(
+    worker: &GpuWorker,
+    plan: &Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
+) -> Result<(), crate::execution_plan::ExecutionPlanError> {
+    let plan = plan.as_ref().ok_or_else(|| {
+        crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+            "upscaling lacked an exact execution plan".to_string(),
+        )
+    })?;
+    plan.validate().map_err(|error| {
+        crate::execution_plan::ExecutionPlanError::PlanInvalidated(error.to_string())
+    })?;
+    validate_gpu_utility_placement(
+        worker,
+        match plan.placement {
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu => None,
+            mold_inference::upscaler::ExactUpscalePlacement::Device { backend, ordinal } => {
+                Some((backend, ordinal))
+            }
+        },
     )
+}
+
+fn validate_gpu_utility_placement(
+    worker: &GpuWorker,
+    placement: Option<(mold_core::GpuBackend, usize)>,
+) -> Result<(), crate::execution_plan::ExecutionPlanError> {
+    if placement == Some((worker.gpu.backend, worker.gpu.ordinal)) {
+        Ok(())
+    } else {
+        Err(crate::execution_plan::ExecutionPlanError::PlanInvalidated(
+            "utility execution placement did not match the accepting GPU owner".to_string(),
+        ))
+    }
 }
 
 fn process_owner_work(
@@ -820,20 +1024,10 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
         ensure_worker_not_poisoned(worker, &job.settings.model)?;
         #[cfg(feature = "expand")]
         {
-            use mold_core::PromptExpander;
-            let selector = worker.gpu.stable_id.as_ref().map_or_else(
-                || mold_core::GpuSelector::Ordinal(worker.gpu.ordinal),
-                |id| mold_core::GpuSelector::Identifier(id.clone()),
-            );
-            let mut expander = mold_inference::expand::LocalExpander::from_config(
-                &job.config,
-                Some(&job.settings.model),
-            )
-            .ok_or_else(|| {
-                anyhow::anyhow!("local expand model not found — run: mold pull qwen3-expand")
-            })?
-            .with_gpu_selection(mold_core::GpuSelection::Specific(vec![selector]))
-            .with_preferred_gpu(Some(worker.gpu.ordinal));
+            let plan = job.execution_plan.ok_or_else(|| {
+                anyhow::anyhow!("prompt expansion lacked an exact execution plan")
+            })?;
+            let mut expander = mold_inference::expand::LocalExpander::from_resolved_plan(plan);
             expander.set_on_progress(Box::new(|event| {
                 if let mold_inference::ProgressEvent::PhaseDone {
                     phase: mold_inference::ProgressPhase::ModelLoad,
@@ -846,7 +1040,7 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
                     record_phase_timing(&event);
                 }
             }));
-            expander.expand(&job.prompt, &job.expand_config)
+            expander.expand_with_cancellation(&job.prompt, &job.expand_config, job.cancellation)
         }
         #[cfg(not(feature = "expand"))]
         {
@@ -868,21 +1062,63 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
     successful
 }
 
+fn process_cpu_prompt_expansion(job: PromptExpansionJob) -> bool {
+    let result = (|| -> anyhow::Result<mold_core::ExpandResult> {
+        #[cfg(feature = "expand")]
+        {
+            let plan = job.execution_plan.ok_or_else(|| {
+                anyhow::anyhow!("CPU prompt expansion lacked an exact execution plan")
+            })?;
+            if !matches!(
+                plan.placement,
+                mold_inference::expand::ExactExpandPlacement::Cpu
+            ) {
+                anyhow::bail!("CPU prompt expansion received a non-CPU execution plan");
+            }
+            let mut expander = mold_inference::expand::LocalExpander::from_resolved_plan(plan);
+            expander.set_on_progress(Box::new(|event| {
+                if let mold_inference::ProgressEvent::PhaseDone {
+                    phase: mold_inference::ProgressPhase::ModelLoad,
+                    elapsed,
+                    ..
+                } = &event
+                {
+                    record_model_load_timing(ModelLoadDisposition::Cold, *elapsed);
+                } else {
+                    record_phase_timing(&event);
+                }
+            }));
+            expander.expand_with_cancellation(&job.prompt, &job.expand_config, job.cancellation)
+        }
+        #[cfg(not(feature = "expand"))]
+        {
+            anyhow::bail!("local prompt expansion not available — built without expand feature")
+        }
+    })();
+    let successful = result.is_ok();
+    let _ = job
+        .result_tx
+        .send(result.map_err(|error| error.to_string()));
+    successful
+}
+
 fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::UpscaleResponse> {
         ensure_worker_not_poisoned(worker, &job.model)?;
+        let plan = job
+            .execution_plan
+            .ok_or_else(|| anyhow::anyhow!("upscaling lacked an exact execution plan"))?;
         let load_started = Instant::now();
-        let mut engine = mold_inference::create_upscale_engine(
-            job.model.clone(),
-            job.weights_path,
+        let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
+            plan,
             mold_inference::LoadStrategy::Eager,
-            worker.gpu.ordinal,
         )?;
         record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
         let progress_tx = job.progress_tx;
         engine.set_on_progress(Box::new(move |event| {
             handle_standalone_upscale_progress(event, progress_tx.as_ref());
         }));
+        engine.set_cancellation_token(job.cancellation);
         run_upscale_engine_safely(worker, engine, &job.request)
     })();
     if result
@@ -910,6 +1146,47 @@ fn handle_standalone_upscale_progress(
     }
 }
 
+fn process_cpu_standalone_upscale(job: StandaloneUpscaleJob) -> bool {
+    let result = run_cpu_upscale(
+        job.execution_plan,
+        &job.request,
+        job.progress_tx,
+        job.cancellation,
+    );
+    let successful = result.is_ok();
+    let _ = job
+        .result_tx
+        .send(result.map_err(|error| error.to_string()));
+    successful
+}
+
+fn run_cpu_upscale(
+    plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
+    request: &mold_core::UpscaleRequest,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+    cancellation: mold_inference::InferenceCancellationToken,
+) -> anyhow::Result<mold_core::UpscaleResponse> {
+    let plan = plan.ok_or_else(|| anyhow::anyhow!("CPU upscaling lacked an exact plan"))?;
+    if !matches!(
+        plan.placement,
+        mold_inference::upscaler::ExactUpscalePlacement::Cpu
+    ) {
+        anyhow::bail!("CPU utility lane received a GPU upscaler plan");
+    }
+    let load_started = Instant::now();
+    let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
+        plan,
+        mold_inference::LoadStrategy::Eager,
+    )?;
+    record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
+    engine.set_on_progress(Box::new(move |event| {
+        handle_standalone_upscale_progress(event, progress_tx.as_ref());
+    }));
+    mold_inference::with_upscale_cancellation(&mut *engine, cancellation, |engine| {
+        engine.upscale(request)
+    })
+}
+
 fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) -> bool {
     let cleanup = GenerationCleanup::new(&job.generation);
     #[cfg(test)]
@@ -926,6 +1203,8 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
         &upscale_model,
         job.image.clone(),
         &mut job.response,
+        job.execution_plan,
+        job.cancellation,
     );
     #[cfg(test)]
     pause_owner_stage_for_test(&job.id, TestOwnerStageBarrier::PostPostUpscale);
@@ -944,6 +1223,63 @@ fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUp
             %error,
             "post-generation upscale failed; keeping original image"
         );
+    }
+    finish_generation_success(*job.generation, job.response, image, original);
+    drop(cleanup);
+    successful
+}
+
+fn process_cpu_post_generation_upscale(mut job: PostGenerationUpscaleJob) -> bool {
+    let cleanup = GenerationCleanup::new(&job.generation);
+    let upscale_model = job
+        .generation
+        .request
+        .upscale_model
+        .clone()
+        .unwrap_or_default();
+    let request_model = mold_core::manifest::resolve_model_name(&upscale_model);
+    let plan_model = job
+        .execution_plan
+        .as_ref()
+        .map(|plan| plan.model_name.as_str());
+    let result = if plan_model != Some(request_model.as_str()) {
+        Err(format!(
+            "post-generation upscaler plan did not match request '{request_model}'"
+        ))
+    } else {
+        let request = mold_core::UpscaleRequest {
+            model: request_model,
+            image: job.image.data.clone(),
+            output_format: job.image.format,
+            tile_size: None,
+            metadata: Some(OutputMetadata::from_generate_request(
+                &job.generation.request,
+                job.response.seed_used,
+                None,
+                mold_core::build_info::version_string(),
+            )),
+        };
+        run_cpu_upscale(
+            job.execution_plan,
+            &request,
+            job.generation.progress_tx.clone(),
+            job.cancellation,
+        )
+        .map_err(|error| format!("upscale failed: {error}"))
+        .and_then(|upscaled| {
+            apply_upscale_response_to_image_generation(
+                &job.generation.request,
+                &mut job.response,
+                job.image.clone(),
+                upscaled,
+            )
+            .map_err(|error| format!("upscale failed: {error}"))
+        })
+    };
+    let successful = result.is_ok();
+    let (image, original, error) = settle_post_generation_upscale(job.image, result);
+    if let Some(error) = error {
+        tracing::warn!(%error, "CPU post-generation upscale failed; keeping original image");
     }
     finish_generation_success(*job.generation, job.response, image, original);
     drop(cleanup);
@@ -1459,17 +1795,18 @@ fn upscale_generated_image_on_worker(
     upscale_model: &str,
     img: ImageData,
     response: &mut mold_core::GenerateResponse,
+    exact_plan: Option<mold_inference::upscaler::ResolvedUpscaleExecutionPlan>,
+    cancellation: mold_inference::InferenceCancellationToken,
 ) -> Result<ImageData, String> {
     let model_name = mold_core::manifest::resolve_model_name(upscale_model);
-    let weights_path = {
-        let config = job.config.blocking_read();
-        config
-            .models
-            .get(&model_name)
-            .and_then(|c| c.transformer.as_ref())
-            .map(std::path::PathBuf::from)
+    let plan = exact_plan
+        .ok_or_else(|| "post-generation upscaling lacked an exact execution plan".to_string())?;
+    if plan.model_name != model_name {
+        return Err(format!(
+            "post-generation upscaler plan model '{}' did not match request '{model_name}'",
+            plan.model_name
+        ));
     }
-    .ok_or_else(|| format!("upscaler model '{model_name}' is not downloaded"))?;
 
     if let Some(ref tx) = job.progress_tx {
         let _ = tx.send(SseMessage::Progress(SseProgressEvent::StageStart {
@@ -1477,11 +1814,9 @@ fn upscale_generated_image_on_worker(
         }));
     }
     let load_started = Instant::now();
-    let mut engine = mold_inference::create_upscale_engine(
-        model_name.clone(),
-        weights_path,
+    let mut engine = mold_inference::upscaler::create_upscale_engine_from_resolved_plan(
+        plan,
         mold_inference::LoadStrategy::Eager,
-        worker.gpu.ordinal,
     )
     .map_err(|e| format!("failed to load upscaler: {e}"))?;
     record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
@@ -1504,6 +1839,7 @@ fn upscale_generated_image_on_worker(
             mold_core::build_info::version_string(),
         )),
     };
+    engine.set_cancellation_token(cancellation);
     let upscale_result = run_upscale_engine_safely(worker, engine, &req);
     let upscaled = upscale_result.map_err(|e| format!("upscale failed: {e}"))?;
     apply_upscale_response_to_image_generation(&job.request, response, img, upscaled)
@@ -1961,6 +2297,31 @@ fn process_job_with_sink(
                             .map(|metadata| metadata.len().saturating_add(2 << 30))
                             .unwrap_or(2 << 30)
                     };
+                    let frozen_upscale_plan = {
+                        let config = job.config.blocking_read();
+                        config
+                            .models
+                            .get(&resolved)
+                            .and_then(|model| model.transformer.as_ref())
+                            .ok_or_else(|| format!("upscaler model '{resolved}' is not downloaded"))
+                            .and_then(|path| {
+                                mold_inference::upscaler::resolve_upscale_execution_plan(
+                                    resolved.clone(),
+                                    std::path::Path::new(path),
+                                    mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+                                )
+                                .map_err(|error| error.to_string())
+                            })
+                    };
+                    let frozen_upscale_plan = match frozen_upscale_plan {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            let _ = job.result_tx.send(Err(format!(
+                                "post-generation upscaler plan could not be frozen: {error}"
+                            )));
+                            return false;
+                        }
+                    };
                     let followup_id = format!("{}::post-upscale", job.id);
                     let work = crate::scheduler::ScheduledOwnerWork::new(
                         followup_id.clone(),
@@ -1971,8 +2332,23 @@ fn process_job_with_sink(
                             generation: Box::new(job),
                             response,
                             image: img,
+                            cancellation: mold_inference::InferenceCancellationToken::default(),
+                            execution_plan: None,
                         })),
-                    );
+                    )
+                    .with_utility_plans(vec![
+                        UtilityExecutionPlan::Upscale(frozen_upscale_plan.clone()),
+                        UtilityExecutionPlan::Upscale(
+                            mold_inference::upscaler::resolve_upscale_execution_plan_from_artifact(
+                                frozen_upscale_plan.model_name.clone(),
+                                frozen_upscale_plan.weights.clone(),
+                                mold_inference::upscaler::ExactUpscalePlacement::Device {
+                                    backend: worker.gpu.backend,
+                                    ordinal: worker.gpu.ordinal,
+                                },
+                            ),
+                        ),
+                    ]);
                     let followup_started = match event_sink.followup_ready(work) {
                         Ok(()) => {
                             std::mem::forget(cleanup);
@@ -3779,6 +4155,128 @@ mod tests {
     }
 
     #[test]
+    fn cpu_utility_owner_has_stable_identity_and_settles_one_exact_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let weights = root.path().join("upscaler.safetensors");
+        let mut empty_safetensors = 2_u64.to_le_bytes().to_vec();
+        empty_safetensors.extend_from_slice(b"{}");
+        std::fs::write(&weights, empty_safetensors).unwrap();
+        let plan = mold_inference::upscaler::resolve_upscale_execution_plan(
+            "real-esrgan-x4plus:fp16",
+            &weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu,
+        )
+        .unwrap();
+        let (job_tx, job_rx) = std::sync::mpsc::sync_channel(1);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let owner = spawn_cpu_utility_thread(job_rx, event_tx);
+
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                device_id,
+                ordinal: usize::MAX,
+                owner_epoch: 1,
+                worker_generation: 1,
+            }) if device_id == crate::scheduler::CPU_UTILITY_DEVICE_ID
+        ));
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        job_tx
+            .send(GpuWorkerCommand::Grant(Box::new(LeaseGrant {
+                fence: crate::scheduler::LeaseFence {
+                    work_id: "cpu-upscale-attempt".to_string(),
+                    device_id: crate::scheduler::CPU_UTILITY_DEVICE_ID.to_string(),
+                    owner_epoch: 1,
+                    state_version: 1,
+                    plan_version: 2,
+                    worker_generation: 1,
+                    memory_sample_generation: 3,
+                    memory_ledger_sequence: 4,
+                },
+                work: OwnerWork::StandaloneUpscale(Box::new(
+                    crate::gpu_pool::StandaloneUpscaleJob {
+                        id: "cpu-upscale-attempt".to_string(),
+                        model: "real-esrgan-x4plus:fp16".to_string(),
+                        weights_path: weights,
+                        request: mold_core::UpscaleRequest {
+                            model: "real-esrgan-x4plus:fp16".to_string(),
+                            image: vec![1],
+                            output_format: OutputFormat::Png,
+                            tile_size: None,
+                            metadata: None,
+                        },
+                        progress_tx: None,
+                        cancellation: mold_inference::InferenceCancellationToken::default(),
+                        execution_plan: Some(plan),
+                        result_tx,
+                    },
+                )),
+                retry: None,
+            })))
+            .unwrap();
+
+        let error = result_rx
+            .blocking_recv()
+            .expect("CPU owner must settle its result")
+            .expect_err("invalid fixture must fail without a retry");
+        assert!(
+            error.contains("safetensors")
+                || error.contains("header")
+                || error.contains("upscaler architecture"),
+            "{error}"
+        );
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Accepted {
+                device_id,
+                work_id,
+                ..
+            }) if device_id == crate::scheduler::CPU_UTILITY_DEVICE_ID
+                && work_id == "cpu-upscale-attempt"
+        ));
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::AllocationCommitted {
+                device_id,
+                work_id,
+                ..
+            }) if device_id == crate::scheduler::CPU_UTILITY_DEVICE_ID
+                && work_id == "cpu-upscale-attempt"
+        ));
+        match event_rx.blocking_recv() {
+            Some(crate::scheduler::WorkerEvent::Completed {
+                device_id,
+                worker_generation: 1,
+                successful,
+                phase_timings,
+                ..
+            }) => {
+                assert_eq!(device_id, crate::scheduler::CPU_UTILITY_DEVICE_ID);
+                assert!(!successful, "the invalid exact artifact must fail");
+                assert!(
+                    phase_timings.cold_load_ms.is_some(),
+                    "the exact CPU lane must publish its load through Phase E's typed timing payload"
+                );
+                assert_eq!(phase_timings.upscale_ms, None);
+            }
+            _ => panic!("CPU exact attempt must publish completion evidence"),
+        }
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::scheduler::WorkerEvent::Ready {
+                device_id,
+                ordinal: usize::MAX,
+                owner_epoch: 1,
+                worker_generation: 2,
+            }) if device_id == crate::scheduler::CPU_UTILITY_DEVICE_ID
+        ));
+
+        job_tx.send(GpuWorkerCommand::Shutdown).unwrap();
+        owner.join().unwrap();
+    }
+
+    #[test]
     fn worker_rejects_stale_generation_before_touching_inference() {
         let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<GpuWorkerCommand>(1);
         let worker = Arc::new(GpuWorker {
@@ -4605,6 +5103,9 @@ mod tests {
             ("drain-pre-upscale", TestOwnerStageBarrier::PrePostUpscale),
             ("drain-post-upscale", TestOwnerStageBarrier::PostPostUpscale),
         ] {
+            let upscale_fixture = tempfile::tempdir().unwrap();
+            let upscale_weights = upscale_fixture.path().join("upscaler.safetensors");
+            std::fs::write(&upscale_weights, b"not-real-safetensors").unwrap();
             let (worker, job_rx) = protocol_worker(0, Arc::new(AtomicBool::new(false)));
             let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
             let handle =
@@ -4669,6 +5170,18 @@ mod tests {
                         generation: Box::new(generation),
                         response,
                         image: original,
+                        cancellation: mold_inference::InferenceCancellationToken::default(),
+                        execution_plan: Some(
+                            mold_inference::upscaler::resolve_upscale_execution_plan(
+                                "missing-upscaler",
+                                &upscale_weights,
+                                mold_inference::upscaler::ExactUpscalePlacement::Device {
+                                    backend: worker.gpu.backend,
+                                    ordinal: worker.gpu.ordinal,
+                                },
+                            )
+                            .unwrap(),
+                        ),
                     })),
                     retry: None,
                 })
@@ -5946,7 +6459,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_post_upscale_reports_missing_downloaded_model() {
+    fn worker_post_upscale_rejects_a_missing_exact_plan() {
         let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
         let job = fake_upscale_job(Config::default(), "real-esrgan-x4plus:fp16");
         let mut response = GenerateResponse {
@@ -5964,46 +6477,27 @@ mod tests {
             "real-esrgan-x4plus:fp16",
             fake_upscale_image(),
             &mut response,
+            None,
+            mold_inference::InferenceCancellationToken::default(),
         )
         .expect_err("worker should reject a missing upscaler config");
 
-        assert!(err.contains("not downloaded"), "got: {err}");
+        assert!(err.contains("lacked an exact execution plan"), "got: {err}");
     }
 
     #[test]
-    fn worker_post_upscale_surfaces_missing_weights_path() {
-        let worker = single_worker_pool_with_parked("flux-dev:q4", Duration::ZERO);
+    fn post_upscale_plan_freeze_surfaces_missing_weights_path() {
         let tmp = tempfile::TempDir::new().unwrap();
         let missing_weights = tmp.path().join("missing-upscaler.safetensors");
-        let mut config = Config::default();
-        config.models.insert(
-            "real-esrgan-x4plus:fp16".to_string(),
-            ModelConfig {
-                transformer: Some(missing_weights.display().to_string()),
-                ..Default::default()
-            },
-        );
-        let job = fake_upscale_job(config, "real-esrgan-x4plus:fp16");
-        let mut response = GenerateResponse {
-            images: vec![],
-            video: None,
-            generation_time_ms: 10,
-            model: job.request.model.clone(),
-            seed_used: 7,
-            gpu: None,
-        };
 
-        let err = upscale_generated_image_on_worker(
-            &worker,
-            &job,
+        let err = mold_inference::upscaler::resolve_upscale_execution_plan(
             "real-esrgan-x4plus:fp16",
-            fake_upscale_image(),
-            &mut response,
+            &missing_weights,
+            mold_inference::upscaler::ExactUpscalePlacement::Cpu,
         )
-        .expect_err("worker should surface missing weight files before generation completes");
+        .expect_err("planning must surface missing weights before admission");
 
-        assert!(err.contains("failed to load upscaler"), "got: {err}");
-        assert!(err.contains("upscaler weights not found"), "got: {err}");
+        assert!(err.to_string().contains("could not resolve"), "got: {err}");
     }
 
     #[test]
