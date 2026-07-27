@@ -195,7 +195,7 @@ fn format_work_item(item: &QueueWorkItem) -> String {
         .map(|finish| format!(" finish={finish}"))
         .unwrap_or_default();
     format!(
-        "{} {} phase={:?} lane={} confidence={:?}{}{}",
+        "{} {} phase={} lane={} confidence={}{}{}",
         item.work_id,
         item.work_kind,
         item.activity_phase,

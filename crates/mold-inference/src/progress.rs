@@ -1,5 +1,15 @@
 use std::time::Duration;
 
+/// Machine-readable inference phase used by the scheduler's learned timing
+/// model. Display names remain independently evolvable client copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressPhase {
+    ModelLoad,
+    PromptEncode,
+    Vae,
+    Upscale,
+}
+
 /// Progress events emitted during model loading and inference.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
@@ -7,6 +17,14 @@ pub enum ProgressEvent {
     StageStart { name: String },
     /// The most recent stage completed, with its elapsed time
     StageDone { name: String, elapsed: Duration },
+    /// A scheduler-observable phase completed. This maps to the same
+    /// StageDone SSE shape as a display-only stage but retains typed identity
+    /// inside the inference/server boundary.
+    PhaseDone {
+        phase: ProgressPhase,
+        name: String,
+        elapsed: Duration,
+    },
     /// Informational message (e.g. "CUDA detected, using GPU")
     Info { message: String },
     /// A cached artifact was reused instead of recomputed.
@@ -64,6 +82,14 @@ impl ProgressReporter {
         });
     }
 
+    pub fn phase_done(&self, phase: ProgressPhase, name: &str, elapsed: Duration) {
+        self.emit(ProgressEvent::PhaseDone {
+            phase,
+            name: name.to_string(),
+            elapsed,
+        });
+    }
+
     pub fn info(&self, message: &str) {
         self.emit(ProgressEvent::Info {
             message: message.to_string(),
@@ -98,6 +124,14 @@ impl From<ProgressEvent> for mold_core::SseProgressEvent {
         match event {
             ProgressEvent::StageStart { name } => mold_core::SseProgressEvent::StageStart { name },
             ProgressEvent::StageDone { name, elapsed } => mold_core::SseProgressEvent::StageDone {
+                name,
+                elapsed_ms: elapsed.as_millis() as u64,
+            },
+            ProgressEvent::PhaseDone {
+                name,
+                elapsed,
+                phase: _,
+            } => mold_core::SseProgressEvent::StageDone {
                 name,
                 elapsed_ms: elapsed.as_millis() as u64,
             },
@@ -230,7 +264,7 @@ mod tests {
         reporter.set_callback(cb);
 
         let dur = Duration::from_secs(2) + Duration::from_millis(500);
-        reporter.stage_done("VAE decode", dur);
+        reporter.phase_done(crate::ProgressPhase::Vae, "VAE decode", dur);
 
         let entries = log.lock().unwrap();
         assert_eq!(entries.len(), 1);
@@ -250,6 +284,24 @@ mod tests {
             "expected elapsed ~2.5s, got: {}",
             entries[0]
         );
+    }
+
+    #[test]
+    fn typed_phase_done_preserves_the_existing_sse_wire_shape() {
+        let wire: mold_core::SseProgressEvent = ProgressEvent::PhaseDone {
+            phase: ProgressPhase::Vae,
+            name: "Decoding video frames".to_string(),
+            elapsed: Duration::from_millis(37),
+        }
+        .into();
+
+        assert!(matches!(
+            wire,
+            mold_core::SseProgressEvent::StageDone {
+                name,
+                elapsed_ms: 37
+            } if name == "Decoding video frames"
+        ));
     }
 
     #[test]

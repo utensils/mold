@@ -1,7 +1,14 @@
 import { defineStore } from "pinia";
 import { listDevices, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, predictedCompletionUnixMs } from "@studio/api/queuePlan";
-import { apiJsonTo, type ApiTarget } from "../lib/api/client";
+import {
+  comparePlacementPreviews,
+  classifyPlacementPreview,
+  previewChainPlacement,
+  previewGenerationPlacement,
+  previewRequestForSiblingFanout,
+} from "@studio/api/generationPlacement";
+import { ApiError, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { fetchServerCapabilities } from "../lib/api/serverCapabilities";
 import {
   hostIdFromUrl,
@@ -13,7 +20,15 @@ import {
 } from "../lib/hosts";
 import { ipc, type SavedHost } from "../lib/ipc";
 import { PLATFORM_UI } from "../lib/platform";
-import type { GpuInfo, GpuWorkerStatus, ServerCapabilities, ServerStatus } from "../lib/api/types";
+import type {
+  AutoChainRequest,
+  ChainRequest,
+  GenerateRequest,
+  GpuInfo,
+  GpuWorkerStatus,
+  ServerCapabilities,
+  ServerStatus,
+} from "../lib/api/types";
 import { useAppPrefsStore } from "./appPrefs";
 import { useConnectionStore } from "./connection";
 import { useDownloadsStore } from "./downloads";
@@ -486,6 +501,148 @@ export const useHostsStore = defineStore("hosts", {
         label: chosen.label,
         kind: chosen.kind,
         target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+        instanceId: chosen.instanceId,
+      };
+    },
+    async resolveFeasibleRoute(
+      selection: string | null,
+      request: GenerateRequest | ChainRequest | AutoChainRequest,
+      copies = 1,
+    ): Promise<HostRoute | null> {
+      const authoritySignature = () =>
+        JSON.stringify({
+          requestedSelection: selection,
+          activeSelection: useAppPrefsStore().settings?.generateTargetHost ?? null,
+          hosts: this.all.map((host) => [
+            host.id,
+            host.baseUrl,
+            host.apiKey,
+            host.instanceId,
+            host.status,
+          ]),
+        });
+      const capturedAuthority = authoritySignature();
+      let candidates = this.all.filter((host) => {
+        if (host.status !== "ready" || !host.baseUrl) return false;
+        const telemetry = this.telemetry[host.id];
+        if (telemetry?.devices != null)
+          return telemetry.devices.some((device) => device.schedulable);
+        return (
+          telemetry?.gpuWorkers == null ||
+          telemetry.gpuWorkers.some((worker) => worker.state !== "degraded")
+        );
+      });
+      if (
+        selection !== null &&
+        selection !== "capable" &&
+        this.all.some((host) => host.id === selection)
+      )
+        candidates = candidates.filter((host) => host.id === selection);
+
+      const probes = await Promise.all(
+        candidates.map(async (host) => {
+          const started = performance.now();
+          try {
+            const target = { baseUrl: host.baseUrl!, apiKey: host.apiKey };
+            const preview =
+              Array.isArray((request as ChainRequest).stages) || "total_frames" in request
+                ? await previewChainPlacement(
+                    target,
+                    previewRequestForSiblingFanout(
+                      request as unknown as Record<string, unknown>,
+                      copies,
+                    ),
+                    copies,
+                  )
+                : await previewGenerationPlacement(
+                    target,
+                    previewRequestForSiblingFanout(
+                      request as unknown as Record<string, unknown>,
+                      copies,
+                    ),
+                    copies,
+                  );
+            return {
+              host,
+              preview,
+              legacyUnsupported: false,
+              roundTripMs: Math.max(0, performance.now() - started),
+            };
+          } catch (error) {
+            return {
+              host,
+              preview: null,
+              legacyUnsupported:
+                error instanceof ApiError && (error.status === 404 || error.status === 405),
+              roundTripMs: Math.max(0, performance.now() - started),
+            };
+          }
+        }),
+      );
+      if (authoritySignature() !== capturedAuthority) return null;
+
+      const planned = probes
+        .flatMap((probe) =>
+          probe.preview && classifyPlacementPreview(probe.preview) === "planned"
+            ? [
+                {
+                  host: probe.host,
+                  preview: probe.preview,
+                  roundTripMs: probe.roundTripMs,
+                },
+              ]
+            : [],
+        )
+        .map((probe) => ({
+          hostId: probe.host.id,
+          roundTripMs: probe.roundTripMs,
+          preview: probe.preview,
+        }))
+        .sort(comparePlacementPreviews);
+      if (planned.length > 0) {
+        const chosen = candidates.find((host) => host.id === planned[0]!.hostId);
+        if (!chosen?.baseUrl) return null;
+        return {
+          hostId: chosen.id,
+          label: chosen.label,
+          kind: chosen.kind,
+          target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+          instanceId: chosen.instanceId,
+        };
+      }
+
+      const unsupportedIds = probes
+        .filter(
+          (probe) =>
+            probe.legacyUnsupported || classifyPlacementPreview(probe.preview) === "unsupported",
+        )
+        .map((probe) => probe.host.id);
+      const legacy = candidates
+        .filter((host) => unsupportedIds.includes(host.id))
+        .map((host) => ({
+          ...host,
+          gpu: strongestRoutableGpu(this.telemetry[host.id]),
+        }));
+      if (legacy.length === 0) return null;
+      const modelHostIds = useHostModelsStore()
+        .hostsFor(request.model)
+        .filter((id) => unsupportedIds.includes(id));
+      let chosen: (typeof legacy)[number] | null;
+      if (selection === "capable") {
+        chosen = pickMostCapableHost(legacy, modelHostIds.length > 0 ? modelHostIds : null);
+      } else if (selection !== null && this.all.some((host) => host.id === selection)) {
+        chosen = legacy.find((host) => host.id === selection) ?? null;
+      } else {
+        const withModel = legacy.filter((host) => modelHostIds.includes(host.id));
+        chosen = pickAutoHost(withModel.length > 0 ? withModel : legacy);
+      }
+      if (!chosen?.baseUrl) return null;
+      return {
+        hostId: chosen.id,
+        label: chosen.label,
+        kind: chosen.kind,
+        target: { baseUrl: chosen.baseUrl, apiKey: chosen.apiKey },
+        instanceId: chosen.instanceId,
       };
     },
     /** Pull queue depth/capacity from every live host. */

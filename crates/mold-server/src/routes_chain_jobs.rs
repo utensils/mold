@@ -31,6 +31,33 @@ const CHAIN_JOB_NOT_RESUMABLE: &str = "CHAIN_JOB_NOT_RESUMABLE";
 const RETAKE_SPLICE_REQUIRES_CUT_OR_FADE: &str = "RETAKE_SPLICE_REQUIRES_CUT_OR_FADE";
 pub const CHAIN_JOB_EPHEMERAL: &str = "CHAIN_JOB_EPHEMERAL";
 
+#[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
+pub struct ChainPlacementPreviewRequest {
+    pub request: ChainRequest,
+    #[serde(default = "default_preview_copies")]
+    pub copies: u32,
+}
+
+fn default_preview_copies() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum ChainPlacementPreviewBody {
+    Wrapped(ChainPlacementPreviewRequest),
+    Legacy(ChainRequest),
+}
+
+impl ChainPlacementPreviewBody {
+    fn into_parts(self) -> (ChainRequest, u32) {
+        match self {
+            Self::Wrapped(body) => (body.request, body.copies),
+            Self::Legacy(request) => (request, 1),
+        }
+    }
+}
+
 /// 202. Validates ChainRequest::normalise + chain_limits caps + family
 /// chain-capability + audio gate. 503 CHAIN_JOBS_UNAVAILABLE when DB
 /// disabled (state.chain_jobs None). Creates job dir + manifest + rows,
@@ -75,6 +102,65 @@ pub async fn create_chain_job(
         StatusCode::ACCEPTED,
         Json(CreateChainJobResponse { job_id }),
     ))
+}
+
+/// Forward-compatible placement capability probe for a normalized durable
+/// sequence.
+///
+/// Until production chain stages retain frozen per-device execution plans,
+/// this deliberately returns `authoritative=false` and `outcome=unsupported`.
+/// It accepts both the preferred `{ request, copies }` body and the legacy raw
+/// `ChainRequest` without creating jobs, downloading assets, or touching CUDA.
+#[utoipa::path(
+    post,
+    path = "/api/chain-jobs/placement-preview",
+    tag = "chain-jobs",
+    request_body = ChainPlacementPreviewRequest,
+    responses(
+        (status = 200, description = "Chain placement capability response", body = mold_core::GenerationPlacementPreview)
+    )
+)]
+pub async fn preview_chain_job_placement(
+    State(state): State<AppState>,
+    Json(body): Json<ChainPlacementPreviewBody>,
+) -> Json<mold_core::GenerationPlacementPreview> {
+    let (mut req, copies) = body.into_parts();
+    let unavailable = |reason: String| mold_core::GenerationPlacementPreview {
+        version: 1,
+        authoritative: true,
+        state_version: 0,
+        plan_version: 0,
+        outcome: "infeasible".to_string(),
+        reason: Some(reason),
+        candidate: None,
+        stage_candidates: Vec::new(),
+    };
+    if !(1..=64).contains(&copies) {
+        return Json(unavailable("copies must be between 1 and 64".to_string()));
+    }
+    if let Err(error) =
+        crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await
+    {
+        return Json(unavailable(error.error));
+    }
+    let req = match req.normalise() {
+        Ok(req) => req,
+        Err(error) => return Json(unavailable(error.to_string())),
+    };
+    // Production durable-chain stages do not yet retain the frozen per-device
+    // execution plans used by ordinary generation. A coarse model-size
+    // projection can choose a device that cannot execute the actual component
+    // placement on heterogeneous hosts, so it must never be advertised as
+    // authoritative. Keep the endpoint and copies=N wire contract available
+    // for forward compatibility, while older clients may still send a raw
+    // ChainRequest.
+    let _ = (state, req);
+    let mut response = unavailable(
+        "exact durable-chain placement requires frozen per-device stage plans".to_string(),
+    );
+    response.authoritative = false;
+    response.outcome = "unsupported".to_string();
+    Json(response)
 }
 
 #[utoipa::path(
@@ -679,6 +765,47 @@ mod tests {
         ) -> anyhow::Result<crate::chain_job_runner::StageRenderOutcome> {
             anyhow::bail!("NoopExecutor should not render during route GC tests")
         }
+    }
+
+    #[test]
+    fn chain_placement_preview_body_accepts_wrapped_copies_and_legacy_raw_request() {
+        let request = req(OutputFormat::Mp4);
+        let wrapped: ChainPlacementPreviewBody = serde_json::from_value(serde_json::json!({
+            "request": request,
+            "copies": 8
+        }))
+        .unwrap();
+        let (wrapped_request, copies) = wrapped.into_parts();
+        assert_eq!(wrapped_request.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(copies, 8);
+
+        let legacy: ChainPlacementPreviewBody =
+            serde_json::from_value(serde_json::to_value(req(OutputFormat::Mp4)).unwrap()).unwrap();
+        let (legacy_request, copies) = legacy.into_parts();
+        assert_eq!(legacy_request.model, "ltx-2-19b-distilled:fp8");
+        assert_eq!(copies, 1);
+    }
+
+    #[tokio::test]
+    async fn chain_placement_preview_is_explicitly_non_authoritative_until_exact_stage_plans() {
+        let state = state_with(
+            Arc::new(Some(MetadataDb::open_in_memory().unwrap())),
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        );
+        let Json(response) = preview_chain_job_placement(
+            State(state),
+            Json(ChainPlacementPreviewBody::Wrapped(
+                ChainPlacementPreviewRequest {
+                    request: req(OutputFormat::Mp4),
+                    copies: 2,
+                },
+            )),
+        )
+        .await;
+        assert!(!response.authoritative);
+        assert_eq!(response.outcome, "unsupported");
+        assert!(response.candidate.is_none());
+        assert!(response.stage_candidates.is_empty());
     }
 
     struct NoopProbe;

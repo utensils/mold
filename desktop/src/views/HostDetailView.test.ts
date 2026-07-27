@@ -277,19 +277,20 @@ describe("HostDetailView GPU lifecycle controls", () => {
   };
 
   it("allows live disable only for an authoritative Scheduler V2 host", async () => {
-    listDevices.mockResolvedValue({ devices: [DEVICE], plan_version: 1 });
+    const lifecycleDevices = [
+      DEVICE,
+      {
+        ...DEVICE,
+        id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ordinal: 1,
+        admin_state: "startup_excluded" as const,
+        desired_enabled: false,
+        schedulable: false,
+      },
+    ];
+    listDevices.mockResolvedValue({ devices: lifecycleDevices, plan_version: 1 });
     const wrapper = await mountView(undefined, undefined, {
-      devices: [
-        DEVICE,
-        {
-          ...DEVICE,
-          id: "cuda:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          ordinal: 1,
-          admin_state: "startup_excluded",
-          desired_enabled: false,
-          schedulable: false,
-        },
-      ],
+      devices: lifecycleDevices,
       capabilities: authoritative,
     });
 
@@ -367,8 +368,8 @@ describe("HostDetailView GPU lifecycle controls", () => {
     const pending = wrapper.get("[data-test='device-toggle-2']");
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).toContain("Restart required");
-    expect(wrapper.findAll("[data-test='device-row']")[2]!.text()).not.toContain("unavailable");
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).toContain("Restart required");
+    expect(wrapper.findAll("[data-test='device-card']")[2]!.text()).not.toContain("unavailable");
   });
 
   it("treats older hosts with missing lifecycle capabilities as unsupported", async () => {

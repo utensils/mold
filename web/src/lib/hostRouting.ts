@@ -35,6 +35,7 @@ export interface RoutableHost {
   url: string;
   /** Per-host key, sent as `x-api-key`. Never placed in a URL. */
   apiKey?: string;
+  instanceId?: string;
   status: HostRoutingStatus;
   /** Live queue depth; null while unknown (counts as busiest). */
   queueDepth: number | null;
@@ -53,6 +54,22 @@ export interface HostRoute {
   hostId: string;
   label: string;
   target: HostTarget;
+  /** Frozen server-installation identity for same-endpoint replacement fences. */
+  instanceId?: string | null;
+}
+
+export function sameHostRoute(
+  frozen: HostRoute | null,
+  current: HostRoute | null,
+): boolean {
+  if (!frozen) return !current || current.hostId === ORIGIN_HOST_ID;
+  if (!current) return false;
+  return (
+    frozen.hostId === current.hostId &&
+    frozen.target.baseUrl === current.target.baseUrl &&
+    frozen.target.apiKey === current.target.apiKey &&
+    (frozen.instanceId ?? null) === (current.instanceId ?? null)
+  );
 }
 
 function isOrigin(host: { id: string }): boolean {
@@ -168,7 +185,12 @@ export function resolveRoute(
   if (!chosen) return null;
   const target: HostTarget = { baseUrl: chosen.url };
   if (chosen.apiKey) target.apiKey = chosen.apiKey;
-  return { hostId: chosen.id, label: chosen.label, target };
+  return {
+    hostId: chosen.id,
+    label: chosen.label,
+    target,
+    instanceId: chosen.instanceId ?? null,
+  };
 }
 
 /** Per-host `/api/models` snapshots, keyed by registry host id. */

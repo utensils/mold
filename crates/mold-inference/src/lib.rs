@@ -48,7 +48,7 @@ pub use flux2::Flux2Engine;
 pub use ltx2::Ltx2Engine;
 pub use ltx_video::LtxVideoEngine;
 pub use model_registry::known_models;
-pub use progress::ProgressEvent;
+pub use progress::{ProgressEvent, ProgressPhase};
 pub use qwen_image::QwenImageEngine;
 pub use sd15::SD15Engine;
 pub use sd3::SD3Engine;

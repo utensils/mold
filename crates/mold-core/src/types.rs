@@ -1146,13 +1146,54 @@ pub struct QueueJobEntryWire {
 }
 
 /// Confidence attached to a learned scheduler ETA.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum QueueEstimateConfidence {
     #[default]
     Low,
     Medium,
     High,
+    Unknown(String),
+}
+
+impl QueueEstimateConfidence {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueEstimateConfidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueEstimateConfidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueEstimateConfidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            _ => Self::Unknown(value),
+        })
+    }
 }
 
 /// Typed reason that a scheduler work unit cannot currently advance.
@@ -1255,8 +1296,7 @@ impl<'de> Deserialize<'de> for QueueBlockedReason {
 }
 
 /// Truthful scheduler-owned phase for a projected work unit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum QueueActivityPhase {
     #[default]
     Queued,
@@ -1265,6 +1305,54 @@ pub enum QueueActivityPhase {
     Dispatching,
     Active,
     Cpu,
+    Unknown(String),
+}
+
+impl QueueActivityPhase {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::WarmWait => "warm_wait",
+            Self::Dispatching => "dispatching",
+            Self::Active => "active",
+            Self::Cpu => "cpu",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for QueueActivityPhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for QueueActivityPhase {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for QueueActivityPhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "queued" => Self::Queued,
+            "blocked" => Self::Blocked,
+            "warm_wait" => Self::WarmWait,
+            "dispatching" => Self::Dispatching,
+            "active" => Self::Active,
+            "cpu" => Self::Cpu,
+            _ => Self::Unknown(value),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1307,6 +1395,7 @@ pub struct QueueWorkItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_finish_unix_ms: Option<u64>,
     #[serde(default)]
+    #[schema(value_type = String)]
     pub estimate_confidence: QueueEstimateConfidence,
     /// Backward-compatible display alias. For queued work this contains the
     /// block, warm-wait, or assignment reason used by pre-Phase-E clients.
@@ -1320,6 +1409,7 @@ pub struct QueueWorkItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_wait_deadline_unix_ms: Option<u64>,
     #[serde(default)]
+    #[schema(value_type = String)]
     pub activity_phase: QueueActivityPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_fingerprint: Option<String>,
@@ -4230,6 +4320,10 @@ pub struct DispatchCapabilities {
     pub v2_authoritative: bool,
     /// Legacy owns dispatch while read-only V2 decisions are recorded.
     pub observes_v2_decisions: bool,
+    /// The server can run the authoritative scheduler against an exact,
+    /// read-only request preview without reserving or enqueueing work.
+    #[serde(default)]
+    pub request_placement_preview: bool,
 }
 
 /// Capabilities payload returned by `GET /api/capabilities`. Grouping keeps
@@ -4436,6 +4530,58 @@ pub struct GenerationMemoryEstimate {
     pub load_strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fits_available_memory: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreviewRequest {
+    pub request: GenerateRequest,
+    #[serde(default = "default_preview_copies")]
+    pub copies: u32,
+}
+
+fn default_preview_copies() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementCandidate {
+    pub device_id: String,
+    pub execution_fingerprint: String,
+    pub predicted_start_after_ms: u64,
+    pub predicted_completion_after_ms: u64,
+    pub setup_ms: u64,
+    pub setup_kind: String,
+    #[schema(value_type = String)]
+    pub estimate_confidence: QueueEstimateConfidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainStagePlacementCandidate {
+    pub stage_index: u32,
+    /// Zero-based sibling index for repeated ordinary-generation work. Absent
+    /// for a once-per-parent stage such as local prompt expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_index: Option<u32>,
+    #[serde(flatten)]
+    pub candidate: GenerationPlacementCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GenerationPlacementPreview {
+    pub version: u32,
+    pub authoritative: bool,
+    pub state_version: u64,
+    pub plan_version: u64,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<GenerationPlacementCandidate>,
+    /// Exact per-stage assignments for every work item in an ordinary
+    /// generation DAG. Durable-chain previews remain unsupported until the
+    /// server can freeze the chain runner's per-device stage plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stage_candidates: Vec<ChainStagePlacementCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -5000,6 +5146,25 @@ mod queue_plan_wire_tests {
         assert_eq!(
             serde_json::to_value(parsed).unwrap(),
             serde_json::json!("thermal_throttle")
+        );
+    }
+
+    #[test]
+    fn future_phase_and_confidence_retain_their_exact_wire_values() {
+        let phase: QueueActivityPhase =
+            serde_json::from_value(serde_json::json!("thermal_wait")).unwrap();
+        let confidence: QueueEstimateConfidence =
+            serde_json::from_value(serde_json::json!("calibrating")).unwrap();
+
+        assert_eq!(phase.as_str(), "thermal_wait");
+        assert_eq!(confidence.as_str(), "calibrating");
+        assert_eq!(
+            serde_json::to_value(phase).unwrap(),
+            serde_json::json!("thermal_wait")
+        );
+        assert_eq!(
+            serde_json::to_value(confidence).unwrap(),
+            serde_json::json!("calibrating")
         );
     }
 

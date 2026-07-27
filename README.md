@@ -73,6 +73,22 @@ cross-GPU component pins fail instead of falling back. `mold run --local
 selected by `--gpus`/`MOLD_GPUS`; single-item local runs retain best-free-GPU
 selection.
 
+Web, desktop, and iPhone preview each finalized ordinary-generation request on
+candidate hosts before queueing. The read-only preview preserves the sibling
+count without reserving a GPU or loading weights, redacts prompt/media content,
+and keeps prepared work pinned to the same endpoint, key, and server instance.
+A strict non-authoritative `unsupported` response or legacy `404`/`405` keeps
+backward-compatible routing; infeasible, malformed, authentication, upgrade,
+and server failures queue nothing. Exact chain and local prompt-expansion/
+post-generation-upscale utility previewing is deliberately deferred rather
+than guessed.
+
+Scheduler V2 learns cold load, warm reload, and execution time separately, so
+ETA planning adds the applicable setup cost exactly once. Machine detail,
+status, TUI, CLI, MCP, and Discord surfaces report every device; interactive
+device buttons appear only for authoritative live lifecycle control, with the
+supported restart-enable recovery shown for read-only dispatch modes.
+
 `MOLD_DISPATCH_MODE=legacy` remains the default server dispatch owner until
 the Phase A–E cutover gates pass. Set `MOLD_DISPATCH_MODE=v2` explicitly to
 qualify the new scheduler. During the

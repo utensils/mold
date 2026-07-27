@@ -717,7 +717,7 @@ impl Ltx2Engine {
 
         self.emit("Encoding prompt and preparing native LTX-2 runtime state");
         let prepare_start = Instant::now();
-        let prepared = runtime.prepare(&plan)?;
+        let prepared = runtime.prepare_with_progress(&plan, self.on_progress.as_ref())?;
         Self::log_timing("pipeline.prepare_runtime", prepare_start);
         self.emit("Executing native LTX-2 runtime");
         let render_start = Instant::now();
@@ -900,7 +900,7 @@ impl Ltx2Engine {
         };
 
         self.emit("Executing native LTX-2 chain stage runtime");
-        let prepared = match runtime.prepare(&plan) {
+        let prepared = match runtime.prepare_with_progress(&plan, self.on_progress.as_ref()) {
             Ok(prepared) => prepared,
             Err(err) => {
                 self.native_runtime = Some(runtime);

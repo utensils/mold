@@ -8,6 +8,7 @@ import {
   pickAutoHost,
   pickMostCapableHost,
   resolveRoute,
+  sameHostRoute,
   unionModels,
   type RoutableHost,
 } from "./hostRouting";
@@ -44,6 +45,60 @@ function model(
     ...overrides,
   } as ModelInfoExtended;
 }
+
+describe("sameHostRoute", () => {
+  const origin = {
+    hostId: ORIGIN_HOST_ID,
+    label: "this server",
+    target: { baseUrl: "http://origin:7680" },
+    instanceId: "origin-a",
+  };
+  const remote = {
+    hostId: "studio",
+    label: "Studio",
+    target: { baseUrl: "http://studio:7680", apiKey: "key-a" },
+    instanceId: "studio-a",
+  };
+
+  it.each([
+    ["null to null", null, null, true],
+    ["null to origin", null, origin, true],
+    ["frozen origin to null", origin, null, false],
+    ["matching origin", origin, { ...origin }, true],
+    [
+      "changed origin instance",
+      origin,
+      { ...origin, instanceId: "origin-b" },
+      false,
+    ],
+    [
+      "matching remote",
+      remote,
+      { ...remote, target: { ...remote.target } },
+      true,
+    ],
+    [
+      "changed remote URL",
+      remote,
+      { ...remote, target: { ...remote.target, baseUrl: "http://other:7680" } },
+      false,
+    ],
+    [
+      "changed remote key",
+      remote,
+      { ...remote, target: { ...remote.target, apiKey: "key-b" } },
+      false,
+    ],
+    [
+      "changed remote instance",
+      remote,
+      { ...remote, instanceId: "studio-b" },
+      false,
+    ],
+  ])("%s", (_case, frozen, current, expected) => {
+    expect(sameHostRoute(frozen, current)).toBe(expected);
+  });
+});
 
 describe("pickAutoHost", () => {
   it("returns null when nothing is ready", () => {
@@ -269,6 +324,7 @@ describe("resolveRoute", () => {
     expect(route).toEqual({
       hostId: "studio",
       label: "Studio",
+      instanceId: null,
       target: { baseUrl: "http://studio:7680", apiKey: "sk-studio" },
     });
   });

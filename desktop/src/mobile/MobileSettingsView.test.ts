@@ -174,7 +174,7 @@ describe("MobileSettingsView", () => {
       expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(true),
     );
 
-    await wrapper.get("[data-test='mobile-settings-device-toggle-0']").trigger("click");
+    await wrapper.get("[data-test='device-toggle-0']").trigger("click");
     await vi.waitFor(() => expect(apiJsonTo).toHaveBeenCalledTimes(4));
 
     expect(setDeviceEnabled).toHaveBeenCalledWith(
@@ -183,7 +183,7 @@ describe("MobileSettingsView", () => {
       false,
     );
     await vi.waitFor(() =>
-      expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable"),
+      expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable"),
     );
     expect(subscribeMock).toHaveBeenCalledWith(
       { baseUrl: host.baseUrl, apiKey: host.apiKey },
@@ -245,13 +245,13 @@ describe("MobileSettingsView", () => {
     refresh();
     newer.resolve({ devices: [disabled], plan_version: 2 });
     await vi.waitFor(() =>
-      expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable"),
+      expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable"),
     );
     older.resolve({ devices: [enabled], plan_version: 1 });
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(wrapper.get("[data-test='mobile-settings-device-toggle-0']").text()).toBe("Enable");
+    expect(wrapper.get("[data-test='device-toggle-0']").text()).toBe("Enable");
   });
 });
 

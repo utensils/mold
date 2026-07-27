@@ -14,6 +14,7 @@ pub struct SchedulerEstimateRecord {
     pub execution_fingerprint: String,
     pub sample_count: u64,
     pub ewma_total_ms: f64,
+    pub ewma_runtime_ms: Option<f64>,
     pub ewma_load_ms: Option<f64>,
     pub ewma_warm_reload_ms: Option<f64>,
     pub ewma_prompt_encode_ms: Option<f64>,
@@ -43,7 +44,7 @@ impl<'a> SchedulerEstimates<'a> {
         self.db.with_conn(|conn| {
             let mut statement = conn.prepare(
                 "SELECT estimate_key, device_class, model_family, model_fingerprint, work_kind, shape_bucket,
-                        execution_fingerprint, sample_count, ewma_total_ms, ewma_load_ms,
+                        execution_fingerprint, sample_count, ewma_total_ms, ewma_runtime_ms, ewma_load_ms,
                         ewma_warm_reload_ms, ewma_prompt_encode_ms, ewma_denoise_ms,
                         ewma_vae_ms, ewma_upscale_ms,
                         vram_high_water_bytes, host_high_water_bytes,
@@ -63,24 +64,25 @@ impl<'a> SchedulerEstimates<'a> {
                     execution_fingerprint: row.get(6)?,
                     sample_count: row.get::<_, i64>(7)?.max(0) as u64,
                     ewma_total_ms: row.get(8)?,
-                    ewma_load_ms: row.get(9)?,
-                    ewma_warm_reload_ms: row.get(10)?,
-                    ewma_prompt_encode_ms: row.get(11)?,
-                    ewma_denoise_ms: row.get(12)?,
-                    ewma_vae_ms: row.get(13)?,
-                    ewma_upscale_ms: row.get(14)?,
+                    ewma_runtime_ms: row.get(9)?,
+                    ewma_load_ms: row.get(10)?,
+                    ewma_warm_reload_ms: row.get(11)?,
+                    ewma_prompt_encode_ms: row.get(12)?,
+                    ewma_denoise_ms: row.get(13)?,
+                    ewma_vae_ms: row.get(14)?,
+                    ewma_upscale_ms: row.get(15)?,
                     vram_high_water_bytes: row
-                        .get::<_, Option<i64>>(15)?
-                        .map(|value| value.max(0) as u64),
-                    host_high_water_bytes: row
                         .get::<_, Option<i64>>(16)?
                         .map(|value| value.max(0) as u64),
-                    failure_count: row.get::<_, i64>(17)?.max(0) as u64,
-                    invalidated_count: row.get::<_, i64>(18)?.max(0) as u64,
-                    last_outcome: row.get(19)?,
-                    last_fallback_reason: row.get(20)?,
-                    last_invalidated_plan_reason: row.get(21)?,
-                    last_observed_at: row.get(22)?,
+                    host_high_water_bytes: row
+                        .get::<_, Option<i64>>(17)?
+                        .map(|value| value.max(0) as u64),
+                    failure_count: row.get::<_, i64>(18)?.max(0) as u64,
+                    invalidated_count: row.get::<_, i64>(19)?.max(0) as u64,
+                    last_outcome: row.get(20)?,
+                    last_fallback_reason: row.get(21)?,
+                    last_invalidated_plan_reason: row.get(22)?,
+                    last_observed_at: row.get(23)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -93,13 +95,13 @@ impl<'a> SchedulerEstimates<'a> {
             conn.execute(
                 "INSERT INTO scheduler_estimates (
                     estimate_key, device_class, model_family, model_fingerprint, work_kind, shape_bucket,
-                    execution_fingerprint, sample_count, ewma_total_ms, ewma_load_ms,
+                    execution_fingerprint, sample_count, ewma_total_ms, ewma_runtime_ms, ewma_load_ms,
                     ewma_warm_reload_ms, ewma_prompt_encode_ms, ewma_denoise_ms,
                     ewma_vae_ms, ewma_upscale_ms,
                     vram_high_water_bytes, host_high_water_bytes,
                     failure_count, invalidated_count, last_outcome,
                     last_fallback_reason, last_invalidated_plan_reason, last_observed_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                  ON CONFLICT(estimate_key) DO UPDATE SET
                     device_class = excluded.device_class,
                     model_family = excluded.model_family,
@@ -109,6 +111,7 @@ impl<'a> SchedulerEstimates<'a> {
                     execution_fingerprint = excluded.execution_fingerprint,
                     sample_count = excluded.sample_count,
                     ewma_total_ms = excluded.ewma_total_ms,
+                    ewma_runtime_ms = excluded.ewma_runtime_ms,
                     ewma_load_ms = excluded.ewma_load_ms,
                     ewma_warm_reload_ms = excluded.ewma_warm_reload_ms,
                     ewma_prompt_encode_ms = excluded.ewma_prompt_encode_ms,
@@ -133,6 +136,7 @@ impl<'a> SchedulerEstimates<'a> {
                     record.execution_fingerprint,
                     i64::try_from(record.sample_count).unwrap_or(i64::MAX),
                     record.ewma_total_ms,
+                    record.ewma_runtime_ms,
                     record.ewma_load_ms,
                     record.ewma_warm_reload_ms,
                     record.ewma_prompt_encode_ms,

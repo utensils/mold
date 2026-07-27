@@ -2,13 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import EstimateBadge from "../components/generate/EstimateBadge.vue";
-import { apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
+import { ApiError, apiFetchTo, apiJsonTo, type ApiTarget } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { expandPrompt } from "../lib/api/expand";
 import { summarizeStatusGpuMemory } from "../lib/api/gpuStatus";
 import { SourceFitPreprocessCache } from "@ui/lib/sourceFitPreprocessCache";
 import { createUuid } from "@studio/lib/id";
 import { modelSupportsSequence } from "@studio/lib/sequence";
+import {
+  classifyPlacementPreview,
+  previewChainPlacement,
+  previewGenerationPlacement,
+  previewRequestForSiblingFanout,
+  type GenerationPlacementPreview,
+} from "@studio/api/generationPlacement";
 import { upscaleImage } from "../lib/api/upscale";
 import { generationCapabilitiesForFamily, outputFormatsForFamily } from "../lib/capabilities";
 import { modelDisplayName, modelDisplayNameForId } from "../lib/models";
@@ -25,6 +32,7 @@ import type {
   ServerStatus,
 } from "../lib/api/types";
 import {
+  buildAutoChainRequest,
   buildGenerationEstimateRequest,
   decideGenerateRequestRouting,
   unsupportedAutoChainFields,
@@ -85,7 +93,13 @@ import {
   type Job,
 } from "../stores/generation";
 import DevelopCanvas from "@ui/components/DevelopCanvas.vue";
-import { mobileHostTarget, normalizeRemoteAddress, remoteHostId, type MobileHost } from "./hosts";
+import {
+  mobileHostMatchesRoute,
+  mobileHostTarget,
+  normalizeRemoteAddress,
+  remoteHostId,
+  type MobileHost,
+} from "./hosts";
 import { applyMobileGalleryMetadata } from "./reuse";
 import MobileAdvancedSheet from "./MobileAdvancedSheet.vue";
 import MobileCatalogView from "./MobileCatalogView.vue";
@@ -980,9 +994,37 @@ async function submitMobileSequence(request: ChainRequest): Promise<void> {
   const host = selectedHost.value;
   if (!host || sequenceStarting.value) return;
   const target = { ...mobileHostTarget(host) };
+  const frozenRoute: HostRoute = {
+    hostId: host.id,
+    label: host.name,
+    kind: "remote",
+    target,
+    instanceId: host.instanceId ?? null,
+  };
   sequenceStarting.value = true;
   sequenceError.value = "";
   try {
+    let preview: GenerationPlacementPreview | null = null;
+    let legacyUnsupported = false;
+    try {
+      preview = await previewChainPlacement(target, request as unknown as Record<string, unknown>);
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
+        legacyUnsupported = true;
+      } else {
+        throw error;
+      }
+    }
+    if (
+      !legacyUnsupported &&
+      classifyPlacementPreview(preview) !== "unsupported" &&
+      classifyPlacementPreview(preview) !== "planned"
+    ) {
+      throw new Error(preview?.reason ?? "The selected host cannot run this sequence.");
+    }
+    if (!sameFrozenHost(frozenRoute, selectedHost.value)) {
+      throw new Error("The selected host changed while checking this sequence.");
+    }
     const response = await apiJsonTo<CreateChainJobResponse>(target, "/api/chain-jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1108,13 +1150,7 @@ function expansionInputs(count: number): PreparedExpansionInputs {
 }
 
 function sameFrozenHost(route: HostRoute, host: MobileHost | undefined): boolean {
-  if (!host || !host.online || host.id !== route.hostId) return false;
-  const target = mobileHostTarget(host);
-  return (
-    target.baseUrl === route.target.baseUrl &&
-    target.apiKey === route.target.apiKey &&
-    (route.instanceId === undefined || (host.instanceId ?? null) === route.instanceId)
-  );
+  return mobileHostMatchesRoute(route, host);
 }
 
 interface ReplacementFocusOwnership {
@@ -1884,6 +1920,57 @@ async function generate(): Promise<void> {
   if (chainRouting.kind === "chain" && unsupportedAutoChainFields(request).length > 0) {
     setGenerationStatus("These options can’t be preserved during long-video chaining.");
     generationAnnouncement.value = `${progress.value} Remove the highlighted options or reduce Frames to 97 or fewer.`;
+    releasePreparedSubmission();
+    return;
+  }
+  let placement: GenerationPlacementPreview | null = null;
+  let legacyUnsupported = false;
+  try {
+    placement =
+      chainRouting.kind === "chain"
+        ? await previewChainPlacement(
+            target,
+            previewRequestForSiblingFanout(
+              buildAutoChainRequest(request, chainRouting) as unknown as Record<string, unknown>,
+              batchSize,
+            ),
+            batchSize,
+          )
+        : await previewGenerationPlacement(
+            target,
+            previewRequestForSiblingFanout(
+              request as unknown as Record<string, unknown>,
+              batchSize,
+            ),
+            batchSize,
+          );
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 405))
+      legacyUnsupported = true;
+    else {
+      setGenerationStatus(describeTransportError(error, route.label), true);
+      releasePreparedSubmission();
+      return;
+    }
+  }
+  if (
+    !legacyUnsupported &&
+    classifyPlacementPreview(placement) !== "unsupported" &&
+    classifyPlacementPreview(placement) !== "planned"
+  ) {
+    setGenerationStatus(
+      placement?.reason ?? "The selected host cannot run this finalized request.",
+    );
+    releasePreparedSubmission();
+    return;
+  }
+  if (
+    !sameFrozenHost(
+      route,
+      hosts.value.find((candidate) => candidate.id === route.hostId),
+    )
+  ) {
+    expansionError.value = `${route.label}'s connection details changed while checking placement.`;
     releasePreparedSubmission();
     return;
   }

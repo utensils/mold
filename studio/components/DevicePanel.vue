@@ -8,9 +8,17 @@ const props = withDefaults(
     devices: DeviceInfo[];
     plan?: QueuePlan | null;
     mutable?: boolean;
+    restartEnable?: boolean;
+    showControls?: boolean;
     busyDeviceId?: string | null;
   }>(),
-  { plan: null, mutable: false, busyDeviceId: null },
+  {
+    plan: null,
+    mutable: false,
+    restartEnable: false,
+    showControls: false,
+    busyDeviceId: null,
+  },
 );
 
 const emit = defineEmits<{
@@ -24,6 +32,16 @@ let clockTimer: ReturnType<typeof setInterval> | null = null;
 const blocked = computed(
   () => props.plan?.work_items.filter((work) => blockedReason(work)) ?? [],
 );
+const lifecycleNote = computed(() => {
+  if (!props.showControls) return null;
+  if (props.mutable) {
+    return "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.";
+  }
+  if (props.restartEnable) {
+    return "Live GPU controls require Scheduler V2. Disabled GPUs can be enabled for the next server restart.";
+  }
+  return "Live GPU controls are unavailable on this server.";
+});
 
 function shortId(id: string): string {
   const tail = id.split(":").at(-1) ?? id;
@@ -40,6 +58,8 @@ function memoryLabel(device: DeviceInfo): string {
 
 function stateLabel(device: DeviceInfo): string {
   if (device.admin_state === "draining") return "Finishing current work";
+  if (device.restart_required) return "Restart required";
+  if (device.admin_state === "starting") return "Starting";
   if (device.health !== "healthy") return device.health;
   return device.admin_state.replace("_", " ");
 }
@@ -86,6 +106,25 @@ function replanLabel(): string | null {
   )}s`;
 }
 
+function canToggle(): boolean {
+  return props.mutable || props.restartEnable || props.showControls;
+}
+
+function toggleDisabled(device: DeviceInfo): boolean {
+  return (
+    device.admin_state === "startup_excluded" ||
+    props.busyDeviceId === device.id ||
+    (!props.mutable && !(props.restartEnable && !device.desired_enabled))
+  );
+}
+
+function toggleLabel(device: DeviceInfo): string {
+  if (props.mutable) return device.desired_enabled ? "Disable" : "Enable";
+  if (!device.desired_enabled)
+    return props.restartEnable ? "Enable on restart" : "Enable";
+  return device.restart_required ? "Enabled on restart" : "Disable";
+}
+
 onMounted(() => {
   clockTimer = setInterval(() => {
     nowUnixMs.value = Date.now();
@@ -114,6 +153,14 @@ onBeforeUnmount(() => {
         {{ replanLabel() }}
       </span>
     </header>
+
+    <p
+      v-if="lifecycleNote"
+      class="device-panel__lifecycle"
+      data-test="device-lifecycle-note"
+    >
+      {{ lifecycleNote }}
+    </p>
 
     <p v-if="devices.length === 0" class="device-panel__empty">
       No compute devices visible.
@@ -169,15 +216,15 @@ onBeforeUnmount(() => {
           </li>
         </ol>
         <button
-          v-if="mutable && device.admin_state !== 'startup_excluded'"
+          v-if="canToggle()"
           type="button"
           class="device-card__toggle"
-          :disabled="busyDeviceId === device.id"
+          :disabled="toggleDisabled(device)"
           :aria-pressed="device.desired_enabled"
           :data-test="`device-toggle-${device.ordinal ?? device.id}`"
           @click="emit('toggle', device.id, !device.desired_enabled)"
         >
-          {{ device.desired_enabled ? "Disable" : "Enable" }}
+          {{ toggleLabel(device) }}
         </button>
       </article>
     </div>

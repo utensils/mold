@@ -189,6 +189,7 @@ use crate::queue::clean_error_message;
     paths(
         generate,
         generate_stream,
+        generate_placement_preview,
         expand_prompt,
         list_models,
         crate::catalog_api::list_loras,
@@ -221,6 +222,7 @@ use crate::queue::clean_error_message;
         crate::routes_chain::generate_chain,
         crate::routes_chain::generate_chain_stream,
         crate::routes_chain_jobs::create_chain_job,
+        crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
         crate::routes_chain_jobs::chain_job_events,
@@ -234,6 +236,11 @@ use crate::queue::clean_error_message;
     components(schemas(
         mold_core::GenerateRequest,
         mold_core::GenerateResponse,
+        mold_core::GenerationPlacementPreviewRequest,
+        mold_core::GenerationPlacementPreview,
+        mold_core::GenerationPlacementCandidate,
+        mold_core::ChainStagePlacementCandidate,
+        crate::routes_chain_jobs::ChainPlacementPreviewRequest,
         mold_core::ExpandRequest,
         mold_core::ExpandResponse,
         mold_core::ImageData,
@@ -315,6 +322,10 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/api/generate", post(generate))
         .route("/api/generate/estimate", post(generate_estimate))
+        .route(
+            "/api/generate/placement-preview",
+            post(generate_placement_preview),
+        )
         .route("/api/generate/stream", post(generate_stream))
         .route(
             "/api/generate/chain",
@@ -328,6 +339,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chain-jobs",
             post(crate::routes_chain_jobs::create_chain_job)
                 .get(crate::routes_chain_jobs::list_chain_jobs),
+        )
+        .route(
+            "/api/chain-jobs/placement-preview",
+            post(crate::routes_chain_jobs::preview_chain_job_placement),
         )
         .route(
             "/api/chain-jobs/:id",
@@ -1670,6 +1685,91 @@ async fn generate_estimate(
     Ok(Json(
         model_manager::estimate_generation_memory(&state, &req).await?,
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/generate/placement-preview",
+    tag = "generation",
+    request_body = mold_core::GenerationPlacementPreviewRequest,
+    responses(
+        (status = 200, description = "Read-only scheduler placement projection", body = mold_core::GenerationPlacementPreview)
+    )
+)]
+async fn generate_placement_preview(
+    State(state): State<AppState>,
+    Json(preview): Json<mold_core::GenerationPlacementPreviewRequest>,
+) -> Json<mold_core::GenerationPlacementPreview> {
+    Json(placement_preview_for_request(&state, preview.request, preview.copies).await)
+}
+
+pub(crate) async fn placement_preview_for_request(
+    state: &AppState,
+    request: GenerateRequest,
+    copies: u32,
+) -> mold_core::GenerationPlacementPreview {
+    let plan = state.scheduled_work.latest_plan();
+    let unavailable = |outcome: &str, reason: String| mold_core::GenerationPlacementPreview {
+        version: 1,
+        authoritative: false,
+        state_version: plan.as_ref().map_or(0, |plan| plan.state_version),
+        plan_version: plan.as_ref().map_or(0, |plan| plan.plan_version),
+        outcome: outcome.to_string(),
+        reason: Some(reason),
+        candidate: None,
+        stage_candidates: Vec::new(),
+    };
+    if !(1..=64).contains(&copies) {
+        let mut response = unavailable("infeasible", "copies must be between 1 and 64".to_string());
+        response.authoritative = true;
+        return response;
+    }
+    let has_post_upscale = request
+        .upscale_model
+        .as_deref()
+        .is_some_and(|model| !model.trim().is_empty());
+    let has_local_expansion = request.expand == Some(true)
+        && state
+            .config
+            .read()
+            .await
+            .expand
+            .clone()
+            .with_env_overrides()
+            .is_local();
+    if has_local_expansion || has_post_upscale {
+        return unavailable(
+            "unsupported",
+            "exact utility CPU/GPU placement plans are not available on this server".to_string(),
+        );
+    }
+    if !state.scheduled_work.v2_authoritative()
+        || !state.scheduled_work.placement_preview_available()
+    {
+        return unavailable(
+            "unsupported",
+            "authoritative scheduler placement preview is unavailable".to_string(),
+        );
+    }
+    let prepared =
+        match crate::variant_dependencies::prepare_execution_inputs_existing_only(state, &request)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let mut response = unavailable("infeasible", error);
+                response.authoritative = true;
+                return response;
+            }
+        };
+    match state
+        .scheduled_work
+        .preview_placement(request, copies, prepared)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => unavailable("temporarily_unavailable", error),
+    }
 }
 
 async fn model_components(
@@ -3162,6 +3262,8 @@ fn dispatch_capabilities(
         active_mode: Some(handle.dispatch_mode().as_str().to_string()),
         v2_authoritative: handle.v2_authoritative(),
         observes_v2_decisions: handle.observes_v2_decisions(),
+        request_placement_preview: handle.v2_authoritative()
+            && handle.placement_preview_available(),
     }
 }
 

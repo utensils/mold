@@ -316,8 +316,15 @@ pub fn format_server_status_pages(
                 let ordinal = device
                     .ordinal
                     .map_or_else(|| "—".into(), |value| value.to_string());
-                let used = device.memory.used_bytes.unwrap_or(0) / 1024_u64.pow(2);
-                let total = device.memory.total_bytes.unwrap_or(0) / 1024_u64.pow(2);
+                let memory = match (device.memory.used_bytes, device.memory.total_bytes) {
+                    (Some(used), Some(total)) => {
+                        format!("{}/{}MB", used / 1024_u64.pow(2), total / 1024_u64.pow(2))
+                    }
+                    (_, Some(total)) => {
+                        format!("{}MB total, usage unknown", total / 1024_u64.pow(2))
+                    }
+                    _ => "VRAM unknown".to_string(),
+                };
                 let state = if device.admin_state == mold_core::DeviceAdminState::Draining {
                     "finishing current work".to_string()
                 } else if device.health != mold_core::DeviceHealth::Healthy {
@@ -335,7 +342,7 @@ pub fn format_server_status_pages(
                 };
                 truncate_chars(
                     &format!(
-                        "GPU {ordinal} · {} · {kind} · `{}` · {state} · {used}/{total}MB",
+                        "GPU {ordinal} · {} · {kind} · `{}` · {state} · {memory}",
                         device.name, device.id
                     ),
                     360,
@@ -395,7 +402,7 @@ pub fn format_server_status_pages(
             .map(|plan| {
                 plan.work_items
                     .iter()
-                    .filter(|work| work.reason.is_some())
+                    .filter(|work| work.blocked_reason.is_some())
                     .count()
             })
             .unwrap_or(0);
@@ -408,6 +415,48 @@ pub fn format_server_status_pages(
             ),
             false,
         ));
+        if let Some(plan) = queue.plan.as_ref() {
+            let lines = plan
+                .work_items
+                .iter()
+                .map(|work| {
+                    let lane = work.planned_device_id.as_deref().map_or_else(
+                        || "unassigned".to_string(),
+                        |device| {
+                            format!(
+                                "{device}/{}",
+                                work.lane_order
+                                    .map(|order| order.to_string())
+                                    .unwrap_or_else(|| "—".to_string())
+                            )
+                        },
+                    );
+                    let finish = work
+                        .estimated_finish_unix_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let reason = work
+                        .blocked_reason
+                        .as_ref()
+                        .map(mold_core::QueueBlockedReason::as_str)
+                        .or(work.assignment_reason.as_deref())
+                        .unwrap_or("none");
+                    truncate_chars(
+                        &format!(
+                            "`{}` · {} · lane {lane} · finish {finish} · {} confidence · {reason}",
+                            work.work_id, work.activity_phase, work.estimate_confidence
+                        ),
+                        360,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (index, chunk) in chunk_lines(&lines, DISCORD_EMBED_FIELD_VALUE_MAX)
+                .into_iter()
+                .enumerate()
+            {
+                fields.push((format!("Queue lanes {}", index + 1), chunk, false));
+            }
+        }
     }
 
     paginate_embed_fields(
@@ -1217,6 +1266,12 @@ mod tests {
         inventory.devices[3].schedulable = false;
         inventory.devices[4].device_kind = mold_core::DeviceKind::Mig;
         inventory.devices[4].mig_profile = Some("1g.23gb".into());
+        inventory.devices[5].memory = mold_core::DeviceMemoryInfo {
+            total_bytes: None,
+            used_bytes: None,
+            mold_used_bytes: None,
+            other_used_bytes: None,
+        };
 
         let pages = format_server_status_pages(&status, Some(&inventory), None);
         assert!(pages.len() > 1, "64 detailed devices must paginate");
@@ -1235,6 +1290,8 @@ mod tests {
         assert!(all_values.contains("finishing current work"));
         assert!(all_values.contains("unavailable"));
         assert!(all_values.contains("MIG 1g.23gb"));
+        assert!(all_values.contains("VRAM unknown"));
+        assert!(!all_values.contains("0/0MB"));
 
         for page in &pages {
             assert!(page.title.chars().count() <= DISCORD_EMBED_TITLE_MAX);
@@ -1253,6 +1310,64 @@ mod tests {
                     .sum::<usize>();
             assert!(total <= DISCORD_EMBED_TOTAL_MAX, "{total}");
         }
+    }
+
+    #[test]
+    fn queue_summary_counts_only_typed_blocks_and_keeps_lane_observability() {
+        let status = ServerStatus {
+            version: "0.20.2".into(),
+            git_sha: None,
+            build_date: None,
+            models_loaded: vec![],
+            busy: true,
+            current_generation: None,
+            gpu_info: None,
+            uptime_secs: 1,
+            hostname: None,
+            memory_status: None,
+            gpus: None,
+            queue_depth: Some(2),
+            queue_capacity: Some(8),
+            queue_paused: Some(false),
+            instance_id: None,
+            models_disk: None,
+        };
+        let queue = mold_core::QueueListingWire {
+            entries: vec![],
+            plan: Some(mold_core::QueuePlan {
+                work_items: vec![
+                    mold_core::QueueWorkItem {
+                        work_id: "assigned".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Active,
+                        planned_device_id: Some("cuda:stable-a".into()),
+                        lane_order: Some(0),
+                        estimate_confidence: mold_core::QueueEstimateConfidence::High,
+                        assignment_reason: Some("warm_model".into()),
+                        ..Default::default()
+                    },
+                    mold_core::QueueWorkItem {
+                        work_id: "blocked".into(),
+                        activity_phase: mold_core::QueueActivityPhase::Blocked,
+                        blocked_reason: Some(mold_core::QueueBlockedReason::InsufficientVram),
+                        estimate_confidence: mold_core::QueueEstimateConfidence::Low,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+        };
+
+        let fields = format_server_status_pages(&status, None, Some(&queue))
+            .iter()
+            .flat_map(|page| page.fields.iter())
+            .map(|(name, value, _)| format!("{name}: {value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fields.contains("2 planned · 1 blocked"));
+        assert!(fields.contains("cuda:stable-a/0"));
+        assert!(fields.contains("high confidence"));
+        assert!(fields.contains("warm_model"));
+        assert!(fields.contains("insufficient_vram"));
     }
 
     #[test]

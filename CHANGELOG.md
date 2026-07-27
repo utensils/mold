@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    hard-pinned blocked jobs offer Auto or re-enable recovery. Multi-host Auto
    routing now ranks feasible devices and predicted completion rather than
    first-GPU VRAM or queue depth alone.
+- **Create routing now previews the finalized request on candidate hosts.**
+  `POST /api/generate/placement-preview` projects exact ordinary-generation
+  siblings without reserving a device or mutating the queue, and web, desktop,
+  and iPhone keep prepared work on its frozen URL, API key, and server instance
+  through source preprocessing and this final check. A strictly valid
+  version-1 non-authoritative `unsupported` response or legacy `404`/`405`
+  retains compatible routing; authentication, upgrade, server, infeasible, and
+  malformed responses fail closed without queueing. Prompt and media contents
+  are redacted from probes. Chain and local expansion/post-generation-upscale
+  utility previews explicitly report non-authoritative `unsupported` until
+  their real CPU/GPU execution paths can be modeled exactly.
+- **Learned scheduler estimates now separate setup from execution.** Typed
+  phase instrumentation records cold model load, warm reload, prompt encoding,
+  denoising, VAE, and upscaling, while metadata schema v15 persists an
+  independent runtime EWMA. Cold and warm planning therefore add the matching
+  setup disposition exactly once instead of learning it into every run.
 - **iPhone Create now supports explicit multi-clip video sequences.** The
   touch-native Single / Sequence switch starts with two required clips,
   filters to compatible installed video models, keeps duration and seed tools

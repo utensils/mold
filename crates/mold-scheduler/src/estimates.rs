@@ -60,11 +60,23 @@ impl EstimateKey {
             execution_fingerprint: "*".to_string(),
         }
     }
+
+    /// Exact identity used by schema v13 before `model_family` became part of
+    /// the key. This is lookup-only: new observations are always written under
+    /// the v14 identity and its safe semantic-family normalization.
+    fn legacy_v13_exact(&self) -> Self {
+        Self {
+            model_family: String::new(),
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StaticEstimate {
     pub total_ms: u64,
+    pub cold_setup_ms: u64,
+    pub warm_setup_ms: u64,
     pub vram_bytes: u64,
     pub host_bytes: u64,
 }
@@ -107,6 +119,9 @@ pub struct EstimateBucket {
     pub key: EstimateKey,
     pub sample_count: u64,
     pub ewma_total_ms: f64,
+    /// Setup-independent execution time. Added in schema v15 so warm and
+    /// unchanged observations cannot collapse a cold candidate's run time.
+    pub ewma_runtime_ms: Option<f64>,
     pub ewma_load_ms: Option<f64>,
     pub ewma_warm_reload_ms: Option<f64>,
     pub ewma_prompt_encode_ms: Option<f64>,
@@ -137,6 +152,9 @@ impl EstimateBucket {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedEstimate {
     pub total_ms: u64,
+    pub cold_setup_ms: u64,
+    pub warm_setup_ms: u64,
+    pub predicted_run_ms: u64,
     pub vram_bytes: u64,
     pub host_bytes: u64,
     pub confidence: EstimateConfidence,
@@ -191,11 +209,33 @@ impl EstimateStore {
     }
 
     pub fn observe(&mut self, key: EstimateKey, observation: EstimateObservation) {
+        // Promote an exact v13 bucket on the first v14 observation so the
+        // accumulated sample count and envelopes continue rather than being
+        // shadowed by a fresh one-sample v14 bucket.
+        if !key.model_family.is_empty() && !self.buckets.contains_key(&key) {
+            let legacy = key.legacy_v13_exact();
+            if let Some(mut bucket) = self.buckets.remove(&legacy) {
+                bucket.key = key.clone();
+                self.buckets.insert(key.clone(), bucket);
+            }
+        }
         match self.buckets.get_mut(&key) {
             Some(bucket) => {
                 if observation.outcome == EstimateOutcome::Success {
                     if let Some(total_ms) = observation.total_ms {
-                        bucket.ewma_total_ms = update_ewma(bucket.ewma_total_ms, total_ms as f64);
+                        let runtime_ms = runtime_sample_ms(total_ms, observation.phases) as f64;
+                        if bucket.sample_count == 0 {
+                            // A diagnostic-only failure bucket has no timing
+                            // prior. The first success initializes timing
+                            // directly instead of winsorizing against zero.
+                            bucket.ewma_total_ms = total_ms as f64;
+                            bucket.ewma_runtime_ms = Some(runtime_ms);
+                        } else {
+                            bucket.ewma_total_ms =
+                                update_ewma(bucket.ewma_total_ms, total_ms as f64);
+                            bucket.ewma_runtime_ms =
+                                update_optional_ewma(bucket.ewma_runtime_ms, Some(runtime_ms));
+                        }
                         bucket.sample_count = bucket.sample_count.saturating_add(1);
                     }
                     bucket.ewma_load_ms = update_optional_ewma(
@@ -250,7 +290,14 @@ impl EstimateStore {
                     EstimateBucket {
                         key,
                         sample_count: u64::from(successful && observation.total_ms.is_some()),
-                        ewma_total_ms: observation.total_ms.unwrap_or_default() as f64,
+                        ewma_total_ms: observation
+                            .total_ms
+                            .filter(|_| successful)
+                            .unwrap_or_default() as f64,
+                        ewma_runtime_ms: observation
+                            .total_ms
+                            .filter(|_| successful)
+                            .map(|total| runtime_sample_ms(total, observation.phases) as f64),
                         ewma_load_ms: observation
                             .phases
                             .cold_load_ms
@@ -303,20 +350,64 @@ impl EstimateStore {
             .exact(key)
             .filter(|bucket| bucket.sample_count > 0)
             .or_else(|| {
+                let legacy = key.legacy_v13_exact();
+                if legacy == *key {
+                    None
+                } else {
+                    self.exact(&legacy).filter(|bucket| bucket.sample_count > 0)
+                }
+            })
+            .or_else(|| {
                 self.exact(&key.normalized())
                     .filter(|bucket| bucket.sample_count > 0)
             });
         let Some(bucket) = bucket else {
             return ResolvedEstimate {
                 total_ms: static_estimate.total_ms,
+                cold_setup_ms: static_estimate.cold_setup_ms,
+                warm_setup_ms: static_estimate.warm_setup_ms,
+                predicted_run_ms: static_estimate
+                    .total_ms
+                    .saturating_sub(static_estimate.cold_setup_ms),
                 vram_bytes: static_estimate.vram_bytes,
                 host_bytes: static_estimate.host_bytes,
                 confidence: EstimateConfidence::Low,
                 learned: false,
             };
         };
+        let total_ms = bucket.ewma_total_ms.max(0.0).round() as u64;
+        let cold_setup_ms = bucket
+            .ewma_load_ms
+            .unwrap_or(static_estimate.cold_setup_ms as f64)
+            .max(0.0)
+            .round() as u64;
+        let warm_setup_ms = bucket
+            .ewma_warm_reload_ms
+            .unwrap_or(static_estimate.warm_setup_ms as f64)
+            .max(0.0)
+            .round() as u64;
+        let predicted_run_ms = bucket
+            .ewma_runtime_ms
+            .unwrap_or({
+                // v13/v14 rows predate the setup-independent runtime column.
+                // Preserve their prior estimate until the first v15 sample
+                // promotes the bucket with explicit runtime evidence.
+                match bucket.ewma_load_ms {
+                    Some(load_ms) => bucket.ewma_total_ms - load_ms,
+                    // Old rows with no typed load sample do not prove that
+                    // their total included static cold setup. Preserve the
+                    // observed total as runtime instead of subtracting a
+                    // fabricated setup cost and collapsing it to zero.
+                    None => bucket.ewma_total_ms,
+                }
+            })
+            .max(0.0)
+            .round() as u64;
         ResolvedEstimate {
-            total_ms: bucket.ewma_total_ms.max(0.0).round() as u64,
+            total_ms,
+            cold_setup_ms,
+            warm_setup_ms,
+            predicted_run_ms,
             // The decaying completion-sample envelope is advisory evidence,
             // never authority to weaken static admission safety.
             vram_bytes: static_estimate
@@ -351,6 +442,15 @@ impl EstimateStore {
             }
         }
     }
+}
+
+fn runtime_sample_ms(total_ms: u64, phases: EstimatePhaseTimings) -> u64 {
+    total_ms.saturating_sub(
+        phases
+            .cold_load_ms
+            .unwrap_or(0)
+            .saturating_add(phases.warm_reload_ms.unwrap_or(0)),
+    )
 }
 
 fn update_ewma(prior: f64, sample: f64) -> f64 {

@@ -504,6 +504,7 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
             mold_core::GpuBackend::Metal => "METAL".to_string(),
         });
     let state = device_state_label(device);
+    let kind = device_kind_label(device);
     let style = if selected {
         app.theme.list_selected()
     } else if device.restart_required || device.admin_state == mold_core::DeviceAdminState::Draining
@@ -515,7 +516,7 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
         Style::default().fg(app.theme.text)
     };
     lines.push(Line::from(Span::styled(
-        format!("{marker} {ordinal} · {} · {state}", device.name),
+        format!("{marker} {ordinal} · {} · {kind} · {state}", device.name),
         style,
     )));
     let vram = match (device.memory.used_bytes, device.memory.total_bytes) {
@@ -558,23 +559,11 @@ fn render_devices(app: &App, host_id: &str, lines: &mut Vec<Line>) {
     }
 }
 
-fn device_state_label(device: &mold_core::DeviceInfo) -> &'static str {
-    use mold_core::{DeviceAdminState, DeviceHealth};
+fn device_state_label(device: &mold_core::DeviceInfo) -> String {
     if device.restart_required {
-        return "Restart required";
+        return "Restart required".to_string();
     }
-    match device.admin_state {
-        DeviceAdminState::StartupExcluded => "startup excluded",
-        DeviceAdminState::Starting => "starting",
-        DeviceAdminState::Draining => "finishing current work",
-        DeviceAdminState::Disabled => "disabled",
-        DeviceAdminState::Enabled => match device.health {
-            DeviceHealth::Healthy => "enabled",
-            DeviceHealth::Degraded => "degraded",
-            DeviceHealth::Unavailable => "unavailable",
-            DeviceHealth::Poisoned => "poisoned",
-        },
-    }
+    device_summary_state_label(device.admin_state, device.health)
 }
 
 fn device_uses_error_style(device: &mold_core::DeviceInfo) -> bool {
@@ -606,12 +595,15 @@ fn short_device_id(id: &str) -> String {
 }
 
 fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
-    if let Some(reason) = &work.reason {
-        return reason.replace('_', " ");
-    }
-    let mut parts = Vec::new();
+    let mut parts = vec![work.activity_phase.to_string().replace('_', " ")];
     if let Some(device) = &work.planned_device_id {
-        parts.push(short_device_id(device));
+        parts.push(format!(
+            "{} lane {}",
+            short_device_id(device),
+            work.lane_order
+                .map(|order| order.to_string())
+                .unwrap_or_else(|| "—".to_string())
+        ));
     }
     if let Some(finish) = work.estimated_finish_unix_ms {
         let now = std::time::SystemTime::now()
@@ -620,7 +612,16 @@ fn queue_plan_detail(work: &mold_core::QueueWorkItem) -> String {
             .unwrap_or(0);
         parts.push(format!("~{}s", finish.saturating_sub(now).div_ceil(1000)));
     }
-    parts.push(format!("{:?} confidence", work.estimate_confidence).to_lowercase());
+    parts.push(format!("{} confidence", work.estimate_confidence));
+    if let Some(reason) = work
+        .blocked_reason
+        .as_ref()
+        .map(mold_core::QueueBlockedReason::as_str)
+        .or(work.assignment_reason.as_deref())
+        .or(work.reason.as_deref())
+    {
+        parts.push(reason.replace('_', " "));
+    }
     parts.join(" · ")
 }
 
@@ -1034,6 +1035,30 @@ mod tests {
     fn queued_lane_positions_are_one_based() {
         assert_eq!(queued_lane("sdxl:fp16", 0), "● sdxl:fp16 · #1");
         assert_eq!(queued_lane("sdxl:fp16", 2), "● sdxl:fp16 · #3");
+    }
+
+    #[test]
+    fn queue_plan_detail_keeps_phase_lane_eta_confidence_and_reason_together() {
+        let finish = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_000;
+        let detail = queue_plan_detail(&mold_core::QueueWorkItem {
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            planned_device_id: Some("cuda:0123456789abcdef".into()),
+            lane_order: Some(2),
+            estimated_finish_unix_ms: Some(finish),
+            estimate_confidence: mold_core::QueueEstimateConfidence::Medium,
+            blocked_reason: Some(mold_core::QueueBlockedReason::InsufficientVram),
+            ..Default::default()
+        });
+
+        assert!(detail.contains("blocked"));
+        assert!(detail.contains("lane 2"));
+        assert!(detail.contains('~'));
+        assert!(detail.contains("medium confidence"));
+        assert!(detail.contains("insufficient vram"));
     }
 
     #[test]

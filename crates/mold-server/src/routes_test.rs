@@ -4441,6 +4441,58 @@ mod tests {
             spec["paths"]["/api/devices/{id}"]["patch"].is_object(),
             "spec should document PATCH /api/devices/{{id}}"
         );
+        assert!(
+            spec["paths"]["/api/generate/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/generate/placement-preview"
+        );
+        assert!(
+            spec["paths"]["/api/chain-jobs/placement-preview"]["post"].is_object(),
+            "spec should document POST /api/chain-jobs/placement-preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_fails_closed_for_utility_stages() {
+        let state = AppState::for_tests();
+        let base = r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#;
+
+        let mut expansion: GenerateRequest = serde_json::from_str(base).unwrap();
+        expansion.expand = Some(true);
+        let expansion_preview =
+            crate::routes::placement_preview_for_request(&state, expansion, 2).await;
+        assert!(!expansion_preview.authoritative);
+        assert_eq!(expansion_preview.outcome, "unsupported");
+        assert!(expansion_preview.candidate.is_none());
+        assert!(expansion_preview.stage_candidates.is_empty());
+        assert!(expansion_preview
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("utility CPU/GPU"));
+
+        let mut upscale: GenerateRequest = serde_json::from_str(base).unwrap();
+        upscale.upscale_model = Some("real-esrgan-x4plus:fp16".into());
+        let upscale_preview =
+            crate::routes::placement_preview_for_request(&state, upscale, 2).await;
+        assert!(!upscale_preview.authoritative);
+        assert_eq!(upscale_preview.outcome, "unsupported");
+        assert!(upscale_preview.candidate.is_none());
+        assert!(upscale_preview.stage_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn generation_placement_preview_validates_copies_before_capability_fallback() {
+        let state = AppState::for_tests();
+        let request: GenerateRequest = serde_json::from_str(
+            r#"{"prompt":"","model":"preview","width":512,"height":512,"steps":4,"guidance":1.0,"batch_size":1}"#,
+        )
+        .unwrap();
+
+        let preview = crate::routes::placement_preview_for_request(&state, request, 0).await;
+
+        assert!(preview.authoritative);
+        assert_eq!(preview.outcome, "infeasible");
+        assert!(preview.reason.unwrap().contains("between 1 and 64"));
     }
 
     // ── /api/docs ────────────────────────────────────────────────────────────
@@ -6057,6 +6109,14 @@ mod tests {
         );
         assert_eq!(
             crate::rate_limit::classify_route("/api/generate/stream", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/generate/placement-preview", &Method::POST),
+            Some(RouteTier::Generation)
+        );
+        assert_eq!(
+            crate::rate_limit::classify_route("/api/chain-jobs/placement-preview", &Method::POST),
             Some(RouteTier::Generation)
         );
         assert_eq!(

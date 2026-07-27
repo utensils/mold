@@ -16,6 +16,7 @@ fn scheduler_estimates_round_trip_and_prune() {
             execution_fingerprint: "bf16".into(),
             sample_count: 3,
             ewma_total_ms: 1_250.0,
+            ewma_runtime_ms: Some(950.0),
             ewma_load_ms: Some(250.0),
             ewma_warm_reload_ms: Some(50.0),
             ewma_prompt_encode_ms: Some(100.0),
@@ -37,6 +38,7 @@ fn scheduler_estimates_round_trip_and_prune() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].sample_count, 3);
     assert_eq!(loaded[0].ewma_load_ms, Some(250.0));
+    assert_eq!(loaded[0].ewma_runtime_ms, Some(950.0));
     assert_eq!(loaded[0].model_family, "flux");
     assert_eq!(loaded[0].ewma_denoise_ms, Some(800.0));
     assert_eq!(loaded[0].failure_count, 1);

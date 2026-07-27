@@ -6,7 +6,6 @@ import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queueP
 import ConfigRowItem from "./ConfigRowItem.vue";
 import ConfigSettingRow from "./ConfigSettingRow.vue";
 import PlacementSection from "./PlacementSection.vue";
-import DeviceSettingsPanel from "./DeviceSettingsPanel.vue";
 import { useSettingsConfigStore } from "../../stores/settingsConfig";
 import { useToastStore } from "../../stores/toasts";
 import { useConnectionStore } from "../../stores/connection";
@@ -24,6 +23,7 @@ const devices = ref<DeviceInfo[]>([]);
 const plan = ref<QueuePlan | null>(null);
 const mutatingDeviceId = ref<string | null>(null);
 const lifecycleMutable = ref(false);
+const restartEnable = ref(false);
 let deviceEventsAbort: AbortController | null = null;
 let deviceRequestGeneration = 0;
 
@@ -38,6 +38,7 @@ async function loadDevices() {
     devices.value = [];
     plan.value = null;
     lifecycleMutable.value = false;
+    restartEnable.value = false;
     return;
   }
   const isCurrent = () => {
@@ -60,6 +61,9 @@ async function loadDevices() {
     capabilityResult.status === "fulfilled" &&
     capabilityResult.value.devices?.lifecycle === true &&
     capabilityResult.value.dispatch?.v2_authoritative === true;
+  restartEnable.value =
+    capabilityResult.status === "fulfilled" &&
+    capabilityResult.value.devices?.restart_enable === true;
 }
 
 async function toggleDevice(deviceId: string, enabled: boolean) {
@@ -132,12 +136,13 @@ async function reset(row: ConfigRow) {
       :devices="devices"
       :plan="plan"
       :mutable="lifecycleMutable"
+      :restart-enable="restartEnable"
+      show-controls
       :busy-device-id="mutatingDeviceId"
       @unpin="unpinWork"
       @toggle="toggleDevice"
     />
     <ConfigSettingRow schema-key="server_port" />
-    <DeviceSettingsPanel v-if="!filter" class="mt-5" />
     <PlacementSection v-if="!filter" class="mt-5" />
     <p class="mt-4 mb-1 text-caption text-ink-3">
       Everything the engine exposes that has no curated control — including keys added by newer

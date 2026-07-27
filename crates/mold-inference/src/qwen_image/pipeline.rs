@@ -771,7 +771,11 @@ impl QwenImageEngine {
             Self::is_oom_error,
         );
 
-        progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding source image (VAE)",
+            encode_start.elapsed(),
+        );
         result
     }
 
@@ -1070,7 +1074,11 @@ impl QwenImageEngine {
         let encode_start = Instant::now();
         let (hidden_states, _attention_mask, valid_len) =
             text_encoder.encode(prompt, device, dtype)?;
-        progress.stage_done("Encoding prompt (Qwen2.5)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Encoding prompt (Qwen2.5)",
+            encode_start.elapsed(),
+        );
 
         prompt_cache.lock().expect("cache poisoned").insert(
             cache_key,
@@ -2548,9 +2556,11 @@ impl QwenImageEngine {
             );
         }
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, None);
         let image_bytes = encode_image(
@@ -2663,7 +2673,11 @@ impl QwenImageEngine {
                 &loaded.device,
                 loaded.dtype,
             )?;
-        progress.stage_done("Encoding prompt (Qwen2.5 edit)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::PromptEncode,
+            "Encoding prompt (Qwen2.5 edit)",
+            encode_start.elapsed(),
+        );
         let (encoder_hidden_states, encoder_attention_mask, uncond_hs, uncond_mask) = if use_cfg {
             progress.stage_start("Encoding negative prompt (Qwen2.5 edit)");
             let neg_start = Instant::now();
@@ -2737,7 +2751,11 @@ impl QwenImageEngine {
             img_shapes.push((1, encoded.dim(2)? / 2, encoded.dim(3)? / 2));
             packed_input_storage.push(Self::pack_latents_4d(&encoded)?);
         }
-        progress.stage_done("Encoding edit images (VAE)", encode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "Encoding edit images (VAE)",
+            encode_start.elapsed(),
+        );
 
         let packed_inputs = if packed_input_storage.is_empty() {
             None
@@ -3424,7 +3442,7 @@ impl QwenImageEngine {
             );
         }
 
-        progress.stage_done("VAE decode", vae_start.elapsed());
+        progress.phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 9. Encode to output format
         let output_metadata = build_output_metadata(req, seed, None);

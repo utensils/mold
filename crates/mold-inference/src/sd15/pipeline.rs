@@ -954,9 +954,11 @@ impl SD15Engine {
                 // natural precision when MOLD_VAE_DTYPE upgraded the VAE.
                 let encoded = encoded.to_dtype(dtype)?;
 
-                self.base
-                    .progress
-                    .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::Vae,
+                    "Encoding source image (VAE)",
+                    encode_start.elapsed(),
+                );
                 Ok(encoded)
             },
         )?;
@@ -1027,9 +1029,11 @@ impl SD15Engine {
                 let encode_start = Instant::now();
                 let tokens = Self::tokenize(tokenizer, prompt, max_len, clip_device)?;
                 let text_embeddings = clip.forward(&tokens)?;
-                self.base
-                    .progress
-                    .stage_done("Encoding prompt (CLIP-L)", encode_start.elapsed());
+                self.base.progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (CLIP-L)",
+                    encode_start.elapsed(),
+                );
 
                 let text_embeddings = if use_cfg {
                     let uncond_tokens =
@@ -1435,9 +1439,11 @@ impl SD15Engine {
         let img = (img * 255.)?.to_dtype(DType::U8)?;
         let img = img.squeeze(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         let output_metadata = build_output_metadata(req, seed, Some(sched));
         let image_bytes = encode_image(
@@ -1649,7 +1655,7 @@ impl SD15Engine {
 
         self.base
             .progress
-            .stage_done("VAE decode", vae_start.elapsed());
+            .phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 5. Encode to image format
         let output_metadata = build_output_metadata(req, seed, Some(sched));

@@ -648,7 +648,7 @@ describe("HostDetailPage — queue", () => {
 
     const w = await mountDetail();
 
-    expect(w.findAll('[data-test="device-row"]')).toHaveLength(8);
+    expect(w.findAll('[data-test="device-card"]')).toHaveLength(8);
     expect(w.text()).toContain("Finishing current work");
     expect(w.text()).toContain("disabled");
     expect(w.text()).toContain("Starting");
@@ -713,10 +713,10 @@ describe("HostDetailPage — queue", () => {
     const pending = w.get('[data-test="device-toggle-2"]');
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    expect(w.findAll('[data-test="device-row"]')[2]!.text()).toContain(
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).toContain(
       "Restart required",
     );
-    expect(w.findAll('[data-test="device-row"]')[2]!.text()).not.toContain(
+    expect(w.findAll('[data-test="device-card"]')[2]!.text()).not.toContain(
       "unavailable",
     );
   });

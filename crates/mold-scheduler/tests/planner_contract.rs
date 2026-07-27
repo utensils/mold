@@ -805,6 +805,27 @@ fn optimizer_scores_future_makespan_for_every_candidate() {
 }
 
 #[test]
+fn future_ready_at_is_a_hard_start_boundary_not_only_a_lateness_hint() {
+    let plan = Planner::default()
+        .plan(&snapshot(
+            vec![device("gpu-0")],
+            vec![work("dependent", 0, vec![candidate("gpu-0", 0)]).with_ready_at(5_000)],
+            8,
+        ))
+        .expect("valid plan");
+
+    assert!(plan.immediate_leases.is_empty());
+    let dependent = plan
+        .lanes
+        .iter()
+        .flat_map(|lane| &lane.assignments)
+        .find(|assignment| assignment.work_id == WorkId::from("dependent"))
+        .expect("future dependent assignment");
+    assert_eq!(dependent.estimated_start_ms, 5_000);
+    assert_eq!(dependent.estimated_finish_ms, 16_000);
+}
+
+#[test]
 fn heterogeneous_single_future_assignment_matches_exhaustive_finish_oracle() {
     for gpu_0_run_ms in [100, 500, 1_500] {
         for gpu_1_run_ms in [100, 500, 1_500] {

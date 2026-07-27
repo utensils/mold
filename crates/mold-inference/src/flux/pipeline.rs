@@ -1721,9 +1721,11 @@ impl FluxEngine {
             // T5 output sitting on GPU. Idempotent on the GGUF path where T5
             // already produces CPU tensors.
             let t5_emb = park_cond_to_cpu(&t5.encode(&req.prompt, &device, gpu_dtype)?)?;
-            self.base
-                .progress
-                .stage_done("Encoding prompt (T5)", encode_t5.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (T5)",
+                encode_t5.elapsed(),
+            );
 
             drop(t5);
             self.base.progress.info("Freed T5 encoder");
@@ -1784,9 +1786,11 @@ impl FluxEngine {
                 let mut clip = clip;
                 park_cond_to_cpu(&clip.encode(&req.prompt, &device, gpu_dtype)?)?
             };
-            self.base
-                .progress
-                .stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (CLIP)",
+                encode_clip.elapsed(),
+            );
 
             self.base.progress.info("Freed CLIP encoder");
             tracing::info!("CLIP encoder dropped (sequential mode)");
@@ -2088,9 +2092,11 @@ impl FluxEngine {
             )?;
             // FLUX VAE expects pixels in [-1, 1]; encode applies shift/scale internally
             let encoded = vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             // Flow-matching img2img: interpolate between encoded latents and noise
             // at the exact noise level matching the first timestep in the schedule
@@ -2228,9 +2234,11 @@ impl FluxEngine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         // VAE dropped here
 
         let output_metadata = build_output_metadata(req, seed, None);
@@ -2505,7 +2513,11 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
-            progress.stage_done("Encoding prompt (T5)", encode_t5.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (T5)",
+                encode_t5.elapsed(),
+            );
             tracing::info!("T5 encoding complete");
 
             progress.stage_start("Encoding prompt (CLIP)");
@@ -2515,7 +2527,11 @@ impl FluxEngine {
                 &loaded_device,
                 loaded_dtype,
             )?)?;
-            progress.stage_done("Encoding prompt (CLIP)", encode_clip.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::PromptEncode,
+                "Encoding prompt (CLIP)",
+                encode_clip.elapsed(),
+            );
             tracing::info!("CLIP encoding complete");
             // CachedTensor::from_tensor already moves to CPU — passing CPU
             // tensors here avoids the round-trip on the GGUF path.
@@ -2709,7 +2725,11 @@ impl FluxEngine {
                 loaded.vae_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let noise = crate::engine::seeded_randn(
                 seed,
@@ -2901,7 +2921,11 @@ impl FluxEngine {
         let img = ((img.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?.to_dtype(DType::U8)?;
         let img = img.i(0)?; // remove batch dim: [3, H, W]
 
-        progress.stage_done("VAE decode", vae_decode_start.elapsed());
+        progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
         tracing::info!("VAE decode complete, encoding output image...");
 
         // 10. Convert candle tensor to image bytes

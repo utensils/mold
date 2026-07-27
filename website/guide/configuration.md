@@ -346,6 +346,16 @@ a family/component path Mold implements. The GPU owner validates the selected
 device and artifacts again before CUDA work; a changed artifact invalidates the
 plan instead of being silently substituted.
 
+Scheduler observations keep setup separate from execution. Typed cold-load,
+warm-reload, prompt-encode, denoise, VAE, and upscale timings feed bounded
+learned estimates; metadata schema v15 persists runtime independently so a
+candidate receives exactly its cold or warm setup charge. Multi-host Create
+uses `POST /api/generate/placement-preview` as a read-only final feasibility
+check for ordinary generation. Current chain and local prompt-expansion/
+post-generation-upscale utility previews deliberately return
+non-authoritative `unsupported`: those paths are not advertised as exact until
+their real device/CPU fallbacks are represented.
+
 Forced-local batches (`mold run --local --batch N`) use the same deterministic
 assignment core across all GPUs selected by `--gpus`/`MOLD_GPUS`. There is no
 two-GPU limit; a one-item run keeps the existing best-free-GPU selection.

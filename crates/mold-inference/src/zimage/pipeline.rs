@@ -597,7 +597,11 @@ impl ZImageEngine {
                 progress.stage_start("Encoding prompt (Qwen3)");
                 let encode_start = Instant::now();
                 let (cap_feats, _token_count) = encoder.encode(prompt, device, dtype)?;
-                progress.stage_done("Encoding prompt (Qwen3)", encode_start.elapsed());
+                progress.phase_done(
+                    crate::ProgressPhase::PromptEncode,
+                    "Encoding prompt (Qwen3)",
+                    encode_start.elapsed(),
+                );
                 Ok(cap_feats)
             })?;
         if cache_hit {
@@ -1287,9 +1291,11 @@ impl ZImageEngine {
                 encode_vae_dtype,
             )?;
             let encoded = encode_vae.encode(&source_tensor)?;
-            self.base
-                .progress
-                .stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            self.base.progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             // Drop encoding VAE before loading transformer
             drop(encode_vae);
@@ -1498,9 +1504,11 @@ impl ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?;
 
-        self.base
-            .progress
-            .stage_done("VAE decode", vae_decode_start.elapsed());
+        self.base.progress.phase_done(
+            crate::ProgressPhase::Vae,
+            "VAE decode",
+            vae_decode_start.elapsed(),
+        );
 
         // VAE dropped here
         let output_metadata = build_output_metadata(req, seed, None);
@@ -1724,7 +1732,11 @@ impl ZImageEngine {
                 vae_encode_dtype,
             )?;
             let encoded = loaded.vae.encode(&source_tensor)?;
-            progress.stage_done("Encoding source image (VAE)", encode_start.elapsed());
+            progress.phase_done(
+                crate::ProgressPhase::Vae,
+                "Encoding source image (VAE)",
+                encode_start.elapsed(),
+            );
 
             let encoded = encoded.to_dtype(loaded.dtype)?.to_device(&loaded.device)?;
 
@@ -1907,7 +1919,7 @@ impl ZImageEngine {
         let image = postprocess_image(&image)?;
         let image = image.i(0)?; // Remove batch dimension → [3, H, W]
 
-        progress.stage_done("VAE decode", vae_start.elapsed());
+        progress.phase_done(crate::ProgressPhase::Vae, "VAE decode", vae_start.elapsed());
 
         // 9. Encode to output format
         let output_metadata = build_output_metadata(req, seed, None);

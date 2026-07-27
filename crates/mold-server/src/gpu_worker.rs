@@ -58,37 +58,62 @@ fn add_phase_sample(slot: &mut Option<u64>, elapsed: Duration) {
     *slot = Some(slot.unwrap_or_default().saturating_add(millis));
 }
 
-fn record_phase_timing(event: &mold_inference::ProgressEvent) {
-    let mold_inference::ProgressEvent::StageDone { name, elapsed } = event else {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelLoadDisposition {
+    Unchanged,
+    Cold,
+    WarmReload,
+}
+
+fn record_model_load_timing(disposition: ModelLoadDisposition, elapsed: Duration) {
+    if disposition == ModelLoadDisposition::Unchanged {
         return;
-    };
-    let name = name.to_ascii_lowercase();
+    }
+    add_lease_load_ms(elapsed);
     LEASE_PHASE_TIMINGS.with(|timings| {
         let mut timings = timings.borrow_mut();
-        if name.contains("upscal") {
-            add_phase_sample(&mut timings.upscale_ms, *elapsed);
-        } else if name.contains("denois") || name.contains("sampling") {
-            add_phase_sample(&mut timings.denoise_ms, *elapsed);
-        } else if name.contains("encoding prompt") || name.contains("text encod") {
-            add_phase_sample(&mut timings.prompt_encode_ms, *elapsed);
-        } else if name.contains("vae") || name.contains("vq-gan") {
-            add_phase_sample(&mut timings.vae_ms, *elapsed);
-        } else if name.contains("reload") {
-            add_phase_sample(&mut timings.warm_reload_ms, *elapsed);
-        } else if name.contains("load") {
-            add_phase_sample(&mut timings.cold_load_ms, *elapsed);
+        match disposition {
+            ModelLoadDisposition::Cold => {
+                add_phase_sample(&mut timings.cold_load_ms, elapsed);
+            }
+            ModelLoadDisposition::WarmReload => {
+                add_phase_sample(&mut timings.warm_reload_ms, elapsed);
+            }
+            ModelLoadDisposition::Unchanged => {}
         }
     });
 }
 
-fn take_lease_phase_timings(load_ms: Option<u64>) -> mold_scheduler::EstimatePhaseTimings {
+fn record_phase_timing(event: &mold_inference::ProgressEvent) {
     LEASE_PHASE_TIMINGS.with(|timings| {
-        let mut observed = std::mem::take(&mut *timings.borrow_mut());
-        if observed.cold_load_ms.is_none() {
-            observed.cold_load_ms = load_ms;
+        let mut timings = timings.borrow_mut();
+        match event {
+            mold_inference::ProgressEvent::PhaseDone {
+                phase,
+                elapsed,
+                name: _,
+            } => match phase {
+                mold_inference::ProgressPhase::ModelLoad => {}
+                mold_inference::ProgressPhase::PromptEncode => {
+                    add_phase_sample(&mut timings.prompt_encode_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::Vae => {
+                    add_phase_sample(&mut timings.vae_ms, *elapsed)
+                }
+                mold_inference::ProgressPhase::Upscale => {
+                    add_phase_sample(&mut timings.upscale_ms, *elapsed)
+                }
+            },
+            mold_inference::ProgressEvent::DenoiseStep { elapsed, .. } => {
+                add_phase_sample(&mut timings.denoise_ms, *elapsed);
+            }
+            _ => {}
         }
-        observed
-    })
+    });
+}
+
+fn take_lease_phase_timings(_load_ms: Option<u64>) -> mold_scheduler::EstimatePhaseTimings {
+    LEASE_PHASE_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()))
 }
 
 pub enum LegacyOwnerEvent {
@@ -788,7 +813,7 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
                 || mold_core::GpuSelector::Ordinal(worker.gpu.ordinal),
                 |id| mold_core::GpuSelector::Identifier(id.clone()),
             );
-            let expander = mold_inference::expand::LocalExpander::from_config(
+            let mut expander = mold_inference::expand::LocalExpander::from_config(
                 &job.config,
                 Some(&job.settings.model),
             )
@@ -797,6 +822,18 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
             })?
             .with_gpu_selection(mold_core::GpuSelection::Specific(vec![selector]))
             .with_preferred_gpu(Some(worker.gpu.ordinal));
+            expander.set_on_progress(Box::new(|event| {
+                if let mold_inference::ProgressEvent::PhaseDone {
+                    phase: mold_inference::ProgressPhase::ModelLoad,
+                    elapsed,
+                    ..
+                } = &event
+                {
+                    record_model_load_timing(ModelLoadDisposition::Cold, *elapsed);
+                } else {
+                    record_phase_timing(&event);
+                }
+            }));
             expander.expand(&job.prompt, &job.expand_config)
         }
         #[cfg(not(feature = "expand"))]
@@ -822,17 +859,18 @@ fn process_prompt_expansion(worker: &GpuWorker, job: PromptExpansionJob) -> bool
 fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> bool {
     let result = (|| -> anyhow::Result<mold_core::UpscaleResponse> {
         ensure_worker_not_poisoned(worker, &job.model)?;
+        let load_started = Instant::now();
         let mut engine = mold_inference::create_upscale_engine(
             job.model.clone(),
             job.weights_path,
             mold_inference::LoadStrategy::Eager,
             worker.gpu.ordinal,
         )?;
-        if let Some(progress_tx) = job.progress_tx {
-            engine.set_on_progress(Box::new(move |event| {
-                let _ = progress_tx.send(SseMessage::Progress(event.into()));
-            }));
-        }
+        record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
+        let progress_tx = job.progress_tx;
+        engine.set_on_progress(Box::new(move |event| {
+            handle_standalone_upscale_progress(event, progress_tx.as_ref());
+        }));
         run_upscale_engine_safely(worker, engine, &job.request)
     })();
     if result
@@ -848,6 +886,16 @@ fn process_standalone_upscale(worker: &GpuWorker, job: StandaloneUpscaleJob) -> 
     let successful = result.is_ok();
     let _ = job.result_tx.send(result.map_err(|e| e.to_string()));
     successful
+}
+
+fn handle_standalone_upscale_progress(
+    event: mold_inference::ProgressEvent,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<SseMessage>>,
+) {
+    record_phase_timing(&event);
+    if let Some(progress_tx) = progress_tx {
+        let _ = progress_tx.send(SseMessage::Progress(event.into()));
+    }
 }
 
 fn process_post_generation_upscale(worker: &GpuWorker, mut job: PostGenerationUpscaleJob) -> bool {
@@ -1416,6 +1464,7 @@ fn upscale_generated_image_on_worker(
             name: format!("Loading upscaler {model_name}"),
         }));
     }
+    let load_started = Instant::now();
     let mut engine = mold_inference::create_upscale_engine(
         model_name.clone(),
         weights_path,
@@ -1423,6 +1472,7 @@ fn upscale_generated_image_on_worker(
         worker.gpu.ordinal,
     )
     .map_err(|e| format!("failed to load upscaler: {e}"))?;
+    record_model_load_timing(ModelLoadDisposition::Cold, load_started.elapsed());
     let progress_tx = job.progress_tx.clone();
     engine.set_on_progress(Box::new(move |event| {
         record_phase_timing(&event);
@@ -2172,14 +2222,15 @@ fn ensure_model_ready_sync_inner_guarded(
         request_has_lora,
         planned_load,
     );
-    add_lease_load_ms(started.elapsed());
     if result.is_ok() {
         worker.set_resident_model(Some(model_name));
     } else if result.as_ref().is_err_and(is_fatal_cuda_error) {
         quarantine_poisoned_worker(worker);
         contain_worker_cache(worker);
     }
-    result
+    result.map(|disposition| {
+        record_model_load_timing(disposition, started.elapsed());
+    })
 }
 
 fn ensure_model_ready_sync_inner(
@@ -2189,7 +2240,7 @@ fn ensure_model_ready_sync_inner(
     hint: Option<crate::model_manager::ActivationHint>,
     request_has_lora: bool,
     planned_load: Option<PlannedLoadContract<'_>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ModelLoadDisposition> {
     let planned_mode = planned_load.map(|planned| planned.mode);
     let planned_execution_fingerprint = planned_load.map(|planned| planned.execution_fingerprint);
     let load_request = planned_load.map(|planned| planned.request);
@@ -2215,7 +2266,7 @@ fn ensure_model_ready_sync_inner(
     // Already loaded?
     if let Some(entry) = cache.get(model_name) {
         if entry.residency == ModelResidency::Gpu && !cached_requires_reconstruction {
-            return Ok(());
+            return Ok(ModelLoadDisposition::Unchanged);
         }
     }
 
@@ -2394,7 +2445,7 @@ fn ensure_model_ready_sync_inner(
                 cache.insert_loaded(model_name.to_string(), engine, vram)
             };
             drop(evicted);
-            return Ok(());
+            return Ok(ModelLoadDisposition::Cold);
         }
 
         // Take the engine out and reload it.
@@ -2423,7 +2474,7 @@ fn ensure_model_ready_sync_inner(
             cache.insert_loaded(model_name.to_string(), engine, vram)
         };
         drop(evicted);
-        return Ok(());
+        return Ok(ModelLoadDisposition::WarmReload);
     }
 
     // Not in cache — need to create from scratch.
@@ -2548,7 +2599,7 @@ fn ensure_model_ready_sync_inner(
     };
     drop(evicted);
 
-    Ok(())
+    Ok(ModelLoadDisposition::Cold)
 }
 
 fn cached_engine_requires_reconstruction(
@@ -5026,17 +5077,42 @@ mod tests {
                     id: "timed-probe".into(),
                     kind: mold_scheduler::WorkKind::Generation,
                     run: Box::new(|| {
-                        for (name, millis) in [
-                            ("Loading transformer", 11),
-                            ("Reloading transformer", 12),
-                            ("Encoding prompt (T5)", 13),
-                            ("Denoising", 14),
-                            ("VAE decode", 15),
-                            ("Upscaling", 16),
+                        record_model_load_timing(
+                            ModelLoadDisposition::Cold,
+                            Duration::from_millis(11),
+                        );
+                        record_model_load_timing(
+                            ModelLoadDisposition::WarmReload,
+                            Duration::from_millis(12),
+                        );
+                        for (phase, name, millis) in [
+                            (
+                                mold_inference::ProgressPhase::PromptEncode,
+                                "Encoding prompt (T5)",
+                                13,
+                            ),
+                            (mold_inference::ProgressPhase::Vae, "VAE decode", 15),
+                            (mold_inference::ProgressPhase::Upscale, "Upscaling", 16),
                         ] {
-                            record_phase_timing(&mold_inference::ProgressEvent::StageDone {
+                            record_phase_timing(&mold_inference::ProgressEvent::PhaseDone {
+                                phase,
                                 name: name.into(),
                                 elapsed: Duration::from_millis(millis),
+                            });
+                        }
+                        for millis in [6, 8] {
+                            record_phase_timing(&mold_inference::ProgressEvent::DenoiseStep {
+                                step: 1,
+                                total: 2,
+                                elapsed: Duration::from_millis(millis),
+                            });
+                        }
+                        // Display copy must never be interpreted as execution
+                        // evidence, even when it contains phase-like words.
+                        for name in ["Loading VAE", "Loading upscaler", "Denoising"] {
+                            record_phase_timing(&mold_inference::ProgressEvent::StageDone {
+                                name: name.into(),
+                                elapsed: Duration::from_secs(99),
                             });
                         }
                     }),
@@ -5073,6 +5149,54 @@ mod tests {
             Some(crate::scheduler::WorkerEvent::Stopped { .. })
         ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn standalone_upscale_records_typed_phase_with_and_without_sse_subscriber() {
+        let _ = take_lease_phase_timings(None);
+        handle_standalone_upscale_progress(
+            mold_inference::ProgressEvent::PhaseDone {
+                phase: mold_inference::ProgressPhase::Upscale,
+                name: "Upscaling".into(),
+                elapsed: Duration::from_millis(17),
+            },
+            None,
+        );
+        assert_eq!(take_lease_phase_timings(None).upscale_ms, Some(17));
+
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_standalone_upscale_progress(
+            mold_inference::ProgressEvent::PhaseDone {
+                phase: mold_inference::ProgressPhase::Upscale,
+                name: "Upscaling".into(),
+                elapsed: Duration::from_millis(19),
+            },
+            Some(&progress_tx),
+        );
+        assert_eq!(take_lease_phase_timings(None).upscale_ms, Some(19));
+        assert!(matches!(
+            progress_rx.try_recv(),
+            Ok(SseMessage::Progress(_))
+        ));
+    }
+
+    #[test]
+    fn typed_load_disposition_never_double_counts_setup() {
+        let _ = take_lease_phase_timings(None);
+        record_model_load_timing(ModelLoadDisposition::WarmReload, Duration::from_millis(7));
+        let warm = take_lease_phase_timings(Some(99));
+        assert_eq!(warm.cold_load_ms, None);
+        assert_eq!(warm.warm_reload_ms, Some(7));
+
+        record_model_load_timing(ModelLoadDisposition::Cold, Duration::from_millis(11));
+        let cold = take_lease_phase_timings(Some(99));
+        assert_eq!(cold.cold_load_ms, Some(11));
+        assert_eq!(cold.warm_reload_ms, None);
+
+        record_model_load_timing(ModelLoadDisposition::Unchanged, Duration::from_millis(13));
+        let unchanged = take_lease_phase_timings(Some(99));
+        assert_eq!(unchanged.cold_load_ms, None);
+        assert_eq!(unchanged.warm_reload_ms, None);
     }
 
     #[test]

@@ -365,6 +365,37 @@ impl OwnerWork {
         }
     }
 
+    pub(crate) fn scheduling_shape_bucket(&self) -> String {
+        fn bucket(value: usize) -> usize {
+            value.max(1).next_power_of_two()
+        }
+        match self {
+            Self::PromptExpansion(job) => format!(
+                "words:{}:variations:{}:max_tokens:{}",
+                bucket(job.prompt.split_whitespace().count()),
+                job.expand_config.variations,
+                job.expand_config.max_tokens
+            ),
+            Self::StandaloneUpscale(job) => format!(
+                "bytes:{}:tile:{}",
+                bucket(job.request.image.len()),
+                job.request.tile_size.unwrap_or(512)
+            ),
+            Self::PostUpscale(job) => format!("{}x{}:tile:auto", job.image.width, job.image.height),
+            Self::AdminModelLoad(_) => "admin_load".to_string(),
+            Self::AdminModelUnload(_) => "admin_unload".to_string(),
+            Self::Generation(job) => format!(
+                "{}x{}:s{}:f{}",
+                job.request.width,
+                job.request.height,
+                job.request.steps,
+                job.request.frames.unwrap_or(1)
+            ),
+            #[cfg(test)]
+            Self::Probe { .. } => "probe".to_string(),
+        }
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         match self {
             Self::Generation(job) => job.result_tx.is_closed(),

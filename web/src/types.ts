@@ -121,6 +121,7 @@ export interface ServerCapabilities {
     active_mode?: string | null;
     v2_authoritative?: boolean;
     observes_v2_decisions?: boolean;
+    request_placement_preview?: boolean;
   };
   queue?: {
     can_pause?: boolean;

@@ -93,6 +93,7 @@ export interface ServerCapabilities {
     active_mode?: string | null;
     v2_authoritative?: boolean;
     observes_v2_decisions?: boolean;
+    request_placement_preview?: boolean;
   } | null;
   /** Absent on older servers means unknown, not unavailable. */
   expand?: ExpandCapabilities | null;
@@ -179,6 +180,22 @@ export interface KeyframeConditionWire {
 export interface LoraWeight {
   path: string;
   scale: number;
+}
+
+export type DeviceRef = { kind: "auto" } | { kind: "cpu" } | { kind: "gpu"; ordinal: number };
+
+export interface AdvancedPlacement {
+  transformer: DeviceRef;
+  vae: DeviceRef;
+  clip_l?: DeviceRef | null;
+  clip_g?: DeviceRef | null;
+  t5?: DeviceRef | null;
+  qwen?: DeviceRef | null;
+}
+
+export interface DevicePlacement {
+  text_encoders: DeviceRef;
+  advanced?: AdvancedPlacement | null;
 }
 
 /** Installed LoRA adapter (`GET /api/loras`). Mirrors mold-core `LoraInfo`. */
@@ -280,6 +297,7 @@ export interface GenerateRequest {
   retake_range?: TimeRange;
   spatial_upscale?: Ltx2SpatialUpscale;
   temporal_upscale?: Ltx2TemporalUpscale;
+  placement?: DevicePlacement | null;
 }
 
 /** serde tag = "type", snake_case — /api/generate/stream `progress` events. */
@@ -682,6 +700,7 @@ export interface ChainRequest {
   batch_id?: string | null;
   batch_index?: number | null;
   batch_count?: number | null;
+  placement?: DevicePlacement | null;
 }
 
 /**

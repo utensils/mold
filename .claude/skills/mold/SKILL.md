@@ -201,6 +201,7 @@ the real queued-job dispatch order.
   across the split `attention.to_q/to_k/to_v` candle tensors automatically.
 - FLUX, Flux.2, Z-Image, Qwen-Image, and LTX-2 CUDA offload use mold-owned block streaming. FLUX / Flux.2 / Z-Image / Qwen-Image keep fitting blocks resident and stream overflow blocks; LTX-2 defaults to adaptive residency and `MOLD_OFFLOAD=1` forces full streaming. SD3 offload still streams every MMDiT block.
 - Scheduler V2 resolves normalized request/environment/persisted component placement into an exact artifact/device/load-strategy plan using sampled free VRAM and aggregate host-RAM admission. Explicit CPU/device values are hard, cross-GPU component pins reject, and owners validate the device plus artifact fingerprints before CUDA. Forced-local batches use the same scheduler core across every selected GPU; one-item local generation retains best-free-GPU selection.
+- Learned estimates keep setup and execution separate. Engine progress reports typed cold-load, warm-reload, prompt-encode, denoise, VAE, and upscale phases; metadata schema v15 stores an independent runtime EWMA. Planning adds the candidate's cold or warm setup disposition to that runtime, never both a setup-inclusive total and another setup charge.
 - GGUF Q4/Q6 work at 1024x1024; Q8 works at 512x512 (Q8 + LoRA at 1024x1024 is tight on 24GB, see #95)
 
 **Per-model config defaults** (config.toml):
@@ -781,10 +782,12 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 
 - `POST /api/generate` — image/video generation, raw bytes response
 - `POST /api/generate/stream` — SSE progress + base64 complete event
+- `POST /api/generate/placement-preview` — read-only Scheduler V2 projection for `{ request, copies }` (`copies` is `1..=64`). Ordinary generations return a version-1 authoritative candidate only when the exact request is feasible; the call never leases a device, loads a model, or mutates queue state. Prepared Batch N clients send one sibling-shaped request (`batch_size: 1`) with `copies: N`.
 - `POST /api/generate/chain` — chained arbitrary-length video (LTX-2 distilled); body is `mold_core::chain::ChainRequest` (canonical `stages[]` or auto-expand `prompt`+`total_frames`+`clip_frames`); executes through the durable chain-job runner while keeping the legacy response shape
 - `POST /api/generate/chain/stream` — same as above, SSE progress with per-stage `denoise_step` events and additive `job_id` fields on progress frames
 - Durable chain jobs:
   - `POST /api/chain-jobs` · `GET /api/chain-jobs` · `GET /api/chain-jobs/:id`
+  - `POST /api/chain-jobs/placement-preview` — accepts preferred `{ request, copies }` and legacy raw-chain bodies, but currently returns a valid version-1 non-authoritative `unsupported` response. Do not use it to claim an exact per-device chain-stage plan yet.
   - `GET /api/chain-jobs/:id/events` — SSE snapshot + live job events
   - `POST /api/chain-jobs/:id/resume` · `POST /api/chain-jobs/:id/retake` · `POST /api/chain-jobs/:id/cancel`
   - `DELETE /api/chain-jobs/:id` · `POST /api/chain-jobs/gc` · `GET /api/chain-jobs/:id/stages/:idx/preview`
@@ -802,6 +805,19 @@ Core endpoints exposed by `mold serve` (full list + schemas at `/api/docs`):
 - `GET /api/config` · `GET/PUT/DELETE /api/config/:key` — the `mold config` verbs over HTTP: rows are `{ key, value, source: db|file|env, env_var? }`; PUT routes by surface like `config set` (403 on env-overridden keys), DELETE resets DB-backed keys like `config reset`
 - `GET /api/config/profiles` · `PUT /api/config/profile` — list/switch the active settings profile (503 when the metadata DB is disabled)
 - `GET /api/status` · `GET /health` · `GET /api/capabilities`
+
+Placement probes remove prompt, negative/original prompt, source/mask/control
+images, edit images, keyframe images, audio, and source-video contents while
+retaining planning structure. LoRA paths are intentionally retained because
+they name server-local artifacts whose presence and size affect exact
+feasibility; candidate probing is therefore limited to the configured hosts
+the user has connected. A response is usable only when its full version-1
+planned or explicit non-authoritative-unsupported shape validates. Clients may
+retain compatible routing for that strict `unsupported` shape or a legacy
+`404`/`405`; every other HTTP or malformed response is a definitive failure.
+Local prompt-expansion and post-generation-upscale utility previews likewise
+remain non-authoritative `unsupported` until the runtime's dynamic CPU
+fallback and GPU-lease behavior have exact plans.
 
 ### Prometheus Metrics
 

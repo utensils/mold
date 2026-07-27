@@ -529,7 +529,7 @@ impl McpServer {
             ));
             for item in &plan.work_items {
                 lines.push(format!(
-                    "work {}: phase={:?} lane={}/{} blocked={} finish={} confidence={:?}",
+                    "work {}: phase={} lane={}/{} blocked={} finish={} confidence={}",
                     item.work_id,
                     item.activity_phase,
                     item.planned_device_id.as_deref().unwrap_or("unassigned"),

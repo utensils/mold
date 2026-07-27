@@ -172,8 +172,11 @@ impl UpscaleEngine for UpscalerEngine {
             &self.progress,
         )?;
 
-        self.progress
-            .stage_done("Upscaling", upscale_start.elapsed());
+        self.progress.phase_done(
+            crate::ProgressPhase::Upscale,
+            "Upscaling",
+            upscale_start.elapsed(),
+        );
         self.progress.stage_start("Encoding output");
         let encode_start = Instant::now();
 

@@ -337,9 +337,10 @@ fn prepare_work(
     let mut immediate_candidates = all_candidates
         .iter()
         .filter(|candidate| {
-            devices
-                .get(&candidate.placement.device_id)
-                .is_some_and(|device| device.is_idle())
+            work.ready_at_ms <= now_ms
+                && devices
+                    .get(&candidate.placement.device_id)
+                    .is_some_and(|device| device.is_idle())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -360,7 +361,8 @@ fn prepare_work(
                 let ready_at = match device.activity {
                     DeviceActivity::Idle => now_ms,
                     DeviceActivity::Busy => device.available_at_ms?,
-                };
+                }
+                .max(work.ready_at_ms);
                 let finish = ready_at
                     .saturating_add(candidate.placement.warm_setup_ms)
                     .saturating_add(candidate.placement.predicted_run_ms);
@@ -1023,8 +1025,13 @@ fn evaluate_schedule(
                 .all_candidates
                 .iter()
                 .min_by(|left, right| {
-                    projected_finish(left, &availability, &warm)
-                        .cmp(&projected_finish(right, &availability, &warm))
+                    projected_finish(left, work.ready_at_ms, &availability, &warm)
+                        .cmp(&projected_finish(
+                            right,
+                            work.ready_at_ms,
+                            &availability,
+                            &warm,
+                        ))
                         .then_with(|| {
                             left.placement
                                 .incremental_host_ram_bytes
@@ -1043,9 +1050,11 @@ fn evaluate_schedule(
         let Some(placement) = selected else {
             continue;
         };
-        let start = *availability
+        let start = availability
             .get(&placement.device_id)
-            .unwrap_or(&(u64::MAX / 4));
+            .copied()
+            .unwrap_or(u64::MAX / 4)
+            .max(work.ready_at_ms);
         let is_warm = warm
             .get(&placement.device_id)
             .is_some_and(|fingerprints| fingerprints.contains(&placement.execution_fingerprint));
@@ -1105,12 +1114,15 @@ fn evaluate_schedule(
 
 fn projected_finish(
     candidate: &MatchCandidate,
+    ready_at_ms: u64,
     availability: &BTreeMap<DeviceId, u64>,
     warm: &BTreeMap<DeviceId, BTreeSet<crate::ExecutionFingerprint>>,
 ) -> (u64, u64) {
-    let start = *availability
+    let start = availability
         .get(&candidate.placement.device_id)
-        .unwrap_or(&(u64::MAX / 4));
+        .copied()
+        .unwrap_or(u64::MAX / 4)
+        .max(ready_at_ms);
     let setup = if warm
         .get(&candidate.placement.device_id)
         .is_some_and(|fingerprints| {

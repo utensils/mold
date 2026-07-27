@@ -3,12 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { parseQueueListing, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
-import {
-  canMutateDevice,
-  deviceActionLabel,
-  deviceLifecycleMessage,
-  deviceStateLabel,
-} from "@studio/lib/deviceLifecycle";
+import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import { describeTransportError } from "../lib/api/errors";
 import { gpuSnapshotsFromStatus } from "../lib/api/gpuStatus";
@@ -458,45 +453,6 @@ onBeforeUnmount(() => {
         <p v-else class="mobile-empty-note">No live telemetry from this host yet.</p>
       </section>
 
-      <section
-        v-if="devices !== null"
-        class="mobile-detail-section"
-        aria-labelledby="host-devices-title"
-        data-test="host-detail-devices"
-      >
-        <div class="mobile-section-head">
-          <h2 id="host-devices-title">GPU devices</h2>
-          <span>{{ devices.length }}</span>
-        </div>
-        <p data-test="device-lifecycle-note">
-          {{ deviceLifecycleMessage(deviceCapabilities) }}
-        </p>
-        <ul class="mobile-data-list">
-          <li v-for="device in devices" :key="device.id" data-test="device-row">
-            <div>
-              <strong>{{ device.name }}</strong>
-              <span>
-                {{
-                  device.ordinal == null ? device.backend.toUpperCase() : `GPU ${device.ordinal}`
-                }}
-                · {{ deviceStateLabel(device) }}
-              </span>
-            </div>
-            <button
-              type="button"
-              class="status-badge"
-              :data-test="`device-toggle-${device.ordinal ?? device.id}`"
-              :disabled="
-                !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
-              "
-              @click="toggleDevice(device)"
-            >
-              {{ deviceActionLabel(device, deviceCapabilities) }}
-            </button>
-          </li>
-        </ul>
-      </section>
-
       <section class="mobile-detail-section" aria-labelledby="host-queue-title">
         <div class="mobile-section-head">
           <h2 id="host-queue-title">Queue</h2>
@@ -505,18 +461,21 @@ onBeforeUnmount(() => {
             }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
           >
         </div>
-        <DevicePanel
-          v-if="devices?.length"
-          :devices="devices ?? []"
-          :plan="queuePlan"
-          :mutable="
-            deviceCapabilities?.devices?.lifecycle === true &&
-            deviceCapabilities?.dispatch?.v2_authoritative === true
-          "
-          :busy-device-id="[...deviceMutations][0] ?? null"
-          @unpin="unpinWork"
-          @toggle="toggleDeviceById"
-        />
+        <div v-if="devices?.length" data-test="host-detail-devices">
+          <DevicePanel
+            :devices="devices ?? []"
+            :plan="queuePlan"
+            :mutable="
+              deviceCapabilities?.devices?.lifecycle === true &&
+              deviceCapabilities?.dispatch?.v2_authoritative === true
+            "
+            :restart-enable="deviceCapabilities?.devices?.restart_enable === true"
+            show-controls
+            :busy-device-id="[...deviceMutations][0] ?? null"
+            @unpin="unpinWork"
+            @toggle="toggleDeviceById"
+          />
+        </div>
         <ul v-if="queue.length" class="mobile-data-list" data-test="host-detail-queue">
           <li v-for="entry in queue" :key="entry.id">
             <div>

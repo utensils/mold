@@ -3,12 +3,7 @@ import { onBeforeUnmount, ref, watch } from "vue";
 import { parseDeviceListResponse, setDeviceEnabled, type DeviceInfo } from "@studio/api/devices";
 import { listQueue, setQueueDevicePin, type QueuePlan } from "@studio/api/queuePlan";
 import DevicePanel from "@studio/components/DevicePanel.vue";
-import {
-  canMutateDevice,
-  deviceActionLabel,
-  deviceLifecycleMessage,
-  deviceStateLabel,
-} from "@studio/lib/deviceLifecycle";
+import { canMutateDevice } from "@studio/lib/deviceLifecycle";
 import { apiJsonTo } from "../lib/api/client";
 import type { ServerCapabilities } from "../lib/api/types";
 import { describeTransportError } from "../lib/api/errors";
@@ -272,43 +267,22 @@ onBeforeUnmount(() => {
     >
       <div class="mobile-settings-section-copy">
         <h2 id="mobile-settings-devices-title">GPU devices</h2>
-        <p>{{ deviceLifecycleMessage(deviceCapabilities) }}</p>
       </div>
       <DevicePanel
-        v-if="plan?.work_items.length"
+        v-if="devices.length"
         :devices="devices"
         :plan="plan"
         :mutable="
           deviceCapabilities?.devices?.lifecycle === true &&
           deviceCapabilities?.dispatch?.v2_authoritative === true
         "
+        :restart-enable="deviceCapabilities?.devices?.restart_enable === true"
+        show-controls
         :busy-device-id="[...deviceMutations][0] ?? null"
         @unpin="unpinWork"
         @toggle="toggleDeviceById"
       />
       <p v-if="deviceError" class="status-line error-text" role="alert">{{ deviceError }}</p>
-      <ul class="mobile-data-list">
-        <li v-for="device in devices" :key="device.id" data-test="device-row">
-          <div>
-            <strong>{{ device.name }}</strong>
-            <span>
-              {{ device.ordinal == null ? device.backend.toUpperCase() : `GPU ${device.ordinal}` }}
-              · {{ deviceStateLabel(device) }}
-            </span>
-          </div>
-          <button
-            type="button"
-            class="secondary-button"
-            :data-test="`mobile-settings-device-toggle-${device.ordinal ?? device.id}`"
-            :disabled="
-              !canMutateDevice(device, deviceCapabilities) || deviceMutations.has(device.id)
-            "
-            @click="toggleDevice(device)"
-          >
-            {{ deviceActionLabel(device, deviceCapabilities) }}
-          </button>
-        </li>
-      </ul>
     </section>
 
     <section class="mobile-settings-section" aria-labelledby="mobile-settings-about-title">

@@ -597,7 +597,7 @@ describe("MobileHostDetail remote host data", () => {
     const pending = view.get("[data-test='device-toggle-1']");
     expect(pending.text()).toBe("Enabled on restart");
     expect(pending.attributes("disabled")).toBeDefined();
-    const row = view.get("[data-test='device-row']");
+    const row = view.get("[data-test='device-card']");
     expect(row.text()).toContain("Restart required");
     expect(row.text()).not.toContain("unavailable");
   });

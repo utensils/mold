@@ -1,6 +1,6 @@
 import { IncompatibleHostError, apiJsonTo, type ApiTarget } from "./client";
 
-export type EstimateConfidence = "low" | "medium" | "high";
+export type EstimateConfidence = "low" | "medium" | "high" | (string & {});
 
 export interface QueueEntry {
   id: string;
