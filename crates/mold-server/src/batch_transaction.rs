@@ -6,6 +6,7 @@
 //! semantics, commits all metadata rows in one SQLite transaction, and
 //! durably advances the manifest to `committed`.
 
+use crate::batch_parent::{BatchChildLease, BatchChildReceipt};
 use anyhow::{bail, ensure, Context};
 use mold_db::GenerationRecord;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const TRANSACTION_DIR: &str = ".mold-batch-transactions";
+pub(crate) const PARENT_AUTHORITY_DIR: &str = "parent-authority";
 const MANIFEST_FILE: &str = "manifest.json";
 const JOURNAL_FILE: &str = "journal.jsonl";
 const COMMITTED_DIR: &str = "committed";
@@ -25,7 +27,8 @@ const DELETED_ARCHIVE_CHILD_VERSION: u32 = 1;
 const LEGACY_ATTEMPT_LOCKS_DIR: &str = ".attempt-locks";
 const ATTEMPT_LOCK_PREFIX: &str = ".mold-batch-attempt-";
 const ATTEMPT_LOCK_SUFFIX: &str = ".lock";
-const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_VERSION_V1: u32 = 1;
+const MANIFEST_VERSION: u32 = 2;
 const DISK_SAFETY_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Readers cover gallery observation. Writers cover publication, deletion,
@@ -445,8 +448,20 @@ struct BatchJournalRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum BatchJournalEvent {
-    ManifestSnapshot { manifest: BatchAttemptManifest },
-    FinalPublished { child_index: usize },
+    ManifestSnapshot {
+        manifest: BatchAttemptManifest,
+    },
+    ChildStaged {
+        receipt: BatchChildReceipt,
+    },
+    ChildUnstaged {
+        child_index: usize,
+        lease_generation: u64,
+        record_identity_sha256: String,
+    },
+    FinalPublished {
+        child_index: usize,
+    },
     MetadataCommitted,
     CleanupStarted,
 }
@@ -455,6 +470,7 @@ enum BatchJournalEvent {
 struct BatchJournalReplay {
     manifest: BatchAttemptManifest,
     manifest_history: Vec<BatchAttemptManifest>,
+    staged_receipts: BTreeMap<usize, BatchChildReceipt>,
     published_children: BTreeSet<usize>,
     post_publish_snapshot: bool,
     metadata_committed: bool,
@@ -562,6 +578,7 @@ pub struct BatchTransaction {
     cleanup_started: bool,
     reconstructed_from_journal: bool,
     journal_needs_heal: bool,
+    staged_receipts: BTreeMap<usize, BatchChildReceipt>,
     poisoned: bool,
     #[cfg(test)]
     commit_failpoint: Option<CommitFailpoint>,
@@ -999,6 +1016,7 @@ impl BatchTransaction {
             cleanup_started: false,
             reconstructed_from_journal: false,
             journal_needs_heal: false,
+            staged_receipts: BTreeMap::new(),
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -1015,6 +1033,84 @@ impl BatchTransaction {
         &self.manifest
     }
 
+    pub(crate) fn protocol_version(&self) -> u32 {
+        self.manifest.version
+    }
+
+    pub(crate) fn recover_exact(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+    ) -> anyhow::Result<Self> {
+        let bookkeeping = acquire_gallery_bookkeeping_lock(output_dir)?;
+        let attempt_dir = attempt_dir(output_dir, parent_id, attempt_generation);
+        let authority =
+            try_claim_attempt_authority(&attempt_dir, &bookkeeping)?.ok_or_else(|| {
+                BatchAttemptAuthorityContended {
+                    parent_id: parent_id.to_owned(),
+                    attempt_generation,
+                }
+            })?;
+        drop(bookkeeping);
+        Self::load_claimed(output_dir, &attempt_dir.join(MANIFEST_FILE), authority)
+    }
+
+    /// Load a retained commit proof only after re-validating both its immutable
+    /// manifest identity and every published child on disk.
+    pub(crate) fn load_validated_committed_archive(
+        output_dir: &Path,
+        parent_id: &str,
+        attempt_generation: u64,
+    ) -> anyhow::Result<BatchAttemptManifest> {
+        validate_component(parent_id, "batch parent id")?;
+        let path = committed_manifests_dir(output_dir, parent_id)
+            .join(format!("{attempt_generation}.json"));
+        let manifest: BatchAttemptManifest = serde_json::from_slice(&fs::read(&path)?)
+            .with_context(|| format!("reading archived batch commit {}", path.display()))?;
+        validate_loaded_manifest(
+            output_dir,
+            &attempt_dir(output_dir, parent_id, attempt_generation),
+            &manifest,
+        )?;
+        ensure!(
+            manifest.parent_id == parent_id
+                && manifest.attempt_generation == attempt_generation
+                && manifest.state == BatchManifestState::Committed,
+            "archived batch commit identity/state is invalid"
+        );
+        for child in &manifest.children {
+            let expected_checksum = child
+                .checksum_sha256
+                .as_deref()
+                .context("committed archive child has no checksum")?;
+            let expected_size = child
+                .size_bytes
+                .context("committed archive child has no size")?;
+            let final_path = output_dir.join(&child.final_name);
+            let metadata = fs::metadata(&final_path).with_context(|| {
+                format!(
+                    "committed archive child is missing: {}",
+                    final_path.display()
+                )
+            })?;
+            ensure!(
+                metadata.is_file() && metadata.len() == expected_size,
+                "committed archive child size changed: {}",
+                final_path.display()
+            );
+            ensure!(
+                checksum_file(&final_path)? == expected_checksum,
+                "committed archive child checksum changed: {}",
+                final_path.display()
+            );
+        }
+        Ok(manifest)
+    }
+
+    pub(crate) fn archived_child_identity(child: &BatchManifestChild) -> anyhow::Result<String> {
+        immutable_record_identity(child)
+    }
+
     pub fn staging_path(&self, child_index: usize) -> anyhow::Result<PathBuf> {
         let child = self
             .manifest
@@ -1026,12 +1122,34 @@ impl BatchTransaction {
 
     /// Write one private child artifact, fsync it, and journal its checksum.
     pub fn stage_bytes(&mut self, child_index: usize, bytes: &[u8]) -> anyhow::Result<()> {
+        let lease = BatchChildLease {
+            parent_id: self.manifest.parent_id.clone(),
+            child_index,
+            attempt_generation: self.manifest.attempt_generation,
+            lease_generation: 0,
+        };
+        self.stage_bytes_for_lease(&lease, bytes).map(|_| ())
+    }
+
+    /// Stage a child for one exact reducer lease. The returned receipt is
+    /// durable only after the file, staging directory, and ChildStaged journal
+    /// delta have all been fsynced, in that order.
+    pub fn stage_bytes_for_lease(
+        &mut self,
+        lease: &BatchChildLease,
+        bytes: &[u8],
+    ) -> anyhow::Result<BatchChildReceipt> {
         self.ensure_usable()?;
         ensure!(
             self.manifest.state == BatchManifestState::Staging,
             "children can only be staged while the attempt is staging"
         );
-        let path = self.staging_path(child_index)?;
+        ensure!(
+            lease.parent_id == self.manifest.parent_id
+                && lease.attempt_generation == self.manifest.attempt_generation,
+            "child lease does not belong to this transaction attempt"
+        );
+        let path = self.staging_path(lease.child_index)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1041,11 +1159,117 @@ impl BatchTransaction {
         file.sync_all()?;
         sync_dir(path.parent().expect("staging path has parent"))?;
 
+        let receipt = BatchChildReceipt {
+            version: BatchChildReceipt::VERSION,
+            parent_id: self.manifest.parent_id.clone(),
+            attempt_generation: self.manifest.attempt_generation,
+            child_index: lease.child_index,
+            lease_generation: lease.lease_generation,
+            checksum_sha256: checksum_bytes(bytes),
+            size_bytes: bytes.len() as u64,
+            record_identity_sha256: immutable_record_identity(
+                &self.manifest.children[lease.child_index],
+            )?,
+        };
+        self.append_journal(BatchJournalEvent::ChildStaged {
+            receipt: receipt.clone(),
+        })?;
+        let child = &mut self.manifest.children[lease.child_index];
+        child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
+        child.size_bytes = Some(receipt.size_bytes);
+        child.record.file_size_bytes = Some(receipt.size_bytes as i64);
+        self.staged_receipts
+            .insert(lease.child_index, receipt.clone());
+        Ok(receipt)
+    }
+
+    pub(crate) fn staged_receipts(&self) -> &BTreeMap<usize, BatchChildReceipt> {
+        &self.staged_receipts
+    }
+
+    /// Remove an unaccepted receipt from only this generation's private
+    /// staging directory, fsync the removal, then append its tombstone.
+    pub(crate) fn unstage_receipt(&mut self, child_index: usize) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        let receipt = self
+            .staged_receipts
+            .get(&child_index)
+            .cloned()
+            .context("batch child has no staged receipt")?;
+        let path = self.staging_path(child_index)?;
+        match fs::remove_file(&path) {
+            Ok(()) => sync_dir(path.parent().expect("staging path has parent"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.append_journal(BatchJournalEvent::ChildUnstaged {
+            child_index,
+            lease_generation: receipt.lease_generation,
+            record_identity_sha256: receipt.record_identity_sha256,
+        })?;
         let child = &mut self.manifest.children[child_index];
-        child.checksum_sha256 = Some(checksum_bytes(bytes));
-        child.size_bytes = Some(bytes.len() as u64);
-        child.record.file_size_bytes = Some(bytes.len() as i64);
-        self.persist_manifest()
+        child.checksum_sha256 = None;
+        child.size_bytes = None;
+        child.record.file_size_bytes = None;
+        child.record.file_mtime_ms = None;
+        self.staged_receipts.remove(&child_index);
+        Ok(())
+    }
+
+    pub(crate) fn remove_unreceipted_staging(&mut self) -> anyhow::Result<usize> {
+        self.ensure_usable()?;
+        let mut removed = 0;
+        for child_index in 0..self.manifest.children.len() {
+            if self.staged_receipts.contains_key(&child_index) {
+                continue;
+            }
+            let path = self.staging_path(child_index)?;
+            match fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if removed > 0 {
+            sync_dir(&self.attempt_dir.join("staging"))?;
+        }
+        Ok(removed)
+    }
+
+    pub(crate) fn rollback_private_attempt(&mut self) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            matches!(
+                self.manifest.state,
+                BatchManifestState::Staging
+                    | BatchManifestState::Prepared
+                    | BatchManifestState::Failed
+            ),
+            "cannot roll back transaction in {:?}",
+            self.manifest.state
+        );
+        ensure!(
+            !self.any_final_exists(),
+            "private rollback found a final-path artifact"
+        );
+        if self.manifest.state != BatchManifestState::Failed {
+            self.manifest.state = BatchManifestState::Failed;
+            self.persist_manifest()?;
+        }
+        self.release_reservations();
+        self.cleanup_private_staging();
+        remove_failed_attempt(self);
+        Ok(())
+    }
+
+    pub(crate) fn retire_committed_attempt(&mut self) -> anyhow::Result<()> {
+        self.ensure_usable()?;
+        ensure!(
+            self.manifest.state == BatchManifestState::Committed,
+            "only a committed transaction can be retired"
+        );
+        self.verify_all_committed()?;
+        self.archive_committed_attempt(true)
     }
 
     /// Seal a child that was streamed directly into its transaction-owned
@@ -1590,7 +1814,7 @@ impl BatchTransaction {
                     )
                 })?;
         ensure!(
-            manifest.version == MANIFEST_VERSION,
+            matches!(manifest.version, MANIFEST_VERSION_V1 | MANIFEST_VERSION),
             "unsupported batch manifest version {}",
             manifest.version
         );
@@ -1609,6 +1833,7 @@ impl BatchTransaction {
             cleanup_started: replay.cleanup_started,
             reconstructed_from_journal,
             journal_needs_heal,
+            staged_receipts: replay.staged_receipts,
             poisoned: false,
             #[cfg(test)]
             commit_failpoint: None,
@@ -1754,6 +1979,7 @@ impl BatchJournalReplay {
         Self {
             manifest_history: vec![manifest.clone()],
             manifest,
+            staged_receipts: BTreeMap::new(),
             published_children: BTreeSet::new(),
             post_publish_snapshot: false,
             metadata_committed: false,
@@ -1769,6 +1995,7 @@ impl BatchJournalReplay {
         let committed = manifest.state == BatchManifestState::Committed;
         Self {
             manifest_history: vec![manifest.clone()],
+            staged_receipts: BTreeMap::new(),
             published_children: if committed {
                 (0..manifest.children.len()).collect()
             } else {
@@ -1803,7 +2030,8 @@ impl BatchJournalReplay {
         );
         let legal = match (self.manifest.state, next.state) {
             (BatchManifestState::Staging, BatchManifestState::Staging) => {
-                is_staging_successor(&self.manifest, next)?
+                self.manifest.version == MANIFEST_VERSION_V1
+                    && is_staging_successor(&self.manifest, next)?
             }
             (BatchManifestState::Staging, BatchManifestState::Prepared) => {
                 manifests_equal_except_state(&self.manifest, next)?
@@ -1811,6 +2039,8 @@ impl BatchJournalReplay {
                         .children
                         .iter()
                         .all(|child| child.checksum_sha256.is_some())
+                    && (next.version == MANIFEST_VERSION_V1
+                        || self.staged_receipts.len() == next.children.len())
             }
             (BatchManifestState::Staging, BatchManifestState::Failed)
             | (BatchManifestState::Prepared, BatchManifestState::Failed) => {
@@ -1868,6 +2098,75 @@ impl BatchJournalReplay {
         match event {
             BatchJournalEvent::ManifestSnapshot { manifest } => {
                 self.apply_manifest_snapshot(output_dir, attempt_dir, manifest)
+            }
+            BatchJournalEvent::ChildStaged { receipt } => {
+                ensure!(
+                    self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.state == BatchManifestState::Staging
+                        && !self.cleanup_started,
+                    "ChildStaged is outside a v2 staging attempt"
+                );
+                ensure!(
+                    receipt.parent_id == self.manifest.parent_id
+                        && receipt.attempt_generation == self.manifest.attempt_generation
+                        && receipt.child_index < self.manifest.children.len(),
+                    "ChildStaged receipt does not belong to this attempt"
+                );
+                let child = &mut self.manifest.children[receipt.child_index];
+                ensure!(
+                    child.checksum_sha256.is_none()
+                        && child.size_bytes.is_none()
+                        && !self.staged_receipts.contains_key(&receipt.child_index),
+                    "ChildStaged duplicates an existing receipt"
+                );
+                ensure!(
+                    receipt.record_identity_sha256 == immutable_record_identity(child)?,
+                    "ChildStaged immutable record identity changed"
+                );
+                ensure!(
+                    receipt.checksum_sha256.len() == 64
+                        && receipt
+                            .checksum_sha256
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                    "ChildStaged checksum is invalid"
+                );
+                ensure!(
+                    receipt.size_bytes <= i64::MAX as u64,
+                    "ChildStaged size is too large"
+                );
+                child.checksum_sha256 = Some(receipt.checksum_sha256.clone());
+                child.size_bytes = Some(receipt.size_bytes);
+                child.record.file_size_bytes = Some(receipt.size_bytes as i64);
+                self.staged_receipts
+                    .insert(receipt.child_index, receipt.clone());
+                Ok(())
+            }
+            BatchJournalEvent::ChildUnstaged {
+                child_index,
+                lease_generation,
+                record_identity_sha256,
+            } => {
+                ensure!(
+                    self.manifest.version == MANIFEST_VERSION
+                        && self.manifest.state == BatchManifestState::Staging,
+                    "ChildUnstaged is outside a v2 staging attempt"
+                );
+                let receipt = self
+                    .staged_receipts
+                    .remove(child_index)
+                    .context("ChildUnstaged has no matching receipt")?;
+                ensure!(
+                    receipt.lease_generation == *lease_generation
+                        && receipt.record_identity_sha256 == *record_identity_sha256,
+                    "ChildUnstaged does not match its receipt"
+                );
+                let child = &mut self.manifest.children[*child_index];
+                child.checksum_sha256 = None;
+                child.size_bytes = None;
+                child.record.file_size_bytes = None;
+                child.record.file_mtime_ms = None;
+                Ok(())
             }
             BatchJournalEvent::FinalPublished { child_index } => {
                 ensure!(
@@ -2039,7 +2338,7 @@ impl UnresolvedBatchCommit {
     /// Startup recovery runs before the listener binds, so it may release the
     /// barrier and return a normal boot error for an operator-recoverable
     /// filesystem/SQLite failure. Live serving code must never call this.
-    fn into_startup_error(mut self) -> anyhow::Error {
+    pub(crate) fn into_startup_error(mut self) -> anyhow::Error {
         self.bookkeeping.take();
         self.writer.take();
         std::mem::replace(
@@ -2311,6 +2610,12 @@ fn collect_claimed_attempts(
     for parent in fs::read_dir(root)? {
         let parent = parent?;
         if !parent.path().is_dir() || parent.file_name() == "reservations" {
+            continue;
+        }
+        // Version-2 parent attempts are recovered only by the joint
+        // parent/transaction authority. Generic v1 recovery must never roll
+        // back a receipted child before that reducer is reconciled.
+        if parent.path().join(PARENT_AUTHORITY_DIR).is_dir() {
             continue;
         }
         let attempts = parent.path().join("attempts");
@@ -4592,7 +4897,7 @@ fn validate_loaded_manifest(
     manifest: &BatchAttemptManifest,
 ) -> anyhow::Result<()> {
     ensure!(
-        manifest.version == MANIFEST_VERSION,
+        matches!(manifest.version, MANIFEST_VERSION_V1 | MANIFEST_VERSION),
         "unsupported batch manifest version {}",
         manifest.version
     );
@@ -4688,6 +4993,16 @@ fn validate_loaded_manifest(
 
 fn checksum_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn immutable_record_identity(child: &BatchManifestChild) -> anyhow::Result<String> {
+    let mut immutable = child.clone();
+    immutable.checksum_sha256 = None;
+    immutable.size_bytes = None;
+    immutable.record.id = None;
+    immutable.record.file_mtime_ms = None;
+    immutable.record.file_size_bytes = None;
+    Ok(checksum_bytes(&serde_json::to_vec(&immutable)?))
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -8741,6 +9056,7 @@ mod tests {
         )
         .unwrap();
         transaction.stage_bytes(0, b"one").unwrap();
+        transaction.mark_prepared().unwrap();
         let journal_path = transaction.attempt_dir.join(JOURNAL_FILE);
         let bytes = fs::read(&journal_path).unwrap();
         let mut records: Vec<_> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
@@ -8752,6 +9068,7 @@ mod tests {
                 .unwrap();
 
         assert!(loaded.journal_needs_heal);
+        assert_eq!(loaded.manifest.state, BatchManifestState::Prepared);
         assert_eq!(loaded.manifest.children[0].size_bytes, Some(3));
         loaded
             .append_journal(BatchJournalEvent::ManifestSnapshot {
@@ -8762,7 +9079,7 @@ mod tests {
         replay_batch_journal(dir.path(), &transaction.attempt_dir, &records)
             .unwrap()
             .unwrap();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
     }
 
     #[tokio::test]
@@ -8952,5 +9269,108 @@ mod tests {
             BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn child_staging_journal_growth_is_linear_in_child_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = (0..64)
+            .map(|index| record(&format!("{index}.png"), index))
+            .collect();
+        let mut transaction =
+            BatchTransaction::begin(dir.path(), "parent", 0, serde_json::json!({}), records)
+                .unwrap();
+
+        for child_index in 0..64 {
+            transaction.stage_bytes(child_index, b"x").unwrap();
+        }
+
+        let journal_bytes = std::fs::metadata(transaction.attempt_dir.join(JOURNAL_FILE))
+            .unwrap()
+            .len();
+        assert!(
+            journal_bytes < 1_000_000,
+            "per-child staging rewrote the full manifest: {journal_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn hundred_thousand_child_staged_deltas_have_constant_record_size() {
+        let mut bytes = Vec::new();
+        for child_index in 0..100_000 {
+            let record = BatchJournalRecord {
+                sequence: child_index as u64 + 1,
+                attempt_generation: 7,
+                event: BatchJournalEvent::ChildStaged {
+                    receipt: BatchChildReceipt {
+                        version: 1,
+                        parent_id: "parent".into(),
+                        attempt_generation: 7,
+                        child_index,
+                        lease_generation: 3,
+                        checksum_sha256: "a".repeat(64),
+                        size_bytes: 123,
+                        record_identity_sha256: "b".repeat(64),
+                    },
+                },
+            };
+            bytes.extend(serde_json::to_vec(&record).unwrap());
+            bytes.push(b'\n');
+        }
+        assert!(
+            bytes.len() < 40_000_000,
+            "ChildStaged deltas are not constant-size: {} bytes",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn v1_manifest_snapshot_journal_fixture_remains_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let transaction = BatchTransaction::begin(
+            dir.path(),
+            "parent",
+            0,
+            serde_json::json!({"legacy": true}),
+            vec![record("one.png", 0)],
+        )
+        .unwrap();
+        let mut initial = transaction.manifest.clone();
+        initial.version = 1;
+        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &initial).unwrap();
+        let initial_record = BatchJournalRecord {
+            sequence: 0,
+            attempt_generation: 0,
+            event: BatchJournalEvent::ManifestSnapshot {
+                manifest: initial.clone(),
+            },
+        };
+        fs::write(
+            transaction.attempt_dir.join(JOURNAL_FILE),
+            format!("{}\n", serde_json::to_string(&initial_record).unwrap()),
+        )
+        .unwrap();
+        let staged_path = transaction.staging_path(0).unwrap();
+        fs::write(&staged_path, b"legacy").unwrap();
+        let mut staged = initial;
+        staged.children[0].checksum_sha256 = Some(checksum_bytes(b"legacy"));
+        staged.children[0].size_bytes = Some(6);
+        staged.children[0].record.file_size_bytes = Some(6);
+        let staged_record = BatchJournalRecord {
+            sequence: 1,
+            attempt_generation: 0,
+            event: BatchJournalEvent::ManifestSnapshot {
+                manifest: staged.clone(),
+            },
+        };
+        append_raw_batch_record(&transaction.attempt_dir, &staged_record);
+        atomic_write_json(&transaction.attempt_dir.join(MANIFEST_FILE), &staged).unwrap();
+
+        let loaded =
+            BatchTransaction::load(dir.path(), &transaction.attempt_dir.join(MANIFEST_FILE))
+                .unwrap();
+
+        assert_eq!(loaded.protocol_version(), 1);
+        assert_eq!(loaded.manifest.children[0].size_bytes, Some(6));
     }
 }

@@ -1438,6 +1438,16 @@ attempt generation; `prepared`, `committing`, and `committed` transitions use
 atomic manifest replacement plus file/directory fsync. Crash recovery
 reconstructs this state from the journal before any gallery route is served.
 
+The internal F1 durability bridge upgrades this authority to parent protocol
+v2 without routing the public raw-batch API yet. Protocol v2 appends one typed,
+constant-size reducer delta per grant/completion/cancel/retry/commit mutation
+and writes compact checkpoints only at attempt barriers. The reducer stores a
+settled-success prefix plus at most 1,024 materialized child states; callers
+page pending indices through a bounded cursor window. That window is a
+durability/memory bound, not a batch-size or GPU-count limit. Recovery still
+replays v1 full-snapshot journals, including the v1 replace-before-append crash
+window where the atomic snapshot is exactly one legal transition ahead.
+
 ### 12.3 Parent and child model
 
 A server batch parent lazily represents indices `0..N`; it does not
@@ -1456,6 +1466,12 @@ offload strategy, semantic component placement, output format, and determinism
 class once into one execution-equivalence fingerprint. Candidate devices must
 admit that equivalence identity, while every child lease still carries and
 validates the selected device's exact execution fingerprint.
+
+The durable substrate is seed-independent: parent transitions are keyed by
+`(parent_id, attempt_generation, child_index, lease_generation)`, while seed
+and request provenance remain immutable transaction metadata. A successful
+child is accepted only with a transaction-issued receipt binding that lease to
+the staged checksum, byte size, and immutable record identity.
 
 Initial family capabilities may expose `native_batch_sizes = [1]`. That is
 valid: the scheduler can distribute singleton children across devices without
@@ -1556,6 +1572,13 @@ Implement logical API atomicity with one `GalleryPublicationGate`:
    private staging/recovery evidence;
 10. release the publication gate;
 11. only then emit one parent completion and ordered child metadata.
+
+The transaction protocol also uses append-only child deltas: after the staged
+file and staging directory are fsynced, `ChildStaged` records its receipt;
+`ChildUnstaged` tombstones an unaccepted receipt after private-file removal is
+durable. It does not rewrite the O(N) manifest for each child. Full manifests
+remain at initial creation and `prepared`/`committing`/post-publication/
+`committed`/`failed` barriers.
 
 Every gallery observer and mutator participates in the same barrier: DB and
 filesystem listings, media-token/path validation, media lookup/open, delete,
@@ -1682,6 +1705,18 @@ Recovery is generation-aware and idempotent:
 - a stale completion or cleanup may touch only its own
   `attempts/<attempt_generation>/` directory and may never overwrite/delete a
   retry’s files.
+
+For a parent-owned attempt, startup reconciles the reducer journal and
+transaction journal before the legacy transaction sweep. One exhaustive
+parent-state × transaction-evidence table decides whether to resume, converge
+commit, roll forward a validated committed archive, fence and roll back, or
+fail closed. A committed archive is proof only after its identity, child
+layout, final-file sizes, and checksums match, and v2 reducer receipts must
+also match each archived child. Older attempt generations are claimed and
+rolled back one generation at a time before the current generation is
+recovered; a future generation or conflicting committed archive fails
+startup. Parent-owned directories are excluded from the legacy sweep so it
+cannot destroy transaction evidence before joint reconciliation.
 
 External direct filesystem observers remain outside the logical API guarantee.
 
@@ -2298,7 +2333,12 @@ F1 then delivers:
 
 The static family registry and pure adaptive partition-planner foundation land
 as a non-routing F1 slice. Parent execution, raw-batch dispatch, and capability
-advertisement remain later F1 work.
+advertisement remain later F1 work. The scalable parent journal, bounded
+reducer window, child staging receipts, and joint startup recovery table also
+land as internal F1 foundations. Neither foundation is connected to raw API
+admission or scheduler dispatch yet; remaining F1 work still owns request
+normalization, planning/execution integration, and the public atomic completion
+contract.
 
 Gates:
 

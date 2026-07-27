@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod batch_attempt;
 pub mod batch_parent;
 pub mod batch_transaction;
 pub mod catalog_api;
@@ -639,16 +640,21 @@ pub async fn run_server(
             let output_dir = config.effective_output_dir();
             drop(config);
             std::fs::create_dir_all(&output_dir)?;
-            let report = batch_transaction::recover_transactions(
+            let report = batch_attempt::recover_batches(
                 &output_dir,
                 &state.gallery_publication_gate,
                 state.metadata_db.clone(),
             )
             .await?;
             tracing::info!(
-                rolled_back = report.rolled_back,
-                rolled_forward = report.rolled_forward,
-                healed_committed_rows = report.healed_committed_rows,
+                joint_parents = report.parents_discovered,
+                joint_running = report.running_attempts_retained,
+                joint_rolled_forward = report.parents_rolled_forward,
+                receipts_removed = report.receipts_removed,
+                leases_requeued = report.leases_requeued,
+                rolled_back = report.legacy_transactions.rolled_back,
+                rolled_forward = report.legacy_transactions.rolled_forward,
+                healed_committed_rows = report.legacy_transactions.healed_committed_rows,
                 "batch transaction startup recovery complete"
             );
         }

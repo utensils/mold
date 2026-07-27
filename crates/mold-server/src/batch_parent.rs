@@ -1,8 +1,9 @@
-//! Serialized state reducer for one server-owned batch parent.
+//! Sparse, crash-recoverable state for one server-owned batch parent.
 //!
-//! The reducer is deliberately free of filesystem, SQLite, scheduler, and
-//! async concerns. Callers serialize access with the parent actor lock and
-//! execute returned cleanup/publication actions outside that lock.
+//! Version 2 journals one constant-size delta per reducer mutation. A parent
+//! materializes only a bounded child window and compacts ordered successes
+//! into `settled_prefix`, so a large lazy batch does not allocate `N` child
+//! states. The reader remains compatible with version-1 snapshot journals.
 
 use anyhow::Context as _;
 use mold_inference::InferenceCancellationToken;
@@ -11,6 +12,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+const PARENT_SNAPSHOT_FILE: &str = "parent-state.json";
+const PARENT_JOURNAL_FILE: &str = "parent-journal.jsonl";
+const PARENT_PROTOCOL_V1: u32 = 1;
+const PARENT_PROTOCOL_V2: u32 = 2;
+pub const MAX_MATERIALIZED_CHILDREN: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,7 +45,7 @@ enum ChildState {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchChildLease {
     pub parent_id: String,
     pub child_index: usize,
@@ -46,7 +53,52 @@ pub struct BatchChildLease {
     pub lease_generation: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Durable proof that a particular lease produced one immutable staged file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchChildReceipt {
+    pub version: u32,
+    pub parent_id: String,
+    pub attempt_generation: u64,
+    pub child_index: usize,
+    pub lease_generation: u64,
+    pub checksum_sha256: String,
+    pub size_bytes: u64,
+    pub record_identity_sha256: String,
+}
+
+impl BatchChildReceipt {
+    pub const VERSION: u32 = 1;
+
+    fn validate_for(&self, lease: &BatchChildLease) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.version == Self::VERSION,
+            "unsupported child receipt version"
+        );
+        anyhow::ensure!(
+            self.parent_id == lease.parent_id
+                && self.attempt_generation == lease.attempt_generation
+                && self.child_index == lease.child_index
+                && self.lease_generation == lease.lease_generation,
+            "staged child receipt does not match its lease"
+        );
+        for (name, digest) in [
+            ("child checksum", self.checksum_sha256.as_str()),
+            ("record identity", self.record_identity_sha256.as_str()),
+        ] {
+            anyhow::ensure!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{name} is not lowercase SHA-256"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompletionDisposition {
     Accepted,
     RetryChild,
@@ -57,11 +109,25 @@ pub enum CompletionDisposition {
     StaleDeletePrivateArtifact,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChildCompletion {
     Succeeded,
     Failed,
     Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingIndexWindow {
+    pub indices: Vec<usize>,
+    pub next_cursor: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SparseChild {
+    state: ChildState,
+    lease_generation: u64,
+    retry_count: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -70,20 +136,29 @@ pub struct BatchParentReducer {
     total_children: usize,
     attempt_generation: u64,
     state: BatchParentState,
-    children: Vec<ChildState>,
-    child_lease_generations: Vec<u64>,
+    settled_prefix: usize,
+    children: BTreeMap<usize, SparseChild>,
     active: BTreeSet<usize>,
     cancellation_tokens: BTreeMap<usize, InferenceCancellationToken>,
-    retry_counts: Vec<u8>,
     terminal_after_fence: Option<BatchParentState>,
 }
 
-const PARENT_SNAPSHOT_FILE: &str = "parent-state.json";
-const PARENT_JOURNAL_FILE: &str = "parent-journal.jsonl";
-const PARENT_JOURNAL_VERSION: u32 = 1;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchParentCheckpointV2 {
+    version: u32,
+    through_sequence: u64,
+    parent_id: String,
+    total_children: usize,
+    attempt_generation: u64,
+    state: BatchParentState,
+    settled_prefix: usize,
+    children: BTreeMap<usize, SparseChild>,
+    active: BTreeSet<usize>,
+    terminal_after_fence: Option<BatchParentState>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct BatchParentSnapshot {
+struct BatchParentSnapshotV1 {
     version: u32,
     parent_id: String,
     total_children: usize,
@@ -96,21 +171,76 @@ struct BatchParentSnapshot {
     terminal_after_fence: Option<BatchParentState>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct BatchParentJournalRecord {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BatchParentJournalRecordV1 {
     sequence: u64,
     attempt_generation: u64,
     from: BatchParentState,
     to: BatchParentState,
-    snapshot: BatchParentSnapshot,
+    snapshot: BatchParentSnapshotV1,
 }
 
-/// Durable, serialized authority for one batch parent's completion reducer.
-///
-/// Every mutating operation is reduced under `&mut self`, then the resulting
-/// full snapshot is atomically replaced and appended to the fsynced journal
-/// before the caller receives the disposition. F1 owns the actor/lock that
-/// serializes access to this type.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BatchParentJournalRecordV2 {
+    version: u32,
+    sequence: u64,
+    attempt_generation: u64,
+    event: BatchParentJournalEventV2,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BatchParentJournalEventV2 {
+    Initialized {
+        parent_id: String,
+        total_children: usize,
+    },
+    Started,
+    ChildGranted {
+        child_index: usize,
+        lease_generation: u64,
+    },
+    ChildCompleted {
+        child_index: usize,
+        lease_generation: u64,
+        completion: ChildCompletion,
+        disposition: CompletionDisposition,
+        receipt: Option<BatchChildReceipt>,
+    },
+    CancelRequested {
+        disposition: CompletionDisposition,
+    },
+    AttemptRetried {
+        next_attempt_generation: u64,
+    },
+    FenceFinalized,
+    CommitStarted,
+    Committed,
+    LostLeaseRequeued {
+        child_index: usize,
+        lease_generation: u64,
+    },
+    LostLeasesFenced {
+        child_indices: Vec<usize>,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum StoredParentRecord {
+    V1(BatchParentJournalRecordV1),
+    V2(BatchParentJournalRecordV2),
+}
+
+impl StoredParentRecord {
+    fn sequence(&self) -> u64 {
+        match self {
+            Self::V1(record) => record.sequence,
+            Self::V2(record) => record.sequence,
+        }
+    }
+}
+
+/// Durable, serialized authority for one batch parent.
 #[derive(Debug)]
 pub struct DurableBatchParent {
     reducer: BatchParentReducer,
@@ -129,98 +259,62 @@ impl DurableBatchParent {
         std::fs::create_dir_all(directory)?;
         sync_parent_dir(directory)?;
         anyhow::ensure!(
-            !directory.join(PARENT_SNAPSHOT_FILE).exists(),
-            "batch parent snapshot already exists in {}",
+            !directory.join(PARENT_SNAPSHOT_FILE).exists()
+                && !directory.join(PARENT_JOURNAL_FILE).exists(),
+            "batch parent authority already exists in {}",
             directory.display()
         );
-        let snapshot = reducer.snapshot();
-        let initial_record = BatchParentJournalRecord {
+        let record = BatchParentJournalRecordV2 {
+            version: PARENT_PROTOCOL_V2,
             sequence: 0,
-            attempt_generation: snapshot.attempt_generation,
-            from: BatchParentState::Queued,
-            to: BatchParentState::Queued,
-            snapshot: snapshot.clone(),
-        };
-        publish_initial_parent_journal(directory, &initial_record)?;
-        atomic_write_parent_json(&directory.join(PARENT_SNAPSHOT_FILE), &snapshot).with_context(
-            || {
-                format!(
-                    "publishing initial batch parent snapshot after its recoverable journal in {}",
-                    directory.display()
-                )
+            attempt_generation: 0,
+            event: BatchParentJournalEventV2::Initialized {
+                parent_id: reducer.parent_id.clone(),
+                total_children,
             },
-        )?;
-        Ok(Self {
+        };
+        publish_initial_parent_journal(directory, &record)?;
+        let durable = Self {
             reducer,
             directory: directory.to_path_buf(),
             next_sequence: 1,
             poisoned: false,
-        })
+        };
+        durable.write_checkpoint(0)?;
+        Ok(durable)
     }
 
     pub fn recover(directory: &Path) -> anyhow::Result<Self> {
-        let records = load_parent_journal(&directory.join(PARENT_JOURNAL_FILE))?;
-        let journal_snapshot = records.last().map(|record| record.snapshot.clone());
-        let snapshot_path = directory.join(PARENT_SNAPSHOT_FILE);
-        let disk_snapshot = match std::fs::read(&snapshot_path) {
-            Ok(bytes) => match serde_json::from_slice::<BatchParentSnapshot>(&bytes) {
-                Ok(snapshot) => match validate_parent_snapshot(&snapshot) {
-                    Ok(()) => Some(snapshot),
-                    Err(error) => {
-                        tracing::warn!(
-                            snapshot = %snapshot_path.display(),
-                            %error,
-                            "ignoring semantically invalid batch parent snapshot in favor of its journal"
-                        );
-                        None
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(
-                        snapshot = %snapshot_path.display(),
-                        %error,
-                        "ignoring unreadable batch parent snapshot in favor of its journal"
-                    );
-                    None
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let (snapshot, rewrite_snapshot, append_disk_ahead) =
-            reconcile_parent_snapshot(&records, journal_snapshot.as_ref(), disk_snapshot.as_ref())
-                .with_context(|| {
-                    format!(
-                        "reconciling batch parent snapshot and journal in {}",
-                        directory.display()
-                    )
-                })?;
-        let reducer = reducer_from_parent_snapshot(&snapshot);
-        let mut durable = Self {
+        let mut durable = Self::recover_inner(directory)?;
+        if !durable.reducer.active.is_empty() {
+            durable.fence_lost_active()?;
+        }
+        Ok(durable)
+    }
+
+    /// Joint transaction recovery uses this before deciding whether each lost
+    /// lease has a matching durable staging receipt.
+    pub(crate) fn recover_unfenced(directory: &Path) -> anyhow::Result<Self> {
+        Self::recover_inner(directory)
+    }
+
+    fn recover_inner(directory: &Path) -> anyhow::Result<Self> {
+        let mut records = load_parent_journal(&directory.join(PARENT_JOURNAL_FILE))?;
+        anyhow::ensure!(
+            !records.is_empty(),
+            "batch parent has no recoverable journal"
+        );
+        reconcile_v1_disk_ahead(directory, &mut records)?;
+        let reducer = replay_parent_journal(&records)?;
+        let durable = Self {
             reducer,
             directory: directory.to_path_buf(),
             next_sequence: records
                 .last()
-                .map_or(0, |record| record.sequence.saturating_add(1)),
+                .map_or(0, |record| record.sequence().saturating_add(1)),
             poisoned: false,
         };
-        if rewrite_snapshot {
-            atomic_write_parent_json(
-                &durable.directory.join(PARENT_SNAPSHOT_FILE),
-                &durable.reducer.snapshot(),
-            )?;
-        }
-        if append_disk_ahead {
-            let from = records
-                .last()
-                .map_or(BatchParentState::Queued, |record| record.snapshot.state);
-            durable.persist_transition(from)?;
-        }
-        if !durable.reducer.active.is_empty() {
-            let from = durable.reducer.state;
-            durable.reducer.fence_lost_active_leases()?;
-            durable.persist_transition(from)?;
-        }
+        durable.reconcile_checkpoint()?;
         Ok(durable)
     }
 
@@ -228,19 +322,52 @@ impl DurableBatchParent {
         self.reducer.state()
     }
 
+    pub fn parent_id(&self) -> &str {
+        &self.reducer.parent_id
+    }
+
+    pub fn total_children(&self) -> usize {
+        self.reducer.total_children
+    }
+
     pub fn attempt_generation(&self) -> u64 {
         self.reducer.attempt_generation()
     }
 
+    pub fn settled_prefix(&self) -> usize {
+        self.reducer.settled_prefix
+    }
+
+    pub fn tracked_child_count(&self) -> usize {
+        self.reducer.children.len()
+    }
+
+    pub fn pending_window(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<PendingIndexWindow> {
+        self.reducer.pending_window(cursor, limit)
+    }
+
     pub fn start(&mut self) -> anyhow::Result<()> {
-        self.mutate(|reducer| reducer.start())
+        self.mutate(
+            |reducer| reducer.start(),
+            |_| BatchParentJournalEventV2::Started,
+        )
     }
 
     pub fn grant(
         &mut self,
         child_index: usize,
     ) -> anyhow::Result<(BatchChildLease, InferenceCancellationToken)> {
-        let lease = self.mutate(|reducer| reducer.grant(child_index))?;
+        let lease = self.mutate(
+            |reducer| reducer.grant(child_index),
+            |lease| BatchParentJournalEventV2::ChildGranted {
+                child_index: lease.child_index,
+                lease_generation: lease.lease_generation,
+            },
+        )?;
         let token = self
             .reducer
             .cancellation_token(&lease)
@@ -253,137 +380,224 @@ impl DurableBatchParent {
         lease: &BatchChildLease,
         completion: ChildCompletion,
     ) -> anyhow::Result<CompletionDisposition> {
-        self.mutate(|reducer| reducer.complete(lease, completion))
+        self.complete_inner(lease, completion, None)
+    }
+
+    pub fn complete_staged(
+        &mut self,
+        lease: &BatchChildLease,
+        receipt: BatchChildReceipt,
+    ) -> anyhow::Result<CompletionDisposition> {
+        receipt.validate_for(lease)?;
+        self.complete_inner(lease, ChildCompletion::Succeeded, Some(receipt))
+    }
+
+    fn complete_inner(
+        &mut self,
+        lease: &BatchChildLease,
+        completion: ChildCompletion,
+        receipt: Option<BatchChildReceipt>,
+    ) -> anyhow::Result<CompletionDisposition> {
+        let lease_for_event = lease.clone();
+        let receipt_for_event = receipt.clone();
+        self.mutate_optional(
+            |reducer| reducer.complete(lease, completion),
+            move |disposition| BatchParentJournalEventV2::ChildCompleted {
+                child_index: lease_for_event.child_index,
+                lease_generation: lease_for_event.lease_generation,
+                completion,
+                disposition: *disposition,
+                receipt: receipt_for_event,
+            },
+        )
     }
 
     pub fn request_cancel(&mut self) -> anyhow::Result<CompletionDisposition> {
-        self.mutate(BatchParentReducer::request_cancel)
+        self.mutate(BatchParentReducer::request_cancel, |disposition| {
+            BatchParentJournalEventV2::CancelRequested {
+                disposition: *disposition,
+            }
+        })
     }
 
     pub fn begin_retry(&mut self) -> anyhow::Result<()> {
-        self.mutate(BatchParentReducer::begin_retry)
+        let next_attempt_generation = self
+            .reducer
+            .attempt_generation
+            .checked_add(1)
+            .context("batch attempt generation overflow")?;
+        self.mutate(BatchParentReducer::begin_retry, |()| {
+            BatchParentJournalEventV2::AttemptRetried {
+                next_attempt_generation,
+            }
+        })
     }
 
     pub fn finalize_fence(&mut self) -> anyhow::Result<()> {
-        self.mutate(BatchParentReducer::finalize_fence)
+        self.mutate(BatchParentReducer::finalize_fence, |_| {
+            BatchParentJournalEventV2::FenceFinalized
+        })
     }
 
     pub fn begin_commit(&mut self) -> anyhow::Result<()> {
-        self.mutate(BatchParentReducer::begin_commit)
+        self.mutate(BatchParentReducer::begin_commit, |_| {
+            BatchParentJournalEventV2::CommitStarted
+        })
     }
 
     pub fn mark_committed(&mut self) -> anyhow::Result<()> {
-        self.mutate(BatchParentReducer::mark_committed)
+        self.mutate(BatchParentReducer::mark_committed, |_| {
+            BatchParentJournalEventV2::Committed
+        })
+    }
+
+    pub(crate) fn requeue_lost_active(&mut self, child_index: usize) -> anyhow::Result<()> {
+        let lease_generation = self
+            .reducer
+            .children
+            .get(&child_index)
+            .context("lost child is not materialized")?
+            .lease_generation;
+        self.mutate(
+            |reducer| reducer.requeue_lost_active(child_index),
+            |_| BatchParentJournalEventV2::LostLeaseRequeued {
+                child_index,
+                lease_generation,
+            },
+        )
+    }
+
+    pub(crate) fn active_children(&self) -> Vec<usize> {
+        self.reducer.active.iter().copied().collect()
+    }
+
+    pub(crate) fn fence_lost_active(&mut self) -> anyhow::Result<()> {
+        let child_indices = self.active_children();
+        anyhow::ensure!(
+            !child_indices.is_empty(),
+            "parent has no lost active leases"
+        );
+        self.mutate(BatchParentReducer::fence_lost_active_leases, |_| {
+            BatchParentJournalEventV2::LostLeasesFenced { child_indices }
+        })
+    }
+
+    pub(crate) fn child_is_succeeded(&self, child_index: usize) -> bool {
+        self.reducer.child_is_succeeded(child_index)
+    }
+
+    pub(crate) fn accepted_receipts(
+        &self,
+    ) -> anyhow::Result<BTreeMap<usize, Option<BatchChildReceipt>>> {
+        accepted_receipts_from_journal(&self.directory.join(PARENT_JOURNAL_FILE))
     }
 
     fn mutate<T>(
         &mut self,
         operation: impl FnOnce(&mut BatchParentReducer) -> anyhow::Result<T>,
+        event: impl FnOnce(&T) -> BatchParentJournalEventV2,
+    ) -> anyhow::Result<T> {
+        self.mutate_optional(operation, event)
+    }
+
+    fn mutate_optional<T>(
+        &mut self,
+        operation: impl FnOnce(&mut BatchParentReducer) -> anyhow::Result<T>,
+        event: impl FnOnce(&T) -> BatchParentJournalEventV2,
     ) -> anyhow::Result<T> {
         anyhow::ensure!(
             !self.poisoned,
             "batch parent durable authority is poisoned after a persistence failure"
         );
-        let before_reducer = self.reducer.clone();
-        let before = before_reducer.snapshot();
+        let before = self.reducer.clone();
         let result = match operation(&mut self.reducer) {
             Ok(result) => result,
             Err(error) => {
-                self.reducer = before_reducer;
+                self.reducer = before;
                 return Err(error);
             }
         };
-        // Stale attempt- and lease-generation completions are successful
-        // commands with cleanup dispositions, but deliberately do not mutate
-        // reducer authority. Every other successful command currently changes
-        // at least one serialized reducer field. Persist only real authority
-        // changes so the append-only journal remains a sequence of replayable
-        // reducer mutations.
-        if self.reducer.snapshot() == before {
+        if reducer_authority_eq(&self.reducer, &before) {
             return Ok(result);
         }
-        if let Err(error) = self.persist_transition(before.state) {
-            self.reducer = before_reducer;
+        if let Err(error) = self.persist_event(event(&result)) {
+            self.reducer = before;
             self.poisoned = true;
-            return Err(error).context(
-                "persisting batch parent transition; this authority must be retired and recovered",
-            );
+            return Err(error)
+                .context("persisting batch parent delta; retire and recover this authority");
         }
         Ok(result)
     }
 
-    fn persist_transition(&mut self, from: BatchParentState) -> anyhow::Result<()> {
-        let snapshot = self.reducer.snapshot();
-        atomic_write_parent_json(&self.directory.join(PARENT_SNAPSHOT_FILE), &snapshot)?;
-        let record = BatchParentJournalRecord {
-            sequence: self.next_sequence,
-            attempt_generation: snapshot.attempt_generation,
-            from,
-            to: snapshot.state,
-            snapshot,
+    fn persist_event(&mut self, event: BatchParentJournalEventV2) -> anyhow::Result<()> {
+        let sequence = self.next_sequence;
+        let record = BatchParentJournalRecordV2 {
+            version: PARENT_PROTOCOL_V2,
+            sequence,
+            attempt_generation: self.reducer.attempt_generation,
+            event,
         };
-        let mut bytes = serde_json::to_vec(&record)?;
-        bytes.push(b'\n');
-        let mut journal = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.directory.join(PARENT_JOURNAL_FILE))?;
-        journal.write_all(&bytes)?;
-        journal.sync_all()?;
-        sync_parent_dir(&self.directory)?;
+        append_parent_record(
+            &self.directory.join(PARENT_JOURNAL_FILE),
+            &StoredParentRecord::V2(record),
+        )?;
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
             .context("batch parent journal sequence overflow")?;
+        if checkpoint_barrier(self.reducer.state) {
+            self.write_checkpoint(sequence)?;
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint(&self, through_sequence: u64) -> anyhow::Result<()> {
+        let checkpoint = self.reducer.checkpoint(through_sequence);
+        atomic_write_parent_json(&self.directory.join(PARENT_SNAPSHOT_FILE), &checkpoint)
+    }
+
+    fn reconcile_checkpoint(&self) -> anyhow::Result<()> {
+        let path = self.directory.join(PARENT_SNAPSHOT_FILE);
+        let rewrite = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) if value.get("version").and_then(|v| v.as_u64()) == Some(2) => {
+                    let checkpoint: BatchParentCheckpointV2 = serde_json::from_value(value)?;
+                    validate_v2_checkpoint(&checkpoint)?;
+                    anyhow::ensure!(
+                        checkpoint.through_sequence < self.next_sequence,
+                        "batch parent checkpoint is ahead of its journal"
+                    );
+                    !checkpoint_matches_reducer(&checkpoint, &self.reducer)
+                }
+                Ok(value) if value.get("version").and_then(|v| v.as_u64()) == Some(1) => true,
+                _ => true,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error.into()),
+        };
+        if rewrite {
+            self.write_checkpoint(self.next_sequence.saturating_sub(1))?;
+        }
         Ok(())
     }
 }
 
-fn publish_initial_parent_journal(
-    directory: &Path,
-    record: &BatchParentJournalRecord,
-) -> anyhow::Result<()> {
-    let journal_path = directory.join(PARENT_JOURNAL_FILE);
-    let temporary = directory.join(format!(
-        ".{PARENT_JOURNAL_FILE}.create-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let result = (|| {
-        let mut bytes = serde_json::to_vec(record)?;
-        bytes.push(b'\n');
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::hard_link(&temporary, &journal_path).with_context(|| {
-            format!(
-                "claiming new batch parent journal {}; existing authority is never overwritten",
-                journal_path.display()
-            )
-        })?;
-        sync_parent_dir(directory)
-    })();
-    let _ = std::fs::remove_file(&temporary);
-    if result.is_ok() {
-        sync_parent_dir(directory)?;
-    }
-    result
+fn checkpoint_barrier(state: BatchParentState) -> bool {
+    matches!(
+        state,
+        BatchParentState::Prepared
+            | BatchParentState::Committing
+            | BatchParentState::Committed
+            | BatchParentState::Fenced
+            | BatchParentState::Cancelled
+            | BatchParentState::Failed
+    )
 }
 
 impl BatchParentReducer {
     pub fn new(parent_id: impl Into<String>, total_children: usize) -> anyhow::Result<Self> {
         let parent_id = parent_id.into();
-        let parent_path = Path::new(&parent_id);
-        anyhow::ensure!(
-            !parent_id.is_empty()
-                && parent_path.file_name().and_then(|name| name.to_str())
-                    == Some(parent_id.as_str())
-                && parent_id != "."
-                && parent_id != "..",
-            "batch parent id must be one path component"
-        );
+        validate_parent_id(&parent_id)?;
         anyhow::ensure!(
             total_children > 0,
             "batch parent must have at least one child"
@@ -393,11 +607,10 @@ impl BatchParentReducer {
             total_children,
             attempt_generation: 0,
             state: BatchParentState::Queued,
-            children: vec![ChildState::Pending; total_children],
-            child_lease_generations: vec![0; total_children],
+            settled_prefix: 0,
+            children: BTreeMap::new(),
             active: BTreeSet::new(),
             cancellation_tokens: BTreeMap::new(),
-            retry_counts: vec![0; total_children],
             terminal_after_fence: None,
         })
     }
@@ -410,19 +623,39 @@ impl BatchParentReducer {
         self.attempt_generation
     }
 
-    fn snapshot(&self) -> BatchParentSnapshot {
-        BatchParentSnapshot {
-            version: PARENT_JOURNAL_VERSION,
-            parent_id: self.parent_id.clone(),
-            total_children: self.total_children,
-            attempt_generation: self.attempt_generation,
-            state: self.state,
-            children: self.children.clone(),
-            child_lease_generations: self.child_lease_generations.clone(),
-            active: self.active.clone(),
-            retry_counts: self.retry_counts.clone(),
-            terminal_after_fence: self.terminal_after_fence,
+    pub fn tracked_child_count(&self) -> usize {
+        self.children.len()
+    }
+
+    pub fn pending_window(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<PendingIndexWindow> {
+        anyhow::ensure!(
+            (1..=MAX_MATERIALIZED_CHILDREN).contains(&limit),
+            "pending window limit must be between 1 and {MAX_MATERIALIZED_CHILDREN}"
+        );
+        let start = cursor.max(self.settled_prefix);
+        let materialized_end = self
+            .settled_prefix
+            .saturating_add(MAX_MATERIALIZED_CHILDREN)
+            .min(self.total_children);
+        let mut indices = Vec::with_capacity(limit);
+        let mut next_cursor = None;
+        for index in start..materialized_end {
+            if self.child_is_pending(index) {
+                if indices.len() == limit {
+                    next_cursor = Some(index);
+                    break;
+                }
+                indices.push(index);
+            }
         }
+        Ok(PendingIndexWindow {
+            indices,
+            next_cursor,
+        })
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
@@ -446,27 +679,40 @@ impl BatchParentReducer {
         );
         anyhow::ensure!(
             child_index < self.total_children,
-            "batch child index {child_index} is out of range"
+            "batch child index out of range"
         );
         anyhow::ensure!(
-            self.children[child_index] == ChildState::Pending,
-            "batch child {child_index} is not pending"
+            child_index
+                < self
+                    .settled_prefix
+                    .saturating_add(MAX_MATERIALIZED_CHILDREN),
+            "batch child {child_index} is outside the current materialization window"
         );
+        anyhow::ensure!(
+            self.child_is_pending(child_index),
+            "batch child is not pending"
+        );
+        let child = self.children.entry(child_index).or_insert(SparseChild {
+            state: ChildState::Pending,
+            lease_generation: 0,
+            retry_count: 0,
+        });
+        child.lease_generation = child
+            .lease_generation
+            .checked_add(1)
+            .context("batch child lease generation overflow")?;
+        child.state = ChildState::Active;
         anyhow::ensure!(
             self.active.insert(child_index),
-            "batch child {child_index} already has an active lease"
+            "batch child already active"
         );
-        self.children[child_index] = ChildState::Active;
-        self.child_lease_generations[child_index] = self.child_lease_generations[child_index]
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("batch child lease generation overflow"))?;
         self.cancellation_tokens
             .insert(child_index, InferenceCancellationToken::default());
         Ok(BatchChildLease {
             parent_id: self.parent_id.clone(),
             child_index,
             attempt_generation: self.attempt_generation,
-            lease_generation: self.child_lease_generations[child_index],
+            lease_generation: child.lease_generation,
         })
     }
 
@@ -476,7 +722,10 @@ impl BatchParentReducer {
     ) -> Option<InferenceCancellationToken> {
         (lease.parent_id == self.parent_id
             && lease.attempt_generation == self.attempt_generation
-            && self.child_lease_generations.get(lease.child_index) == Some(&lease.lease_generation))
+            && self
+                .children
+                .get(&lease.child_index)
+                .is_some_and(|child| child.lease_generation == lease.lease_generation))
         .then(|| self.cancellation_tokens.get(&lease.child_index).cloned())
         .flatten()
     }
@@ -488,54 +737,42 @@ impl BatchParentReducer {
     ) -> anyhow::Result<CompletionDisposition> {
         anyhow::ensure!(
             lease.parent_id == self.parent_id,
-            "completion parent does not match reducer"
+            "completion parent mismatch"
         );
         anyhow::ensure!(
             lease.child_index < self.total_children,
-            "batch child index {} is out of range",
-            lease.child_index
+            "batch child index out of range"
         );
-        if lease.attempt_generation < self.attempt_generation {
-            return Ok(CompletionDisposition::StaleDeletePrivateArtifact);
-        }
-        anyhow::ensure!(
-            lease.attempt_generation == self.attempt_generation,
-            "completion generation {} is ahead of current generation {}",
-            lease.attempt_generation,
-            self.attempt_generation
-        );
-        if lease.lease_generation
-            < *self
-                .child_lease_generations
-                .get(lease.child_index)
-                .context("batch child lease generation is missing")?
+        if lease.attempt_generation < self.attempt_generation
+            || lease.child_index < self.settled_prefix
         {
             return Ok(CompletionDisposition::StaleDeletePrivateArtifact);
         }
         anyhow::ensure!(
-            lease.lease_generation == self.child_lease_generations[lease.child_index],
-            "completion lease generation {} is ahead of current lease generation {}",
-            lease.lease_generation,
-            self.child_lease_generations[lease.child_index]
+            lease.attempt_generation == self.attempt_generation,
+            "completion generation is ahead of current generation"
+        );
+        let Some(child) = self.children.get(&lease.child_index) else {
+            anyhow::bail!("batch child has no materialized lease");
+        };
+        if lease.lease_generation < child.lease_generation || child.state == ChildState::Succeeded {
+            return Ok(CompletionDisposition::StaleDeletePrivateArtifact);
+        }
+        anyhow::ensure!(
+            lease.lease_generation == child.lease_generation,
+            "completion lease generation is ahead of current lease"
         );
         anyhow::ensure!(
-            self.children[lease.child_index] == ChildState::Active
-                && self.active.remove(&lease.child_index),
-            "batch child {} has no active lease in generation {}",
-            lease.child_index,
-            lease.attempt_generation
+            child.state == ChildState::Active && self.active.remove(&lease.child_index),
+            "batch child has no active lease"
         );
         self.cancellation_tokens.remove(&lease.child_index);
-
         match self.state {
             BatchParentState::Running => self.complete_running(lease.child_index, completion),
             BatchParentState::Cancelling | BatchParentState::Failing => {
                 self.complete_closed_attempt(lease.child_index, completion)
             }
-            _ => anyhow::bail!(
-                "batch child completion is invalid while parent is {:?}",
-                self.state
-            ),
+            _ => anyhow::bail!("completion invalid while parent is {:?}", self.state),
         }
     }
 
@@ -550,9 +787,11 @@ impl BatchParentReducer {
         );
         self.state = BatchParentState::Cancelling;
         self.terminal_after_fence = Some(BatchParentState::Cancelled);
+        self.retain_only_active();
         self.cancel_active_children();
         if self.active.is_empty() {
             self.state = BatchParentState::Fenced;
+            self.children.clear();
             Ok(CompletionDisposition::AttemptFenced)
         } else {
             Ok(CompletionDisposition::Accepted)
@@ -568,12 +807,11 @@ impl BatchParentReducer {
         self.attempt_generation = self
             .attempt_generation
             .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("batch attempt generation overflow"))?;
-        self.children.fill(ChildState::Pending);
-        self.child_lease_generations.fill(0);
+            .context("batch attempt generation overflow")?;
+        self.settled_prefix = 0;
+        self.children.clear();
         self.active.clear();
         self.cancellation_tokens.clear();
-        self.retry_counts.fill(0);
         self.terminal_after_fence = None;
         self.state = BatchParentState::Retrying;
         Ok(())
@@ -587,13 +825,13 @@ impl BatchParentReducer {
         let terminal = self
             .terminal_after_fence
             .take()
-            .ok_or_else(|| anyhow::anyhow!("fenced parent has no terminal disposition"))?;
+            .context("fenced parent has no terminal disposition")?;
         anyhow::ensure!(
             matches!(
                 terminal,
                 BatchParentState::Cancelled | BatchParentState::Failed
             ),
-            "invalid terminal state after fence: {terminal:?}"
+            "invalid terminal state after fence"
         );
         self.state = terminal;
         Ok(())
@@ -602,8 +840,7 @@ impl BatchParentReducer {
     pub fn begin_commit(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.state == BatchParentState::Prepared,
-            "batch parent cannot commit from {:?}",
-            self.state
+            "parent is not prepared"
         );
         self.state = BatchParentState::Committing;
         Ok(())
@@ -612,8 +849,7 @@ impl BatchParentReducer {
     pub fn mark_committed(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.state == BatchParentState::Committing,
-            "batch parent cannot finish commit from {:?}",
-            self.state
+            "parent is not committing"
         );
         self.state = BatchParentState::Committed;
         Ok(())
@@ -626,16 +862,14 @@ impl BatchParentReducer {
     ) -> anyhow::Result<CompletionDisposition> {
         match completion {
             ChildCompletion::Succeeded => {
-                self.children[child_index] = ChildState::Succeeded;
-                if self
-                    .children
-                    .iter()
-                    .all(|state| *state == ChildState::Succeeded)
-                {
+                self.children.get_mut(&child_index).unwrap().state = ChildState::Succeeded;
+                self.compact_successes();
+                if self.settled_prefix == self.total_children {
                     anyhow::ensure!(
                         self.active.is_empty(),
-                        "all children succeeded while active leases remain"
+                        "all children succeeded with active leases"
                     );
+                    self.children.clear();
                     self.state = BatchParentState::Prepared;
                     Ok(CompletionDisposition::AttemptPrepared)
                 } else {
@@ -643,20 +877,23 @@ impl BatchParentReducer {
                 }
             }
             ChildCompletion::Failed | ChildCompletion::Cancelled => {
-                self.children[child_index] = match completion {
+                let child = self.children.get_mut(&child_index).unwrap();
+                child.state = match completion {
                     ChildCompletion::Failed => ChildState::Failed,
                     ChildCompletion::Cancelled => ChildState::Cancelled,
                     ChildCompletion::Succeeded => unreachable!(),
                 };
-                if completion == ChildCompletion::Failed && self.retry_counts[child_index] == 0 {
-                    self.retry_counts[child_index] = 1;
-                    self.children[child_index] = ChildState::Pending;
+                if completion == ChildCompletion::Failed && child.retry_count == 0 {
+                    child.retry_count = 1;
+                    child.state = ChildState::Pending;
                     return Ok(CompletionDisposition::RetryChild);
                 }
                 self.state = BatchParentState::Failing;
                 self.terminal_after_fence = Some(BatchParentState::Failed);
+                self.retain_only_active();
                 self.cancel_active_children();
                 if self.active.is_empty() {
+                    self.children.clear();
                     self.state = BatchParentState::Fenced;
                     Ok(CompletionDisposition::AttemptFenced)
                 } else {
@@ -671,22 +908,56 @@ impl BatchParentReducer {
         child_index: usize,
         completion: ChildCompletion,
     ) -> anyhow::Result<CompletionDisposition> {
-        let has_private_artifact = completion == ChildCompletion::Succeeded;
-        self.children[child_index] = ChildState::Cancelled;
+        let has_artifact = completion == ChildCompletion::Succeeded;
+        if let Some(child) = self.children.get_mut(&child_index) {
+            child.state = ChildState::Cancelled;
+        }
         if self.active.is_empty() {
+            self.children.clear();
             self.state = BatchParentState::Fenced;
-            Ok(if has_private_artifact {
+            Ok(if has_artifact {
                 CompletionDisposition::AttemptFencedDeletePrivateArtifact
             } else {
                 CompletionDisposition::AttemptFenced
             })
         } else {
-            Ok(if has_private_artifact {
+            Ok(if has_artifact {
                 CompletionDisposition::ClosedAttemptDeletePrivateArtifact
             } else {
                 CompletionDisposition::Accepted
             })
         }
+    }
+
+    fn compact_successes(&mut self) {
+        while self
+            .children
+            .get(&self.settled_prefix)
+            .is_some_and(|child| child.state == ChildState::Succeeded)
+        {
+            self.children.remove(&self.settled_prefix);
+            self.settled_prefix += 1;
+        }
+    }
+
+    fn child_is_pending(&self, child_index: usize) -> bool {
+        child_index >= self.settled_prefix
+            && self
+                .children
+                .get(&child_index)
+                .is_none_or(|child| child.state == ChildState::Pending)
+    }
+
+    fn child_is_succeeded(&self, child_index: usize) -> bool {
+        child_index < self.settled_prefix
+            || self
+                .children
+                .get(&child_index)
+                .is_some_and(|child| child.state == ChildState::Succeeded)
+    }
+
+    fn retain_only_active(&mut self) {
+        self.children.retain(|index, _| self.active.contains(index));
     }
 
     fn cancel_active_children(&self) {
@@ -707,9 +978,8 @@ impl BatchParentReducer {
             "batch parent cannot fence lost leases from {:?}",
             self.state
         );
-        for child_index in std::mem::take(&mut self.active) {
-            self.children[child_index] = ChildState::Cancelled;
-        }
+        self.active.clear();
+        self.children.clear();
         self.cancellation_tokens.clear();
         self.terminal_after_fence = Some(if self.state == BatchParentState::Cancelling {
             BatchParentState::Cancelled
@@ -719,98 +989,434 @@ impl BatchParentReducer {
         self.state = BatchParentState::Fenced;
         Ok(())
     }
+
+    fn requeue_lost_active(&mut self, child_index: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.state == BatchParentState::Running,
+            "parent is not running"
+        );
+        anyhow::ensure!(self.active.remove(&child_index), "child is not active");
+        let child = self
+            .children
+            .get_mut(&child_index)
+            .context("child is missing")?;
+        child.state = ChildState::Pending;
+        self.cancellation_tokens.remove(&child_index);
+        Ok(())
+    }
+
+    fn checkpoint(&self, through_sequence: u64) -> BatchParentCheckpointV2 {
+        BatchParentCheckpointV2 {
+            version: PARENT_PROTOCOL_V2,
+            through_sequence,
+            parent_id: self.parent_id.clone(),
+            total_children: self.total_children,
+            attempt_generation: self.attempt_generation,
+            state: self.state,
+            settled_prefix: self.settled_prefix,
+            children: self.children.clone(),
+            active: self.active.clone(),
+            terminal_after_fence: self.terminal_after_fence,
+        }
+    }
 }
 
-fn validate_parent_snapshot(snapshot: &BatchParentSnapshot) -> anyhow::Result<()> {
-    let parent_path = Path::new(&snapshot.parent_id);
+fn reducer_authority_eq(left: &BatchParentReducer, right: &BatchParentReducer) -> bool {
+    left.parent_id == right.parent_id
+        && left.total_children == right.total_children
+        && left.attempt_generation == right.attempt_generation
+        && left.state == right.state
+        && left.settled_prefix == right.settled_prefix
+        && left.children == right.children
+        && left.active == right.active
+        && left.terminal_after_fence == right.terminal_after_fence
+}
+
+fn validate_parent_id(parent_id: &str) -> anyhow::Result<()> {
+    let path = Path::new(parent_id);
     anyhow::ensure!(
-        !snapshot.parent_id.is_empty()
-            && parent_path.file_name().and_then(|name| name.to_str())
-                == Some(snapshot.parent_id.as_str())
-            && snapshot.parent_id != "."
-            && snapshot.parent_id != "..",
-        "batch parent snapshot has an invalid parent id"
+        !parent_id.is_empty()
+            && path.file_name().and_then(|name| name.to_str()) == Some(parent_id)
+            && parent_id != "."
+            && parent_id != "..",
+        "batch parent id must be one path component"
     );
-    anyhow::ensure!(snapshot.total_children > 0, "batch parent has no children");
+    Ok(())
+}
+
+fn validate_v2_checkpoint(checkpoint: &BatchParentCheckpointV2) -> anyhow::Result<()> {
     anyhow::ensure!(
-        snapshot.children.len() == snapshot.total_children
+        checkpoint.version == PARENT_PROTOCOL_V2,
+        "unsupported parent checkpoint"
+    );
+    validate_parent_id(&checkpoint.parent_id)?;
+    anyhow::ensure!(
+        checkpoint.total_children > 0,
+        "batch parent has no children"
+    );
+    anyhow::ensure!(
+        checkpoint.settled_prefix <= checkpoint.total_children
+            && checkpoint.children.len() <= MAX_MATERIALIZED_CHILDREN
+            && checkpoint
+                .children
+                .keys()
+                .all(|index| *index >= checkpoint.settled_prefix
+                    && *index < checkpoint.total_children
+                    && *index
+                        < checkpoint
+                            .settled_prefix
+                            .saturating_add(MAX_MATERIALIZED_CHILDREN)),
+        "batch parent checkpoint violates the sparse materialization bound"
+    );
+    anyhow::ensure!(
+        checkpoint.active.iter().all(|index| {
+            checkpoint
+                .children
+                .get(index)
+                .is_some_and(|child| child.state == ChildState::Active)
+        }),
+        "batch parent checkpoint active set is inconsistent"
+    );
+    Ok(())
+}
+
+fn checkpoint_matches_reducer(
+    checkpoint: &BatchParentCheckpointV2,
+    reducer: &BatchParentReducer,
+) -> bool {
+    let expected = reducer.checkpoint(checkpoint.through_sequence);
+    expected == *checkpoint
+}
+
+fn replay_parent_journal(records: &[StoredParentRecord]) -> anyhow::Result<BatchParentReducer> {
+    let mut reducer: Option<BatchParentReducer> = None;
+    let mut previous_v1: Option<BatchParentSnapshotV1> = None;
+    for (position, record) in records.iter().enumerate() {
+        anyhow::ensure!(
+            record.sequence() == position as u64,
+            "batch parent journal sequence gap"
+        );
+        match record {
+            StoredParentRecord::V1(record) => {
+                validate_v1_snapshot(&record.snapshot)?;
+                anyhow::ensure!(
+                    record.attempt_generation == record.snapshot.attempt_generation
+                        && record.to == record.snapshot.state,
+                    "invalid v1 parent journal envelope"
+                );
+                if let Some(previous) = previous_v1.as_ref() {
+                    anyhow::ensure!(
+                        record.from == previous.state
+                            && is_legal_v1_successor(previous, &record.snapshot),
+                        "illegal v1 parent journal transition"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        position == 0
+                            && record.from == BatchParentState::Queued
+                            && record.to == BatchParentState::Queued
+                            && is_initial_v1_snapshot(&record.snapshot),
+                        "invalid initial v1 parent journal"
+                    );
+                }
+                reducer = Some(reducer_from_v1(&record.snapshot));
+                previous_v1 = Some(record.snapshot.clone());
+            }
+            StoredParentRecord::V2(record) => {
+                anyhow::ensure!(
+                    record.version == PARENT_PROTOCOL_V2,
+                    "unsupported parent record"
+                );
+                if let BatchParentJournalEventV2::Initialized {
+                    parent_id,
+                    total_children,
+                } = &record.event
+                {
+                    anyhow::ensure!(
+                        position == 0 && reducer.is_none(),
+                        "duplicate parent initialization"
+                    );
+                    reducer = Some(BatchParentReducer::new(parent_id.clone(), *total_children)?);
+                    continue;
+                }
+                let reducer = reducer
+                    .as_mut()
+                    .context("parent delta precedes initialization")?;
+                anyhow::ensure!(
+                    record.attempt_generation == reducer.attempt_generation
+                        || matches!(
+                            record.event,
+                            BatchParentJournalEventV2::AttemptRetried { .. }
+                        ),
+                    "parent delta attempt generation mismatch"
+                );
+                apply_v2_event(reducer, &record.event)?;
+            }
+        }
+    }
+    reducer.context("batch parent journal is empty")
+}
+
+fn apply_v2_event(
+    reducer: &mut BatchParentReducer,
+    event: &BatchParentJournalEventV2,
+) -> anyhow::Result<()> {
+    match event {
+        BatchParentJournalEventV2::Initialized { .. } => anyhow::bail!("duplicate initialization"),
+        BatchParentJournalEventV2::Started => reducer.start(),
+        BatchParentJournalEventV2::ChildGranted {
+            child_index,
+            lease_generation,
+        } => {
+            let lease = reducer.grant(*child_index)?;
+            anyhow::ensure!(
+                lease.lease_generation == *lease_generation,
+                "grant generation drift"
+            );
+            Ok(())
+        }
+        BatchParentJournalEventV2::ChildCompleted {
+            child_index,
+            lease_generation,
+            completion,
+            disposition,
+            receipt,
+        } => {
+            let lease = BatchChildLease {
+                parent_id: reducer.parent_id.clone(),
+                child_index: *child_index,
+                attempt_generation: reducer.attempt_generation,
+                lease_generation: *lease_generation,
+            };
+            if let Some(receipt) = receipt {
+                receipt.validate_for(&lease)?;
+                anyhow::ensure!(
+                    *completion == ChildCompletion::Succeeded,
+                    "receipt on non-success"
+                );
+            }
+            let actual = reducer.complete(&lease, *completion)?;
+            anyhow::ensure!(actual == *disposition, "completion disposition drift");
+            Ok(())
+        }
+        BatchParentJournalEventV2::CancelRequested { disposition } => {
+            anyhow::ensure!(
+                reducer.request_cancel()? == *disposition,
+                "cancel disposition drift"
+            );
+            Ok(())
+        }
+        BatchParentJournalEventV2::AttemptRetried {
+            next_attempt_generation,
+        } => {
+            reducer.begin_retry()?;
+            anyhow::ensure!(
+                reducer.attempt_generation == *next_attempt_generation,
+                "retry generation drift"
+            );
+            Ok(())
+        }
+        BatchParentJournalEventV2::FenceFinalized => reducer.finalize_fence(),
+        BatchParentJournalEventV2::CommitStarted => reducer.begin_commit(),
+        BatchParentJournalEventV2::Committed => reducer.mark_committed(),
+        BatchParentJournalEventV2::LostLeaseRequeued {
+            child_index,
+            lease_generation,
+        } => {
+            anyhow::ensure!(
+                reducer
+                    .children
+                    .get(child_index)
+                    .is_some_and(|child| child.lease_generation == *lease_generation),
+                "lost lease generation drift"
+            );
+            reducer.requeue_lost_active(*child_index)
+        }
+        BatchParentJournalEventV2::LostLeasesFenced { child_indices } => {
+            anyhow::ensure!(
+                reducer
+                    .active
+                    .iter()
+                    .copied()
+                    .eq(child_indices.iter().copied()),
+                "lost lease fence set drift"
+            );
+            reducer.fence_lost_active_leases()
+        }
+    }
+}
+
+fn accepted_receipts_from_journal(
+    path: &Path,
+) -> anyhow::Result<BTreeMap<usize, Option<BatchChildReceipt>>> {
+    let records = load_parent_journal(path)?;
+    let mut accepted = BTreeMap::new();
+    let mut previous_v1: Option<BatchParentSnapshotV1> = None;
+    for record in records {
+        match record {
+            StoredParentRecord::V1(record) => {
+                if let Some(previous) = previous_v1.as_ref() {
+                    for (index, (before, after)) in previous
+                        .children
+                        .iter()
+                        .zip(&record.snapshot.children)
+                        .enumerate()
+                    {
+                        if *before == ChildState::Active && *after == ChildState::Succeeded {
+                            accepted.insert(index, None);
+                        }
+                    }
+                }
+                previous_v1 = Some(record.snapshot);
+            }
+            StoredParentRecord::V2(record) => {
+                if let BatchParentJournalEventV2::ChildCompleted {
+                    child_index,
+                    completion: ChildCompletion::Succeeded,
+                    disposition:
+                        CompletionDisposition::Accepted | CompletionDisposition::AttemptPrepared,
+                    receipt,
+                    ..
+                } = &record.event
+                {
+                    accepted.insert(*child_index, receipt.clone());
+                }
+                if matches!(
+                    record.event,
+                    BatchParentJournalEventV2::AttemptRetried { .. }
+                ) {
+                    accepted.clear();
+                }
+            }
+        }
+    }
+    Ok(accepted)
+}
+
+fn reconcile_v1_disk_ahead(
+    directory: &Path,
+    records: &mut Vec<StoredParentRecord>,
+) -> anyhow::Result<()> {
+    let snapshot_path = directory.join(PARENT_SNAPSHOT_FILE);
+    let value = match std::fs::read(&snapshot_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    {
+        Some(value) if value.get("version").and_then(|version| version.as_u64()) == Some(1) => {
+            value
+        }
+        _ => return Ok(()),
+    };
+    let disk: BatchParentSnapshotV1 = match serde_json::from_value(value) {
+        Ok(snapshot) if validate_v1_snapshot(&snapshot).is_ok() => snapshot,
+        _ => return Ok(()),
+    };
+    if records
+        .iter()
+        .any(|record| matches!(record, StoredParentRecord::V1(record) if record.snapshot == disk))
+    {
+        return Ok(());
+    }
+    let previous = match records.last() {
+        Some(StoredParentRecord::V1(record)) => &record.snapshot,
+        _ => anyhow::bail!("v1 batch parent disk snapshot diverges from its durable journal"),
+    };
+    anyhow::ensure!(
+        is_legal_v1_successor(previous, &disk),
+        "v1 batch parent disk snapshot diverges from its durable journal"
+    );
+    let record = StoredParentRecord::V1(BatchParentJournalRecordV1 {
+        sequence: records.len() as u64,
+        attempt_generation: disk.attempt_generation,
+        from: previous.state,
+        to: disk.state,
+        snapshot: disk,
+    });
+    append_parent_record(&directory.join(PARENT_JOURNAL_FILE), &record)?;
+    records.push(record);
+    Ok(())
+}
+
+fn validate_v1_snapshot(snapshot: &BatchParentSnapshotV1) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        snapshot.version == PARENT_PROTOCOL_V1,
+        "unsupported v1 parent snapshot"
+    );
+    validate_parent_id(&snapshot.parent_id)?;
+    anyhow::ensure!(
+        snapshot.total_children > 0
+            && snapshot.children.len() == snapshot.total_children
             && snapshot.child_lease_generations.len() == snapshot.total_children
             && snapshot.retry_counts.len() == snapshot.total_children,
-        "batch parent snapshot child vectors do not match total_children"
-    );
-    anyhow::ensure!(
-        snapshot
-            .active
-            .iter()
-            .all(|index| *index < snapshot.total_children),
-        "batch parent snapshot contains an out-of-range active child"
+        "v1 parent child vectors are inconsistent"
     );
     anyhow::ensure!(
         snapshot.children.iter().enumerate().all(
             |(index, state)| (*state == ChildState::Active) == snapshot.active.contains(&index)
         ),
-        "batch parent snapshot active set does not match child states"
+        "v1 parent active set is inconsistent"
     );
-    let expected_terminal = match snapshot.state {
-        BatchParentState::Cancelling => Some(BatchParentState::Cancelled),
-        BatchParentState::Failing => Some(BatchParentState::Failed),
-        BatchParentState::Fenced => snapshot.terminal_after_fence,
-        _ => None,
-    };
-    anyhow::ensure!(
-        snapshot.terminal_after_fence == expected_terminal
-            && (!matches!(snapshot.state, BatchParentState::Fenced)
-                || matches!(
-                    snapshot.terminal_after_fence,
-                    Some(BatchParentState::Cancelled | BatchParentState::Failed)
-                )),
-        "batch parent snapshot has an invalid terminal-after-fence state"
-    );
-    if matches!(
-        snapshot.state,
-        BatchParentState::Prepared | BatchParentState::Committing | BatchParentState::Committed
-    ) {
-        anyhow::ensure!(
-            snapshot.active.is_empty()
-                && snapshot
-                    .children
-                    .iter()
-                    .all(|state| *state == ChildState::Succeeded),
-            "prepared/committing/committed batch parent is not fully succeeded"
-        );
-    }
     Ok(())
 }
 
-fn reducer_from_parent_snapshot(snapshot: &BatchParentSnapshot) -> BatchParentReducer {
+fn reducer_from_v1(snapshot: &BatchParentSnapshotV1) -> BatchParentReducer {
+    let settled_prefix = snapshot
+        .children
+        .iter()
+        .take_while(|state| **state == ChildState::Succeeded)
+        .count();
+    let children = snapshot
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(index, state)| *index >= settled_prefix && **state != ChildState::Pending)
+        .map(|(index, state)| {
+            (
+                index,
+                SparseChild {
+                    state: *state,
+                    lease_generation: snapshot.child_lease_generations[index],
+                    retry_count: snapshot.retry_counts[index],
+                },
+            )
+        })
+        .collect();
     BatchParentReducer {
         parent_id: snapshot.parent_id.clone(),
         total_children: snapshot.total_children,
         attempt_generation: snapshot.attempt_generation,
         state: snapshot.state,
-        children: snapshot.children.clone(),
-        child_lease_generations: snapshot.child_lease_generations.clone(),
+        settled_prefix,
+        children,
         active: snapshot.active.clone(),
         cancellation_tokens: snapshot
             .active
             .iter()
             .map(|index| (*index, InferenceCancellationToken::default()))
             .collect(),
-        retry_counts: snapshot.retry_counts.clone(),
         terminal_after_fence: snapshot.terminal_after_fence,
     }
 }
 
-fn is_initial_parent_snapshot(snapshot: &BatchParentSnapshot) -> bool {
-    BatchParentReducer::new(snapshot.parent_id.clone(), snapshot.total_children)
-        .map(|reducer| reducer.snapshot() == *snapshot)
-        .unwrap_or(false)
+fn is_initial_v1_snapshot(snapshot: &BatchParentSnapshotV1) -> bool {
+    snapshot.attempt_generation == 0
+        && snapshot.state == BatchParentState::Queued
+        && snapshot
+            .children
+            .iter()
+            .all(|state| *state == ChildState::Pending)
+        && snapshot
+            .child_lease_generations
+            .iter()
+            .all(|value| *value == 0)
+        && snapshot.active.is_empty()
+        && snapshot.retry_counts.iter().all(|value| *value == 0)
+        && snapshot.terminal_after_fence.is_none()
 }
 
-fn is_legal_parent_successor(previous: &BatchParentSnapshot, next: &BatchParentSnapshot) -> bool {
-    let base = reducer_from_parent_snapshot(previous);
-    let matches = |candidate: &BatchParentReducer| candidate.snapshot() == *next;
-
+fn is_legal_v1_successor(previous: &BatchParentSnapshotV1, next: &BatchParentSnapshotV1) -> bool {
+    let base = reducer_from_v1(previous);
+    let matches = |candidate: &BatchParentReducer| v1_matches_reducer(next, candidate, previous);
     let mut candidate = base.clone();
     if candidate.start().is_ok() && matches(&candidate) {
         return true;
@@ -863,50 +1469,49 @@ fn is_legal_parent_successor(previous: &BatchParentSnapshot, next: &BatchParentS
     candidate.fence_lost_active_leases().is_ok() && matches(&candidate)
 }
 
-fn reconcile_parent_snapshot(
-    records: &[BatchParentJournalRecord],
-    journal_snapshot: Option<&BatchParentSnapshot>,
-    disk_snapshot: Option<&BatchParentSnapshot>,
-) -> anyhow::Result<(BatchParentSnapshot, bool, bool)> {
-    match (journal_snapshot, disk_snapshot) {
-        (None, None) => anyhow::bail!("batch parent has no recoverable state"),
-        (None, Some(disk)) => {
-            anyhow::ensure!(
-                is_initial_parent_snapshot(disk),
-                "batch parent disk snapshot is not the initial journal state"
-            );
-            Ok((disk.clone(), false, true))
-        }
-        (Some(journal), None) => Ok((journal.clone(), true, false)),
-        (Some(journal), Some(disk)) if journal == disk => Ok((journal.clone(), false, false)),
-        (Some(journal), Some(disk)) if records.iter().any(|record| record.snapshot == *disk) => {
-            // A stale but valid atomic snapshot must never supersede the later
-            // append-only authority. Rewrite it; do not append backward state.
-            Ok((journal.clone(), true, false))
-        }
-        (Some(journal), Some(disk)) if is_legal_parent_successor(journal, disk) => {
-            // atomic snapshot replacement precedes the journal append. This is
-            // the one valid crash window where disk is exactly one event ahead.
-            Ok((disk.clone(), false, true))
-        }
-        (Some(_), Some(_)) => {
-            anyhow::bail!("batch parent disk snapshot diverges from its durable journal")
+fn v1_matches_reducer(
+    snapshot: &BatchParentSnapshotV1,
+    reducer: &BatchParentReducer,
+    previous: &BatchParentSnapshotV1,
+) -> bool {
+    if snapshot.parent_id != reducer.parent_id
+        || snapshot.total_children != reducer.total_children
+        || snapshot.attempt_generation != reducer.attempt_generation
+        || snapshot.state != reducer.state
+        || snapshot.active != reducer.active
+        || snapshot.terminal_after_fence != reducer.terminal_after_fence
+    {
+        return false;
+    }
+    for index in 0..snapshot.total_children {
+        let (state, lease, retry) = if index < reducer.settled_prefix {
+            (
+                ChildState::Succeeded,
+                previous.child_lease_generations[index],
+                previous.retry_counts[index],
+            )
+        } else if let Some(child) = reducer.children.get(&index) {
+            (child.state, child.lease_generation, child.retry_count)
+        } else {
+            (ChildState::Pending, 0, 0)
+        };
+        if snapshot.children[index] != state
+            || snapshot.child_lease_generations[index] != lease
+            || snapshot.retry_counts[index] != retry
+        {
+            return false;
         }
     }
+    true
 }
 
-fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalRecord>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
+fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<StoredParentRecord>> {
+    let bytes = std::fs::read(path)?;
     let has_incomplete_tail = !bytes.ends_with(b"\n");
     let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
     let last_nonempty = lines.iter().rposition(|line| !line.is_empty());
-    let mut records: Vec<BatchParentJournalRecord> = Vec::new();
+    let mut records = Vec::new();
     let mut offset = 0_u64;
-    let mut discarded_incomplete_tail = false;
     for (index, line) in lines.into_iter().enumerate() {
         if line.is_empty() {
             if offset < bytes.len() as u64 {
@@ -914,63 +1519,34 @@ fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalReco
             }
             continue;
         }
-        match serde_json::from_slice::<BatchParentJournalRecord>(line) {
+        let parsed = serde_json::from_slice::<serde_json::Value>(line).and_then(|value| {
+            if value.get("version").and_then(|version| version.as_u64()) == Some(2) {
+                serde_json::from_value::<BatchParentJournalRecordV2>(value)
+                    .map(StoredParentRecord::V2)
+            } else {
+                serde_json::from_value::<BatchParentJournalRecordV1>(value)
+                    .map(StoredParentRecord::V1)
+            }
+        });
+        match parsed {
             Ok(record) => {
                 anyhow::ensure!(
-                    record.sequence == records.len() as u64,
+                    record.sequence() == records.len() as u64,
                     "batch parent journal sequence gap at {}",
                     path.display()
                 );
-                validate_parent_snapshot(&record.snapshot)?;
-                anyhow::ensure!(
-                    record.attempt_generation == record.snapshot.attempt_generation,
-                    "batch parent journal generation does not match its snapshot at {}",
-                    path.display()
-                );
-                anyhow::ensure!(
-                    record.to == record.snapshot.state,
-                    "batch parent journal target state does not match its snapshot at {}",
-                    path.display()
-                );
-                if let Some(previous) = records.last() {
-                    anyhow::ensure!(
-                        record.from == previous.snapshot.state,
-                        "batch parent journal transition chain is broken at {}",
-                        path.display()
-                    );
-                    anyhow::ensure!(
-                        is_legal_parent_successor(&previous.snapshot, &record.snapshot),
-                        "batch parent journal contains an illegal state mutation at record {} in {}",
-                        record.sequence,
-                        path.display()
-                    );
-                } else {
-                    anyhow::ensure!(
-                        record.from == BatchParentState::Queued
-                            && record.to == BatchParentState::Queued
-                            && record.attempt_generation == 0
-                            && is_initial_parent_snapshot(&record.snapshot),
-                        "batch parent journal has an invalid initial record at {}",
-                        path.display()
-                    );
-                }
                 records.push(record);
                 offset = (offset + line.len() as u64 + 1).min(bytes.len() as u64);
             }
             Err(error) if Some(index) == last_nonempty && has_incomplete_tail => {
-                tracing::warn!(
-                    journal = %path.display(),
-                    %error,
-                    "ignoring incomplete trailing batch parent journal record"
-                );
                 let file = OpenOptions::new().write(true).open(path)?;
                 file.set_len(offset)?;
                 file.sync_all()?;
                 if let Some(parent) = path.parent() {
                     sync_parent_dir(parent)?;
                 }
-                discarded_incomplete_tail = true;
-                break;
+                tracing::warn!(journal = %path.display(), %error, "discarded incomplete parent journal tail");
+                return Ok(records);
             }
             Err(error) => {
                 return Err(error)
@@ -978,15 +1554,52 @@ fn load_parent_journal(path: &Path) -> anyhow::Result<Vec<BatchParentJournalReco
             }
         }
     }
-    if has_incomplete_tail && !discarded_incomplete_tail {
+    if has_incomplete_tail {
         let mut file = OpenOptions::new().append(true).open(path)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        if let Some(parent) = path.parent() {
-            sync_parent_dir(parent)?;
-        }
     }
     Ok(records)
+}
+
+fn publish_initial_parent_journal(
+    directory: &Path,
+    record: &BatchParentJournalRecordV2,
+) -> anyhow::Result<()> {
+    let journal_path = directory.join(PARENT_JOURNAL_FILE);
+    let temporary = directory.join(format!(
+        ".{PARENT_JOURNAL_FILE}.create-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut bytes = serde_json::to_vec(record)?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::hard_link(&temporary, &journal_path)?;
+        sync_parent_dir(directory)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+fn append_parent_record(path: &Path, record: &StoredParentRecord) -> anyhow::Result<()> {
+    let mut bytes = match record {
+        StoredParentRecord::V1(record) => serde_json::to_vec(record)?,
+        StoredParentRecord::V2(record) => serde_json::to_vec(record)?,
+    };
+    bytes.push(b'\n');
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    if let Some(parent) = path.parent() {
+        sync_parent_dir(parent)?;
+    }
+    Ok(())
 }
 
 fn atomic_write_parent_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
@@ -1028,14 +1641,6 @@ fn sync_parent_dir(_path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn append_parent_record(path: &Path, record: &BatchParentJournalRecord) {
-        let mut bytes = serde_json::to_vec(record).unwrap();
-        bytes.push(b'\n');
-        let mut journal = OpenOptions::new().append(true).open(path).unwrap();
-        journal.write_all(&bytes).unwrap();
-        journal.sync_all().unwrap();
-    }
-
     fn running_parent(children: usize) -> BatchParentReducer {
         let mut parent = BatchParentReducer::new("parent", children).unwrap();
         parent.start().unwrap();
@@ -1043,519 +1648,312 @@ mod tests {
     }
 
     #[test]
-    fn all_current_generation_children_prepare_exactly_once() {
-        let mut parent = running_parent(2);
-        let first = parent.grant(0).unwrap();
-        let second = parent.grant(1).unwrap();
-
-        assert_eq!(
-            parent
-                .complete(&second, ChildCompletion::Succeeded)
-                .unwrap(),
-            CompletionDisposition::Accepted
-        );
-        assert_eq!(
-            parent.complete(&first, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::AttemptPrepared
-        );
-        assert_eq!(parent.state(), BatchParentState::Prepared);
-        assert!(parent.complete(&first, ChildCompletion::Succeeded).is_err());
+    fn n_1_2_8_64_completion_parity_and_compaction() {
+        for total in [1, 2, 8, 64] {
+            let mut parent = running_parent(total);
+            let leases: Vec<_> = (0..total)
+                .map(|index| parent.grant(index).unwrap())
+                .collect();
+            for lease in leases.into_iter().rev() {
+                parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+            }
+            assert_eq!(parent.state(), BatchParentState::Prepared);
+            assert_eq!(parent.settled_prefix, total);
+            assert_eq!(parent.tracked_child_count(), 0);
+        }
     }
 
     #[test]
-    fn failure_fences_active_siblings_before_retry_and_late_completion_is_stale() {
+    fn retry_generation_and_late_completion_are_fenced() {
         let mut parent = running_parent(2);
         let failed = parent.grant(0).unwrap();
         let sibling = parent.grant(1).unwrap();
-        let sibling_token = parent.cancellation_token(&sibling).unwrap();
-
         assert_eq!(
             parent.complete(&failed, ChildCompletion::Failed).unwrap(),
             CompletionDisposition::RetryChild
         );
-        assert_eq!(parent.state(), BatchParentState::Running);
-        let child_retry = parent.grant(0).unwrap();
+        let retry = parent.grant(0).unwrap();
         assert_eq!(
-            parent
-                .complete(&child_retry, ChildCompletion::Failed)
-                .unwrap(),
+            parent.complete(&retry, ChildCompletion::Failed).unwrap(),
             CompletionDisposition::Accepted
         );
-        assert_eq!(parent.state(), BatchParentState::Failing);
-        assert!(sibling_token.is_cancelled());
         assert_eq!(
             parent
                 .complete(&sibling, ChildCompletion::Cancelled)
                 .unwrap(),
             CompletionDisposition::AttemptFenced
         );
-        assert_eq!(parent.state(), BatchParentState::Fenced);
-
         parent.begin_retry().unwrap();
-        assert_eq!(parent.state(), BatchParentState::Retrying);
-        assert_eq!(parent.attempt_generation(), 1);
         parent.start().unwrap();
-        let retry = parent.grant(1).unwrap();
-
         assert_eq!(
             parent
-                .complete(&sibling, ChildCompletion::Succeeded)
+                .complete(&failed, ChildCompletion::Succeeded)
                 .unwrap(),
             CompletionDisposition::StaleDeletePrivateArtifact
         );
-        assert_eq!(parent.state(), BatchParentState::Running);
-        assert_eq!(
-            parent.complete(&retry, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::Accepted
-        );
     }
 
     #[test]
-    fn cancel_racing_last_success_never_prepares_after_attempt_closes() {
-        let mut parent = running_parent(1);
-        let child = parent.grant(0).unwrap();
-        let token = parent.cancellation_token(&child).unwrap();
-
-        assert_eq!(
-            parent.request_cancel().unwrap(),
-            CompletionDisposition::Accepted
-        );
-        assert!(token.is_cancelled());
-        assert_eq!(parent.state(), BatchParentState::Cancelling);
-        assert_eq!(
-            parent.complete(&child, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::AttemptFencedDeletePrivateArtifact
-        );
-        assert_eq!(parent.state(), BatchParentState::Fenced);
-        parent.finalize_fence().unwrap();
-        assert_eq!(parent.state(), BatchParentState::Cancelled);
+    fn pending_windows_are_bounded_and_lazy() {
+        let parent = running_parent(100_000);
+        let window = parent.pending_window(0, 64).unwrap();
+        assert_eq!(window.indices, (0..64).collect::<Vec<_>>());
+        assert_eq!(window.next_cursor, Some(64));
+        assert_eq!(parent.tracked_child_count(), 0);
+        assert!(parent
+            .pending_window(0, MAX_MATERIALIZED_CHILDREN + 1)
+            .is_err());
     }
 
     #[test]
-    fn prepared_attempt_commits_in_order_and_cannot_be_cancelled_after_commit_begins() {
-        let mut parent = running_parent(1);
-        let child = parent.grant(0).unwrap();
-        assert_eq!(
-            parent.complete(&child, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::AttemptPrepared
-        );
-
-        parent.begin_commit().unwrap();
-        assert_eq!(parent.state(), BatchParentState::Committing);
-        assert!(parent.request_cancel().is_err());
-        parent.mark_committed().unwrap();
-        assert_eq!(parent.state(), BatchParentState::Committed);
-    }
-
-    #[test]
-    fn invalid_parent_index_or_generation_cannot_mutate_reducer() {
-        let mut parent = running_parent(1);
-        let lease = parent.grant(0).unwrap();
-        for invalid in [
-            BatchChildLease {
-                parent_id: "other".into(),
-                ..lease.clone()
+    fn hundred_thousand_child_parent_journal_growth_is_linear_and_memory_bounded() {
+        let mut parent = BatchParentReducer::new("parent", 100_000).unwrap();
+        parent.start().unwrap();
+        let mut journal = serde_json::to_vec(&BatchParentJournalRecordV2 {
+            version: 2,
+            sequence: 0,
+            attempt_generation: 0,
+            event: BatchParentJournalEventV2::Initialized {
+                parent_id: "parent".into(),
+                total_children: 100_000,
             },
-            BatchChildLease {
-                child_index: 1,
-                ..lease.clone()
-            },
-            BatchChildLease {
-                attempt_generation: 1,
-                ..lease.clone()
-            },
-        ] {
-            assert!(parent
-                .complete(&invalid, ChildCompletion::Succeeded)
-                .is_err());
-            assert_eq!(parent.state(), BatchParentState::Running);
+        })
+        .unwrap();
+        journal.push(b'\n');
+        let mut sequence = 1_u64;
+        for child_index in 0..100_000 {
+            let lease = parent.grant(child_index).unwrap();
+            for event in [
+                BatchParentJournalEventV2::ChildGranted {
+                    child_index,
+                    lease_generation: lease.lease_generation,
+                },
+                BatchParentJournalEventV2::ChildCompleted {
+                    child_index,
+                    lease_generation: lease.lease_generation,
+                    completion: ChildCompletion::Succeeded,
+                    disposition: if child_index == 99_999 {
+                        CompletionDisposition::AttemptPrepared
+                    } else {
+                        CompletionDisposition::Accepted
+                    },
+                    receipt: None,
+                },
+            ] {
+                journal.extend(
+                    serde_json::to_vec(&BatchParentJournalRecordV2 {
+                        version: 2,
+                        sequence,
+                        attempt_generation: 0,
+                        event,
+                    })
+                    .unwrap(),
+                );
+                journal.push(b'\n');
+                sequence += 1;
+            }
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+            assert!(
+                parent.tracked_child_count() <= 1,
+                "sequential success did not compact"
+            );
         }
-    }
-
-    #[test]
-    fn queued_parent_can_cancel_without_granting_children() {
-        let mut parent = BatchParentReducer::new("parent", 2).unwrap();
-        assert_eq!(
-            parent.request_cancel().unwrap(),
-            CompletionDisposition::AttemptFenced
+        let checkpoint = serde_json::to_vec(&parent.checkpoint(sequence - 1)).unwrap();
+        assert!(
+            journal.len() < 80_000_000,
+            "journal growth is not linear: {}",
+            journal.len()
         );
-        parent.finalize_fence().unwrap();
-        assert_eq!(parent.state(), BatchParentState::Cancelled);
+        assert!(
+            checkpoint.len() < 4096,
+            "terminal checkpoint is not compact"
+        );
+        assert_eq!(parent.state(), BatchParentState::Prepared);
     }
 
     #[test]
-    fn retry_lease_generation_fences_late_completion_from_first_device() {
-        let mut parent = running_parent(1);
+    fn maximal_out_of_order_window_never_exceeds_materialization_bound() {
+        let mut parent = running_parent(100_000);
+        let leases: Vec<_> = (0..MAX_MATERIALIZED_CHILDREN)
+            .map(|index| parent.grant(index).unwrap())
+            .collect();
+        assert_eq!(parent.tracked_child_count(), MAX_MATERIALIZED_CHILDREN);
+        for lease in leases.into_iter().rev() {
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+            assert!(parent.tracked_child_count() <= MAX_MATERIALIZED_CHILDREN);
+        }
+        assert_eq!(parent.settled_prefix, MAX_MATERIALIZED_CHILDREN);
+        assert_eq!(parent.tracked_child_count(), 0);
+    }
+
+    #[test]
+    fn child_beyond_live_window_is_rejected_then_admitted_after_prefix_advance() {
+        let mut parent = running_parent(100_000);
+        assert!(parent.grant(MAX_MATERIALIZED_CHILDREN).is_err());
         let first = parent.grant(0).unwrap();
-        assert_eq!(
-            parent.complete(&first, ChildCompletion::Failed).unwrap(),
-            CompletionDisposition::RetryChild
-        );
-        let retry = parent.grant(0).unwrap();
-        assert!(retry.lease_generation > first.lease_generation);
-        assert_eq!(
-            parent.complete(&first, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::StaleDeletePrivateArtifact
-        );
-        assert_eq!(
-            parent.complete(&retry, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::AttemptPrepared
-        );
+        parent.complete(&first, ChildCompletion::Succeeded).unwrap();
+        assert!(parent.grant(MAX_MATERIALIZED_CHILDREN).is_ok());
     }
 
     #[test]
-    fn durable_parent_journals_every_mutation_and_recovers_latest_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let (lease, token) = parent.grant(0).unwrap();
-        assert!(!token.is_cancelled());
-        assert_eq!(
-            parent.complete(&lease, ChildCompletion::Succeeded).unwrap(),
-            CompletionDisposition::AttemptPrepared
-        );
-        parent.begin_commit().unwrap();
-
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Committing);
-        assert_eq!(recovered.attempt_generation(), 0);
-        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
-        assert_eq!(records.len(), 5);
-        assert_eq!(records.last().unwrap().to, BatchParentState::Committing);
-    }
-
-    #[test]
-    fn durable_parent_recovers_from_corrupt_atomic_snapshot_using_journal() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        std::fs::write(dir.path().join(PARENT_SNAPSHOT_FILE), b"{truncated").unwrap();
-
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Running);
-    }
-
-    #[test]
-    fn durable_parent_recovers_from_semantically_invalid_snapshot_using_journal() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let mut invalid = parent.reducer.snapshot();
-        invalid.children.clear();
-        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &invalid).unwrap();
-
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-
-        assert_eq!(recovered.state(), BatchParentState::Running);
-        let healed: BatchParentSnapshot =
-            serde_json::from_slice(&std::fs::read(dir.path().join(PARENT_SNAPSHOT_FILE)).unwrap())
-                .unwrap();
-        validate_parent_snapshot(&healed).unwrap();
-        assert_eq!(healed, recovered.reducer.snapshot());
-    }
-
-    #[test]
-    fn reducer_error_restores_the_prior_in_memory_authority() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let (lease, _) = parent.grant(0).unwrap();
-        let before = parent.reducer.snapshot();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let journal_before = std::fs::read(&journal_path).unwrap();
-
-        let error = parent
-            .mutate(|reducer| -> anyhow::Result<()> {
-                reducer.active.remove(&lease.child_index);
-                reducer.children[lease.child_index] = ChildState::Succeeded;
-                reducer.cancellation_tokens.remove(&lease.child_index);
-                anyhow::bail!("injected partial reducer mutation")
-            })
-            .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("injected partial reducer mutation"));
-        assert_eq!(parent.reducer.snapshot(), before);
-        assert!(parent.reducer.cancellation_token(&lease).is_some());
-        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Fenced);
-    }
-
-    #[test]
-    fn initial_parent_journal_recovers_when_snapshot_was_never_published() {
-        let dir = tempfile::tempdir().unwrap();
-        DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        std::fs::remove_file(dir.path().join(PARENT_SNAPSHOT_FILE)).unwrap();
-
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-
-        assert_eq!(recovered.state(), BatchParentState::Queued);
-        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].sequence, 0);
-        assert!(dir.path().join(PARENT_SNAPSHOT_FILE).is_file());
-    }
-
-    #[test]
-    fn recovery_heals_a_snapshot_persisted_before_its_journal_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let bytes = std::fs::read(&journal_path).unwrap();
-        let mut lines: Vec<_> = bytes.split_inclusive(|byte| *byte == b'\n').collect();
-        lines.pop();
-        std::fs::write(&journal_path, lines.concat()).unwrap();
-
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-
-        assert_eq!(recovered.state(), BatchParentState::Running);
-        let records = load_parent_journal(&journal_path).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records.last().unwrap().to, BatchParentState::Running);
-    }
-
-    #[test]
-    fn restart_fences_lost_active_leases_before_retrying_a_new_generation() {
+    fn durable_parent_recovers_current_v2_and_fences_standalone_lost_lease() {
         let dir = tempfile::tempdir().unwrap();
         let mut parent = DurableBatchParent::create(dir.path(), "parent", 2).unwrap();
         parent.start().unwrap();
-        let (_lease, _token) = parent.grant(0).unwrap();
-
-        let mut recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        parent.grant(0).unwrap();
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
         assert_eq!(recovered.state(), BatchParentState::Fenced);
-        recovered.begin_retry().unwrap();
-        assert_eq!(recovered.attempt_generation(), 1);
-        assert_eq!(recovered.state(), BatchParentState::Retrying);
     }
 
     #[test]
-    fn complete_malformed_parent_journal_record_fails_closed_without_truncation() {
+    fn v1_snapshot_journal_fixture_remains_readable() {
         let dir = tempfile::tempdir().unwrap();
-        DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let mut journal = OpenOptions::new().append(true).open(&journal_path).unwrap();
-        journal.write_all(b"{malformed}\n").unwrap();
-        journal.sync_all().unwrap();
-        drop(journal);
-        let before = std::fs::read(&journal_path).unwrap();
-
-        assert!(load_parent_journal(&journal_path).is_err());
-        assert_eq!(std::fs::read(&journal_path).unwrap(), before);
+        let snapshot = BatchParentSnapshotV1 {
+            version: 1,
+            parent_id: "parent".into(),
+            total_children: 2,
+            attempt_generation: 0,
+            state: BatchParentState::Queued,
+            children: vec![ChildState::Pending; 2],
+            child_lease_generations: vec![0; 2],
+            active: BTreeSet::new(),
+            retry_counts: vec![0; 2],
+            terminal_after_fence: None,
+        };
+        let record = BatchParentJournalRecordV1 {
+            sequence: 0,
+            attempt_generation: 0,
+            from: BatchParentState::Queued,
+            to: BatchParentState::Queued,
+            snapshot: snapshot.clone(),
+        };
+        std::fs::write(
+            dir.path().join(PARENT_JOURNAL_FILE),
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &snapshot).unwrap();
+        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
+        assert_eq!(recovered.state(), BatchParentState::Queued);
+        assert_eq!(recovered.total_children(), 2);
     }
 
     #[test]
-    fn parent_journal_rejects_terminal_state_regression() {
+    fn v1_snapshot_one_transition_ahead_is_appended_before_v2_checkpoint_upgrade() {
         let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let (lease, _) = parent.grant(0).unwrap();
-        parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
-        parent.begin_commit().unwrap();
-        parent.mark_committed().unwrap();
-
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let records = load_parent_journal(&journal_path).unwrap();
-        let mut snapshot = records.last().unwrap().snapshot.clone();
-        snapshot.state = BatchParentState::Running;
+        let queued = BatchParentSnapshotV1 {
+            version: 1,
+            parent_id: "parent".into(),
+            total_children: 1,
+            attempt_generation: 0,
+            state: BatchParentState::Queued,
+            children: vec![ChildState::Pending],
+            child_lease_generations: vec![0],
+            active: BTreeSet::new(),
+            retry_counts: vec![0],
+            terminal_after_fence: None,
+        };
         append_parent_record(
-            &journal_path,
-            &BatchParentJournalRecord {
-                sequence: records.len() as u64,
-                attempt_generation: snapshot.attempt_generation,
-                from: BatchParentState::Committed,
-                to: BatchParentState::Running,
-                snapshot,
-            },
-        );
-
-        assert!(load_parent_journal(&journal_path).is_err());
-    }
-
-    #[test]
-    fn parent_journal_rejects_unreachable_running_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let records = load_parent_journal(&journal_path).unwrap();
-        let mut snapshot = records.last().unwrap().snapshot.clone();
-        snapshot.children.fill(ChildState::Succeeded);
-        append_parent_record(
-            &journal_path,
-            &BatchParentJournalRecord {
-                sequence: records.len() as u64,
-                attempt_generation: snapshot.attempt_generation,
-                from: BatchParentState::Running,
-                to: BatchParentState::Running,
-                snapshot,
-            },
-        );
-
-        assert!(load_parent_journal(&journal_path).is_err());
-    }
-
-    #[test]
-    fn parent_journal_rejects_immutable_identity_drift() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let records = load_parent_journal(&journal_path).unwrap();
-        let mut snapshot = records.last().unwrap().snapshot.clone();
-        snapshot.parent_id = "other".into();
-        append_parent_record(
-            &journal_path,
-            &BatchParentJournalRecord {
-                sequence: records.len() as u64,
-                attempt_generation: snapshot.attempt_generation,
-                from: BatchParentState::Running,
-                to: BatchParentState::Running,
-                snapshot,
-            },
-        );
-
-        assert!(load_parent_journal(&journal_path).is_err());
-    }
-
-    #[test]
-    fn parent_recovery_never_prefers_a_stale_valid_disk_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        let initial = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE))
-            .unwrap()
-            .first()
-            .unwrap()
-            .snapshot
-            .clone();
-        parent.start().unwrap();
-        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &initial).unwrap();
+            &dir.path().join(PARENT_JOURNAL_FILE),
+            &StoredParentRecord::V1(BatchParentJournalRecordV1 {
+                sequence: 0,
+                attempt_generation: 0,
+                from: BatchParentState::Queued,
+                to: BatchParentState::Queued,
+                snapshot: queued.clone(),
+            }),
+        )
+        .unwrap();
+        let mut running = queued;
+        running.state = BatchParentState::Running;
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &running).unwrap();
 
         let recovered = DurableBatchParent::recover(dir.path()).unwrap();
 
         assert_eq!(recovered.state(), BatchParentState::Running);
-        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
-        assert_eq!(records.len(), 2, "recovery must not append backward state");
+        assert_eq!(
+            load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE))
+                .unwrap()
+                .len(),
+            2
+        );
+        let checkpoint: BatchParentCheckpointV2 =
+            serde_json::from_slice(&std::fs::read(dir.path().join(PARENT_SNAPSHOT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(checkpoint.through_sequence, 1);
     }
 
     #[test]
-    fn parent_recovery_rejects_a_divergent_valid_disk_snapshot() {
+    fn v1_snapshot_ahead_with_lease_drift_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let records = load_parent_journal(&dir.path().join(PARENT_JOURNAL_FILE)).unwrap();
-        let mut divergent = records.last().unwrap().snapshot.clone();
-        divergent.state = BatchParentState::Fenced;
-        divergent.terminal_after_fence = Some(BatchParentState::Failed);
+        let queued = BatchParentSnapshotV1 {
+            version: 1,
+            parent_id: "parent".into(),
+            total_children: 1,
+            attempt_generation: 0,
+            state: BatchParentState::Queued,
+            children: vec![ChildState::Pending],
+            child_lease_generations: vec![0],
+            active: BTreeSet::new(),
+            retry_counts: vec![0],
+            terminal_after_fence: None,
+        };
+        append_parent_record(
+            &dir.path().join(PARENT_JOURNAL_FILE),
+            &StoredParentRecord::V1(BatchParentJournalRecordV1 {
+                sequence: 0,
+                attempt_generation: 0,
+                from: BatchParentState::Queued,
+                to: BatchParentState::Queued,
+                snapshot: queued.clone(),
+            }),
+        )
+        .unwrap();
+        let mut divergent = queued;
+        divergent.state = BatchParentState::Running;
+        divergent.child_lease_generations[0] = 7;
         atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &divergent).unwrap();
 
         assert!(DurableBatchParent::recover(dir.path()).is_err());
     }
 
     #[test]
-    fn parseable_parent_journal_tail_without_newline_is_healed_before_append() {
+    fn v2_checkpoint_ahead_of_journal_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let _parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let mut bytes = std::fs::read(&journal_path).unwrap();
-        assert_eq!(bytes.pop(), Some(b'\n'));
-        std::fs::write(&journal_path, bytes).unwrap();
+        let parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        let checkpoint = parent.reducer.checkpoint(99);
+        atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &checkpoint).unwrap();
 
-        let mut recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        recovered.start().unwrap();
+        let error = DurableBatchParent::recover(dir.path()).unwrap_err();
 
-        let bytes = std::fs::read(&journal_path).unwrap();
-        assert!(bytes.ends_with(b"\n"));
-        let records = load_parent_journal(&journal_path).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].sequence, 0);
-        assert_eq!(records[1].sequence, 1);
+        assert!(format!("{error:#}").contains("checkpoint is ahead"));
     }
 
     #[test]
-    fn create_refuses_to_overwrite_an_existing_parent_journal() {
+    fn complete_malformed_record_fails_closed_but_incomplete_tail_is_discarded() {
         let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "original", 1).unwrap();
-        parent.start().unwrap();
-        let snapshot_path = dir.path().join(PARENT_SNAPSHOT_FILE);
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let snapshot_before = std::fs::read(&snapshot_path).unwrap();
-        let journal_before = std::fs::read(&journal_path).unwrap();
+        DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        let path = dir.path().join(PARENT_JOURNAL_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{bad}\n")
+            .unwrap();
+        assert!(DurableBatchParent::recover(dir.path()).is_err());
 
-        assert!(DurableBatchParent::create(dir.path(), "replacement", 2).is_err());
-
-        assert_eq!(std::fs::read(&snapshot_path).unwrap(), snapshot_before);
-        assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Running);
-        assert_eq!(recovered.reducer.snapshot().parent_id, "original");
-    }
-
-    #[test]
-    fn stale_attempt_completion_does_not_grow_the_durable_journal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let (first, _) = parent.grant(0).unwrap();
+        DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
+        let path = dir.path().join(PARENT_JOURNAL_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{truncated")
+            .unwrap();
         assert_eq!(
-            parent.complete(&first, ChildCompletion::Failed).unwrap(),
-            CompletionDisposition::RetryChild
-        );
-        let (child_retry, _) = parent.grant(0).unwrap();
-        assert_eq!(
-            parent
-                .complete(&child_retry, ChildCompletion::Failed)
-                .unwrap(),
-            CompletionDisposition::AttemptFenced
-        );
-        parent.begin_retry().unwrap();
-        parent.start().unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let before = load_parent_journal(&journal_path).unwrap().len();
-
-        let disposition = parent.complete(&first, ChildCompletion::Succeeded).unwrap();
-
-        assert_eq!(
-            disposition,
-            CompletionDisposition::StaleDeletePrivateArtifact
-        );
-        assert_eq!(parent.state(), BatchParentState::Running);
-        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Running);
-        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
-    }
-
-    #[test]
-    fn stale_lease_completion_does_not_grow_the_durable_journal() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = DurableBatchParent::create(dir.path(), "parent", 1).unwrap();
-        parent.start().unwrap();
-        let (first, _) = parent.grant(0).unwrap();
-        assert_eq!(
-            parent.complete(&first, ChildCompletion::Failed).unwrap(),
-            CompletionDisposition::RetryChild
-        );
-        let (_child_retry, _) = parent.grant(0).unwrap();
-        let journal_path = dir.path().join(PARENT_JOURNAL_FILE);
-        let before = load_parent_journal(&journal_path).unwrap().len();
-
-        let disposition = parent.complete(&first, ChildCompletion::Succeeded).unwrap();
-
-        assert_eq!(
-            disposition,
-            CompletionDisposition::StaleDeletePrivateArtifact
-        );
-        assert_eq!(parent.state(), BatchParentState::Running);
-        assert_eq!(load_parent_journal(&journal_path).unwrap().len(), before);
-        let recovered = DurableBatchParent::recover(dir.path()).unwrap();
-        assert_eq!(recovered.state(), BatchParentState::Fenced);
-        assert_eq!(
-            load_parent_journal(&journal_path).unwrap().len(),
-            before + 1,
-            "recovery appends only the real lost-lease fence"
+            DurableBatchParent::recover(dir.path()).unwrap().state(),
+            BatchParentState::Queued
         );
     }
 }
