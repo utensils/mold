@@ -247,6 +247,44 @@ afterEach(() => {
 });
 
 describe("MobileHostDetail remote host data", () => {
+  it("shows a CPU utility lane when the host reports no GPUs", async () => {
+    const originalApi = apiJsonTo.getMockImplementation()!;
+    apiJsonTo.mockImplementation((target, path) => {
+      if (path === "/api/queue") {
+        return Promise.resolve({
+          entries: [],
+          plan: {
+            plan_version: 1,
+            state_version: 1,
+            optimizer_state: "optimized",
+            dirty_since_unix_ms: null,
+            next_replan_at_unix_ms: null,
+            work_items: [
+              {
+                work_id: "cpu-upscale",
+                parent_id: "parent",
+                work_kind: "post_upscale",
+                priority_class: "user",
+                queue_rank: 0,
+                bypass_count: 0,
+                planned_device_id: "cpu:utility:0",
+                lane_order: 0,
+                estimate_confidence: "low",
+                activity_phase: "cpu",
+              },
+            ],
+          },
+        });
+      }
+      return originalApi(target, path);
+    });
+
+    const view = await mountDetail();
+
+    expect(view.get("[data-test='host-detail-devices']").text()).toContain("Host utility");
+    expect(view.findAll('[data-test="device-card"]')).toHaveLength(0);
+  });
+
   it("targets the exact remote and renders telemetry, queue, downloads, and installed models", async () => {
     const view = await mountDetail();
 

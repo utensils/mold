@@ -26,8 +26,6 @@ const emit = defineEmits<{
   unpin: [workId: string];
 }>();
 
-const compact = computed(() => props.devices.length <= 1);
-const CPU_UTILITY_DEVICE_ID = "cpu:utility:0";
 const nowUnixMs = ref(Date.now());
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 const blocked = computed(
@@ -36,8 +34,11 @@ const blocked = computed(
 const cpuUtilityWork = computed(
   () =>
     props.plan?.work_items
-      .filter((work) => work.planned_device_id === CPU_UTILITY_DEVICE_ID)
+      .filter((work) => work.planned_device_id?.startsWith("cpu:utility:"))
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
+);
+const compact = computed(
+  () => props.devices.length + Number(cpuUtilityWork.value.length > 0) <= 1,
 );
 const hasComputeLanes = computed(
   () => props.devices.length > 0 || cpuUtilityWork.value.length > 0,
@@ -252,12 +253,7 @@ onBeforeUnmount(() => {
           <span class="device-card__badge">CPU</span>
         </div>
         <div class="device-card__meta">
-          <code>{{ CPU_UTILITY_DEVICE_ID }}</code>
           <span>One task at a time</span>
-        </div>
-        <div class="device-card__metrics">
-          <span>Prompt expansion and upscaling</span>
-          <span>Uses available system memory</span>
         </div>
         <ol class="device-card__lane" data-test="cpu-utility-lane-list">
           <li v-for="work in cpuUtilityWork" :key="work.work_id">
@@ -338,6 +334,9 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line, #d5d5d5);
   border-radius: 10px;
   background: var(--surface-2, transparent);
+}
+.device-card--utility {
+  border-style: dashed;
 }
 .device-card[data-state="draining"],
 .device-card[data-health="degraded"] {

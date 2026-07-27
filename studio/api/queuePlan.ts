@@ -44,7 +44,7 @@ export interface QueueWorkItem {
     | "dispatching"
     | "active"
     | "cpu"
-    | string;
+    | (string & {});
   execution_fingerprint?: string | null;
 }
 

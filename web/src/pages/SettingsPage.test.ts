@@ -445,6 +445,61 @@ describe("SettingsPage", () => {
     expect(wrapper.text()).not.toContain("Show NSFW");
   });
 
+  it("shows CPU utility work when the server reports no GPUs", async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "cpu-expand",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: "cpu:utility:0",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                    activity_phase: "cpu",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Host utility"));
+
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
+    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
+      "cpu-expand",
+    );
+  });
+
   it("controls the origin server GPU from Advanced settings", async () => {
     let enabled = true;
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;

@@ -57,6 +57,7 @@ describe("AdvancedSection device snapshots", () => {
       },
     });
     await vi.waitFor(() => expect(listDevicesMock).toHaveBeenCalled());
+    expect(wrapper.find("device-panel-stub").exists()).toBe(true);
     expect(subscribeMock).toHaveBeenCalledWith(
       {
         baseUrl: "http://127.0.0.1:7680",

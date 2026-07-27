@@ -2,12 +2,15 @@ import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import MobileSettingsView from "./MobileSettingsView.vue";
 
-const { apiJsonTo, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(() => ({
-  apiJsonTo: vi.fn(),
-  openExternalMock: vi.fn(),
-  setDeviceEnabled: vi.fn(),
-  subscribeMock: vi.fn(),
-}));
+const { apiJsonTo, listQueueMock, openExternalMock, setDeviceEnabled, subscribeMock } = vi.hoisted(
+  () => ({
+    apiJsonTo: vi.fn(),
+    listQueueMock: vi.fn(),
+    openExternalMock: vi.fn(),
+    setDeviceEnabled: vi.fn(),
+    subscribeMock: vi.fn(),
+  }),
+);
 vi.mock("../lib/openExternal", () => ({ openExternal: openExternalMock }));
 vi.mock("../lib/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api/client")>()),
@@ -17,6 +20,10 @@ vi.mock("@studio/api/devices", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@studio/api/devices")>()),
   setDeviceEnabled,
 }));
+vi.mock("@studio/api/queuePlan", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@studio/api/queuePlan")>()),
+  listQueue: listQueueMock,
+}));
 vi.mock("../lib/api/deviceEvents", () => ({
   subscribeToDeviceSnapshots: subscribeMock,
 }));
@@ -24,6 +31,7 @@ vi.mock("../lib/api/deviceEvents", () => ({
 beforeEach(() => {
   openExternalMock.mockClear();
   apiJsonTo.mockReset();
+  listQueueMock.mockReset().mockResolvedValue({ entries: [], plan: null });
   setDeviceEnabled.mockReset().mockResolvedValue(undefined);
   subscribeMock.mockReset();
 });
@@ -77,6 +85,47 @@ describe("MobileSettingsView", () => {
     expect(wrapper.text()).toContain("No hosts saved");
     await wrapper.get(".mobile-settings-manage").trigger("click");
     expect(wrapper.emitted("manage-hosts")).toHaveLength(1);
+  });
+
+  it("keeps the compute panel visible when a host reports no GPUs", async () => {
+    const host = {
+      id: "cpu-host",
+      name: "CPU Host",
+      baseUrl: "http://cpu-host:7680",
+      apiKey: "secret",
+      hostname: "cpu-host",
+      version: "0.20.2",
+      online: true,
+    };
+    apiJsonTo.mockImplementation(async (_target, path) => {
+      if (path === "/api/devices") return { devices: [], plan_version: 1 };
+      if (path === "/api/capabilities") {
+        return {
+          devices: { available: true, lifecycle: false },
+          dispatch: { active_mode: "v2", v2_authoritative: true },
+        };
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const wrapper = mount(MobileSettingsView, {
+      props: {
+        settings: {
+          theme: "system",
+          themeFamily: "mold",
+          autoSavePhotos: true,
+        },
+        hostCount: 1,
+        appVersion: "0.20.2",
+        host,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(wrapper.find("[data-test='mobile-settings-devices']").exists()).toBe(true),
+    );
+
+    expect(wrapper.text()).toContain("Compute devices");
+    expect(wrapper.text()).toContain("No compute devices visible.");
   });
 
   it("opens the public privacy policy from About", async () => {

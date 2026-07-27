@@ -266,10 +266,9 @@ onBeforeUnmount(() => {
       data-test="mobile-settings-devices"
     >
       <div class="mobile-settings-section-copy">
-        <h2 id="mobile-settings-devices-title">GPU devices</h2>
+        <h2 id="mobile-settings-devices-title">Compute devices</h2>
       </div>
       <DevicePanel
-        v-if="devices.length"
         :devices="devices"
         :plan="plan"
         :mutable="

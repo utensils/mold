@@ -131,7 +131,7 @@ async function reset(row: ConfigRow) {
 <template>
   <div>
     <DevicePanel
-      v-if="!filter && devices.length"
+      v-if="!filter"
       class="mb-5"
       :devices="devices"
       :plan="plan"

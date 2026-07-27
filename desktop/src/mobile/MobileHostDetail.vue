@@ -461,7 +461,7 @@ onBeforeUnmount(() => {
             }}<template v-if="status.queue_capacity">/{{ status.queue_capacity }}</template></span
           >
         </div>
-        <div v-if="devices?.length" data-test="host-detail-devices">
+        <div v-if="devices !== null || queuePlan !== null" data-test="host-detail-devices">
           <DevicePanel
             :devices="devices ?? []"
             :plan="queuePlan"
