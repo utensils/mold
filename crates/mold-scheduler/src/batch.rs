@@ -101,10 +101,244 @@ impl AdaptiveBatchPartition {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchPlanRepresentation {
+    Materialized,
+    CompactSingleton,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompactSingletonLane {
+    device_id: DeviceId,
+    count: u32,
+    first_start_ms: u64,
+    first_finish_ms: u64,
+    period_ms: u64,
+    first_setup_disposition: BatchSetupDisposition,
+    predicted_vram_bytes: u64,
+    predicted_host_ram_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompactSingletonSchedule {
+    child_count: u32,
+    lanes: Vec<CompactSingletonLane>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdaptiveBatchPartitions {
+    materialized: Vec<AdaptiveBatchPartition>,
+    compact_singleton: Option<CompactSingletonSchedule>,
+}
+
+impl AdaptiveBatchPartitions {
+    fn materialized(partitions: Vec<AdaptiveBatchPartition>) -> Self {
+        Self {
+            materialized: partitions,
+            compact_singleton: None,
+        }
+    }
+
+    fn compact_singleton(child_count: u32, lanes: Vec<CompactSingletonLane>) -> Self {
+        Self {
+            materialized: Vec::new(),
+            compact_singleton: Some(CompactSingletonSchedule { child_count, lanes }),
+        }
+    }
+
+    pub fn representation(&self) -> BatchPlanRepresentation {
+        if self.compact_singleton.is_some() {
+            BatchPlanRepresentation::CompactSingleton
+        } else {
+            BatchPlanRepresentation::Materialized
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.compact_singleton
+            .as_ref()
+            .map_or(self.materialized.len(), |schedule| {
+                schedule.child_count as usize
+            })
+    }
+
+    pub fn len_u32(&self) -> u32 {
+        self.compact_singleton.as_ref().map_or_else(
+            || u32::try_from(self.materialized.len()).unwrap_or(u32::MAX),
+            |schedule| schedule.child_count,
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len_u32() == 0
+    }
+
+    pub fn retained_records(&self) -> usize {
+        self.compact_singleton
+            .as_ref()
+            .map_or(self.materialized.len(), |schedule| schedule.lanes.len())
+    }
+
+    pub fn get(&self, index: u32) -> Option<AdaptiveBatchPartition> {
+        if let Some(schedule) = &self.compact_singleton {
+            return schedule.partition_at(index);
+        }
+        self.materialized.get(index as usize).cloned()
+    }
+
+    pub fn iter(&self) -> AdaptiveBatchPartitionIter<'_> {
+        AdaptiveBatchPartitionIter {
+            partitions: self,
+            next: 0,
+        }
+    }
+}
+
+pub struct AdaptiveBatchPartitionIter<'a> {
+    partitions: &'a AdaptiveBatchPartitions,
+    next: u32,
+}
+
+impl Iterator for AdaptiveBatchPartitionIter<'_> {
+    type Item = AdaptiveBatchPartition;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let partition = self.partitions.get(self.next)?;
+        self.next = self.next.checked_add(1)?;
+        Some(partition)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.partitions.len_u32().saturating_sub(self.next) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for AdaptiveBatchPartitionIter<'_> {}
+
+impl CompactSingletonSchedule {
+    fn partition_at(&self, index: u32) -> Option<AdaptiveBatchPartition> {
+        if index >= self.child_count {
+            return None;
+        }
+        let lane_count = self.lanes.len() as u32;
+        let (lane, ordinal) = if index < lane_count {
+            (&self.lanes[index as usize], 0)
+        } else {
+            self.additional_partition(index - lane_count)?
+        };
+        let estimated_finish_ms = lane
+            .first_finish_ms
+            .checked_add(u64::from(ordinal).checked_mul(lane.period_ms)?)?;
+        let estimated_start_ms = if ordinal == 0 {
+            lane.first_start_ms
+        } else {
+            lane.first_finish_ms
+                .checked_add(u64::from(ordinal - 1).checked_mul(lane.period_ms)?)?
+        };
+        Some(AdaptiveBatchPartition {
+            partition_index: index.checked_add(1)?,
+            partition_count: self.child_count,
+            child_start: index,
+            size: 1,
+            device_id: lane.device_id.clone(),
+            estimated_start_ms,
+            estimated_finish_ms,
+            setup_disposition: if ordinal == 0 {
+                lane.first_setup_disposition
+            } else {
+                BatchSetupDisposition::Warm
+            },
+            predicted_vram_bytes: lane.predicted_vram_bytes,
+            predicted_host_ram_bytes: lane.predicted_host_ram_bytes,
+        })
+    }
+
+    fn additional_partition(&self, rank: u32) -> Option<(&CompactSingletonLane, u32)> {
+        let additional_count = self.child_count.checked_sub(self.lanes.len() as u32)?;
+        if rank >= additional_count {
+            return None;
+        }
+        let mut low = 0u64;
+        let mut high = self
+            .lanes
+            .iter()
+            .filter_map(|lane| {
+                lane.count.checked_sub(1).and_then(|tail| {
+                    lane.first_finish_ms
+                        .checked_add(u64::from(tail).checked_mul(lane.period_ms)?)
+                })
+            })
+            .max()?;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let covered = self
+                .lanes
+                .iter()
+                .map(|lane| u64::from(lane.additional_count_at(middle)))
+                .sum::<u64>();
+            if covered > u64::from(rank) {
+                high = middle;
+            } else {
+                low = middle.checked_add(1)?;
+            }
+        }
+        let threshold = low;
+        let before_limit = threshold.checked_sub(1);
+        let mut before_total = 0u64;
+        for lane in &self.lanes {
+            before_total = before_total.checked_add(u64::from(
+                before_limit.map_or(0, |limit| lane.additional_count_at(limit)),
+            ))?;
+        }
+        let mut tie_offset = u64::from(rank).checked_sub(before_total)?;
+        for lane in &self.lanes {
+            let before = before_limit.map_or(0, |limit| lane.additional_count_at(limit));
+            let through = lane.additional_count_at(threshold);
+            let ties = through.checked_sub(before)?;
+            if tie_offset < u64::from(ties) {
+                return Some((
+                    lane,
+                    before
+                        .checked_add(1)?
+                        .checked_add(u32::try_from(tie_offset).ok()?)?,
+                ));
+            }
+            tie_offset = tie_offset.checked_sub(u64::from(ties))?;
+        }
+        None
+    }
+}
+
+impl CompactSingletonLane {
+    fn additional_count_at(&self, limit: u64) -> u32 {
+        let available = self.count.saturating_sub(1);
+        if available == 0 {
+            return 0;
+        }
+        if self.period_ms == 0 {
+            return if limit >= self.first_finish_ms {
+                available
+            } else {
+                0
+            };
+        }
+        let Some(second) = self.first_finish_ms.checked_add(self.period_ms) else {
+            return 0;
+        };
+        if limit < second {
+            0
+        } else {
+            u32::try_from(1 + ((limit - second) / self.period_ms).min(u64::from(available - 1)))
+                .unwrap_or(available)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdaptiveBatchPlan {
     pub child_count: u32,
-    pub partitions: Vec<AdaptiveBatchPartition>,
+    pub partitions: AdaptiveBatchPartitions,
     pub predicted_parent_makespan_ms: u64,
     pub predicted_sum_completion_ms: u128,
     pub predicted_setup_ms: u128,
@@ -115,15 +349,66 @@ pub struct AdaptiveBatchPlan {
     pub optimization: BatchOptimization,
     /// Compact activation/allocation objectives scored by the selected solver.
     pub optimizer_states_evaluated: usize,
-    /// Full `AdaptiveBatchPartition` materialization passes. Exact subset
-    /// search scores summaries and materializes only the winner.
+    /// Full `AdaptiveBatchPartition` materialization passes. Compact singleton
+    /// plans retain arithmetic lanes and therefore report zero.
     pub materialization_passes: u8,
+}
+
+impl AdaptiveBatchPlan {
+    pub fn representation(&self) -> BatchPlanRepresentation {
+        self.partitions.representation()
+    }
+
+    pub fn partition_count(&self) -> u32 {
+        self.partitions.len_u32()
+    }
+
+    pub fn retained_partition_records(&self) -> usize {
+        self.partitions.retained_records()
+    }
+
+    pub fn partition_at(&self, index: u32) -> Result<AdaptiveBatchPartition, BatchPartitionError> {
+        if index >= self.partition_count() {
+            return Err(BatchPartitionError::PartitionIndexOutOfRange {
+                index,
+                partition_count: self.partition_count(),
+            });
+        }
+        self.partitions
+            .get(index)
+            .ok_or(BatchPartitionError::TimingOverflow)
+    }
+
+    pub fn partition_window(
+        &self,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<AdaptiveBatchPartition>, BatchPartitionError> {
+        if count > MAX_PARTITION_WINDOW {
+            return Err(BatchPartitionError::PartitionWindowTooLarge {
+                requested: count,
+                maximum: MAX_PARTITION_WINDOW,
+            });
+        }
+        if start > self.partition_count() || (count > 0 && start == self.partition_count()) {
+            return Err(BatchPartitionError::PartitionIndexOutOfRange {
+                index: start,
+                partition_count: self.partition_count(),
+            });
+        }
+        let available = self.partition_count().saturating_sub(start);
+        (start..start.saturating_add(count.min(available)))
+            .map(|index| self.partition_at(index))
+            .collect()
+    }
 }
 
 /// Exact exhaustive activation/allocation is deliberately bounded. Larger
 /// heterogeneous/native-batch instances use the observable bounded heuristic.
 pub const EXACT_SMALL_DEVICE_LIMIT: usize = 8;
 pub const BOUNDED_HEURISTIC_STRATEGY_LIMIT: usize = 64;
+pub const NATIVE_MATERIALIZATION_CHILD_LIMIT: u32 = 100_003;
+pub const MAX_PARTITION_WINDOW: u32 = 4_096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BatchOptimization {
@@ -170,6 +455,14 @@ pub enum BatchPartitionError {
     TimingOverflow,
     HostMemoryOverflow,
     PartitionCountOverflow,
+    PartitionWindowTooLarge {
+        requested: u32,
+        maximum: u32,
+    },
+    PartitionIndexOutOfRange {
+        index: u32,
+        partition_count: u32,
+    },
     Infeasible {
         remaining_children: u32,
         reasons: BTreeSet<BatchInfeasibilityReason>,
@@ -215,6 +508,17 @@ impl fmt::Display for BatchPartitionError {
             Self::PartitionCountOverflow => {
                 formatter.write_str("batch partition count exceeds the u32 projection")
             }
+            Self::PartitionWindowTooLarge { requested, maximum } => write!(
+                formatter,
+                "batch partition window of {requested} exceeds the bounded maximum {maximum}"
+            ),
+            Self::PartitionIndexOutOfRange {
+                index,
+                partition_count,
+            } => write!(
+                formatter,
+                "batch partition index {index} is outside the {partition_count}-partition plan"
+            ),
             Self::Infeasible {
                 remaining_children,
                 reasons,
@@ -233,12 +537,14 @@ impl std::error::Error for BatchPartitionError {}
 /// The planner compares one complete schedule for every capability-derived
 /// maximum partition size. It is exact for homogeneous singleton fleets and
 /// for singleton devices whose next completion streams can be merged
-/// independently. Native heterogeneous batching uses a deterministic bounded
-/// strategy comparison; it deliberately does not claim general global
-/// optimality for the NP-hard unrelated-machine batching problem. For `N`
-/// children, `D` devices, and `S` declared sizes, work is bounded by
-/// `O(N * D * S^2)` and retained memory by `O(N + D * S)`; singleton
-/// production capabilities reduce the time bound to `O(N * D)`.
+/// independently. Singleton plans retain `O(D)` arithmetic lanes and expose
+/// lazy random access plus bounded windows rather than allocating `O(N)`
+/// partition records. Native heterogeneous batching uses a deterministic
+/// bounded strategy comparison for ordinary parent sizes; parents above
+/// [`NATIVE_MATERIALIZATION_CHILD_LIMIT`] visibly fall back to the mandatory
+/// compact singleton capability. The bounded native path deliberately does
+/// not claim global optimality for the NP-hard unrelated-machine batching
+/// problem.
 pub struct BatchPartitionPlanner;
 
 impl BatchPartitionPlanner {
@@ -246,6 +552,11 @@ impl BatchPartitionPlanner {
         let prepared = PreparedRequest::new(request)?;
         if prepared.native_sizes.as_slice() == [1] {
             return plan_singleton(&prepared);
+        }
+        if request.child_count > NATIVE_MATERIALIZATION_CHILD_LIMIT {
+            let mut fallback = plan_singleton(&prepared)?;
+            fallback.optimization = BatchOptimization::BoundedHeuristic;
+            return Ok(fallback);
         }
         let mut best: Option<AdaptiveBatchPlan> = None;
         let mut infeasible_reasons = BTreeSet::new();
@@ -396,6 +707,7 @@ struct SingletonDevice {
     device_index: usize,
     estimate: BatchSizeEstimate,
     activation_host_bytes: u64,
+    first_finish_ms: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -429,10 +741,21 @@ fn plan_singleton(
             .setup_host_ram_bytes
             .checked_add(estimate.predicted_host_ram_bytes)
             .ok_or(BatchPartitionError::HostMemoryOverflow)?;
+        let first_setup = if device.profile.initially_warm {
+            device.profile.warm_setup_ms
+        } else {
+            device.profile.cold_setup_ms
+        };
+        let first_finish_ms =
+            u128::from(device.profile.available_at_ms.max(prepared.request.now_ms))
+                .checked_add(u128::from(first_setup))
+                .and_then(|value| value.checked_add(u128::from(estimate.predicted_run_ms)))
+                .ok_or(BatchPartitionError::TimingOverflow)?;
         viable.push(SingletonDevice {
             device_index,
             estimate,
             activation_host_bytes,
+            first_finish_ms,
         });
     }
     if viable.is_empty() {
@@ -481,10 +804,7 @@ fn plan_singleton(
     viable.sort_by(|left, right| {
         left.activation_host_bytes
             .cmp(&right.activation_host_bytes)
-            .then_with(|| {
-                first_singleton_finish(prepared, *left)
-                    .cmp(&first_singleton_finish(prepared, *right))
-            })
+            .then_with(|| left.first_finish_ms.cmp(&right.first_finish_ms))
             .then_with(|| {
                 prepared.devices[left.device_index]
                     .profile
@@ -529,20 +849,6 @@ fn singleton_profile_key(
         candidate.activation_host_bytes,
         candidate.estimate,
     )
-}
-
-fn first_singleton_finish(prepared: &PreparedRequest<'_>, candidate: SingletonDevice) -> u64 {
-    let profile = prepared.devices[candidate.device_index].profile;
-    let setup = if profile.initially_warm {
-        profile.warm_setup_ms
-    } else {
-        profile.cold_setup_ms
-    };
-    profile
-        .available_at_ms
-        .max(prepared.request.now_ms)
-        .saturating_add(setup)
-        .saturating_add(candidate.estimate.predicted_run_ms)
 }
 
 fn exact_small_singleton_plan(
@@ -621,77 +927,107 @@ fn singleton_allocation(
             } else {
                 profile.cold_setup_ms
             };
-            (
-                u128::from(profile.available_at_ms.max(prepared.request.now_ms))
-                    + u128::from(first_setup)
-                    + u128::from(candidate.estimate.predicted_run_ms),
-                u128::from(profile.warm_setup_ms) + u128::from(candidate.estimate.predicted_run_ms),
-                first_setup,
-                profile.warm_setup_ms,
-            )
+            let first = u128::from(profile.available_at_ms.max(prepared.request.now_ms))
+                .checked_add(u128::from(first_setup))
+                .and_then(|value| {
+                    value.checked_add(u128::from(candidate.estimate.predicted_run_ms))
+                })
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            let period = u128::from(profile.warm_setup_ms)
+                .checked_add(u128::from(candidate.estimate.predicted_run_ms))
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            Ok((first, period, first_setup, profile.warm_setup_ms))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, BatchPartitionError>>()?;
     let mut counts = vec![1u32; selected.len()];
 
     if additional > 0 {
-        let additional_count_at = |stream: (u128, u128, u64, u64), limit: u128| {
-            let (first, period, _, _) = stream;
-            if period == 0 {
-                return u32::from(limit >= first).saturating_mul(additional);
-            }
-            let second = first + period;
-            if limit < second {
-                0
-            } else {
-                u32::try_from(1 + ((limit - second) / period).min(u128::from(additional - 1)))
-                    .unwrap_or(additional)
-            }
-        };
         let mut low = 0u128;
         let mut high = streams
             .iter()
-            .map(|&(first, period, _, _)| first + u128::from(additional) * period)
+            .map(|&(first, period, _, _)| {
+                u128::from(additional)
+                    .checked_mul(period)
+                    .and_then(|tail| first.checked_add(tail))
+                    .ok_or(BatchPartitionError::TimingOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .min()
             .unwrap_or(0);
         while low < high {
-            let middle = (low + high) / 2;
-            let covered = streams
-                .iter()
-                .copied()
-                .map(|stream| additional_count_at(stream, middle))
-                .fold(0u32, u32::saturating_add);
-            if covered >= additional {
+            let middle = low
+                .checked_add((high - low) / 2)
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            let mut covered = 0u64;
+            for stream in streams.iter().copied() {
+                covered = covered
+                    .checked_add(u64::from(singleton_additional_count_at(
+                        stream, middle, additional,
+                    )?))
+                    .ok_or(BatchPartitionError::PartitionCountOverflow)?;
+            }
+            if covered >= u64::from(additional) {
                 high = middle;
             } else {
-                low = middle + 1;
+                low = middle
+                    .checked_add(1)
+                    .ok_or(BatchPartitionError::TimingOverflow)?;
             }
         }
         let threshold = low;
         let before_limit = threshold.checked_sub(1);
         let mut assigned = 0u32;
         for (index, stream) in streams.iter().copied().enumerate() {
-            let before = before_limit
-                .map(|limit| additional_count_at(stream, limit))
-                .unwrap_or(0)
-                .min(additional - assigned);
-            counts[index] += before;
-            assigned += before;
+            let before = match before_limit {
+                Some(limit) => singleton_additional_count_at(stream, limit, additional)?,
+                None => 0,
+            }
+            .min(additional - assigned);
+            counts[index] = counts[index]
+                .checked_add(before)
+                .ok_or(BatchPartitionError::PartitionCountOverflow)?;
+            assigned = assigned
+                .checked_add(before)
+                .ok_or(BatchPartitionError::PartitionCountOverflow)?;
             if assigned == additional {
                 break;
             }
         }
-        for (index, stream) in streams.iter().copied().enumerate() {
+        let mut boundary_ties = streams
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, stream)| {
+                let through = singleton_additional_count_at(stream, threshold, additional)?;
+                let before = match before_limit {
+                    Some(limit) => singleton_additional_count_at(stream, limit, additional)?,
+                    None => 0,
+                };
+                Ok((
+                    index,
+                    through
+                        .checked_sub(before)
+                        .ok_or(BatchPartitionError::PartitionCountOverflow)?,
+                    stream.3,
+                    &prepared.devices[selected[index].device_index]
+                        .profile
+                        .device_id,
+                ))
+            })
+            .collect::<Result<Vec<_>, BatchPartitionError>>()?;
+        boundary_ties.sort_by(|left, right| left.2.cmp(&right.2).then_with(|| right.3.cmp(left.3)));
+        for (index, ties, _, _) in boundary_ties {
             if assigned == additional {
                 break;
             }
-            let through = additional_count_at(stream, threshold);
-            let before = before_limit
-                .map(|limit| additional_count_at(stream, limit))
-                .unwrap_or(0);
-            let ties = through.saturating_sub(before);
             let take = ties.min(additional - assigned);
-            counts[index] += take;
-            assigned += take;
+            counts[index] = counts[index]
+                .checked_add(take)
+                .ok_or(BatchPartitionError::PartitionCountOverflow)?;
+            assigned = assigned
+                .checked_add(take)
+                .ok_or(BatchPartitionError::PartitionCountOverflow)?;
         }
         debug_assert_eq!(assigned, additional);
     }
@@ -701,16 +1037,40 @@ fn singleton_allocation(
     let mut setup_ms = 0u128;
     for ((first, period, first_setup, warm_setup), &count) in streams.iter().copied().zip(&counts) {
         let tail = u128::from(count - 1);
-        let finish = first + tail * period;
+        let finish = tail
+            .checked_mul(period)
+            .and_then(|tail_time| first.checked_add(tail_time))
+            .ok_or(BatchPartitionError::TimingOverflow)?;
         makespan_ms = makespan_ms.max(finish);
+        let first_completion_total = u128::from(count)
+            .checked_mul(first)
+            .ok_or(BatchPartitionError::TimingOverflow)?;
+        let tail_completion_total = period
+            .checked_mul(tail)
+            .and_then(|value| value.checked_mul(u128::from(count)))
+            .map(|value| value / 2)
+            .ok_or(BatchPartitionError::TimingOverflow)?;
         sum_completion_ms = sum_completion_ms
-            .checked_add(u128::from(count) * first + period * tail * u128::from(count) / 2)
+            .checked_add(
+                first_completion_total
+                    .checked_add(tail_completion_total)
+                    .ok_or(BatchPartitionError::TimingOverflow)?,
+            )
+            .ok_or(BatchPartitionError::TimingOverflow)?;
+        let repeated_setup = tail
+            .checked_mul(u128::from(warm_setup))
             .ok_or(BatchPartitionError::TimingOverflow)?;
         setup_ms = setup_ms
-            .checked_add(u128::from(first_setup) + tail * u128::from(warm_setup))
+            .checked_add(
+                u128::from(first_setup)
+                    .checked_add(repeated_setup)
+                    .ok_or(BatchPartitionError::TimingOverflow)?,
+            )
             .ok_or(BatchPartitionError::TimingOverflow)?;
     }
-    let now_total = u128::from(prepared.request.now_ms) * u128::from(child_count);
+    let now_total = u128::from(prepared.request.now_ms)
+        .checked_mul(u128::from(child_count))
+        .ok_or(BatchPartitionError::TimingOverflow)?;
     Ok(SingletonAllocation {
         counts,
         makespan_ms: makespan_ms
@@ -721,6 +1081,32 @@ fn singleton_allocation(
             .ok_or(BatchPartitionError::TimingOverflow)?,
         setup_ms,
     })
+}
+
+fn singleton_additional_count_at(
+    stream: (u128, u128, u64, u64),
+    limit: u128,
+    additional: u32,
+) -> Result<u32, BatchPartitionError> {
+    let (first, period, _, _) = stream;
+    if period == 0 {
+        return Ok(if limit >= first { additional } else { 0 });
+    }
+    let second = first
+        .checked_add(period)
+        .ok_or(BatchPartitionError::TimingOverflow)?;
+    if limit < second {
+        Ok(0)
+    } else {
+        let through = (limit - second) / period;
+        let bounded = through.min(u128::from(additional - 1));
+        u32::try_from(
+            1u128
+                .checked_add(bounded)
+                .ok_or(BatchPartitionError::TimingOverflow)?,
+        )
+        .map_err(|_| BatchPartitionError::PartitionCountOverflow)
+    }
 }
 
 fn singleton_allocation_cmp(
@@ -768,140 +1154,63 @@ fn singleton_plan_for_allocation(
     optimizer_states_evaluated: usize,
 ) -> Result<AdaptiveBatchPlan, BatchPartitionError> {
     let request = prepared.request;
-    let mut schedules = selected
+    let lanes = selected
         .iter()
-        .map(|candidate| DeviceSchedule {
-            next_available_ms: prepared.devices[candidate.device_index]
-                .profile
-                .available_at_ms
-                .max(request.now_ms),
-            used: false,
-            peak_partition_host_ram_bytes: 0,
-        })
-        .collect::<Vec<_>>();
-    let mut partitions = Vec::with_capacity(request.child_count as usize);
-    let mut predicted_setup_ms = 0u128;
-    let mut remaining_counts = allocation.counts.clone();
-
-    // Initial-wave work conservation is a hard lexicographic objective: every
-    // selected device receives one real partition before any receives a second.
-    for (selected_index, remaining) in remaining_counts.iter_mut().enumerate() {
-        push_singleton_partition(
-            prepared,
-            selected,
-            &mut schedules,
-            &mut partitions,
-            &mut predicted_setup_ms,
-            selected_index,
-        )?;
-        *remaining -= 1;
-    }
-    while partitions.len() < request.child_count as usize {
-        let mut best_index: Option<usize> = None;
-        let mut best_finish = u64::MAX;
-        for (selected_index, candidate) in selected.iter().enumerate() {
-            if remaining_counts[selected_index] == 0 {
-                continue;
-            }
+        .zip(&allocation.counts)
+        .map(|(candidate, &count)| {
             let profile = prepared.devices[candidate.device_index].profile;
-            let finish = schedules[selected_index]
-                .next_available_ms
-                .checked_add(profile.warm_setup_ms)
+            let (first_setup_disposition, first_setup_ms) = if profile.initially_warm {
+                (BatchSetupDisposition::Warm, profile.warm_setup_ms)
+            } else {
+                (BatchSetupDisposition::Cold, profile.cold_setup_ms)
+            };
+            let first_start_ms = profile.available_at_ms.max(request.now_ms);
+            let first_finish_ms = first_start_ms
+                .checked_add(first_setup_ms)
                 .and_then(|time| time.checked_add(candidate.estimate.predicted_run_ms))
                 .ok_or(BatchPartitionError::TimingOverflow)?;
-            if finish < best_finish
-                || (finish == best_finish
-                    && best_index.is_none_or(|current| {
-                        profile.device_id
-                            < prepared.devices[selected[current].device_index]
-                                .profile
-                                .device_id
-                    }))
-            {
-                best_finish = finish;
-                best_index = Some(selected_index);
-            }
-        }
-        let best_index = best_index.ok_or(BatchPartitionError::PartitionCountOverflow)?;
-        push_singleton_partition(
-            prepared,
-            selected,
-            &mut schedules,
-            &mut partitions,
-            &mut predicted_setup_ms,
-            best_index,
-        )?;
-        remaining_counts[best_index] -= 1;
-    }
-
-    let plan = finalize_plan(
-        request,
-        partitions,
-        PlanSummaryInput {
-            predicted_setup_ms,
-            predicted_peak_host_ram_bytes: selected.iter().try_fold(0u64, |total, candidate| {
-                total
-                    .checked_add(candidate.activation_host_bytes)
-                    .ok_or(BatchPartitionError::HostMemoryOverflow)
-            })?,
-            devices_used: selected.len(),
-            optimization,
-            optimizer_states_evaluated,
-            materialization_passes: 1,
-        },
-    )?;
-    debug_assert_eq!(
-        u128::from(plan.predicted_parent_makespan_ms),
-        allocation.makespan_ms
-    );
-    debug_assert_eq!(
-        plan.predicted_sum_completion_ms,
-        allocation.sum_completion_ms
-    );
-    debug_assert_eq!(plan.predicted_setup_ms, allocation.setup_ms);
-    Ok(plan)
-}
-
-fn push_singleton_partition(
-    prepared: &PreparedRequest<'_>,
-    selected: &[SingletonDevice],
-    schedules: &mut [DeviceSchedule],
-    partitions: &mut Vec<AdaptiveBatchPartition>,
-    predicted_setup_ms: &mut u128,
-    selected_index: usize,
-) -> Result<(), BatchPartitionError> {
-    let candidate = selected[selected_index];
-    let profile = prepared.devices[candidate.device_index].profile;
-    let schedule = &mut schedules[selected_index];
-    let (setup_disposition, setup_ms) = if !schedule.used && !profile.initially_warm {
-        (BatchSetupDisposition::Cold, profile.cold_setup_ms)
-    } else {
-        (BatchSetupDisposition::Warm, profile.warm_setup_ms)
-    };
-    let start_ms = schedule.next_available_ms;
-    let finish_ms = start_ms
-        .checked_add(setup_ms)
-        .and_then(|time| time.checked_add(candidate.estimate.predicted_run_ms))
-        .ok_or(BatchPartitionError::TimingOverflow)?;
-    schedule.next_available_ms = finish_ms;
-    schedule.used = true;
-    *predicted_setup_ms = predicted_setup_ms
-        .checked_add(u128::from(setup_ms))
-        .ok_or(BatchPartitionError::TimingOverflow)?;
-    partitions.push(AdaptiveBatchPartition {
-        partition_index: 0,
-        partition_count: 0,
-        child_start: u32::try_from(partitions.len())
-            .map_err(|_| BatchPartitionError::PartitionCountOverflow)?,
-        size: 1,
-        device_id: profile.device_id.clone(),
-        estimated_start_ms: start_ms,
-        estimated_finish_ms: finish_ms,
-        setup_disposition,
-        predicted_vram_bytes: candidate.estimate.predicted_vram_bytes,
-        predicted_host_ram_bytes: candidate.estimate.predicted_host_ram_bytes,
-    });
-    Ok(())
+            let period_ms = profile
+                .warm_setup_ms
+                .checked_add(candidate.estimate.predicted_run_ms)
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            let tail = u64::from(count - 1);
+            first_finish_ms
+                .checked_add(
+                    tail.checked_mul(period_ms)
+                        .ok_or(BatchPartitionError::TimingOverflow)?,
+                )
+                .ok_or(BatchPartitionError::TimingOverflow)?;
+            Ok(CompactSingletonLane {
+                device_id: profile.device_id.clone(),
+                count,
+                first_start_ms,
+                first_finish_ms,
+                period_ms,
+                first_setup_disposition,
+                predicted_vram_bytes: candidate.estimate.predicted_vram_bytes,
+                predicted_host_ram_bytes: candidate.estimate.predicted_host_ram_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, BatchPartitionError>>()?;
+    let predicted_peak_host_ram_bytes = selected.iter().try_fold(0u64, |total, candidate| {
+        total
+            .checked_add(candidate.activation_host_bytes)
+            .ok_or(BatchPartitionError::HostMemoryOverflow)
+    })?;
+    let predicted_parent_makespan_ms =
+        u64::try_from(allocation.makespan_ms).map_err(|_| BatchPartitionError::TimingOverflow)?;
+    Ok(AdaptiveBatchPlan {
+        child_count: request.child_count,
+        partitions: AdaptiveBatchPartitions::compact_singleton(request.child_count, lanes),
+        predicted_parent_makespan_ms,
+        predicted_sum_completion_ms: allocation.sum_completion_ms,
+        predicted_setup_ms: allocation.setup_ms,
+        predicted_peak_host_ram_bytes,
+        devices_used: selected.len(),
+        optimization,
+        optimizer_states_evaluated,
+        materialization_passes: 0,
+    })
 }
 
 fn plan_with_size_cap(
@@ -1083,12 +1392,12 @@ fn plan_cmp(left: &AdaptiveBatchPlan, right: &AdaptiveBatchPlan) -> Ordering {
             .then_with(|| {
                 left.partitions
                     .iter()
-                    .map(|partition| (&partition.device_id, partition.size))
+                    .map(|partition| (partition.device_id, partition.size))
                     .cmp(
                         right
                             .partitions
                             .iter()
-                            .map(|partition| (&partition.device_id, partition.size)),
+                            .map(|partition| (partition.device_id, partition.size)),
                     )
             })
     })
@@ -1133,7 +1442,7 @@ fn finalize_plan(
     })?;
     Ok(AdaptiveBatchPlan {
         child_count: request.child_count,
-        partitions,
+        partitions: AdaptiveBatchPartitions::materialized(partitions),
         predicted_parent_makespan_ms: latest_finish_ms
             .checked_sub(request.now_ms)
             .ok_or(BatchPartitionError::TimingOverflow)?,

@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use mold_scheduler::{
     BatchDeviceProfile, BatchInfeasibilityReason, BatchOptimization, BatchPartitionError,
-    BatchPartitionPlanner, BatchPartitionRequest, BatchSetupDisposition, BatchSizeEstimate,
-    NativeBatchSizes, BOUNDED_HEURISTIC_STRATEGY_LIMIT, EXACT_SMALL_DEVICE_LIMIT,
+    BatchPartitionPlanner, BatchPartitionRequest, BatchPlanRepresentation, BatchSetupDisposition,
+    BatchSizeEstimate, NativeBatchSizes, BOUNDED_HEURISTIC_STRATEGY_LIMIT,
+    EXACT_SMALL_DEVICE_LIMIT, MAX_PARTITION_WINDOW, NATIVE_MATERIALIZATION_CHILD_LIMIT,
 };
 
 fn estimate(size: u32, run_ms: u64, vram_bytes: u64, host_ram_bytes: u64) -> BatchSizeEstimate {
@@ -222,6 +223,8 @@ fn synthetic_non_power_of_two_capability_selects_measured_native_partitions() {
     .unwrap();
 
     assert_exact_coverage(&plan);
+    assert_eq!(plan.representation(), BatchPlanRepresentation::Materialized);
+    assert_eq!(plan.retained_partition_records(), 2);
     assert_eq!(
         plan.partitions
             .iter()
@@ -375,6 +378,56 @@ fn exact_small_two_device_host_coupled_plans_agree_with_independent_brute_force(
 }
 
 #[test]
+fn exact_small_boundary_tie_minimizes_setup_before_stable_assignment() {
+    let mut high_setup = device("cuda:a", vec![estimate(1, 1, 1, 0)]);
+    high_setup.cold_setup_ms = 9;
+    high_setup.warm_setup_ms = 9;
+    let mut low_setup = device("cuda:b", vec![estimate(1, 9, 1, 0)]);
+    low_setup.cold_setup_ms = 1;
+    low_setup.warm_setup_ms = 1;
+
+    let plan =
+        BatchPartitionPlanner::plan(&request(3, vec![1], vec![high_setup, low_setup])).unwrap();
+    let devices = plan
+        .partitions
+        .iter()
+        .map(|partition| partition.device_id.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(plan.optimization, BatchOptimization::ExactSmall);
+    assert_eq!(plan.predicted_parent_makespan_ms, 20);
+    assert_eq!(plan.predicted_sum_completion_ms, 40);
+    assert_eq!(plan.predicted_setup_ms, 11);
+    assert_eq!(devices, ["cuda:a", "cuda:b", "cuda:b"]);
+}
+
+#[test]
+fn exact_small_zero_period_boundary_ties_apply_setup_then_stable_counts() {
+    let profiles = [("cuda:a", 3u64), ("cuda:b", 1u64), ("cuda:c", 1u64)]
+        .into_iter()
+        .map(|(id, cold_setup)| {
+            let mut profile = device(id, vec![estimate(1, 0, 1, 0)]);
+            profile.cold_setup_ms = cold_setup;
+            profile.warm_setup_ms = 0;
+            profile
+        })
+        .collect();
+
+    let plan = BatchPartitionPlanner::plan(&request(7, vec![1], profiles)).unwrap();
+    let counts = ["cuda:a", "cuda:b", "cuda:c"].map(|id| {
+        plan.partitions
+            .iter()
+            .filter(|partition| partition.device_id.as_str() == id)
+            .count()
+    });
+
+    // All additional completions tie at the same threshold with equal zero
+    // marginal setup. The stable assignment comparator minimizes the earlier
+    // device counts first, so the highest stable ID receives the tie slots.
+    assert_eq!(counts, [1, 1, 5]);
+}
+
+#[test]
 fn exact_singleton_objective_matches_brute_force_across_edge_case_streams() {
     // available, initially_warm, cold, warm_setup, run, setup_host, partition_host
     let fleets = [
@@ -461,7 +514,19 @@ fn exact_singleton_objective_matches_brute_force_across_edge_case_streams() {
                             setup += u128::from(first_setup)
                                 + u128::from(spec.3) * u128::from(count - 1);
                         }
-                        Some((std::cmp::Reverse(cardinality), makespan, sum, setup))
+                        let stable_assignment = counts
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, count)| **count > 0)
+                            .map(|(index, count)| (index, *count))
+                            .collect::<Vec<_>>();
+                        Some((
+                            std::cmp::Reverse(cardinality),
+                            makespan,
+                            sum,
+                            setup,
+                            stable_assignment,
+                        ))
                     })
                     .min();
 
@@ -474,6 +539,22 @@ fn exact_singleton_objective_matches_brute_force_across_edge_case_streams() {
                                 plan.predicted_parent_makespan_ms,
                                 plan.predicted_sum_completion_ms,
                                 plan.predicted_setup_ms,
+                                specs
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(index, _)| {
+                                        let count = plan
+                                            .partitions
+                                            .iter()
+                                            .filter(|partition| {
+                                                partition.device_id.as_str()
+                                                    == format!("cuda:{index:02}")
+                                            })
+                                            .count()
+                                            as u32;
+                                        (count > 0).then_some((index, count))
+                                    })
+                                    .collect::<Vec<_>>(),
                             ),
                             oracle,
                             "{specs:?}, children={children}, headroom={headroom}"
@@ -497,6 +578,126 @@ fn exact_singleton_objective_matches_brute_force_across_edge_case_streams() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn singleton_u32_max_plan_is_compact_and_supports_lazy_random_access() {
+    let mut first = device("cuda:a", vec![estimate(1, 3, 1, 2)]);
+    first.cold_setup_ms = 7;
+    first.warm_setup_ms = 2;
+    let mut second = device("cuda:b", vec![estimate(1, 5, 1, 3)]);
+    second.cold_setup_ms = 1;
+    second.warm_setup_ms = 1;
+
+    let plan =
+        BatchPartitionPlanner::plan(&request(u32::MAX, vec![1], vec![first, second])).unwrap();
+
+    assert_eq!(
+        plan.representation(),
+        BatchPlanRepresentation::CompactSingleton
+    );
+    assert_eq!(plan.partition_count(), u32::MAX);
+    assert_eq!(plan.retained_partition_records(), 2);
+
+    let first_window = plan.partition_window(0, 3).unwrap();
+    let middle_window = plan.partition_window(2_000_000_000, 3).unwrap();
+    let last_window = plan.partition_window(u32::MAX - 3, 3).unwrap();
+    assert_eq!(
+        middle_window,
+        plan.partition_window(2_000_000_000, 3).unwrap()
+    );
+    assert_eq!(
+        first_window
+            .iter()
+            .map(|partition| partition.child_start)
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert_eq!(
+        middle_window
+            .iter()
+            .map(|partition| partition.child_start)
+            .collect::<Vec<_>>(),
+        [2_000_000_000, 2_000_000_001, 2_000_000_002]
+    );
+    assert_eq!(
+        last_window
+            .iter()
+            .map(|partition| partition.child_start)
+            .collect::<Vec<_>>(),
+        [u32::MAX - 3, u32::MAX - 2, u32::MAX - 1]
+    );
+    assert_eq!(
+        plan.partition_at(u32::MAX - 1).ok(),
+        last_window.last().cloned()
+    );
+    assert!(matches!(
+        plan.partition_at(u32::MAX),
+        Err(BatchPartitionError::PartitionIndexOutOfRange {
+            index: u32::MAX,
+            partition_count: u32::MAX,
+        })
+    ));
+    assert!(matches!(
+        plan.partition_window(0, MAX_PARTITION_WINDOW + 1),
+        Err(BatchPartitionError::PartitionWindowTooLarge { .. })
+    ));
+    assert!(matches!(
+        plan.partition_window(u32::MAX, 1),
+        Err(BatchPartitionError::PartitionIndexOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn huge_native_parent_uses_compact_singleton_fallback() {
+    let estimates = vec![estimate(1, 5, 1, 1), estimate(3, 8, 2, 2)];
+    let plan = BatchPartitionPlanner::plan(&request(
+        u32::MAX,
+        vec![1, 3],
+        vec![device("cuda:a", estimates)],
+    ))
+    .unwrap();
+
+    assert_eq!(
+        plan.representation(),
+        BatchPlanRepresentation::CompactSingleton
+    );
+    assert_eq!(plan.optimization, BatchOptimization::BoundedHeuristic);
+    assert_eq!(plan.partition_count(), u32::MAX);
+    assert_eq!(plan.retained_partition_records(), 1);
+    assert_eq!(
+        plan.partition_window(u32::MAX - 2, 2)
+            .unwrap()
+            .iter()
+            .map(|partition| partition.size)
+            .collect::<Vec<_>>(),
+        [1, 1]
+    );
+}
+
+#[test]
+fn singleton_timing_overflow_is_typed_in_every_solver_class() {
+    let overflowing = |id: String, offset: u64| {
+        let mut profile = device(id, vec![estimate(1, u64::MAX, 0, 0)]);
+        profile.cold_setup_ms = u64::MAX - offset;
+        profile.warm_setup_ms = u64::MAX - offset;
+        profile
+    };
+    let cases = [
+        vec![overflowing("cuda:00".into(), 0)],
+        vec![
+            overflowing("cuda:00".into(), 0),
+            overflowing("cuda:01".into(), 1),
+        ],
+        (0..=EXACT_SMALL_DEVICE_LIMIT)
+            .map(|index| overflowing(format!("cuda:{index:02}"), index as u64))
+            .collect(),
+    ];
+
+    for devices in cases {
+        let error = BatchPartitionPlanner::plan(&request(u32::MAX, vec![1], devices)).unwrap_err();
+        assert_eq!(error, BatchPartitionError::TimingOverflow);
     }
 }
 
@@ -615,7 +816,12 @@ fn exact_small_singleton_solver_has_no_child_count_bound() {
 
     assert_eq!(plan.optimization, BatchOptimization::ExactSmall);
     assert!(plan.optimizer_states_evaluated < (1 << EXACT_SMALL_DEVICE_LIMIT));
-    assert_eq!(plan.materialization_passes, 1);
+    assert_eq!(plan.materialization_passes, 0);
+    assert_eq!(
+        plan.representation(),
+        BatchPlanRepresentation::CompactSingleton
+    );
+    assert_eq!(plan.retained_partition_records(), 8);
     assert_eq!(plan.devices_used, 8);
     assert_eq!(u128::from(plan.predicted_parent_makespan_ms), low);
     assert_exact_coverage(&plan);
@@ -663,9 +869,12 @@ fn warm_and_cold_setup_are_compared_before_selecting_a_device() {
 
     let plan = BatchPartitionPlanner::plan(&request(1, vec![1], vec![cold, warm])).unwrap();
 
-    assert_eq!(plan.partitions[0].device_id.as_str(), "cuda:warm");
     assert_eq!(
-        plan.partitions[0].setup_disposition,
+        plan.partition_at(0).unwrap().device_id.as_str(),
+        "cuda:warm"
+    );
+    assert_eq!(
+        plan.partition_at(0).unwrap().setup_disposition,
         BatchSetupDisposition::Warm
     );
 }
@@ -681,7 +890,10 @@ fn deterministic_ties_use_device_id_and_ignore_input_order() {
     let reverse = BatchPartitionPlanner::plan(&request(5, vec![1, 1], vec![right, left])).unwrap();
 
     assert_eq!(forward, reverse);
-    assert_eq!(forward.partitions[0].device_id.as_str(), "cuda:a");
+    assert_eq!(
+        forward.partition_at(0).unwrap().device_id.as_str(),
+        "cuda:a"
+    );
 }
 
 #[test]
@@ -695,10 +907,15 @@ fn large_parent_planning_is_bounded_by_derived_strategies_not_combinatorial() {
         .map(|index| device(format!("cuda:{index:032x}"), estimates.clone()))
         .collect();
 
-    let plan = BatchPartitionPlanner::plan(&request(100_003, vec![1, 3, 5], devices)).unwrap();
+    let plan = BatchPartitionPlanner::plan(&request(
+        NATIVE_MATERIALIZATION_CHILD_LIMIT,
+        vec![1, 3, 5],
+        devices,
+    ))
+    .unwrap();
 
     assert_exact_coverage(&plan);
-    assert!(plan.partitions.len() <= 100_003);
+    assert!(plan.partitions.len() <= NATIVE_MATERIALIZATION_CHILD_LIMIT as usize);
     assert_eq!(plan.devices_used, 64);
     assert_eq!(plan.optimization, BatchOptimization::BoundedHeuristic);
     assert!(plan.optimizer_states_evaluated <= BOUNDED_HEURISTIC_STRATEGY_LIMIT);

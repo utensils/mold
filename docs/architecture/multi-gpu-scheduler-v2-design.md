@@ -1436,21 +1436,28 @@ The F1 planning foundation implements this boundary without routing a parent:
 - Homogeneous singleton fleets use an exact activation and balanced
   completion-stream allocation for arbitrary `N` and `D`. Heterogeneous
   singleton inputs at most 8 devices and arbitrary child count exhaust every
-  activation subset as compact arithmetic objectives before materializing the
-  winner once, including aggregate host-RAM coupling. Larger
-  heterogeneous/native-batch inputs use at most 64
-  deterministic capability-derived size-cap strategies. General
-  heterogeneous native batching is an NP-hard unrelated-machine batching
-  problem; the bounded path does not claim global optimality.
+  activation subset as compact arithmetic objectives, including aggregate
+  host-RAM coupling. Singleton results retain one arithmetic lane per selected
+  device and lazily derive any partition or bounded window; they never allocate
+  one record per child. Boundary completion ties minimize marginal warm setup
+  before the stable assignment tie. Ordinary native-batch inputs use at most
+  64 deterministic capability-derived size-cap strategies. Above the named
+  100003-child materialization ceiling, native planning visibly falls back to
+  the mandatory compact singleton capability and reports `BoundedHeuristic`.
+  General heterogeneous native batching is an NP-hard unrelated-machine
+  batching problem; the bounded path does not claim global optimality.
 - Every returned plan exposes `ExactHomogeneousSingleton`, `ExactSmall`, or
-  `BoundedHeuristic`, together with compact states scored and full
-  materialization passes. Hard capacity, VRAM, host-RAM, and missing-estimate
-  infeasibility remains typed separately from optimizer truncation, and host
-  byte arithmetic overflow is distinct from timing overflow. For `N`
-  children, `D` devices, and `S` declared sizes, the bounded strategy path is
-  `O(N × D × min(S,64) × S)` time and `O(N + D × S)` retained memory;
-  production singleton declarations use `O(N × D)` time and `O(N + D)`
-  memory, including the 100003-child/64-device stress case.
+  `BoundedHeuristic`, together with its honest
+  `Materialized`/`CompactSingleton` representation, compact states scored, and
+  full materialization passes. Compact plans report zero materialization
+  passes and expose typed random access plus a named 4096-record maximum
+  materialization window. Hard capacity, VRAM, host-RAM, missing-estimate,
+  out-of-range/window, and arithmetic failures remain typed; timing objective
+  construction uses checked arithmetic throughout. For `N` children, `D`
+  devices, and `S` declared sizes, the ordinary bounded native strategy path is
+  `O(N × D × min(S,64) × S)` time and `O(N + D × S)` retained memory.
+  Production singleton declarations retain `O(D)` memory; objective scoring
+  and lazy random access use logarithmic completion-threshold searches.
 - The output carries exact contiguous child coverage and the existing
   `PlannedBatchPartition` projection needed by future `BatchChild` work.
   Production raw batches remain unrouted and `server_batch` remains false.

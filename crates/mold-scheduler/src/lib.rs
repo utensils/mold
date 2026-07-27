@@ -14,10 +14,11 @@ mod planner;
 mod types;
 
 pub use batch::{
-    AdaptiveBatchPartition, AdaptiveBatchPlan, BatchDeviceProfile, BatchInfeasibilityReason,
-    BatchOptimization, BatchPartitionError, BatchPartitionPlanner, BatchPartitionRequest,
-    BatchSetupDisposition, BatchSizeEstimate, NativeBatchSizes, BOUNDED_HEURISTIC_STRATEGY_LIMIT,
-    EXACT_SMALL_DEVICE_LIMIT,
+    AdaptiveBatchPartition, AdaptiveBatchPartitionIter, AdaptiveBatchPartitions, AdaptiveBatchPlan,
+    BatchDeviceProfile, BatchInfeasibilityReason, BatchOptimization, BatchPartitionError,
+    BatchPartitionPlanner, BatchPartitionRequest, BatchPlanRepresentation, BatchSetupDisposition,
+    BatchSizeEstimate, NativeBatchSizes, BOUNDED_HEURISTIC_STRATEGY_LIMIT,
+    EXACT_SMALL_DEVICE_LIMIT, MAX_PARTITION_WINDOW, NATIVE_MATERIALIZATION_CHILD_LIMIT,
 };
 pub use eligibility::EligibilityIndex;
 pub use estimates::{
