@@ -37,6 +37,55 @@ describe("AdvancedSection device snapshots", () => {
     return { promise, resolve };
   }
 
+  it("renders typed host utility work when the local server has no GPUs", async () => {
+    const connection = useConnectionStore();
+    connection.info = {
+      mode: "local",
+      baseUrl: "http://127.0.0.1:7680",
+      apiKey: "desktop-secret",
+    };
+    connection.status = "ready";
+    listDevicesMock.mockResolvedValueOnce({ devices: [], plan_version: 1 });
+    listQueueMock.mockResolvedValueOnce({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "desktop-cpu-work",
+            parent_id: "parent",
+            work_kind: "prompt_expansion",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            planned_device_id: null,
+            planned_lane_kind: "host_utility",
+            lane_order: 0,
+            estimate_confidence: "low",
+          },
+        ],
+      },
+    });
+
+    const wrapper = mount(AdvancedSection, {
+      global: {
+        stubs: {
+          ConfigRowItem: true,
+          ConfigSettingRow: true,
+          PlacementSection: true,
+        },
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("desktop-cpu-work"));
+
+    expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain("Host utility");
+    expect(wrapper.findAll('[data-test="device-card"]')).toHaveLength(0);
+  });
+
   it("subscribes to the exact authenticated target and refetches on invalidation", async () => {
     const connection = useConnectionStore();
     connection.info = {

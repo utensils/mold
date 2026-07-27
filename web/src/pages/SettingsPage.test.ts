@@ -467,7 +467,8 @@ describe("SettingsPage", () => {
                     priority_class: "user",
                     queue_rank: 0,
                     bypass_count: 0,
-                    planned_device_id: "cpu:utility:0",
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
                     lane_order: 0,
                     estimate_confidence: "low",
                     activity_phase: "cpu",
@@ -498,6 +499,67 @@ describe("SettingsPage", () => {
     expect(wrapper.get('[data-test="cpu-utility-lane"]').text()).toContain(
       "cpu-expand",
     );
+  });
+
+  it("clears a stale queue plan when a device-panel refresh fails", async () => {
+    let failPanel = false;
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (
+        failPanel &&
+        (url.endsWith("/api/devices") || url.endsWith("/api/queue"))
+      ) {
+        throw new Error("host offline");
+      }
+      const body = url.endsWith("/api/devices")
+        ? { devices: [], plan_version: 1 }
+        : url.endsWith("/api/queue")
+          ? {
+              entries: [],
+              plan: {
+                plan_version: 1,
+                state_version: 1,
+                optimizer_state: "optimized",
+                dirty_since_unix_ms: null,
+                next_replan_at_unix_ms: null,
+                work_items: [
+                  {
+                    work_id: "stale-work",
+                    parent_id: "parent",
+                    work_kind: "prompt_expansion",
+                    priority_class: "user",
+                    queue_rank: 0,
+                    bypass_count: 0,
+                    planned_device_id: null,
+                    planned_lane_kind: "host_utility",
+                    lane_order: 0,
+                    estimate_confidence: "low",
+                  },
+                ],
+              },
+            }
+          : url.endsWith("/api/capabilities")
+            ? {
+                devices: { available: true, lifecycle: true },
+                dispatch: { active_mode: "v2", v2_authoritative: true },
+              }
+            : url.endsWith("/profiles")
+              ? { profiles: ["default"], active: "default" }
+              : url.endsWith("/api/catalog/credentials")
+                ? {
+                    hf: { configured: false, source: null, masked: null },
+                    civitai: { configured: false, source: null, masked: null },
+                  }
+                : { entries: [] };
+      return { ok: true, json: async () => body } as Response;
+    }) as typeof fetch;
+
+    const wrapper = mount(SettingsPage);
+    await vi.waitFor(() => expect(wrapper.text()).toContain("stale-work"));
+    failPanel = true;
+    const refresh = subscribeToDeviceSnapshots.mock.calls[0]?.[2] as () => void;
+    refresh();
+    await vi.waitFor(() => expect(wrapper.text()).not.toContain("stale-work"));
   });
 
   it("controls the origin server GPU from Advanced settings", async () => {

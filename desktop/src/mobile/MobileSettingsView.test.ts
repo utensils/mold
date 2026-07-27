@@ -87,7 +87,7 @@ describe("MobileSettingsView", () => {
     expect(wrapper.emitted("manage-hosts")).toHaveLength(1);
   });
 
-  it("keeps the compute panel visible when a host reports no GPUs", async () => {
+  it("keeps CPU utility work visible when a host reports no GPUs", async () => {
     const host = {
       id: "cpu-host",
       name: "CPU Host",
@@ -107,6 +107,30 @@ describe("MobileSettingsView", () => {
       }
       throw new Error(`Unexpected path ${path}`);
     });
+    listQueueMock.mockResolvedValue({
+      entries: [],
+      plan: {
+        plan_version: 1,
+        state_version: 1,
+        optimizer_state: "optimized",
+        dirty_since_unix_ms: null,
+        next_replan_at_unix_ms: null,
+        work_items: [
+          {
+            work_id: "mobile-cpu-work",
+            parent_id: "parent",
+            work_kind: "post_upscale",
+            priority_class: "user",
+            queue_rank: 0,
+            bypass_count: 0,
+            planned_device_id: null,
+            planned_lane_kind: "host_utility",
+            lane_order: 0,
+            estimate_confidence: "low",
+          },
+        ],
+      },
+    });
 
     const wrapper = mount(MobileSettingsView, {
       props: {
@@ -125,7 +149,8 @@ describe("MobileSettingsView", () => {
     );
 
     expect(wrapper.text()).toContain("Compute devices");
-    expect(wrapper.text()).toContain("No compute devices visible.");
+    expect(wrapper.text()).toContain("Host utility");
+    expect(wrapper.text()).toContain("mobile-cpu-work");
   });
 
   it("opens the public privacy policy from About", async () => {

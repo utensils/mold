@@ -167,6 +167,7 @@ async function loadDevicePanel() {
     devices.value = deviceResult.value.devices;
   if (queueResult.status === "fulfilled")
     queuePlan.value = queueResult.value.plan ?? null;
+  else queuePlan.value = null;
   deviceCapabilities.value =
     capabilityResult.status === "fulfilled" ? capabilityResult.value : null;
   if (deviceResult.status !== "fulfilled") devices.value = null;

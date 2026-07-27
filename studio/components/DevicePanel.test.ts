@@ -192,7 +192,8 @@ describe("DevicePanel", () => {
                 priority_class: "user",
                 queue_rank: 1,
                 bypass_count: 0,
-                planned_device_id: "cpu:utility:7",
+                planned_device_id: null,
+                planned_lane_kind: "host_utility",
                 lane_order: 2,
                 estimated_finish_unix_ms: Date.now() + 7_000,
                 estimate_confidence: "low",
@@ -205,7 +206,8 @@ describe("DevicePanel", () => {
                 priority_class: "user",
                 queue_rank: 0,
                 bypass_count: 0,
-                planned_device_id: "cpu:utility:0",
+                planned_device_id: null,
+                planned_lane_kind: "host_utility",
                 lane_order: 1,
                 estimated_finish_unix_ms: Date.now() + 5_000,
                 estimate_confidence: "medium",
@@ -223,11 +225,16 @@ describe("DevicePanel", () => {
           .classes()
           .includes("device-panel--compact"),
       ).toBe(count === 0);
+      expect(
+        wrapper.get('[data-test="device-panel"]').attributes("data-lane-count"),
+      ).toBe(String(count + 1));
       const utility = wrapper.get('[data-test="cpu-utility-lane"]');
       expect(utility.text()).toContain("Host utility");
       expect(utility.text()).toContain("CPU");
-      expect(utility.text()).not.toContain("cpu:utility:");
       expect(utility.find("button").exists()).toBe(false);
+      if (count === 0) {
+        expect(wrapper.text()).not.toContain("Live GPU controls");
+      }
       expect(
         utility
           .findAll("li")
@@ -240,12 +247,81 @@ describe("DevicePanel", () => {
     }
   });
 
+  it("keeps future typed non-device lanes visible without parsing their IDs", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "future-lane-work",
+              parent_id: "parent",
+              work_kind: "future_utility",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: null,
+              planned_lane_kind: "future_host_lane",
+              lane_order: 0,
+              estimate_confidence: "low",
+              activity_phase: "queued",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.get('[data-test="other-compute-lane"]').text()).toContain(
+      "future-lane-work",
+    );
+  });
+
   it("does not invent a host utility card without CPU-planned work", () => {
     const wrapper = mount(DevicePanel, {
       props: { devices: [device(0)], plan: null },
     });
 
     expect(wrapper.find('[data-test="cpu-utility-lane"]').exists()).toBe(false);
+  });
+
+  it("shows blocked host utility work only in the blocked recovery section", () => {
+    const wrapper = mount(DevicePanel, {
+      props: {
+        devices: [],
+        plan: {
+          plan_version: 1,
+          state_version: 1,
+          optimizer_state: "optimized",
+          dirty_since_unix_ms: null,
+          next_replan_at_unix_ms: null,
+          work_items: [
+            {
+              work_id: "blocked-cpu-work",
+              parent_id: "parent",
+              work_kind: "prompt_expansion",
+              priority_class: "user",
+              queue_rank: 0,
+              bypass_count: 0,
+              planned_device_id: null,
+              planned_lane_kind: "host_utility",
+              lane_order: 0,
+              estimate_confidence: "low",
+              blocked_reason: "host_ram",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(wrapper.find('[data-test="cpu-utility-lane"]').exists()).toBe(false);
+    expect(wrapper.get('[data-test="blocked-work"]').text()).toContain(
+      "blocked-cpu-work",
+    );
   });
 
   it("updates ETA and replan countdowns while the snapshot is otherwise static", async () => {

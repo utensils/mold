@@ -34,17 +34,45 @@ const blocked = computed(
 const cpuUtilityWork = computed(
   () =>
     props.plan?.work_items
-      .filter((work) => work.planned_device_id?.startsWith("cpu:utility:"))
+      .filter(
+        (work) =>
+          work.planned_lane_kind === "host_utility" && !blockedReason(work),
+      )
+      .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
+);
+const otherComputeWork = computed(
+  () =>
+    props.plan?.work_items
+      .filter(
+        (work) =>
+          work.planned_lane_kind != null &&
+          work.planned_lane_kind !== "device" &&
+          work.planned_lane_kind !== "host_utility" &&
+          !blockedReason(work),
+      )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? [],
 );
 const compact = computed(
-  () => props.devices.length + Number(cpuUtilityWork.value.length > 0) <= 1,
+  () =>
+    props.devices.length +
+      Number(cpuUtilityWork.value.length > 0) +
+      Number(otherComputeWork.value.length > 0) <=
+    1,
 );
 const hasComputeLanes = computed(
-  () => props.devices.length > 0 || cpuUtilityWork.value.length > 0,
+  () =>
+    props.devices.length > 0 ||
+    cpuUtilityWork.value.length > 0 ||
+    otherComputeWork.value.length > 0,
+);
+const laneCount = computed(
+  () =>
+    props.devices.length +
+    Number(cpuUtilityWork.value.length > 0) +
+    Number(otherComputeWork.value.length > 0),
 );
 const lifecycleNote = computed(() => {
-  if (!props.showControls) return null;
+  if (!props.showControls || props.devices.length === 0) return null;
   if (props.mutable) {
     return "Disabling a busy GPU lets its current stage finish, then removes it from scheduling.";
   }
@@ -78,7 +106,9 @@ function stateLabel(device: DeviceInfo): string {
 function planned(device: DeviceInfo): QueueWorkItem[] {
   return (
     props.plan?.work_items
-      .filter((work) => work.planned_device_id === device.id)
+      .filter(
+        (work) => work.planned_device_id === device.id && !blockedReason(work),
+      )
       .sort((a, b) => (a.lane_order ?? 0) - (b.lane_order ?? 0)) ?? []
   );
 }
@@ -108,8 +138,8 @@ function eta(work: QueueWorkItem): string {
   return `~${seconds}s · ${work.estimate_confidence} confidence`;
 }
 
-function workKindLabel(kind: string): string {
-  const words = kind.replaceAll("_", " ");
+function workKindLabel(kind: unknown): string {
+  const words = typeof kind === "string" ? kind.replaceAll("_", " ") : "";
   return words.length ? `${words[0]!.toUpperCase()}${words.slice(1)}` : "Work";
 }
 
@@ -157,10 +187,11 @@ onBeforeUnmount(() => {
     class="device-panel"
     :class="{ 'device-panel--compact': compact }"
     :data-device-count="devices.length"
+    :data-lane-count="laneCount"
     data-test="device-panel"
   >
     <header class="device-panel__head">
-      <span>Devices</span>
+      <span>Compute</span>
       <span
         v-if="replanLabel()"
         class="device-panel__tentative"
@@ -257,6 +288,22 @@ onBeforeUnmount(() => {
         </div>
         <ol class="device-card__lane" data-test="cpu-utility-lane-list">
           <li v-for="work in cpuUtilityWork" :key="work.work_id">
+            {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
+            {{ eta(work) }}
+          </li>
+        </ol>
+      </article>
+      <article
+        v-if="otherComputeWork.length"
+        class="device-card device-card--utility"
+        data-test="other-compute-lane"
+      >
+        <div class="device-card__title">
+          <span class="device-card__name">Scheduled work</span>
+          <span class="device-card__badge">HOST</span>
+        </div>
+        <ol class="device-card__lane">
+          <li v-for="work in otherComputeWork" :key="work.work_id">
             {{ work.work_id }} · {{ workKindLabel(work.work_kind) }} ·
             {{ eta(work) }}
           </li>
