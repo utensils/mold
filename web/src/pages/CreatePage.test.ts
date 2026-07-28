@@ -1,6 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, nextTick, type Component } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import CreatePage from "./CreatePage.vue";
 import {
   useGenerateForm,
@@ -14,14 +15,36 @@ import {
 } from "../lib/toasts";
 import { styleHint } from "../lib/stylePresets";
 import { __testing__ as hostRoutingTesting } from "../composables/useHostRouting";
+import {
+  __testing__ as chainJobsTesting,
+  useChainJobs,
+} from "../composables/useChainJobs";
+import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
-import type { ChainJobDetail, GalleryImage, ModelInfoExtended } from "../types";
+import type { GalleryImage, ModelInfoExtended } from "../types";
 import type { Job } from "../composables/useGenerateStream";
 
+const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
+const routerReplaceMock = vi.hoisted(() =>
+  vi.fn((to: { query?: Record<string, unknown> }) => {
+    routeQuery.value = to.query ?? {};
+    return Promise.resolve();
+  }),
+);
 vi.mock("vue-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-router")>()),
-  useRoute: () => ({ query: {} }),
+  useRoute: () =>
+    new Proxy(
+      {},
+      { get: (_t, key) => (key === "query" ? routeQuery.value : undefined) },
+    ),
+  useRouter: () => ({ replace: routerReplaceMock, push: vi.fn() }),
+}));
+
+vi.mock("@microsoft/fetch-event-source", () => ({
+  fetchEventSource: vi.fn(async () => undefined),
 }));
 
 const entry: GalleryImage = {
@@ -61,29 +84,62 @@ const expandPromptMock = vi.hoisted(() =>
     ),
   })),
 );
-const chainJobDetailRef = vi.hoisted(
-  () =>
-    ({ __v_isRef: true, value: null as ChainJobDetail | null }) as {
-      __v_isRef: true;
-      value: ChainJobDetail | null;
-    },
-);
-const chainJobIdRef = vi.hoisted(() => ({ value: null as string | null }));
 const streamJobsRef = vi.hoisted(() => ({ value: [] as Job[] }));
-const refreshChainJobMock = vi.hoisted(() => vi.fn(async () => undefined));
+const fetchChainLimitsMock = vi.hoisted(() =>
+  vi.fn(async () => ({
+    model: "ltx-2-19b-distilled:fp8",
+    frames_per_clip_cap: 97,
+    frames_per_clip_recommended: 97,
+    max_stages: 16,
+    max_total_frames: 97 * 16,
+    fade_frames_max: 32,
+    transition_modes: ["smooth", "cut", "fade"],
+    quantization_family: "fp8",
+    supports_audio: true,
+    supports_sequence: true,
+  })),
+);
+const listChainJobsMock = vi.hoisted(() =>
+  vi.fn(async () => ({ jobs: [] as unknown[] })),
+);
+const getChainJobMock = vi.hoisted(() => vi.fn());
+const cancelChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
+const resumeChainJobMock = vi.hoisted(() => vi.fn(async () => ({})));
+const deleteChainJobMock = vi.hoisted(() => vi.fn(async () => undefined));
+const gcChainJobsMock = vi.hoisted(() =>
+  vi.fn(async () => ({ swept_ephemeral_jobs: 0, pruned_artifact_dirs: 0 })),
+);
+const amendChainJobMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../api", () => ({
-  createChainJob: createChainJobMock,
-  expandPrompt: expandPromptMock,
-  fetchModels: vi.fn(async () => []),
-  fetchQueue: vi.fn(async () => ({ entries: [] })),
-  listGallery: vi.fn(async () => [entry]),
-  deleteGalleryImage: vi.fn(async () => undefined),
-  upscaleStream: upscaleStreamMock,
-  fetchPromptHistory: vi.fn(async () => []),
-  imageUrl: (name: string) => `/api/gallery/image/${name}`,
-  thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
-}));
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return {
+    // Real error class so `instanceof ApiHttpError` branches stay honest.
+    ApiHttpError: actual.ApiHttpError,
+    createChainJob: createChainJobMock,
+    expandPrompt: expandPromptMock,
+    fetchModels: vi.fn(async () => []),
+    fetchQueue: vi.fn(async () => ({ entries: [] })),
+    listGallery: vi.fn(async () => [entry]),
+    deleteGalleryImage: vi.fn(async () => undefined),
+    upscaleStream: upscaleStreamMock,
+    fetchPromptHistory: vi.fn(async () => []),
+    imageUrl: (name: string) => `/api/gallery/image/${name}`,
+    thumbnailUrl: (name: string) => `/api/gallery/thumbnail/${name}`,
+    fetchChainLimits: fetchChainLimitsMock,
+    listChainJobs: listChainJobsMock,
+    getChainJob: getChainJobMock,
+    cancelChainJob: cancelChainJobMock,
+    resumeChainJob: resumeChainJobMock,
+    retakeChainJob: vi.fn(async () => ({})),
+    deleteChainJob: deleteChainJobMock,
+    gcChainJobs: gcChainJobsMock,
+    amendChainJob: amendChainJobMock,
+    chainJobEventsUrl: (id: string) => `/api/chain-jobs/${id}/events`,
+    chainJobStagePreviewUrl: (id: string, idx: number) =>
+      `/api/chain-jobs/${id}/stages/${idx}/preview`,
+  };
+});
 
 vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
   // Keep the real pure helpers (activeCanvasJob) — only the singleton
@@ -98,17 +154,6 @@ vi.mock("../composables/useGenerateStream", async (importOriginal) => ({
     remove: vi.fn(),
     clearDone: vi.fn(),
   }),
-}));
-
-vi.mock("../composables/useChainJobStream", () => ({
-  useChainJobStream: (jobId: { value: string | null }) => {
-    chainJobIdRef.value = jobId.value;
-    return {
-      detail: chainJobDetailRef,
-      connected: { __v_isRef: true, value: true },
-      refresh: refreshChainJobMock,
-    };
-  },
 }));
 
 vi.mock("../composables/useStatusPoll", () => ({
@@ -144,6 +189,15 @@ const RecentGridStub = defineComponent({
   template: '<div data-test="recent-grid">{{ entries.length }}</div>',
 });
 
+/** Flip the shared draft store into Sequence output (the Output card's job)
+ * without going through a mounted ControlsAside. */
+function enterSequenceMode() {
+  const draft = useSequenceDraftStore();
+  draft.hydrate();
+  draft.setOutput("sequence", { getPrompt: () => "", setPrompt: () => {} }, 97);
+  return draft;
+}
+
 describe("CreatePage layout and behavior", () => {
   beforeEach(async () => {
     // The routing singleton outlives a test's component; let any poll still in
@@ -152,6 +206,8 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
     hostRoutingTesting.reset();
     localStorage.clear();
+    setActivePinia(createPinia());
+    chainJobsTesting.reset();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
@@ -170,8 +226,17 @@ describe("CreatePage layout and behavior", () => {
         ),
       }),
     );
-    chainJobDetailRef.value = null;
-    refreshChainJobMock.mockClear();
+    fetchChainLimitsMock.mockClear();
+    listChainJobsMock.mockClear();
+    listChainJobsMock.mockResolvedValue({ jobs: [] });
+    getChainJobMock.mockReset();
+    cancelChainJobMock.mockClear();
+    resumeChainJobMock.mockClear();
+    deleteChainJobMock.mockClear();
+    gcChainJobsMock.mockClear();
+    amendChainJobMock.mockReset();
+    routeQuery.value = {};
+    routerReplaceMock.mockClear();
     hostStatusMock.mockClear();
     hostModelsMock.mockClear();
     hostModelsMock.mockResolvedValue([]);
@@ -553,61 +618,60 @@ describe("CreatePage layout and behavior", () => {
     expect(form.state.value.maskImage).toBeNull();
   });
 
-  it("submits Sequence mode through the durable chain endpoint", async () => {
-    // Sequence only offers the ScriptComposer for a chain-capable (video)
-    // model; a non-chain model gets the "sequences need a video model" panel.
+  it("submits the sequence with the LIVE inspector values (stale-inspector regression)", async () => {
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    // Switch to Sequence so the ScriptComposer renders.
-    const seqButton = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((b) => b.text() === "Sequence")!;
-    await seqButton.trigger("click");
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "the opening";
+    draft.clips[1]!.prompt = "the landing";
+    // Turn the inspector's knobs WHILE in sequence mode — the old
+    // ScriptComposer kept private copies that silently ignored these.
+    const form = useGenerateForm();
+    form.state.value.width = 1216;
+    form.state.value.height = 704;
+    form.state.value.steps = 4;
+    form.state.value.guidance = 5.5;
+    form.state.value.fps = 24;
+    await flushPromises();
 
-    wrapper.getComponent({ name: "ScriptComposer" }).vm.$emit("submit", {
-      chain: {
-        model: "ltx-2-19b-distilled:fp8",
-        width: 64,
-        height: 64,
-        fps: 12,
-        seed: 42,
-        steps: 4,
-        guidance: 3,
-        strength: 1,
-        output_format: "mp4",
-        motion_tail_frames: 0,
-      },
-      stage: [{ prompt: "stage zero", frames: 9, transition: "cut" }],
-    });
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
     await flushPromises();
 
     expect(createChainJobMock).toHaveBeenCalledTimes(1);
     expect(createChainJobMock).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "ltx-2-19b-distilled:fp8",
+        width: 1216,
+        height: 704,
+        steps: 4,
+        guidance: 5.5,
+        fps: 24,
         output_format: "mp4",
-        stages: [expect.objectContaining({ prompt: "stage zero", frames: 9 })],
+        stages: [
+          expect.objectContaining({ prompt: "the opening" }),
+          expect.objectContaining({ prompt: "the landing" }),
+        ],
       }),
       expect.objectContaining({ baseUrl: expect.any(String) }),
     );
     expect(submitMock).not.toHaveBeenCalled();
   });
 
-  it("keeps a successfully submitted Sequence job when host persistence fails", async () => {
+  it("keeps a successfully submitted sequence when tracked-job persistence fails", async () => {
     useGenerateForm().state.value.modelFamily = "ltx2";
     useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    const seqButton = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((button) => button.text() === "Sequence")!;
-    await seqButton.trigger("click");
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "one";
+    draft.clips[1]!.prompt = "two";
+    await flushPromises();
     const setItem = vi
       .spyOn(Storage.prototype, "setItem")
       .mockImplementation(function (this: Storage, key, value) {
-        if (key === "mold.create.chain-job-host")
+        if (key === "mold.create.tracked-sequences.v1")
           throw new DOMException("blocked", "QuotaExceededError");
         return Reflect.apply(
           Object.getOwnPropertyDescriptor(Storage.prototype, "setItem")!.value,
@@ -616,26 +680,33 @@ describe("CreatePage layout and behavior", () => {
         );
       });
 
-    wrapper.getComponent({ name: "ScriptComposer" }).vm.$emit("submit", {
-      chain: {
-        model: "ltx-2-19b-distilled:fp8",
-        width: 64,
-        height: 64,
-        fps: 12,
-        seed: 42,
-        steps: 4,
-        guidance: 3,
-        strength: 1,
-        output_format: "mp4",
-        motion_tail_frames: 0,
-      },
-      stage: [{ prompt: "stage zero", frames: 9, transition: "cut" }],
-    });
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
     await flushPromises();
 
+    // The durable job was created and is being watched despite storage
+    // being unavailable — persistence is recovery convenience only.
     expect(createChainJobMock).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem("mold.create.chain-job")).toBe("job-1");
+    expect(useChainJobs().state.watching).toMatchObject({ jobId: "job-1" });
     setItem.mockRestore();
+  });
+
+  it("redirects legacy ?mode=sequence deep links to ?output=sequence", async () => {
+    routeQuery.value = { mode: "sequence" };
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(routerReplaceMock).toHaveBeenCalledWith({
+      query: { output: "sequence" },
+    });
+  });
+
+  it("consumes ?output=sequence once and strips it from the URL", async () => {
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    routeQuery.value = { output: "sequence" };
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(useSequenceDraftStore().output).toBe("sequence");
+    expect(routerReplaceMock).toHaveBeenCalledWith({ query: {} });
   });
 
   it("explains Sequence for a non-chain model instead of a dead composer", async () => {
@@ -643,15 +714,15 @@ describe("CreatePage layout and behavior", () => {
     useGenerateForm().state.value.model = "flux2-klein:q4";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    const seqButton = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((b) => b.text() === "Sequence")!;
-    await seqButton.trigger("click");
-    // The Sequence tab stays reachable, but a non-chain model gets a clear
-    // explanation — not the ScriptComposer with a live-looking Generate button.
+    enterSequenceMode();
+    await nextTick();
+    // Sequence output stays reachable, but a non-chain model gets a clear
+    // explanation — not a composer with a live-looking Generate button.
     expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
-    expect(wrapper.find("[data-test='script-composer']").exists()).toBe(false);
-    // "back to single" returns to the composer.
+    expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
+      false,
+    );
+    // "back to one shot" returns to the composer.
     await wrapper.get("[data-test='chain-back-to-single']").trigger("click");
     expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(
       false,
@@ -711,10 +782,7 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    const sequence = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((button) => button.text() === "Sequence")!;
-    await sequence.trigger("click");
+    enterSequenceMode();
     await flushPromises();
 
     expect(useGenerateForm().state.value.model).toBe(
@@ -753,10 +821,8 @@ describe("CreatePage layout and behavior", () => {
     useGenerateForm().state.value.modelFamily = "flux2";
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    const sequence = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((button) => button.text() === "Sequence")!;
-    await sequence.trigger("click");
+    enterSequenceMode();
+    await nextTick();
 
     expect(
       wrapper.get("[data-test='browse-sequence-models']").attributes("to"),
@@ -769,10 +835,8 @@ describe("CreatePage layout and behavior", () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
 
-    const sequence = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((button) => button.text() === "Sequence")!;
-    await sequence.trigger("click");
+    enterSequenceMode();
+    await nextTick();
 
     expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
   });
@@ -863,7 +927,7 @@ describe("CreatePage layout and behavior", () => {
     expect(modal.props("styleDirective")).toBe(styleHint("cinematic"));
   });
 
-  it("never steers a chain-stage expand with the composer's style chip", async () => {
+  it("never steers a clip expand with the composer's style chip", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
@@ -871,16 +935,14 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.stylePreset = "cinematic";
     await nextTick();
 
-    const seqButton = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((b) => b.text() === "Sequence")!;
-    await seqButton.trigger("click");
-    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    enterSequenceMode();
+    await nextTick();
+    await wrapper.get("[data-test='clip-expand']").trigger("click");
     await nextTick();
 
     const modal = wrapper.getComponent({ name: "ExpandModal" });
     expect(modal.props("prompt")).toBe("a stage prompt");
-    // The style row belongs to the single-print composer, not to stage text.
+    // The style row belongs to the single-print composer, not to clip text.
     expect(modal.props("styleDirective")).toBeNull();
   });
 
@@ -1020,7 +1082,7 @@ describe("CreatePage layout and behavior", () => {
     });
   });
 
-  it("keeps a stage expansion out of the composer's prompt and style", async () => {
+  it("applies a clip expansion to the clip, never the composer's prompt or style", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
     form.state.value.model = "ltx2:q8";
@@ -1029,16 +1091,19 @@ describe("CreatePage layout and behavior", () => {
     form.state.value.stylePreset = "cinematic";
     await nextTick();
 
-    const seqButton = wrapper
-      .findAll("[data-test='composer-mode'] button")
-      .find((b) => b.text() === "Sequence")!;
-    await seqButton.trigger("click");
-    await wrapper.get("[data-test='stage-expand']").trigger("click");
+    const draft = enterSequenceMode();
+    await nextTick();
+    const clip = draft.clips[0]!;
+    wrapper
+      .getComponent({ name: "SequenceComposer" })
+      .vm.$emit("expand-clip", clip.id, clip.prompt);
+    await nextTick();
     wrapper
       .getComponent({ name: "ExpandModal" })
       .vm.$emit("apply-prompt", "a rewritten stage");
     await nextTick();
 
+    expect(clip.prompt).toBe("a rewritten stage");
     expect(form.state.value.prompt).toBe("a lighthouse");
     expect(form.state.value.stylePreset).toBe("cinematic");
   });
@@ -1098,63 +1163,267 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='cold-start-stub']").exists()).toBe(true);
   });
 
-  it("renders the submitted durable chain job card from useChainJobStream", async () => {
-    chainJobDetailRef.value = {
-      id: "job-1",
-      state: "queued",
-      model: "ltx-2",
-      stage_count: 1,
-      current_stage: 0,
+  it("feeds durable sequence jobs from every host into the activity strip", async () => {
+    listChainJobsMock.mockResolvedValue({
+      jobs: [
+        {
+          id: "chain-9",
+          state: "running",
+          model: "ltx-2-19b-distilled:fp8",
+          stage_count: 3,
+          current_stage: 1,
+          created_at_unix_ms: 5,
+          updated_at_unix_ms: 5,
+        },
+      ],
+    });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const strip = wrapper.getComponent({ name: "ActivityStrip" });
+    expect(
+      (strip.props("sequences") as { jobId: string }[]).map((s) => s.jobId),
+    ).toEqual(["chain-9"]);
+  });
+
+  it("deletes settled durable jobs through the strip's Delete action", async () => {
+    listChainJobsMock.mockResolvedValue({
+      jobs: [
+        {
+          id: "failed-job",
+          state: "failed",
+          model: "ltx-2.3-22b-dev:fp8",
+          stage_count: 1,
+          current_stage: 0,
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 2,
+          error: "TwoStage is unsupported",
+        },
+      ],
+    });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    wrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("sequence-action", "delete", {
+        kind: "sequence",
+        hostId: ORIGIN_HOST_ID,
+        jobId: "failed-job",
+      });
+    await flushPromises();
+
+    expect(deleteChainJobMock).toHaveBeenCalledWith(
+      "failed-job",
+      expect.objectContaining({ baseUrl: expect.any(String) }),
+    );
+    expect(cancelChainJobMock).not.toHaveBeenCalled();
+  });
+
+  it("reattaches to a tracked in-flight sequence after a reload", async () => {
+    localStorage.setItem(
+      "mold.create.tracked-sequences.v1",
+      JSON.stringify([{ hostId: ORIGIN_HOST_ID, jobId: "durable-job-7" }]),
+    );
+    listChainJobsMock.mockResolvedValue({
+      jobs: [
+        {
+          id: "durable-job-7",
+          state: "running",
+          model: "ltx-2-19b-distilled:fp8",
+          stage_count: 2,
+          current_stage: 0,
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 1,
+        },
+      ],
+    });
+    mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    expect(useChainJobs().state.watching).toEqual({
+      hostId: ORIGIN_HOST_ID,
+      jobId: "durable-job-7",
+    });
+  });
+
+  it("loads a durable job into an edit session and amends through it", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        size_gb: 20,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 8,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        description: "Sequence model",
+        supports_sequence: true,
+      },
+    ]);
+    getChainJobMock.mockResolvedValue({
+      id: "job-9",
+      state: "completed",
+      model: "ltx-2-19b-distilled:fp8",
+      stage_count: 2,
+      current_stage: 1,
       created_at_unix_ms: 1,
       updated_at_unix_ms: 2,
       error: null,
-      ephemeral: false,
-      stages: [],
+      stages: [
+        { idx: 0, state: "completed" },
+        { idx: 1, state: "completed" },
+      ],
       finalizes: [],
       retakes: [],
-      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
-    };
+      script: {
+        schema: "mold.chain.v1",
+        chain: {
+          model: "ltx-2-19b-distilled:fp8",
+          width: 640,
+          height: 384,
+          fps: 24,
+          seed: 7,
+          steps: 6,
+          guidance: 4,
+          strength: 1,
+          motion_tail_frames: 17,
+          output_format: "mp4",
+        },
+        stage: [
+          { prompt: "one", frames: 97 },
+          { prompt: "two", frames: 97, transition: "cut" },
+        ],
+      },
+    });
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    expect(
-      wrapper.getComponent({ name: "ChainJobCard" }).props("job"),
-    ).toMatchObject({ id: "job-1", state: "queued" });
 
-    wrapper.getComponent({ name: "ChainJobCard" }).vm.$emit("updated");
-    expect(refreshChainJobMock).toHaveBeenCalledOnce();
-  });
+    wrapper
+      .getComponent({ name: "ActivityStrip" })
+      .vm.$emit("sequence-action", "edit", {
+        kind: "sequence",
+        hostId: ORIGIN_HOST_ID,
+        jobId: "job-9",
+      });
+    await flushPromises();
 
-  it("dismisses settled durable jobs from Create without pretending to cancel them", async () => {
-    localStorage.setItem("mold.create.chain-job", "failed-job");
-    chainJobDetailRef.value = {
-      id: "failed-job",
-      state: "failed",
-      model: "ltx-2.3-22b-dev:fp8",
-      stage_count: 1,
+    const draft = useSequenceDraftStore();
+    expect(draft.editing).toMatchObject({
+      jobId: "job-9",
+      hostId: ORIGIN_HOST_ID,
+      completedStages: 2,
+    });
+    expect(draft.clips.map((c) => c.prompt)).toEqual(["one", "two"]);
+    expect(draft.clips[1]?.transition).toBe("cut");
+    // The job's shared params landed on the LIVE form.
+    const form = useGenerateForm();
+    expect(form.state.value.width).toBe(640);
+    expect(form.state.value.height).toBe(384);
+    expect(form.state.value.steps).toBe(6);
+    expect(form.state.value.seedMode).toBe("static");
+    expect(form.state.value.seed).toBe(7);
+
+    amendChainJobMock.mockResolvedValue({
+      id: "job-9",
+      state: "queued",
+      model: "ltx-2-19b-distilled:fp8",
+      stage_count: 2,
       current_stage: 0,
       created_at_unix_ms: 1,
-      updated_at_unix_ms: 2,
-      error: "TwoStage is unsupported",
-      ephemeral: false,
-      stages: [],
-      finalizes: [],
-      retakes: [],
-      script: { schema: "mold.chain.v1", chain: {}, stage: [] },
-    };
-    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+      updated_at_unix_ms: 3,
+      preserved_stages: 1,
+    });
+    draft.clips[1]!.prompt = "two, but stormier";
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
     await flushPromises();
 
-    wrapper.getComponent({ name: "ChainJobCard" }).vm.$emit("dismiss");
-    await nextTick();
-
-    expect(localStorage.getItem("mold.create.chain-job")).toBeNull();
+    expect(amendChainJobMock).toHaveBeenCalledWith(
+      "job-9",
+      expect.objectContaining({
+        stages: [
+          expect.objectContaining({ prompt: "one" }),
+          expect.objectContaining({ prompt: "two, but stormier" }),
+        ],
+      }),
+      expect.objectContaining({ baseUrl: expect.any(String) }),
+    );
+    expect(createChainJobMock).not.toHaveBeenCalled();
+    expect(draft.editing).toBeNull();
   });
 
-  it("reattaches to the last durable chain job after a reload", async () => {
-    localStorage.setItem("mold.create.chain-job", "durable-job-7");
-    mount(CreatePage, { global: { stubs: pageStubs() } });
+  it("falls back to create-as-new when an amend conflicts (409)", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2-19b-distilled:fp8",
+        family: "ltx2",
+        size_gb: 20,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 8,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        description: "Sequence model",
+        supports_sequence: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     await flushPromises();
-    expect(chainJobIdRef.value).toBe("durable-job-7");
+    const draft = enterSequenceMode();
+    draft.clips[0]!.prompt = "one";
+    draft.clips[1]!.prompt = "two";
+    draft.loadFromJob(
+      {
+        jobId: "job-9",
+        hostId: ORIGIN_HOST_ID,
+        baseline: draft.clips.map((c) => ({ ...c })),
+        completedStages: 1,
+      },
+      draft.clips.map((c) => ({ ...c })),
+      false,
+    );
+    await flushPromises();
+    amendChainJobMock.mockRejectedValue(
+      new ApiHttpError("POST /api/chain-jobs/job-9/amend", 409, "moved on"),
+    );
+
+    await wrapper.get("[data-test='sequence-generate']").trigger("click");
+    await flushPromises();
+
+    expect(amendChainJobMock).toHaveBeenCalledTimes(1);
+    expect(createChainJobMock).toHaveBeenCalledTimes(1);
+    expect(draft.editing).toBeNull();
+  });
+
+  it("keeps the Output control reachable on phones in sequence mode", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    useGenerateForm().state.value.modelFamily = "ltx2";
+    useGenerateForm().state.value.model = "ltx-2-19b-distilled:fp8";
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    enterSequenceMode();
+    await nextTick();
+
+    expect(wrapper.find("[data-test='phone-sequence-controls']").exists()).toBe(
+      true,
+    );
+    expect(wrapper.find("[data-test='sequence-composer-stub']").exists()).toBe(
+      true,
+    );
+    vi.unstubAllGlobals();
+    vi.stubGlobal("prompt", vi.fn());
   });
 });
 
@@ -1182,9 +1451,14 @@ describe("CreatePage host routing", () => {
     await flushPromises();
     hostRoutingTesting.reset();
     localStorage.clear();
+    setActivePinia(createPinia());
+    chainJobsTesting.reset();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
+    listChainJobsMock.mockResolvedValue({ jobs: [] });
+    routeQuery.value = {};
+    routerReplaceMock.mockClear();
     hostStatusMock.mockReset();
     hostStatusMock.mockResolvedValue({
       version: "test",
@@ -1481,18 +1755,42 @@ function pageStubs() {
       template: "<aside data-test='controls-stub' />",
     },
     AdvancedDrawer: { name: "AdvancedDrawer", template: "<div />" },
-    ActivityStrip: { name: "ActivityStrip", template: "<div />" },
-    ScriptComposer: {
-      name: "ScriptComposer",
+    ActivityStrip: {
+      name: "ActivityStrip",
+      props: ["jobs", "sequences"],
+      emits: [
+        "cancel",
+        "dismiss",
+        "open",
+        "sequence-action",
+        "clear-inactive",
+        "cleanup-disk",
+      ],
       template:
-        "<div data-test='script-composer'><button data-test='stage-expand' @click=\"$emit('expand', 0, 'a stage prompt')\">expand stage</button></div>",
-      methods: { setStagePrompt: vi.fn() },
+        "<div data-test='activity-stub' :data-sequences='(sequences||[]).length' />",
     },
-    ChainJobCard: {
-      name: "ChainJobCard",
-      props: ["job", "target"],
-      emits: ["dismiss"],
-      template: '<div data-test="chain-job-card">{{ job.id }}</div>',
+    SequenceComposer: {
+      name: "SequenceComposer",
+      props: [
+        "model",
+        "family",
+        "shared",
+        "modelDefaultFrames",
+        "target",
+        "chainLevelDirty",
+      ],
+      emits: [
+        "submit",
+        "duplicate-as-new",
+        "discard-edit",
+        "expand-clip",
+        "import-shared",
+      ],
+      template:
+        "<div data-test='sequence-composer-stub'>" +
+        "<button data-test='sequence-generate' @click=\"$emit('submit')\">go</button>" +
+        "<button data-test='clip-expand' @click=\"$emit('expand-clip', 'clip-x', 'a stage prompt')\">expand</button>" +
+        "</div>",
     },
     ExpandModal: {
       name: "ExpandModal",
