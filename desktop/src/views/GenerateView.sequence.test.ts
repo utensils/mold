@@ -105,6 +105,42 @@ describe("GenerateView — sequence output", () => {
     expect(routerReplace).toHaveBeenCalledWith({ path: "/create" });
   });
 
+  it("swaps to a sequence-capable model BEFORE seeding clips on deep-link", async () => {
+    // Deep-linking ?output=sequence while a still model is selected must
+    // not seed the clips with the still model's (absent) frame default —
+    // the capable model is applied first so defaultClipFrames sees it.
+    const stillModel = {
+      name: "flux-dev:q8",
+      family: "flux",
+      downloaded: true,
+      default_width: 1024,
+      default_height: 1024,
+      default_steps: 25,
+      default_guidance: 3.5,
+    } as ModelEntry;
+    const ltx2 = {
+      ...videoModel,
+      name: "ltx-2-19b-distilled:fp8",
+      family: "ltx2",
+      default_frames: 97,
+    } as ModelEntry;
+    readyLocal();
+    installedPayload = [stillModel, ltx2];
+    useModelStore().all = [stillModel, ltx2];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "flux-dev:q8";
+    routeQuery.value = { output: "sequence" };
+    mountView();
+    await flushPromises();
+
+    const draft = useSequenceDraftStore();
+    expect(formStore.form.model).toBe("ltx-2-19b-distilled:fp8");
+    expect(draft.lastSingleModel).toBe("flux-dev:q8");
+    // 97 comes from the swapped-in model's server-advertised default; the
+    // pre-fix ordering seeded 25 (the generic floor) from the still model.
+    expect(draft.clips[0]!.frames).toBe(97);
+  });
+
   it("renders the sequence bench instead of the single composer", async () => {
     readyLocal();
     installedPayload = [videoModel];
@@ -129,6 +165,62 @@ describe("GenerateView — sequence output", () => {
     await flushPromises();
     expect(wrapper.find("composer-card-stub").exists()).toBe(true);
     expect(wrapper.find("sequence-composer-stub").exists()).toBe(false);
+  });
+
+  it("amends with an explicit enable_audio boolean so edits can turn audio off", async () => {
+    // null means "keep current" server-side — sending it when the draft's
+    // audio is off would make disabling audio via edit-in-place impossible.
+    readyLocal();
+    installedPayload = [videoModel];
+    useModelStore().all = [videoModel];
+    const formStore = useGenerateFormStore();
+    formStore.form.model = "ltx-video";
+    const draft = useSequenceDraftStore();
+    draft.hydrate();
+    draft.output = "sequence";
+    draft.ensureClips(25);
+    draft.clips[0]!.prompt = "opening";
+    draft.clips[1]!.prompt = "landing";
+    draft.enableAudio = false; // user turned audio OFF during the edit
+    draft.loadFromJob(
+      {
+        jobId: "job-1",
+        hostId: "local",
+        baseline: draft.clips.map((c) => ({ ...c })),
+        completedStages: 2,
+      },
+      draft.clips.map((c) => ({ ...c })),
+      false,
+    );
+
+    const amendCalls: unknown[] = [];
+    apiJsonTo.mockImplementation((_target: unknown, path: unknown, init?: unknown) => {
+      if (typeof path === "string" && path.endsWith("/amend")) {
+        amendCalls.push(init);
+        return Promise.resolve({
+          id: "job-1",
+          state: "queued",
+          model: "ltx-video",
+          stage_count: 2,
+          current_stage: 0,
+          created_at_unix_ms: 1,
+          updated_at_unix_ms: 2,
+          preserved_stages: 1,
+        });
+      }
+      if (path === "/api/chain-jobs") return Promise.resolve({ jobs: [] });
+      if (path === "/api/models") return Promise.resolve(installedPayload);
+      return Promise.resolve({});
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    wrapper.findComponent({ name: "SequenceComposer" }).vm.$emit("submit");
+    await flushPromises();
+
+    expect(amendCalls.length).toBe(1);
+    const body = JSON.parse((amendCalls[0] as { body: string }).body);
+    expect(body.enable_audio).toBe(false);
   });
 
   it("guides to Discover when no chain-capable video model is installed", async () => {

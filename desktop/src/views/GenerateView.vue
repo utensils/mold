@@ -486,19 +486,21 @@ const chainLevelDirty = computed(
 function consumeOutputQuery() {
   if (activeRoute.query.output !== "sequence") return;
   if (draft.output !== "sequence") {
-    draft.setOutput(
-      "sequence",
-      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
-      sequenceDefaultFrames.value,
-    );
-    // Mirror the inspector's model rule: a non-capable selection is
-    // remembered and swapped for the first chain-capable model.
+    // Mirror the inspector's model rule, and swap BEFORE seeding clips: a
+    // non-capable selection is remembered and replaced by the first
+    // chain-capable model so setOutput's new clips default their frames
+    // from the effective selection, not the outgoing still model's.
     const current = selectedEntry.value;
     if (!current || !sequenceCapableModels.value.some((m) => m.name === current.name)) {
       draft.lastSingleModel = form.model || null;
       const pick = sequenceCapableModels.value[0];
       if (pick) formStore.applyModel(pick);
     }
+    draft.setOutput(
+      "sequence",
+      { getPrompt: () => form.prompt, setPrompt: (value) => (form.prompt = value) },
+      sequenceDefaultFrames.value,
+    );
   }
   void router.replace({ path: "/create" });
 }
@@ -586,7 +588,9 @@ async function generateSequence() {
         seed: form.seed.trim() === "" ? null : form.seed.trim(),
         steps: request.steps,
         guidance: request.guidance,
-        enable_audio: draft.enableAudio ? true : null,
+        // Always explicit: null means "keep current" server-side, which
+        // would make turning audio OFF impossible through an edit.
+        enable_audio: draft.enableAudio,
       };
       try {
         const outcome = await chains.amend(editing.hostId, editing.jobId, amend);
