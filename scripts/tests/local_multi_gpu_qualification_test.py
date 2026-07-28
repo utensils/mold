@@ -183,6 +183,22 @@ class RunnerPureContracts(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 2.0)
 
+    def test_file_reads_hashes_and_tree_walks_honor_expired_deadline(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = root / "payload"
+            path.write_bytes(b"payload")
+            deadline = runner.Deadline(0.001)
+            time.sleep(0.01)
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                runner.read_file_text(path, deadline)
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                runner.models_tree_manifest(root, deadline)
+            evidence = runner.Evidence(root / "evidence")
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                evidence.existing("payload", path, "text", deadline)
+            self.assertFalse(evidence.contains("payload"))
+
 
 class ReportValidationContracts(unittest.TestCase):
     def fixture(self, root: pathlib.Path) -> pathlib.Path:
@@ -454,7 +470,7 @@ class ReportValidationContracts(unittest.TestCase):
             "source-provenance",
             {**versioned, "commit": "a" * 40, "source_root": str(root)},
         )
-        isolated_environment(evidence_root / "probe")
+        isolated_environment(evidence_root / "candidate-probe-runtime")
         add(
             "candidate-version",
             {
@@ -464,16 +480,26 @@ class ReportValidationContracts(unittest.TestCase):
                 "version": "mold fixture",
                 "sandboxed": True,
                 "argv": sandbox_argv(
-                    [str(binary), "version"], evidence_root / "probe"
+                    [str(binary), "version"],
+                    evidence_root / "candidate-probe-runtime",
                 ),
                 "environment": {
                     "HOME": inherited_home,
-                    "TMPDIR": str(evidence_root / "probe" / "tmp"),
-                    "XDG_CACHE_HOME": str(
-                        evidence_root / "probe" / "cache" / "xdg"
+                    "TMPDIR": str(
+                        evidence_root / "candidate-probe-runtime" / "tmp"
                     ),
-                    "XDG_CONFIG_HOME": str(evidence_root / "probe" / "config"),
-                    "XDG_DATA_HOME": str(evidence_root / "probe" / "data"),
+                    "XDG_CACHE_HOME": str(
+                        evidence_root
+                        / "candidate-probe-runtime"
+                        / "cache"
+                        / "xdg"
+                    ),
+                    "XDG_CONFIG_HOME": str(
+                        evidence_root / "candidate-probe-runtime" / "config"
+                    ),
+                    "XDG_DATA_HOME": str(
+                        evidence_root / "candidate-probe-runtime" / "data"
+                    ),
                     "MOLD_HOST": None,
                 },
                 "build_identity": {
@@ -1120,6 +1146,40 @@ class ReportValidationContracts(unittest.TestCase):
         item["sha256"] = validator.sha256(evidence_path)
         report_path.write_text(json.dumps(report), encoding="utf-8")
 
+    def relocate_runtime(self, payload, runtime: pathlib.Path) -> None:
+        for relative in (
+            "tmp",
+            "cache/xdg",
+            "cache/cuda",
+            "cache/huggingface",
+            "config",
+            "data",
+            "home",
+            "output",
+        ):
+            (runtime / relative).mkdir(parents=True, exist_ok=True)
+        (runtime / "mold.db").touch()
+        argv = payload["argv"]
+        first_bind = argv.index("--bind")
+        argv[first_bind + 1] = str(runtime)
+        argv[first_bind + 2] = str(runtime)
+        second_bind = argv.index("--bind", first_bind + 1)
+        argv[second_bind + 1] = str(runtime / "tmp")
+        replacements = {
+            "TMPDIR": runtime / "tmp",
+            "XDG_CACHE_HOME": runtime / "cache" / "xdg",
+            "XDG_CONFIG_HOME": runtime / "config",
+            "XDG_DATA_HOME": runtime / "data",
+            "CUDA_CACHE_PATH": runtime / "cache" / "cuda",
+            "HF_HOME": runtime / "cache" / "huggingface",
+            "MOLD_HOME": runtime / "home",
+            "MOLD_DB_PATH": runtime / "mold.db",
+            "MOLD_OUTPUT_DIR": runtime / "output",
+        }
+        for key, path in replacements.items():
+            if key in payload["environment"]:
+                payload["environment"][key] = str(path)
+
     def test_fabricated_passing_fixture_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
@@ -1414,6 +1474,75 @@ class ReportValidationContracts(unittest.TestCase):
 
             self.mutate_evidence(path, "primary-command", mutate)
             with self.assertRaisesRegex(ValueError, "symlink|canonical|normalized"):
+                validator.validate(path, require_passing=True)
+
+    def test_candidate_version_runtime_cannot_escape_evidence_root(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+            self.mutate_evidence(
+                path,
+                "candidate-version",
+                lambda payload: self.relocate_runtime(
+                    payload, root / "external-candidate-runtime"
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "runtime|evidence|candidate"):
+                validator.validate(path, require_passing=True)
+
+    def test_selector_contract_rejects_sibling_prefix_runtime(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+            sibling = pathlib.Path(str(path) + ".d-sibling") / "contract"
+            self.mutate_evidence(
+                path,
+                "ambiguous-selector-source-contract",
+                lambda payload: self.relocate_runtime(payload, sibling),
+            )
+            with self.assertRaisesRegex(ValueError, "runtime|evidence|contract"):
+                validator.validate(path, require_passing=True)
+
+    def test_probe_runtime_cannot_reuse_another_role_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+            other_role = pathlib.Path(str(path) + ".d") / "selector-contract-runtime"
+            self.mutate_evidence(
+                path,
+                "candidate-version",
+                lambda payload: self.relocate_runtime(payload, other_role),
+            )
+            with self.assertRaisesRegex(ValueError, "runtime|role|candidate"):
+                validator.validate(path, require_passing=True)
+
+    def test_selector_runtime_cannot_reuse_another_scenario_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+
+            def mutate(payload):
+                scenario = next(
+                    row for row in payload["scenarios"] if row["label"] == "all"
+                )
+                other = pathlib.Path(str(path) + ".d") / "selector-runtimes" / "empty"
+                self.relocate_runtime(scenario, other)
+
+            self.mutate_evidence(path, "selector-matrix", mutate)
+            with self.assertRaisesRegex(ValueError, "runtime|role|selector"):
+                validator.validate(path, require_passing=True)
+
+    def test_client_runtime_cannot_reuse_probe_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            path = self.synthetic_semantic_fixture(root)
+            probe = pathlib.Path(str(path) + ".d") / "candidate-probe-runtime"
+            self.mutate_evidence(
+                path,
+                "client-projection",
+                lambda payload: self.relocate_runtime(payload, probe),
+            )
+            with self.assertRaisesRegex(ValueError, "runtime|role|client"):
                 validator.validate(path, require_passing=True)
 
     def test_empty_live_service_snapshot_is_rejected(self):

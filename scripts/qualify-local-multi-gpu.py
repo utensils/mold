@@ -110,6 +110,26 @@ def sha256(path: pathlib.Path, deadline: Deadline | None = None) -> str:
     return digest.hexdigest()
 
 
+def read_file_bytes(path: pathlib.Path, deadline: Deadline) -> bytes:
+    chunks: list[bytes] = []
+    with path.open("rb") as handle:
+        while True:
+            deadline.remaining()
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def read_file_text(path: pathlib.Path, deadline: Deadline) -> str:
+    data = read_file_bytes(path, deadline)
+    deadline.remaining()
+    value = data.decode("utf-8")
+    deadline.remaining()
+    return value
+
+
 def validate_qualification_port(port: int) -> None:
     if not (1024 <= port <= 65535):
         raise ValueError("qualification port must be in 1024..65535")
@@ -254,9 +274,16 @@ def run_process_group(
 
 
 def validate_png_output(
-    path: pathlib.Path, expected_width: int, expected_height: int
+    path: pathlib.Path,
+    expected_width: int,
+    expected_height: int,
+    deadline: Deadline | None = None,
 ) -> dict[str, object]:
-    data = path.read_bytes()
+    data = (
+        path.read_bytes()
+        if deadline is None
+        else read_file_bytes(path, deadline)
+    )
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("output is not a PNG")
     offset = 8
@@ -264,6 +291,8 @@ def validate_png_output(
     idat = bytearray()
     saw_iend = False
     while offset < len(data):
+        if deadline is not None:
+            deadline.remaining()
         if offset + 12 > len(data):
             raise ValueError("PNG has a truncated chunk")
         length = struct.unpack(">I", data[offset : offset + 4])[0]
@@ -301,12 +330,16 @@ def validate_png_output(
     if channels is None:
         raise ValueError(f"PNG has unsupported color type {color_type}")
     try:
+        if deadline is not None:
+            deadline.remaining()
         decoded = zlib.decompress(bytes(idat))
     except zlib.error as error:
         raise ValueError(f"PNG IDAT cannot be decompressed: {error}") from error
     if len(decoded) != height * (1 + width * channels):
         raise ValueError("PNG decoded byte count does not match dimensions")
     for row in range(height):
+        if deadline is not None:
+            deadline.remaining()
         if decoded[row * (1 + width * channels)] > 4:
             raise ValueError("PNG has an invalid row filter")
     return {"decoded": True, "width": width, "height": height}
@@ -560,6 +593,29 @@ class Evidence:
     def contains(self, label: str) -> bool:
         return label in self._labels
 
+    def digest(self, label: str) -> str:
+        return next(item["sha256"] for item in self.items if item["label"] == label)
+
+    def existing_prehashed(
+        self,
+        label: str,
+        path: pathlib.Path,
+        kind: str,
+        digest: str,
+    ) -> pathlib.Path:
+        if label in self._labels:
+            raise ValueError(f"duplicate evidence label: {label}")
+        self._labels.add(label)
+        self.items.append(
+            {
+                "label": label,
+                "path": str(path.resolve()),
+                "sha256": digest,
+                "kind": kind,
+            }
+        )
+        return path
+
 
 class Api:
     def __init__(self, port: int, api_key: str):
@@ -744,7 +800,9 @@ class CandidateServer:
             + "\n",
             encoding="utf-8",
         )
-        self.evidence.existing(f"{self.label}-command", command_path, "json")
+        self.evidence.existing(
+            f"{self.label}-command", command_path, "json", deadline
+        )
         self.process = subprocess.Popen(
             self.command(),
             env=self.environment(),
@@ -1220,9 +1278,10 @@ def run_parallel_lifecycle(
             "POST", "/api/generate", child, timeout=deadline.remaining()
         )
         output = evidence.directory / f"parallel-output-{index + 1}.png"
+        deadline.remaining()
         output.write_bytes(payload)
         decoded = validate_png_output(
-            output, int(child["width"]), int(child["height"])
+            output, int(child["width"]), int(child["height"]), deadline
         )
         normalized_headers = {key.lower(): value for key, value in headers.items()}
         if normalized_headers.get("content-type", "").split(";", 1)[0] != "image/png":
@@ -1243,7 +1302,10 @@ def run_parallel_lifecycle(
                 f"{response_seed} != {expected_seed}"
             )
         with lock:
-            evidence.existing(f"parallel-output-{index + 1}", output, "png")
+            evidence.existing(
+                f"parallel-output-{index + 1}", output, "png", deadline
+            )
+            output_sha256 = evidence.digest(f"parallel-output-{index + 1}")
         return {
             "index": index + 1,
             "prompt": child["prompt"],
@@ -1255,7 +1317,7 @@ def run_parallel_lifecycle(
             "decoded": decoded,
             "path": str(output.resolve()),
             "size": len(payload),
-            "sha256": sha256(output),
+            "sha256": output_sha256,
         }
 
     observed_compute_uuids: set[str] = set()
@@ -1596,7 +1658,7 @@ def run_queued_cancellation(
     evidence: Evidence,
     deadline: Deadline,
 ) -> None:
-    output_before = models_tree_manifest(server.output)
+    output_before = models_tree_manifest(server.output, deadline)
     paused = False
     thread: threading.Thread | None = None
     result: dict[str, object] = {}
@@ -1709,7 +1771,7 @@ def run_queued_cancellation(
         device.get("active_work_id") == work_id
         for device in devices_after["devices"]
     )
-    output_after = models_tree_manifest(server.output)
+    output_after = models_tree_manifest(server.output, deadline)
     output_unchanged = output_after == output_before
     if not typed_cancelled or not never_active or not output_unchanged:
         raise RuntimeError(
@@ -1985,11 +2047,18 @@ def run_selector_matrix(
     process = run_process_group(
         missing_command, env=missing.environment(), deadline=deadline, text=False
     )
-    missing.log_path.write_bytes(process.stdout + process.stderr)
-    evidence.existing("selector-missing-server-log", missing.log_path, "text")
+    missing_log = process.stdout + process.stderr
+    deadline.remaining()
+    missing.log_path.write_bytes(missing_log)
+    evidence.existing(
+        "selector-missing-server-log", missing.log_path, "text", deadline
+    )
     if process.returncode == 0:
         raise RuntimeError("unmatched NVIDIA UUID selector unexpectedly started")
-    if "did not match" not in missing.log_path.read_text(errors="replace"):
+    deadline.remaining()
+    missing_log_text = missing_log.decode(errors="replace")
+    deadline.remaining()
+    if "did not match" not in missing_log_text:
         raise RuntimeError("unmatched selector did not report a typed match failure")
     results.append(
         {
@@ -2218,6 +2287,7 @@ def main() -> int:
     source_commit = "0" * 40
     request: dict[str, object] = default_request(args.model or "unavailable")
     request_path = evidence_dir / "normalized-request.json"
+    request_sha: str | None = None
     devices: list[dict[str, object]] = []
     model_artifacts: list[dict[str, object]] = []
     artifact_roots: list[str] = []
@@ -2228,11 +2298,11 @@ def main() -> int:
         evidence.json("live-service-before", live_service_before)
         models_before = models_tree_manifest(args.models_dir, deadline)
         evidence.json("models-tree-before", models_before)
-        request_value = (
-            json.loads(args.request.read_text(encoding="utf-8"))
-            if args.request
-            else default_request(args.model)
-        )
+        if args.request:
+            request_value = json.loads(read_file_text(args.request, deadline))
+            deadline.remaining()
+        else:
+            request_value = default_request(args.model)
         if not isinstance(request_value, dict):
             raise ValueError("qualification request must be a JSON object")
         request = request_value
@@ -2243,11 +2313,14 @@ def main() -> int:
             request.get("height"), int
         ):
             raise ValueError("qualification request requires integer width/height")
+        deadline.remaining()
         request_path.write_text(
             json.dumps(request, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        evidence.existing("normalized-request", request_path, "json")
+        deadline.remaining()
+        evidence.existing("normalized-request", request_path, "json", deadline)
+        request_sha = evidence.digest("normalized-request")
         model_artifacts, artifact_roots = collect_model_artifacts(
             args.models_dir, args.model_artifact, deadline
         )
@@ -2686,11 +2759,23 @@ def main() -> int:
             evidence.text("qualification-error", error_message + "\n")
 
     if not evidence.contains("normalized-request"):
-        request_path.write_text(
-            json.dumps(request, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        evidence.existing("normalized-request", request_path, "json")
+        normalized_request = json.dumps(request, indent=2, sort_keys=True) + "\n"
+        request_path.write_text(normalized_request, encoding="utf-8")
+        # Report finalization must remain possible after the campaign deadline.
+        try:
+            evidence.existing(
+                "normalized-request", request_path, "json", deadline
+            )
+            request_sha = evidence.digest("normalized-request")
+        except TimeoutError:
+            # Hash the exact already-in-memory bytes instead of starting an
+            # unbounded post-deadline filesystem scan.
+            request_sha = hashlib.sha256(normalized_request.encode()).hexdigest()
+            evidence.existing_prehashed(
+                "normalized-request", request_path, "json", request_sha
+            )
+    elif request_sha is None:
+        request_sha = evidence.digest("normalized-request")
 
     finished = utc_now()
     all_passed = all(item["status"] == "passed" for item in checks.values())
@@ -2724,7 +2809,7 @@ def main() -> int:
         },
         "request": {
             "path": str(request_path),
-            "sha256": sha256(request_path),
+            "sha256": request_sha,
             "model": str(request.get("model", "unavailable")),
             "job_count": args.jobs,
             "artifacts": model_artifacts,

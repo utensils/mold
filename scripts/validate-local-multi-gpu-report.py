@@ -549,6 +549,7 @@ def validate_isolation_environment(
     report: dict,
     evidence_root: pathlib.Path,
     runtime: pathlib.Path,
+    expected_runtime: pathlib.Path,
     client: bool = False,
 ) -> None:
     if not isinstance(value, dict):
@@ -561,6 +562,7 @@ def validate_isolation_environment(
     )
     if value.get("MOLD_HOST") != expected_host:
         fail(f"{label} environment targets an unexpected host or reserved service")
+    validate_role_runtime(label, runtime, evidence_root, expected_runtime)
     expected_paths = {
         "TMPDIR": runtime / "tmp",
         "XDG_CACHE_HOME": runtime / "cache" / "xdg",
@@ -602,6 +604,8 @@ def validate_probe_environment(
     *,
     inherited_home: str,
     runtime: pathlib.Path,
+    evidence_root: pathlib.Path,
+    expected_runtime: pathlib.Path,
 ) -> None:
     required_keys = {
         "HOME",
@@ -615,6 +619,7 @@ def validate_probe_environment(
         fail(f"{label} environment is not the exact recorded probe environment")
     if value["HOME"] != inherited_home or value["MOLD_HOST"] is not None:
         fail(f"{label} inherited HOME or host target is invalid")
+    validate_role_runtime(label, runtime, evidence_root, expected_runtime)
     expected = {
         "TMPDIR": runtime / "tmp",
         "XDG_CACHE_HOME": runtime / "cache" / "xdg",
@@ -630,6 +635,39 @@ def validate_probe_environment(
         )
         if observed != expected_path:
             fail(f"{label} environment {key} is not the exact probe path")
+
+
+def validate_role_runtime(
+    label: str,
+    runtime: pathlib.Path,
+    evidence_root: pathlib.Path,
+    expected_runtime: pathlib.Path,
+) -> None:
+    observed = canonical_path(
+        f"{label} writable runtime",
+        str(runtime),
+        require_exists=True,
+        require_directory=True,
+    )
+    root = canonical_path(
+        f"{label} evidence root",
+        str(evidence_root),
+        require_exists=True,
+        require_directory=True,
+    )
+    expected = canonical_path(
+        f"{label} expected runtime",
+        str(expected_runtime),
+        require_exists=True,
+        require_directory=True,
+    )
+    try:
+        observed.relative_to(root)
+        expected.relative_to(root)
+    except ValueError:
+        fail(f"{label} writable runtime escapes the exact evidence root")
+    if observed != expected:
+        fail(f"{label} writable runtime is not the exact role-specific directory")
 
 
 def sandbox_runtime(argv: list[str]) -> pathlib.Path:
@@ -753,6 +791,12 @@ def validate_passing_evidence(
     paths: dict[str, pathlib.Path],
     values: dict[str, object],
 ) -> None:
+    evidence_root = canonical_path(
+        "evidence root",
+        str(report_path) + ".d",
+        require_exists=True,
+        require_directory=True,
+    )
     missing = MANDATORY_EVIDENCE - set(paths)
     if missing:
         fail(f"passing report is missing mandatory typed evidence: {sorted(missing)}")
@@ -881,6 +925,8 @@ def validate_passing_evidence(
         version.get("environment"),
         inherited_home=report["isolation"]["inherited_home"],
         runtime=sandbox_runtime(version["argv"]),
+        evidence_root=evidence_root,
+        expected_runtime=evidence_root / "candidate-probe-runtime",
     )
     build_identity = version.get("build_identity")
     if (
@@ -957,8 +1003,9 @@ def validate_passing_evidence(
         "client projection",
         client.get("environment"),
         report=report,
-        evidence_root=pathlib.Path(str(report_path) + ".d").resolve(),
+        evidence_root=evidence_root,
         runtime=sandbox_runtime(client["argv"]),
+        expected_runtime=evidence_root / "primary-runtime",
         client=True,
     )
     if client.get("server_pid") != report["candidate"]["server_pid"]:
@@ -1466,7 +1513,6 @@ def validate_passing_evidence(
 
     selector = require_evidence_version("selector-matrix", values["selector-matrix"])
     scenarios = selector.get("scenarios", [])
-    evidence_root = pathlib.Path(str(report_path) + ".d").resolve()
     physical_order = [
         str(device["uuid"])
         for device in sorted(report["host"]["devices"], key=lambda row: int(row["index"]))
@@ -1511,6 +1557,7 @@ def validate_passing_evidence(
             report=report,
             evidence_root=evidence_root,
             runtime=sandbox_runtime(scenario["argv"]),
+            expected_runtime=evidence_root / "selector-runtimes" / str(label),
         )
         if label == "missing":
             if (
@@ -1637,6 +1684,8 @@ def validate_passing_evidence(
         contract.get("environment"),
         inherited_home=report["isolation"]["inherited_home"],
         runtime=sandbox_runtime(contract["argv"]),
+        evidence_root=evidence_root,
+        expected_runtime=evidence_root / "selector-contract-runtime",
     )
 
     if values["models-tree-before"] != values["models-tree-after"]:
@@ -1669,6 +1718,7 @@ def validate_passing_evidence(
             report=report,
             evidence_root=evidence_root,
             runtime=sandbox_runtime(command["argv"]),
+            expected_runtime=evidence_root / "primary-runtime",
         )
         environment = command["environment"]
         if (
