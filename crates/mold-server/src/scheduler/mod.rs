@@ -1212,6 +1212,8 @@ struct Coordinator {
     next_plan_error: Option<PlannerError>,
     #[cfg(test)]
     before_grant_hook: Option<BeforeGrantHook>,
+    #[cfg(test)]
+    before_queue_control_plan_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1312,6 +1314,8 @@ impl Coordinator {
             next_plan_error: None,
             #[cfg(test)]
             before_grant_hook: None,
+            #[cfg(test)]
+            before_queue_control_plan_hook: None,
         }
     }
 
@@ -4588,8 +4592,30 @@ impl Coordinator {
         &mut self,
         pass: PlanningPass,
     ) -> Result<(), PlanPublicationError> {
+        let queue_paused = self.state.queue_pause.is_paused();
+        self.try_replan_and_publish_with_queue_state(pass, queue_paused, false)
+            .map(|_| ())
+    }
+
+    fn try_replan_and_publish_with_queue_state(
+        &mut self,
+        pass: PlanningPass,
+        queue_paused: bool,
+        advance_state_version: bool,
+    ) -> Result<(u64, Option<ReplanWindow>), PlanPublicationError> {
         let owner_plan_cache = self.owner_plan_cache_and_settle_errors();
-        let (snapshot, _) = self.planner_snapshot(&owner_plan_cache);
+        let prospective_state_version = self
+            .state_version
+            .saturating_add(u64::from(advance_state_version));
+        let (mut snapshot, _) = self.planner_snapshot(&owner_plan_cache);
+        snapshot.state_version = prospective_state_version;
+        snapshot.queue_paused = queue_paused;
+        let prospective_dirty = advance_state_version.then(|| {
+            let mut dirty = self.dirty.clone();
+            dirty.mark_dirty(Instant::now(), prospective_state_version);
+            snapshot.next_replan_at_ms = dirty.deadline().map(monotonic_deadline_ms);
+            dirty
+        });
         let planner = match pass {
             PlanningPass::Admission => &self.admission_planner,
             PlanningPass::Optimize => &self.planner,
@@ -4604,7 +4630,7 @@ impl Coordinator {
         let plan = plan_result?;
         self.publish_plan(&snapshot, &plan)?;
         self.plan_version = plan.plan_version;
-        Ok(())
+        Ok((prospective_state_version, prospective_dirty))
     }
 
     #[cfg(test)]
@@ -4624,16 +4650,26 @@ impl Coordinator {
 
     fn set_queue_paused_and_publish(&mut self, paused: bool) -> Result<bool, String> {
         let was_paused = self.state.queue_pause.is_paused();
-        let changed = if paused {
-            self.state.queue_pause.pause()
-        } else {
-            self.state.queue_pause.resume()
-        };
+        let changed = was_paused != paused;
         let mut immediate = false;
         self.reconcile_external_mutations(&mut immediate);
-        match self.try_replan_and_publish_with(PlanningPass::Admission) {
-            Ok(()) => {
+        #[cfg(test)]
+        if let Some(hook) = self.before_queue_control_plan_hook.take() {
+            hook();
+        }
+        match self.try_replan_and_publish_with_queue_state(PlanningPass::Admission, paused, changed)
+        {
+            Ok((published_state_version, prospective_dirty)) => {
                 if changed {
+                    if paused {
+                        self.state.queue_pause.pause();
+                    } else {
+                        self.state.queue_pause.resume();
+                    }
+                    self.last_paused = paused;
+                    self.state_version = published_state_version;
+                    self.dirty = prospective_dirty
+                        .expect("changed queue pause state must carry its replan window");
                     self.state.events.publish(if paused {
                         mold_core::ServerEvent::QueuePaused
                     } else {
@@ -4642,23 +4678,9 @@ impl Coordinator {
                 }
                 Ok(changed)
             }
-            Err(error) => {
-                // State, plan, event, and acknowledgement form one serialized
-                // transaction. Restore the exact prior gate after either
-                // transition fails, then best-effort republish that authority.
-                if changed {
-                    if was_paused {
-                        self.state.queue_pause.pause();
-                    } else {
-                        self.state.queue_pause.resume();
-                    }
-                    self.reconcile_external_mutations(&mut immediate);
-                    self.replan_and_publish_with(PlanningPass::Admission);
-                }
-                Err(format!(
-                    "scheduler could not publish queue pause state: {error}"
-                ))
-            }
+            Err(error) => Err(format!(
+                "scheduler could not publish queue pause state: {error}"
+            )),
         }
     }
 
@@ -8319,6 +8341,61 @@ mod tests {
             coordinator.state.queue_pause.is_paused(),
             "failed resume must restore the safe paused gate"
         );
+    }
+
+    #[test]
+    fn failed_resume_never_releases_a_blocked_waiter_before_plan_commit() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let queue_pause = state.queue_pause.clone();
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        assert!(coordinator.set_queue_paused_and_publish(true).unwrap());
+        coordinator.next_plan_error = Some(PlannerError::DuplicateWorkId {
+            work_id: WorkId::new("injected-resume-publication-error"),
+        });
+
+        let crossed = Arc::new(AtomicBool::new(false));
+        let waiter_pause = queue_pause.clone();
+        let waiter_crossed = crossed.clone();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            waiter_pause.wait_if_paused_blocking(&|| false);
+            waiter_crossed.store(true, Ordering::SeqCst);
+        });
+        let observed_crossed = crossed.clone();
+        coordinator.before_queue_control_plan_hook = Some(Box::new(move || {
+            start_tx.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while !observed_crossed.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        }));
+
+        coordinator
+            .set_queue_paused_and_publish(false)
+            .expect_err("injected resume publication failure must be returned");
+
+        assert!(
+            !crossed.load(Ordering::SeqCst),
+            "a rejected resume must never expose a transient unpaused gate"
+        );
+        assert!(queue_pause.is_paused());
+        queue_pause.resume();
+        waiter.join().unwrap();
     }
 
     #[test]
