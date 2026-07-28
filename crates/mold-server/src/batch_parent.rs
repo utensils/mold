@@ -1,9 +1,10 @@
 //! Sparse, crash-recoverable state for one server-owned batch parent.
 //!
 //! Version 2 journals one constant-size delta per reducer mutation. A parent
-//! materializes only a bounded child window and compacts ordered successes
-//! into `settled_prefix`, so a large lazy batch does not allocate `N` child
-//! states. The reader remains compatible with version-1 snapshot journals.
+//! materializes only bounded live child state, compacts ordered successes into
+//! `settled_prefix`, and retains later successes as bounded canonical ranges,
+//! so a large lazy batch does not allocate `N` child states. The reader remains
+//! compatible with version-1 snapshot journals.
 
 use anyhow::Context as _;
 use mold_inference::InferenceCancellationToken;
@@ -137,6 +138,7 @@ pub struct BatchParentReducer {
     attempt_generation: u64,
     state: BatchParentState,
     settled_prefix: usize,
+    succeeded_ranges: BTreeMap<usize, usize>,
     children: BTreeMap<usize, SparseChild>,
     active: BTreeSet<usize>,
     cancellation_tokens: BTreeMap<usize, InferenceCancellationToken>,
@@ -152,6 +154,8 @@ struct BatchParentCheckpointV2 {
     attempt_generation: u64,
     state: BatchParentState,
     settled_prefix: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    succeeded_ranges: BTreeMap<usize, usize>,
     children: BTreeMap<usize, SparseChild>,
     active: BTreeSet<usize>,
     terminal_after_fence: Option<BatchParentState>,
@@ -711,6 +715,7 @@ impl BatchParentReducer {
             attempt_generation: 0,
             state: BatchParentState::Queued,
             settled_prefix: 0,
+            succeeded_ranges: BTreeMap::new(),
             children: BTreeMap::new(),
             active: BTreeSet::new(),
             cancellation_tokens: BTreeMap::new(),
@@ -730,6 +735,14 @@ impl BatchParentReducer {
         self.children.len()
     }
 
+    fn retained_state_count(&self) -> usize {
+        self.children.len() + self.succeeded_ranges.len()
+    }
+
+    fn has_materialization_capacity(&self) -> bool {
+        self.retained_state_count() < MAX_MATERIALIZED_CHILDREN
+    }
+
     pub fn pending_window(
         &self,
         cursor: usize,
@@ -739,22 +752,44 @@ impl BatchParentReducer {
             (1..=MAX_MATERIALIZED_CHILDREN).contains(&limit),
             "pending window limit must be between 1 and {MAX_MATERIALIZED_CHILDREN}"
         );
-        let start = cursor.max(self.settled_prefix);
-        let materialized_end = self
-            .settled_prefix
-            .saturating_add(MAX_MATERIALIZED_CHILDREN)
-            .min(self.total_children);
-        let mut indices = Vec::with_capacity(limit);
-        let mut next_cursor = None;
-        for index in start..materialized_end {
-            if self.child_is_pending(index) {
-                if indices.len() == limit {
-                    next_cursor = Some(index);
-                    break;
-                }
-                indices.push(index);
+        let mut grantable = self
+            .children
+            .iter()
+            .filter_map(|(index, child)| (child.state == ChildState::Pending).then_some(*index))
+            .collect::<BTreeSet<_>>();
+        anyhow::ensure!(
+            self.retained_state_count() <= MAX_MATERIALIZED_CHILDREN,
+            "batch parent exceeds its sparse retained-state bound"
+        );
+        let mut shadow = self.clone();
+        let mut index = self.settled_prefix;
+        while index < self.total_children {
+            if let Some(end) = shadow.succeeded_range_end(index) {
+                index = end;
+                continue;
             }
+            if shadow.children.contains_key(&index) {
+                index += 1;
+                continue;
+            }
+            if shadow.has_materialization_capacity() {
+                grantable.insert(index);
+                shadow.children.insert(
+                    index,
+                    SparseChild {
+                        state: ChildState::Pending,
+                        lease_generation: 0,
+                        retry_count: 0,
+                    },
+                );
+                index += 1;
+                continue;
+            }
+            break;
         }
+        let mut eligible = grantable.range(cursor.max(self.settled_prefix)..);
+        let indices = eligible.by_ref().take(limit).copied().collect::<Vec<_>>();
+        let next_cursor = eligible.next().copied();
         Ok(PendingIndexWindow {
             indices,
             next_cursor,
@@ -785,7 +820,7 @@ impl BatchParentReducer {
     fn grant_inner(
         &mut self,
         child_index: usize,
-        enforce_materialization_window: bool,
+        enforce_v2_bound: bool,
     ) -> anyhow::Result<BatchChildLease> {
         anyhow::ensure!(
             self.state == BatchParentState::Running,
@@ -797,17 +832,15 @@ impl BatchParentReducer {
             "batch child index out of range"
         );
         anyhow::ensure!(
-            !enforce_materialization_window
-                || child_index
-                    < self
-                        .settled_prefix
-                        .saturating_add(MAX_MATERIALIZED_CHILDREN),
-            "batch child {child_index} is outside the current materialization window"
-        );
-        anyhow::ensure!(
             self.child_is_pending(child_index),
             "batch child is not pending"
         );
+        if enforce_v2_bound && !self.children.contains_key(&child_index) {
+            anyhow::ensure!(
+                self.has_materialization_capacity(),
+                "batch child {child_index} exceeds the sparse retained-state capacity"
+            );
+        }
         let child = self.children.entry(child_index).or_insert(SparseChild {
             state: ChildState::Pending,
             lease_generation: 0,
@@ -860,7 +893,7 @@ impl BatchParentReducer {
             "batch child index out of range"
         );
         if lease.attempt_generation < self.attempt_generation
-            || lease.child_index < self.settled_prefix
+            || self.child_is_succeeded(lease.child_index)
         {
             return Ok(CompletionDisposition::StaleDeletePrivateArtifact);
         }
@@ -871,7 +904,7 @@ impl BatchParentReducer {
         let Some(child) = self.children.get(&lease.child_index) else {
             anyhow::bail!("batch child has no materialized lease");
         };
-        if lease.lease_generation < child.lease_generation || child.state == ChildState::Succeeded {
+        if lease.lease_generation < child.lease_generation {
             return Ok(CompletionDisposition::StaleDeletePrivateArtifact);
         }
         anyhow::ensure!(
@@ -925,6 +958,7 @@ impl BatchParentReducer {
             .checked_add(1)
             .context("batch attempt generation overflow")?;
         self.settled_prefix = 0;
+        self.succeeded_ranges.clear();
         self.children.clear();
         self.active.clear();
         self.cancellation_tokens.clear();
@@ -978,8 +1012,8 @@ impl BatchParentReducer {
     ) -> anyhow::Result<CompletionDisposition> {
         match completion {
             ChildCompletion::Succeeded => {
-                self.children.get_mut(&child_index).unwrap().state = ChildState::Succeeded;
-                self.compact_successes();
+                self.children.remove(&child_index);
+                self.record_success(child_index);
                 if self.settled_prefix == self.total_children {
                     anyhow::ensure!(
                         self.active.is_empty(),
@@ -1046,18 +1080,50 @@ impl BatchParentReducer {
     }
 
     fn compact_successes(&mut self) {
-        while self
-            .children
-            .get(&self.settled_prefix)
-            .is_some_and(|child| child.state == ChildState::Succeeded)
-        {
-            self.children.remove(&self.settled_prefix);
-            self.settled_prefix += 1;
+        while let Some(end) = self.succeeded_ranges.remove(&self.settled_prefix) {
+            self.settled_prefix = end;
         }
+    }
+
+    fn record_success(&mut self, child_index: usize) {
+        let mut start = child_index;
+        let mut end = child_index + 1;
+        if let Some((previous_start, previous_end)) = self
+            .succeeded_ranges
+            .range(..child_index)
+            .next_back()
+            .map(|(start, end)| (*start, *end))
+        {
+            if previous_end == child_index {
+                start = previous_start;
+                self.succeeded_ranges.remove(&previous_start);
+            }
+        }
+        if let Some((next_start, next_end)) = self
+            .succeeded_ranges
+            .range(end..)
+            .next()
+            .map(|(start, end)| (*start, *end))
+        {
+            if next_start == end {
+                end = next_end;
+                self.succeeded_ranges.remove(&next_start);
+            }
+        }
+        self.succeeded_ranges.insert(start, end);
+        self.compact_successes();
+    }
+
+    fn succeeded_range_end(&self, child_index: usize) -> Option<usize> {
+        self.succeeded_ranges
+            .range(..=child_index)
+            .next_back()
+            .and_then(|(_, end)| (child_index < *end).then_some(*end))
     }
 
     fn child_is_pending(&self, child_index: usize) -> bool {
         child_index >= self.settled_prefix
+            && self.succeeded_range_end(child_index).is_none()
             && self
                 .children
                 .get(&child_index)
@@ -1065,15 +1131,12 @@ impl BatchParentReducer {
     }
 
     fn child_is_succeeded(&self, child_index: usize) -> bool {
-        child_index < self.settled_prefix
-            || self
-                .children
-                .get(&child_index)
-                .is_some_and(|child| child.state == ChildState::Succeeded)
+        child_index < self.settled_prefix || self.succeeded_range_end(child_index).is_some()
     }
 
     fn retain_only_active(&mut self) {
         self.children.retain(|index, _| self.active.contains(index));
+        self.succeeded_ranges.clear();
     }
 
     fn cancel_active_children(&self) {
@@ -1096,6 +1159,7 @@ impl BatchParentReducer {
         );
         self.active.clear();
         self.children.clear();
+        self.succeeded_ranges.clear();
         self.cancellation_tokens.clear();
         self.terminal_after_fence = Some(if self.state == BatchParentState::Cancelling {
             BatchParentState::Cancelled
@@ -1130,6 +1194,7 @@ impl BatchParentReducer {
             attempt_generation: self.attempt_generation,
             state: self.state,
             settled_prefix: self.settled_prefix,
+            succeeded_ranges: self.succeeded_ranges.clone(),
             children: self.children.clone(),
             active: self.active.clone(),
             terminal_after_fence: self.terminal_after_fence,
@@ -1143,20 +1208,18 @@ fn reducer_authority_eq(left: &BatchParentReducer, right: &BatchParentReducer) -
         && left.attempt_generation == right.attempt_generation
         && left.state == right.state
         && left.settled_prefix == right.settled_prefix
+        && left.succeeded_ranges == right.succeeded_ranges
         && left.children == right.children
         && left.active == right.active
         && left.terminal_after_fence == right.terminal_after_fence
 }
 
 fn reducer_is_v2_representable(reducer: &BatchParentReducer) -> bool {
-    reducer.children.len() <= MAX_MATERIALIZED_CHILDREN
-        && reducer.children.keys().all(|index| {
-            *index >= reducer.settled_prefix
-                && *index
-                    < reducer
-                        .settled_prefix
-                        .saturating_add(MAX_MATERIALIZED_CHILDREN)
-        })
+    reducer.retained_state_count() <= MAX_MATERIALIZED_CHILDREN
+        && reducer
+            .children
+            .keys()
+            .all(|index| *index >= reducer.settled_prefix)
 }
 
 fn v1_snapshot_from_reducer(
@@ -1167,7 +1230,7 @@ fn v1_snapshot_from_reducer(
     let mut child_lease_generations = Vec::with_capacity(reducer.total_children);
     let mut retry_counts = Vec::with_capacity(reducer.total_children);
     for index in 0..reducer.total_children {
-        if index < reducer.settled_prefix {
+        if reducer.child_is_succeeded(index) {
             children.push(ChildState::Succeeded);
             child_lease_generations.push(previous.child_lease_generations[index]);
             retry_counts.push(previous.retry_counts[index]);
@@ -1219,24 +1282,33 @@ fn validate_v2_checkpoint(checkpoint: &BatchParentCheckpointV2) -> anyhow::Resul
     );
     anyhow::ensure!(
         checkpoint.settled_prefix <= checkpoint.total_children
-            && checkpoint.children.len() <= MAX_MATERIALIZED_CHILDREN
+            && checkpoint.children.len() + checkpoint.succeeded_ranges.len()
+                <= MAX_MATERIALIZED_CHILDREN
             && checkpoint
                 .children
                 .keys()
                 .all(|index| *index >= checkpoint.settled_prefix
-                    && *index < checkpoint.total_children
-                    && *index
-                        < checkpoint
-                            .settled_prefix
-                            .saturating_add(MAX_MATERIALIZED_CHILDREN)),
+                    && *index < checkpoint.total_children),
         "batch parent checkpoint violates the sparse materialization bound"
     );
+    let mut previous_end = None;
+    for (start, end) in &checkpoint.succeeded_ranges {
+        anyhow::ensure!(
+            *start > checkpoint.settled_prefix
+                && start < end
+                && *end <= checkpoint.total_children
+                && previous_end.is_none_or(|previous| previous < *start),
+            "batch parent checkpoint has noncanonical succeeded ranges"
+        );
+        anyhow::ensure!(
+            checkpoint.children.range(*start..*end).next().is_none(),
+            "batch parent checkpoint overlaps succeeded and live child state"
+        );
+        previous_end = Some(*end);
+    }
     anyhow::ensure!(
-        checkpoint.active.iter().all(|index| {
-            checkpoint
-                .children
-                .get(index)
-                .is_some_and(|child| child.state == ChildState::Active)
+        checkpoint.children.iter().all(|(index, child)| {
+            (child.state == ChildState::Active) == checkpoint.active.contains(index)
         }),
         "batch parent checkpoint active set is inconsistent"
     );
@@ -1546,11 +1618,26 @@ fn reducer_from_v1(snapshot: &BatchParentSnapshotV1) -> BatchParentReducer {
         .iter()
         .take_while(|state| **state == ChildState::Succeeded)
         .count();
+    let mut succeeded_ranges = BTreeMap::new();
+    let mut range_start = None;
+    for index in settled_prefix..snapshot.total_children {
+        if snapshot.children[index] == ChildState::Succeeded {
+            range_start.get_or_insert(index);
+        } else if let Some(start) = range_start.take() {
+            succeeded_ranges.insert(start, index);
+        }
+    }
+    if let Some(start) = range_start {
+        succeeded_ranges.insert(start, snapshot.total_children);
+    }
     let children = snapshot
         .children
         .iter()
         .enumerate()
-        .filter(|(index, state)| *index >= settled_prefix && **state != ChildState::Pending)
+        .filter(|(index, state)| {
+            *index >= settled_prefix
+                && !matches!(**state, ChildState::Pending | ChildState::Succeeded)
+        })
         .map(|(index, state)| {
             (
                 index,
@@ -1568,6 +1655,7 @@ fn reducer_from_v1(snapshot: &BatchParentSnapshotV1) -> BatchParentReducer {
         attempt_generation: snapshot.attempt_generation,
         state: snapshot.state,
         settled_prefix,
+        succeeded_ranges,
         children,
         active: snapshot.active.clone(),
         cancellation_tokens: snapshot
@@ -1676,7 +1764,7 @@ fn v1_matches_reducer(
         return false;
     }
     for index in 0..snapshot.total_children {
-        let (state, lease, retry) = if index < reducer.settled_prefix {
+        let (state, lease, retry) = if reducer.child_is_succeeded(index) {
             (
                 ChildState::Succeeded,
                 previous.child_lease_generations[index],
@@ -1974,6 +2062,7 @@ mod tests {
             .map(|index| parent.grant(index).unwrap())
             .collect();
         assert_eq!(parent.tracked_child_count(), MAX_MATERIALIZED_CHILDREN);
+        assert!(parent.grant(MAX_MATERIALIZED_CHILDREN + 10).is_err());
         for lease in leases.into_iter().rev() {
             parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
             assert!(parent.tracked_child_count() <= MAX_MATERIALIZED_CHILDREN);
@@ -1983,12 +2072,207 @@ mod tests {
     }
 
     #[test]
-    fn child_beyond_live_window_is_rejected_then_admitted_after_prefix_advance() {
+    fn blocked_first_child_does_not_stall_the_sparse_success_frontier() {
+        let total = MAX_MATERIALIZED_CHILDREN + 3;
+        let mut parent = running_parent(total);
+        let blocked = parent.grant(0).unwrap();
+
+        for child_index in 1..total {
+            let lease = parent.grant(child_index).unwrap();
+            assert_eq!(
+                parent.complete(&lease, ChildCompletion::Succeeded).unwrap(),
+                CompletionDisposition::Accepted
+            );
+            assert!(
+                parent.tracked_child_count() <= 1,
+                "settled sparse successes consumed the live materialization budget"
+            );
+        }
+
+        assert_eq!(parent.settled_prefix, 0);
+        assert_eq!(
+            parent
+                .complete(&blocked, ChildCompletion::Succeeded)
+                .unwrap(),
+            CompletionDisposition::AttemptPrepared
+        );
+        assert_eq!(parent.settled_prefix, total);
+        assert_eq!(parent.tracked_child_count(), 0);
+    }
+
+    #[test]
+    fn reverse_hundred_thousand_successes_retain_constant_sparse_state() {
+        let total = 100_000;
+        let mut parent = running_parent(total);
+
+        for child_index in (0..total).rev() {
+            let lease = parent.grant(child_index).unwrap();
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+            assert!(
+                parent.tracked_child_count() <= 1,
+                "compacted reverse success stream retained materialized children"
+            );
+        }
+
+        assert_eq!(parent.state(), BatchParentState::Prepared);
+        assert_eq!(parent.settled_prefix, total);
+        assert!(
+            serde_json::to_vec(&parent.checkpoint(200_000))
+                .unwrap()
+                .len()
+                < 4096,
+            "reverse success checkpoint is not compact"
+        );
+    }
+
+    #[test]
+    fn pending_window_skips_compact_successes_to_the_next_real_pending_child() {
+        let total = MAX_MATERIALIZED_CHILDREN + 8;
+        let mut parent = running_parent(total);
+        let _blocked = parent.grant(0).unwrap();
+        for child_index in 1..=MAX_MATERIALIZED_CHILDREN + 2 {
+            let lease = parent.grant(child_index).unwrap();
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+        }
+
+        assert_eq!(
+            parent.pending_window(1, 3).unwrap().indices,
+            vec![
+                MAX_MATERIALIZED_CHILDREN + 3,
+                MAX_MATERIALIZED_CHILDREN + 4,
+                MAX_MATERIALIZED_CHILDREN + 5,
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_success_frontier_replays_exactly_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let total = MAX_MATERIALIZED_CHILDREN + 8;
+        let mut parent = DurableBatchParent::create(dir.path(), "parent", total).unwrap();
+        parent.start().unwrap();
+        let blocked = parent.grant(0).unwrap().0;
+        for child_index in 1..=MAX_MATERIALIZED_CHILDREN + 2 {
+            let lease = parent.grant(child_index).unwrap().0;
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+        }
+        let before = parent.pending_window(1, MAX_MATERIALIZED_CHILDREN).unwrap();
+        parent.write_checkpoint(parent.next_sequence - 1).unwrap();
+        drop(parent);
+
+        let mut recovered = DurableBatchParent::recover_unfenced(dir.path()).unwrap();
+        assert_eq!(
+            recovered
+                .pending_window(1, MAX_MATERIALIZED_CHILDREN)
+                .unwrap(),
+            before
+        );
+        assert_eq!(recovered.tracked_child_count(), 1);
+        assert!(recovered.child_is_succeeded(MAX_MATERIALIZED_CHILDREN + 2));
+        assert_eq!(
+            recovered
+                .complete(&blocked, ChildCompletion::Succeeded)
+                .unwrap(),
+            CompletionDisposition::Accepted
+        );
+        assert_eq!(recovered.settled_prefix(), MAX_MATERIALIZED_CHILDREN + 3);
+    }
+
+    #[test]
+    fn duplicate_completion_held_only_by_success_range_is_stale() {
+        let mut parent = running_parent(4);
+        let _blocked = parent.grant(0).unwrap();
+        let lease = parent.grant(1).unwrap();
+        assert_eq!(
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap(),
+            CompletionDisposition::Accepted
+        );
+        assert!(!parent.children.contains_key(&1));
+        assert_eq!(
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap(),
+            CompletionDisposition::StaleDeletePrivateArtifact
+        );
+    }
+
+    #[test]
+    fn adversarial_sparse_successes_backpressure_then_admit_a_merging_gap() {
+        let total = MAX_MATERIALIZED_CHILDREN * 3;
+        let mut parent = running_parent(total);
+        let blocked = parent.grant(0).unwrap();
+        let sparse = (1..MAX_MATERIALIZED_CHILDREN)
+            .map(|offset| parent.grant(offset * 2).unwrap())
+            .collect::<Vec<_>>();
+        for lease in sparse {
+            parent.complete(&lease, ChildCompletion::Succeeded).unwrap();
+            assert!(parent.retained_state_count() <= MAX_MATERIALIZED_CHILDREN);
+        }
+        assert_eq!(parent.retained_state_count(), MAX_MATERIALIZED_CHILDREN);
+        assert_eq!(parent.succeeded_ranges.len(), MAX_MATERIALIZED_CHILDREN - 1);
+        assert!(parent.grant(total - 1).is_err());
+
+        parent
+            .complete(&blocked, ChildCompletion::Succeeded)
+            .unwrap();
+        assert_eq!(parent.retained_state_count(), MAX_MATERIALIZED_CHILDREN - 1);
+        let bridge = parent.grant(1).unwrap();
+        assert_eq!(parent.retained_state_count(), MAX_MATERIALIZED_CHILDREN);
+        parent
+            .complete(&bridge, ChildCompletion::Succeeded)
+            .unwrap();
+        assert_eq!(parent.retained_state_count(), MAX_MATERIALIZED_CHILDREN - 2);
+        assert!(
+            serde_json::to_vec(&parent.checkpoint(1)).unwrap().len() < 128_000,
+            "bounded sparse checkpoint grew unexpectedly"
+        );
+
+        for child_index in (3..(MAX_MATERIALIZED_CHILDREN - 1) * 2).step_by(2) {
+            let bridge = parent.grant(child_index).unwrap();
+            parent
+                .complete(&bridge, ChildCompletion::Succeeded)
+                .unwrap();
+            assert!(parent.retained_state_count() <= MAX_MATERIALIZED_CHILDREN);
+        }
+        assert!(parent.succeeded_ranges.is_empty());
+        assert_eq!(
+            parent.settled_prefix,
+            (MAX_MATERIALIZED_CHILDREN - 1) * 2 + 1
+        );
+    }
+
+    #[test]
+    fn high_index_grants_are_governed_by_sparse_capacity_not_prefix_distance() {
         let mut parent = running_parent(100_000);
-        assert!(parent.grant(MAX_MATERIALIZED_CHILDREN).is_err());
-        let first = parent.grant(0).unwrap();
-        parent.complete(&first, ChildCompletion::Succeeded).unwrap();
         assert!(parent.grant(MAX_MATERIALIZED_CHILDREN).is_ok());
+    }
+
+    #[test]
+    fn malformed_sparse_success_checkpoints_fail_closed() {
+        fn assert_recovery_rejects(ranges: BTreeMap<usize, usize>, active_child: Option<usize>) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut parent = DurableBatchParent::create(dir.path(), "parent", 4_096).unwrap();
+            if let Some(child_index) = active_child {
+                parent.start().unwrap();
+                parent.grant(child_index).unwrap();
+            }
+            let mut checkpoint = parent.reducer.checkpoint(parent.next_sequence - 1);
+            checkpoint.succeeded_ranges = ranges;
+            atomic_write_parent_json(&dir.path().join(PARENT_SNAPSHOT_FILE), &checkpoint).unwrap();
+            drop(parent);
+            assert!(DurableBatchParent::recover_unfenced(dir.path()).is_err());
+        }
+
+        assert_recovery_rejects(BTreeMap::from([(1, 1)]), None);
+        assert_recovery_rejects(BTreeMap::from([(1, 4_097)]), None);
+        assert_recovery_rejects(BTreeMap::from([(0, 1)]), None);
+        assert_recovery_rejects(BTreeMap::from([(1, 3), (3, 5)]), None);
+        assert_recovery_rejects(BTreeMap::from([(1, 5), (3, 6)]), None);
+        assert_recovery_rejects(BTreeMap::from([(3, 6)]), Some(4));
+        assert_recovery_rejects(
+            (0..=MAX_MATERIALIZED_CHILDREN)
+                .map(|index| (index * 2 + 1, index * 2 + 2))
+                .collect(),
+            None,
+        );
     }
 
     #[test]
