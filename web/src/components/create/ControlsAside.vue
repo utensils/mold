@@ -18,6 +18,7 @@ import BadgePill from "@ui/components/BadgePill.vue";
 import Icon from "@ui/components/Icon.vue";
 import { ASPECTS, dimsForMp } from "@ui/lib/resolution";
 import type { GenerateFormState } from "../../types";
+import type { OutputMode } from "@studio/lib/sequence";
 import { generationCapabilitiesForFamily } from "../../lib/generateCapabilities";
 import { projectResolution } from "./resolutionProjection";
 import HostRoutingPicker from "./HostRoutingPicker.vue";
@@ -35,12 +36,24 @@ const props = withDefaults(
     /** Seed of the most recent finished print — powers "lock last seed"
      * (desktop InspectorPanel parity). */
     lastSeed?: number | null;
+    /** Output is a setting, not a place (mockup 1c/3a): One shot | Sequence
+     * lives here between the model picker and Shape. */
+    output?: OutputMode;
+    /** Clips currently parked on the composer rail (sequence caption). */
+    clipCount?: number;
   }>(),
-  { advCount: 0, mobile: false, lastSeed: null },
+  {
+    advCount: 0,
+    mobile: false,
+    lastSeed: null,
+    output: "single",
+    clipCount: 0,
+  },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [value: GenerateFormState];
+  "update:output": [value: OutputMode];
   "open-advanced": [];
   /* The rail only knows the form, not the catalog row behind it, so the page
    * owns the actual reset (model defaults + the undo offer). */
@@ -50,8 +63,17 @@ const emit = defineEmits<{
 const capabilities = computed(() =>
   generationCapabilitiesForFamily(props.family),
 );
-// Edit families (Qwen image edit) render one print at a time.
-const batchLocked = computed(() => capabilities.value.forcesBatchSizeOne);
+const sequenceMode = computed(() => props.output === "sequence");
+// Edit families (Qwen image edit) render one print at a time; a sequence
+// renders one timeline.
+const batchLocked = computed(
+  () => capabilities.value.forcesBatchSizeOne || sequenceMode.value,
+);
+
+const outputSegments = [
+  { value: "single", label: "One shot" },
+  { value: "sequence", label: "Sequence" },
+] as const;
 
 // Reroll: a fresh random seed for the next print without leaving Fixed mode —
 // mirrors the desktop inspector's reroll. Switches to Random so the server
@@ -141,6 +163,21 @@ function lockLastSeed() {
       >
         ↺ Reset
       </button>
+    </div>
+
+    <div class="controls__group controls__output" data-test="output-card">
+      <div class="controls__label">Output</div>
+      <SegmentedControl
+        data-test="output-mode"
+        :model-value="output"
+        :options="outputSegments"
+        label="Output"
+        @update:model-value="emit('update:output', $event as OutputMode)"
+      />
+      <p v-if="sequenceMode" class="controls__hint" data-test="output-caption">
+        {{ clipCount }} clips on the composer rail · switching back keeps clip 1
+        and parks the rest.
+      </p>
     </div>
 
     <div class="controls__group">
@@ -242,7 +279,11 @@ function lockLastSeed() {
         />
       </div>
       <p v-if="batchLocked" class="controls__hint" data-test="batch-locked">
-        locked to 1 — edit models render one print at a time.
+        {{
+          sequenceMode
+            ? "locked to 1 — a sequence renders one timeline."
+            : "locked to 1 — edit models render one print at a time."
+        }}
       </p>
     </div>
 
@@ -316,6 +357,15 @@ function lockLastSeed() {
 
 .controls__group {
   margin-bottom: 20px;
+}
+
+/* Output is the one mode-defining setting — a highlighted card so it reads
+ * apart from the tuning sliders below it. */
+.controls__output {
+  border: 1px solid var(--sel-border, var(--ce));
+  background: var(--sel-bg, var(--bath));
+  border-radius: var(--radius-card);
+  padding: 12px;
 }
 
 .controls__label {

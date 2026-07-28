@@ -245,6 +245,9 @@ export interface ModelInfoExtended extends ModelDefaults {
   supports_audio?: boolean | null;
   /** Model-specific sequence support; absent on older servers. */
   supports_sequence?: boolean | null;
+  /** Model's own default frame count (`/api/models`, additive) — LTX-2
+   * ships 97, LTX-Video 25; absent on older servers and image models. */
+  default_frames?: number | null;
 }
 
 export interface GpuInfo {
@@ -486,7 +489,7 @@ export interface RetakeAmendment {
   at_unix_ms: number;
 }
 
-// script is a NEW wire-exact mirror (NOT lib/chainToml.ts's ChainScriptToml):
+// script is a NEW wire-exact mirror (NOT @studio/lib/chainToml's ChainScript):
 // Rust ChainScript serializes stages under the key "stage"
 // (#[serde(rename = "stage")], chain.rs:236) — mirror pins that name.
 export interface ChainScriptWire {

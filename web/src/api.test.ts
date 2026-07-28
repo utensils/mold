@@ -437,7 +437,9 @@ describe("chain job api helpers", () => {
       new Response(JSON.stringify({ jobs: [summary] })),
     );
     await expect(listChainJobs()).resolves.toEqual({ jobs: [summary] });
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs", {
+      headers: {},
+    });
 
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(detail)));
     await expect(getChainJob("job/1")).resolves.toEqual(detail);
@@ -480,6 +482,7 @@ describe("chain job api helpers", () => {
     await deleteChainJob("job/1");
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/job%2F1", {
       method: "DELETE",
+      headers: {},
     });
 
     fetchMock.mockResolvedValueOnce(
@@ -493,6 +496,7 @@ describe("chain job api helpers", () => {
     });
     expect(fetchMock).toHaveBeenLastCalledWith("/api/chain-jobs/gc", {
       method: "POST",
+      headers: {},
     });
   });
 

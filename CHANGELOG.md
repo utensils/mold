@@ -55,6 +55,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-renders only from the earliest changed clip. Legacy `/create/chain`
   and `/chains` URLs permanently redirect to `/create?output=sequence`, and
   File → New Chain became **New Sequence**.
+- **Web Create now makes sequences where you make everything else.** The
+  Single | Sequence switch and the separate script composer are gone:
+  **Output** (One shot | Sequence) is a setting in the Create controls
+  column beside Model. Choosing Sequence turns the composer into a clip
+  rail — clip pills joined by seam pills that name each transition in
+  words, with a click opening the seam editor's teaching rows and
+  fade-length stepper — filters the model picker to sequence-capable video
+  models (auto-picking one and remembering your single-mode model),
+  defaults new clips to the selected model's own frame count, locks batch
+  to one timeline, and relabels the button **Generate sequence**. Sequences
+  now submit the **live** inspector: the composer used to keep private
+  copies of width, steps, and guidance, so changing those controls silently
+  did nothing to the queued chain. Sequence jobs share the one Create
+  activity strip with prints (watch, cancel, resume, edit, clear inactive,
+  clean up disk) instead of a separate jobs list, clip prompts survive
+  navigation and restarts, and a finished sequence can be edited in place:
+  clips reload onto the rail, pills show cached ✓ versus re-render ↻ as you
+  edit, and **Update sequence** re-renders only from the earliest changed
+  clip. Existing drafts and tracked jobs migrate on first load
+  (`mold.composer.mode` and `mold.chain.draft.v2` into the shared sequence
+  draft; `mold.create.chain-job` / `-host` into
+  `mold.create.tracked-sequences.v1`), and Import/Export `.toml` keeps
+  reading and writing canonical `mold.chain.v1` scripts.
 - **Chain jobs now announce their lifecycle on the server event stream.**
   `GET /api/events` gains additive `chain_job_queued`, `chain_job_started`,
   and `chain_job_ended` events — emitted on durable-job creation, resume,
