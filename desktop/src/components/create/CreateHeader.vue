@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import Icon from "@ui/components/Icon.vue";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import type { GenerateForm } from "../../lib/generateForm";
 import { aspectRatioLabel } from "../../lib/resolutions";
 import { normalizeTargetHost } from "../../lib/hosts";
@@ -17,6 +19,12 @@ const props = defineProps<{ form: GenerateForm }>();
 
 const hosts = useHostsStore();
 const prefs = useAppPrefsStore();
+const router = useRouter();
+
+/** Create is the Single side of the composer; Sequence lives at /create/chain. */
+function setComposerMode(mode: string | number) {
+  if (mode === "sequence") void router.push("/create/chain");
+}
 
 const summary = computed(() => {
   const { width, height, steps, family } = props.form;
@@ -92,6 +100,17 @@ onBeforeUnmount(() => {
   <header data-test="create-header" class="ms-header">
     <span class="ms-header__title">Untitled print</span>
     <span class="ms-header__summary data-mono">{{ summary }}</span>
+    <SegmentedControl
+      model-value="single"
+      :options="[
+        { value: 'single', label: 'Single' },
+        { value: 'sequence', label: 'Sequence' },
+      ]"
+      label="Composer mode"
+      data-test="composer-mode"
+      class="ms-header__mode"
+      @update:model-value="setComposerMode"
+    />
     <div class="ms-header__spacer" />
     <div ref="popoverEl" class="ms-header__host">
       <button
@@ -192,6 +211,10 @@ onBeforeUnmount(() => {
 }
 .ms-header__spacer {
   flex: 1;
+}
+/* Compact the shared segmented control to the 52px header row. */
+.ms-header__mode :deep(.ms-seg__btn) {
+  padding: 4px 12px;
 }
 .ms-header__host {
   position: relative;

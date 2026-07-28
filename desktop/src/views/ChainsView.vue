@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { modelDisplayName, modelSupportsSequence } from "@mold/studio";
+import SegmentedControl from "@ui/components/SegmentedControl.vue";
 import EmptyState from "../components/shell/EmptyState.vue";
 import ImagePickerModal from "../components/generate/ImagePickerModal.vue";
 import StageCard from "../components/chains/StageCard.vue";
@@ -36,6 +37,12 @@ import { mergeInstalledModels } from "../lib/generateModels";
 import type { ChainLimits, ModelEntry, ResourceSnapshot } from "../lib/api/types";
 
 const router = useRouter();
+
+/** The chain composer is the Sequence side; Single returns to /create. */
+function setComposerMode(mode: string | number) {
+  if (mode === "single") void router.push("/create");
+}
+
 const conn = useConnectionStore();
 const models = useModelStore();
 const hostModels = useHostModelsStore();
@@ -280,19 +287,17 @@ onMounted(() => {
     <header class="border-edge border-b bg-bench px-4 py-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div class="mb-2 inline-flex rounded-control border border-edge bg-bath p-0.5">
-            <button
-              type="button"
-              class="rounded-control px-3 py-1 text-caption text-ink-2 hover:text-ink"
-              @click="router.push('/create')"
-            >
-              Single
-            </button>
-            <span
-              class="rounded-control bg-safelight px-3 py-1 text-caption font-semibold text-on-accent"
-            >
-              Sequence
-            </span>
+          <div class="mb-2 inline-flex">
+            <SegmentedControl
+              model-value="sequence"
+              :options="[
+                { value: 'single', label: 'Single' },
+                { value: 'sequence', label: 'Sequence' },
+              ]"
+              label="Composer mode"
+              data-test="composer-mode"
+              @update:model-value="setComposerMode"
+            />
           </div>
           <h1 class="text-title text-ink">Build a sequence</h1>
           <p class="text-caption text-ink-3">Tell the story one clip at a time.</p>

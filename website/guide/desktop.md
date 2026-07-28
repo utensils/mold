@@ -127,7 +127,9 @@ surface powers it, so anything the app does maps to a documented endpoint.
   Chains and video Create empty states deep-link straight to the video
   catalog.
 - **Chains** (inside Create) — a filmstrip editing bench for multi-stage video
-  (`mold.chain.v1`): per-stage prompts and frame counts (validated `8n+1`),
+  (`mold.chain.v1`), reached with the **Single | Sequence** switch in the
+  Create header (also File → New Chain or the ⌘K palette): per-stage prompts
+  and frame counts (validated `8n+1`),
   splice transitions (smooth / cut / fade) you click to cycle, a live
   fits/duration forecast against `/api/capabilities/chain-limits`, TOML
   import/export, and a durable jobs list with resume, cancel, and retake. Its

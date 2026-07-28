@@ -3,13 +3,14 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import type { ModelEntry } from "../lib/api/types";
 
-const { apiJson, apiJsonTo, sseStream } = vi.hoisted(() => ({
+const { apiJson, apiJsonTo, sseStream, routerPush } = vi.hoisted(() => ({
   apiJson: vi.fn(),
   apiJsonTo: vi.fn(),
   sseStream: vi.fn().mockResolvedValue(undefined),
+  routerPush: vi.fn(),
 }));
 
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
 vi.mock("../lib/api/client", () => ({
   apiFetch: vi.fn(),
   apiFetchTo: vi.fn(),
@@ -104,6 +105,17 @@ beforeEach(() => {
 });
 
 describe("ChainsView multi-host video generation", () => {
+  it("marks Sequence active in the composer mode switch and returns to Create on Single", async () => {
+    installRemoteVideoHost();
+    const wrapper = mount(ChainsView, { global: { stubs: { DevelopCanvas: true } } });
+    await flushPromises();
+    const segments = wrapper.get("[data-test='composer-mode']").findAll("button[role='radio']");
+    expect(segments.map((b) => b.text())).toEqual(["Single", "Sequence"]);
+    expect(segments[1]!.attributes("aria-checked")).toBe("true");
+    await segments[0]!.trigger("click");
+    expect(routerPush).toHaveBeenCalledWith("/create");
+  });
+
   it("starts with two guided clips and requires every prompt", async () => {
     installRemoteVideoHost();
     const wrapper = mount(ChainsView, {
