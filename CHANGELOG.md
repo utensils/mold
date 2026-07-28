@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-28
+
 ### Fixed
 
 - **Desktop dev builds no longer crash when a generation completes.** Sending a completion notice calls Apple's UserNotifications framework, which aborts the process with an uncatchable `NSInternalInconsistencyException` ("bundleProxyForCurrentProcess is nil") when the binary runs outside an `.app` bundle — exactly how `desktop-dev` runs it. The native-notification command now detects the missing bundle identity and quietly reports the notification as unsent instead of taking the app down; bundled release builds are unaffected.
@@ -1266,7 +1268,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/utensils/mold/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/utensils/mold/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/utensils/mold/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/utensils/mold/compare/v0.19.0...v0.20.0
