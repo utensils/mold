@@ -3184,12 +3184,21 @@ struct QueueCancelAllResponse {
         (status = 200, description = "Queue dispatch paused", body = QueuePauseResponse),
     )
 )]
-async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
-    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    if state.queue_pause.pause() {
+async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    let changed = if state.scheduled_work.v2_authoritative() {
+        state
+            .scheduled_work
+            .set_queue_paused(true)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.queue_pause.pause()
+    };
+    if changed {
         state.events.publish(mold_core::ServerEvent::QueuePaused);
     }
-    Json(QueuePauseResponse { paused: true })
+    Ok(Json(QueuePauseResponse { paused: true }))
 }
 
 /// Resume dispatch of new generation jobs. Idempotent — repeat resumes return
@@ -3202,12 +3211,21 @@ async fn pause_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> 
         (status = 200, description = "Queue dispatch resumed", body = QueuePauseResponse),
     )
 )]
-async fn resume_queue(State(state): State<AppState>) -> Json<QueuePauseResponse> {
-    let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
-    if state.queue_pause.resume() {
+async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    let changed = if state.scheduled_work.v2_authoritative() {
+        state
+            .scheduled_work
+            .set_queue_paused(false)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        let _scheduler_mutation = state.scheduler_mutation_fence.lock().await;
+        state.queue_pause.resume()
+    };
+    if changed {
         state.events.publish(mold_core::ServerEvent::QueueResumed);
     }
-    Json(QueuePauseResponse { paused: false })
+    Ok(Json(QueuePauseResponse { paused: false }))
 }
 
 /// Cancel every still-queued generation job and close every active

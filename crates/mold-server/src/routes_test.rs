@@ -2737,6 +2737,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_pause_and_resume_wait_for_authoritative_plan_publication() {
+        let (mut state, _rx) = AppState::with_engine_and_queue(MockEngine::ready());
+        let (owner_tx, _owner_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+        let scheduled = crate::scheduler::ScheduledWorkHandle::for_runtime(
+            owner_tx,
+            crate::dispatch_mode::DispatchMode::V2,
+            true,
+            false,
+        )
+        .with_placement_preview(control_tx);
+        state.scheduled_work = scheduled.clone();
+        let queue_pause = state.queue_pause.clone();
+        let app = app_with_state(state);
+
+        let pause = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/queue/pause")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let pause_reply = match tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("pause must reach scheduler control")
+            .expect("scheduler control channel must remain open")
+        {
+            crate::scheduler::PlacementPreviewQuery::SetQueuePaused {
+                paused: true,
+                reply_tx,
+            } => reply_tx,
+            _ => panic!("expected scheduler-owned pause control"),
+        };
+        assert!(
+            !pause.is_finished(),
+            "pause response must wait for authoritative plan publication"
+        );
+        assert!(queue_pause.pause());
+        scheduled.set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+            work_id: "paused-work".into(),
+            parent_id: "paused-work".into(),
+            blocked_reason: Some(mold_core::QueueBlockedReason::QueuePaused),
+            activity_phase: mold_core::QueueActivityPhase::Blocked,
+            ..Default::default()
+        }]);
+        pause_reply.send(Ok(true)).unwrap();
+        let response = pause.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let queue = json_body(
+            app.clone()
+                .oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            queue["plan"]["work_items"][0]["blocked_reason"],
+            "queue_paused"
+        );
+
+        let resume = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    Request::post("/api/queue/resume")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let resume_reply = match tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("resume must reach scheduler control")
+            .expect("scheduler control channel must remain open")
+        {
+            crate::scheduler::PlacementPreviewQuery::SetQueuePaused {
+                paused: false,
+                reply_tx,
+            } => reply_tx,
+            _ => panic!("expected scheduler-owned resume control"),
+        };
+        assert!(
+            !resume.is_finished(),
+            "resume response must wait for authoritative plan publication"
+        );
+        assert!(queue_pause.resume());
+        scheduled.set_queue_work_items_for_tests(vec![mold_core::QueueWorkItem {
+            work_id: "queued-work".into(),
+            parent_id: "queued-work".into(),
+            activity_phase: mold_core::QueueActivityPhase::Queued,
+            ..Default::default()
+        }]);
+        resume_reply.send(Ok(true)).unwrap();
+        let response = resume.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let queue = json_body(
+            app.oneshot(Request::get("/api/queue").body(Body::empty()).unwrap())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(queue["plan"]["work_items"][0]["activity_phase"], "queued");
+        assert_eq!(
+            queue["plan"]["work_items"][0]["blocked_reason"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
     async fn pause_publishes_queue_paused_event_once_per_transition() {
         // Keep `state` in scope so its EventBroadcaster (and thus the
         // subscriber) outlives the router across both requests.

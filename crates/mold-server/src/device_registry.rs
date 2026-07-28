@@ -378,6 +378,10 @@ impl DeviceRegistry {
     }
 
     pub(crate) fn all_startup_allowed_devices_disabled(&self) -> bool {
+        let preferences = self
+            .explicit_preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut startup_allowed = self
             .records
             .iter()
@@ -385,8 +389,8 @@ impl DeviceRegistry {
         let Some(first) = startup_allowed.next() else {
             return false;
         };
-        !self.desired_enabled(&first.id)
-            && startup_allowed.all(|record| !self.desired_enabled(&record.id))
+        let desired_enabled = |id: &str| preferences.get(id).copied().unwrap_or(true);
+        !desired_enabled(&first.id) && startup_allowed.all(|record| !desired_enabled(&record.id))
     }
 
     /// Complete startup-selected construction catalog. Persisted-disabled
@@ -1268,6 +1272,32 @@ mod tests {
             assert_eq!(target.raw_cuda_uuid, gpu.raw_cuda_uuid);
             assert_eq!(target.cuda_kind, gpu.device_kind);
         }
+    }
+
+    #[test]
+    fn all_disabled_uses_one_complete_multi_device_preference_snapshot() {
+        let discovered = vec![
+            runtime_gpu(0, 1, mold_inference::device::CudaDeviceKind::FullGpu),
+            runtime_gpu(1, 2, mold_inference::device::CudaDeviceKind::FullGpu),
+        ];
+        let registry =
+            DeviceRegistry::from_runtime_inventory(discovered.clone(), &discovered, Arc::new(None));
+        let first = discovered[0].stable_id.as_deref().unwrap();
+        let second = discovered[1].stable_id.as_deref().unwrap();
+
+        assert!(!registry.all_startup_allowed_devices_disabled());
+        registry.set_desired_enabled(first, false).unwrap();
+        assert!(
+            !registry.all_startup_allowed_devices_disabled(),
+            "one enabled sibling keeps the runtime out of maintenance"
+        );
+        registry.set_desired_enabled(second, false).unwrap();
+        assert!(registry.all_startup_allowed_devices_disabled());
+        registry.set_desired_enabled(first, true).unwrap();
+        assert!(
+            !registry.all_startup_allowed_devices_disabled(),
+            "re-enabling any eligible device leaves maintenance"
+        );
     }
 
     #[test]

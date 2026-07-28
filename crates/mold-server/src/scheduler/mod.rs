@@ -386,6 +386,22 @@ impl ScheduledWorkHandle {
             .map_err(|_| "scheduler batch profiling was cancelled".to_string())?
     }
 
+    pub async fn set_queue_paused(&self, paused: bool) -> Result<bool, String> {
+        if !self.v2_authoritative {
+            return Err("authoritative scheduler queue control is unavailable".to_string());
+        }
+        let Some(tx) = &self.preview_tx else {
+            return Err("scheduler queue control channel is unavailable".to_string());
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(PlacementPreviewQuery::SetQueuePaused { paused, reply_tx })
+            .await
+            .map_err(|_| "scheduler queue control is shutting down".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "scheduler queue control was cancelled".to_string())?
+    }
+
     pub async fn submit(&self, work: ScheduledOwnerWork) -> Result<(), String> {
         let Some(tx) = &self.tx else {
             return Err("GPU scheduler is unavailable".to_string());
@@ -423,6 +439,10 @@ pub enum PlacementPreviewQuery {
         reply_tx: tokio::sync::oneshot::Sender<
             Result<Vec<mold_core::GenerationPlacementCandidate>, String>,
         >,
+    },
+    SetQueuePaused {
+        paused: bool,
+        reply_tx: tokio::sync::oneshot::Sender<Result<bool, String>>,
     },
 }
 
@@ -4602,6 +4622,32 @@ impl Coordinator {
         }
     }
 
+    fn set_queue_paused_and_publish(&mut self, paused: bool) -> Result<bool, String> {
+        let changed = if paused {
+            self.state.queue_pause.pause()
+        } else {
+            self.state.queue_pause.resume()
+        };
+        let mut immediate = false;
+        self.reconcile_external_mutations(&mut immediate);
+        match self.try_replan_and_publish_with(PlanningPass::Admission) {
+            Ok(()) => Ok(changed),
+            Err(error) => {
+                // A failed resume must fail closed. Restore the paused gate
+                // and make a best-effort paused publication before reporting
+                // the synchronization failure to the route.
+                if !paused && changed {
+                    self.state.queue_pause.pause();
+                    self.reconcile_external_mutations(&mut immediate);
+                    self.replan_and_publish_with(PlanningPass::Admission);
+                }
+                Err(format!(
+                    "scheduler could not publish queue pause state: {error}"
+                ))
+            }
+        }
+    }
+
     fn publish_plan(
         &self,
         snapshot: &PlannerSnapshot,
@@ -4848,6 +4894,13 @@ pub async fn run_scheduler_coordinator(
                             let response = coordinator
                                 .batch_device_profiles(&request, parent_size, &prepared_inputs)
                                 .map_err(|error| format!("{error:#}"));
+                            let _ = reply_tx.send(response);
+                        }
+                        PlacementPreviewQuery::SetQueuePaused { paused, reply_tx } => {
+                            let response = coordinator.set_queue_paused_and_publish(paused);
+                            if !paused && response.is_ok() {
+                                immediate = true;
+                            }
                             let _ = reply_tx.send(response);
                         }
                     }
@@ -8077,11 +8130,10 @@ mod tests {
             },
             &mut immediate,
         );
-        coordinator.state.queue_pause.pause();
-
-        coordinator
-            .dispatch_ready_with(PlanningPass::Admission)
-            .await;
+        assert!(
+            coordinator.set_queue_paused_and_publish(true).unwrap(),
+            "first scheduler-owned pause must change state"
+        );
 
         assert!(
             worker_rx.try_recv().is_err(),
@@ -8129,10 +8181,10 @@ mod tests {
         );
         assert!(!coordinator.pending.contains_key("paused-visible"));
 
-        coordinator.state.queue_pause.resume();
-        coordinator
-            .dispatch_ready_with(PlanningPass::Admission)
-            .await;
+        assert!(
+            coordinator.set_queue_paused_and_publish(false).unwrap(),
+            "scheduler-owned resume must change state"
+        );
         assert_eq!(
             worker_rx.try_recv().err(),
             Some(std::sync::mpsc::TryRecvError::Empty),
@@ -8219,6 +8271,40 @@ mod tests {
             Some(mold_core::QueueBlockedReason::QueuePaused)
         );
         assert_eq!(item.planned_device_id, None);
+    }
+
+    #[test]
+    fn failed_resume_plan_publication_restores_paused_gate() {
+        let (worker, _worker_rx) = test_worker(0);
+        let pool = Arc::new(GpuPool {
+            workers: vec![worker].into(),
+        });
+        let (ingress_tx, _ingress_rx) = tokio::sync::mpsc::channel(1);
+        let state = AppState::empty(
+            mold_core::Config::default(),
+            QueueHandle::new(ingress_tx),
+            pool,
+            1,
+        );
+        let mut coordinator = Coordinator::with_preparer_and_memory(
+            state,
+            Arc::new(ImmediatePreparer),
+            ample_memory(),
+        );
+        assert!(coordinator.set_queue_paused_and_publish(true).unwrap());
+        coordinator.next_plan_error = Some(PlannerError::DuplicateWorkId {
+            work_id: WorkId::new("injected-resume-publication-error"),
+        });
+
+        let error = coordinator
+            .set_queue_paused_and_publish(false)
+            .expect_err("resume must fail when its authority cannot publish");
+
+        assert!(error.contains("could not publish queue pause state"));
+        assert!(
+            coordinator.state.queue_pause.is_paused(),
+            "failed resume must restore the safe paused gate"
+        );
     }
 
     #[tokio::test]
