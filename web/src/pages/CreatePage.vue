@@ -1020,6 +1020,42 @@ async function resolveFeasibleSubmitRoute(
   return route;
 }
 
+function requestCopyCount(request: GenerateRequestWire): number {
+  return Math.max(1, Math.floor(request.batch_size ?? 1));
+}
+
+function submitRequestCopies(
+  request: GenerateRequestWire,
+  decision: ReturnType<typeof decideGenerateRequestRouting>,
+  route: HostRoute | null,
+): void {
+  const copies = requestCopyCount(request);
+  if (copies === 1) {
+    stream.submit(request, decision, normalizeSubmitRoute(route));
+    return;
+  }
+
+  const batchId = createUuid();
+  const baseSeed =
+    request.seed === null || request.seed === undefined
+      ? crypto.getRandomValues(new Uint32Array(1))[0]!
+      : request.seed;
+  for (let index = 0; index < copies; index += 1) {
+    stream.submit(
+      {
+        ...request,
+        batch_size: 1,
+        batch_id: batchId,
+        batch_index: index + 1,
+        batch_count: copies,
+        seed: baseSeed + index,
+      },
+      decision,
+      normalizeSubmitRoute(route),
+    );
+  }
+}
+
 async function onSubmit(allowStaleQuick = false) {
   // The route is settled first, and before source preprocessing, for two
   // reasons: an unreachable pinned machine is the real complaint (its model
@@ -1042,15 +1078,17 @@ async function onSubmit(allowStaleQuick = false) {
     return;
   }
   const currentRequest = form.toRequest(currentModel.value);
+  const copies = requestCopyCount(currentRequest);
   if (quick && !allowStaleQuick) {
     const feasible = route
       ? decision.kind === "chain"
         ? await routing.revalidateFeasibleChain(
             route,
             resolveChainRequest(currentRequest, decision),
+            copies,
           )
-        : await routing.revalidateFeasible(route, currentRequest)
-      : await resolveFeasibleSubmitRoute(currentRequest);
+        : await routing.revalidateFeasible(route, currentRequest, copies)
+      : await resolveFeasibleSubmitRoute(currentRequest, copies);
     if (feasible === false) return;
     if (!sameRoute(route, feasible)) {
       toast(
@@ -1065,8 +1103,9 @@ async function onSubmit(allowStaleQuick = false) {
       decision.kind === "chain"
         ? await routing.resolveFeasibleChain(
             resolveChainRequest(currentRequest, decision),
+            copies,
           )
-        : await routing.resolveFeasible(currentRequest);
+        : await routing.resolveFeasible(currentRequest, copies);
     if (!feasible) {
       toast(
         "error",
@@ -1079,6 +1118,7 @@ async function onSubmit(allowStaleQuick = false) {
   const preparedSource = await prepareStillSourceToRequest(route);
   if (preparedSource === false) return;
   const req = form.toRequest(currentModel.value);
+  const finalizedCopies = requestCopyCount(req);
   if (quick) req.original_prompt = quick.originalPrompt;
   if ("source_image" in req) {
     req.source_image = preparedSource.source?.base64 ?? null;
@@ -1090,11 +1130,15 @@ async function onSubmit(allowStaleQuick = false) {
       ? await routing.revalidateFeasibleChain(
           route,
           resolveChainRequest(req, decision),
+          finalizedCopies,
         )
-      : await routing.revalidateFeasible(route, req)
+      : await routing.revalidateFeasible(route, req, finalizedCopies)
     : decision.kind === "chain"
-      ? await routing.resolveFeasibleChain(resolveChainRequest(req, decision))
-      : await routing.resolveFeasible(req);
+      ? await routing.resolveFeasibleChain(
+          resolveChainRequest(req, decision),
+          finalizedCopies,
+        )
+      : await routing.resolveFeasible(req, finalizedCopies);
   if (!finalizedRoute) {
     toast(
       "error",
@@ -1110,7 +1154,7 @@ async function onSubmit(allowStaleQuick = false) {
     return;
   }
   route = finalizedRoute;
-  stream.submit(req, decision, normalizeSubmitRoute(route));
+  submitRequestCopies(req, decision, route);
   quickPrepared.value = null;
   // Push to history immediately so ↑ recalls it before the server round-trips.
   composerCardRef.value?.record(req.prompt);

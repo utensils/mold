@@ -814,6 +814,56 @@ describe("CreatePage layout and behavior", () => {
     expect(wrapper.find("[data-test='chain-unsupported']").exists()).toBe(true);
   });
 
+  it("fans an ordinary batch out into one routed request per print", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "flux-dev:q4",
+        family: "flux",
+        description: "Flux Dev Q4",
+        size_gb: 4,
+        default_width: 1024,
+        default_height: 1024,
+        default_steps: 20,
+        default_guidance: 3.5,
+        is_loaded: false,
+        hf_repo: "example/flux",
+        downloaded: true,
+      },
+    ]);
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+    const form = useGenerateForm();
+    form.state.value.model = "flux-dev:q4";
+    form.state.value.modelFamily = "flux";
+    form.state.value.prompt = "three lighthouses";
+    form.state.value.batchSize = 3;
+    form.state.value.seedMode = "static";
+    form.state.value.seed = 41;
+    await nextTick();
+
+    await wrapper.get("[data-test='composer-submit']").trigger("click");
+    await flushPromises();
+
+    expect(submitMock).toHaveBeenCalledTimes(3);
+    const batchIds = new Set<string>();
+    for (const [index, call] of submitMock.mock.calls.entries()) {
+      expect(call[0]).toMatchObject({
+        prompt: "three lighthouses",
+        batch_size: 1,
+        batch_index: index + 1,
+        batch_count: 3,
+        seed: 41 + index,
+      });
+      batchIds.add(call[0].batch_id);
+    }
+    expect(batchIds.size).toBe(1);
+    expect(placementPreviewMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ batch_size: 1 }),
+      3,
+    );
+  });
+
   it("prepares a batch on the server and queues provenance on every sibling", async () => {
     const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
     const form = useGenerateForm();
