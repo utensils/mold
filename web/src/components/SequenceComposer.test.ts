@@ -178,7 +178,7 @@ describe("SequenceComposer", () => {
   });
 
   it("copies TOML built from the LIVE shared params", async () => {
-    const writeText = vi.fn(async () => undefined);
+    const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(globalThis.navigator, "clipboard", {
       value: { writeText },
       configurable: true,
@@ -189,7 +189,7 @@ describe("SequenceComposer", () => {
     store.clips.forEach((clip, i) => (clip.prompt = `clip ${i + 1}`));
     await wrapper.get("[data-test='sequence-file-tools']").trigger("click");
     await wrapper.get("[data-test='sequence-copy-toml']").trigger("click");
-    const toml = writeText.mock.calls[0]?.[0] as string;
+    const toml = writeText.mock.calls[0]?.[0] ?? "";
     expect(toml).toContain("width = 1216");
     expect(toml).toContain('model = "ltx-2-19b-distilled:fp8"');
     const parsed = parseChainScript(toml);

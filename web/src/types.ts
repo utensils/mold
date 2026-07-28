@@ -489,7 +489,7 @@ export interface RetakeAmendment {
   at_unix_ms: number;
 }
 
-// script is a NEW wire-exact mirror (NOT lib/chainToml.ts's ChainScriptToml):
+// script is a NEW wire-exact mirror (NOT @studio/lib/chainToml's ChainScript):
 // Rust ChainScript serializes stages under the key "stage"
 // (#[serde(rename = "stage")], chain.rs:236) — mirror pins that name.
 export interface ChainScriptWire {
