@@ -278,7 +278,6 @@ pub enum CanonicalRuntimeValue {
     Presence(bool),
     Unsigned(Option<u64>),
     FloatBits(Option<u64>),
-    Token(String),
     Text(String),
 }
 
@@ -288,7 +287,8 @@ pub struct RuntimeSemanticSetting {
     pub value: CanonicalRuntimeValue,
 }
 
-/// Canonical, path-free engine construction and runtime semantics.
+/// Canonical engine construction and runtime semantics that are independent
+/// of the exact model/path route retained by the enclosing descriptor.
 ///
 /// `from_frozen` fully destructures `FrozenEngineConfig`; adding a field to
 /// the source type is therefore a compile error until its equivalence effect
@@ -323,6 +323,7 @@ pub enum EffectiveComponentDType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum ArtifactFormatUnknown {
+    CacheMiss,
     Io,
     UnsupportedContainer,
     InvalidHeader,
@@ -362,9 +363,29 @@ pub struct EquivalentLoraExecution {
     pub scale_bits: u64,
 }
 
+/// Exact process-platform representation of a runtime artifact path.
+///
+/// Legacy engine construction still consumes model IDs, filenames,
+/// extensions, and path equality in several family-specific dispatchers.
+/// Until those dispatchers are fully content-typed, equivalence must retain
+/// this conservative route identity instead of claiming path independence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum RuntimePathIdentity {
+    UnixBytes(Vec<u8>),
+    WindowsWide(Vec<u16>),
+    Portable(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeArtifactPathIdentity {
+    pub role: ComponentRole,
+    pub path: RuntimePathIdentity,
+}
+
 /// Canonical deterministic-output environment for a future server batch
-/// parent. Device identity, ordinal, paths, and capacity estimates are absent
-/// by construction; every semantic execution dimension remains explicit.
+/// parent. Device identity, ordinal, and capacity estimates are absent.
+/// Runtime model/path identity remains explicit while legacy engines still
+/// branch on those values.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ExecutionEnvironmentDescriptor {
     pub schema_version: u16,
@@ -373,6 +394,8 @@ pub struct ExecutionEnvironmentDescriptor {
     pub attention_kernel_class: AttentionKernelClass,
     pub code: ExecutionCodeIdentity,
     pub semantic_config: ExecutionSemanticConfig,
+    pub runtime_model_id: String,
+    pub runtime_artifact_paths: Vec<RuntimeArtifactPathIdentity>,
     pub model_family: String,
     pub model_fingerprint: String,
     pub components: Vec<EquivalentComponentExecution>,
@@ -383,12 +406,29 @@ pub struct ExecutionEnvironmentDescriptor {
     pub determinism_class: DeterminismClass,
 }
 
+fn runtime_path_identity(path: &Path) -> RuntimePathIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        RuntimePathIdentity::UnixBytes(path.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        RuntimePathIdentity::WindowsWide(path.as_os_str().encode_wide().collect())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        RuntimePathIdentity::Portable(path.to_string_lossy().into_owned())
+    }
+}
+
 impl ExecutionEnvironmentDescriptor {
     pub fn fingerprint(&self) -> ExecutionEquivalenceFingerprint {
         let encoded = serde_json::to_vec(self)
             .expect("execution environment descriptor serialization is infallible");
         let mut hash = Sha256::new();
-        hash.update(b"mold.execution-equivalence.v2\0");
+        hash.update(b"mold.execution-equivalence.v3\0");
         hash.update(encoded);
         ExecutionEquivalenceFingerprint::new(format!("{:x}", hash.finalize()))
     }
@@ -406,8 +446,9 @@ impl ExecutionSemanticConfig {
             qwen2_variant,
             qwen2_text_encoder_mode,
             ltx2_gemma_variant,
-            // Artifact selections are represented by path-free component
-            // content and format facts in the enclosing descriptor.
+            // Selected artifacts are represented by component content/format
+            // facts and the conservative exact runtime route in the enclosing
+            // descriptor.
             selected_t5_path: _,
             selected_qwen3_paths: _,
             selected_qwen2_path: _,
@@ -549,7 +590,7 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticS
                     | RuntimeSemanticVariable::ReserveVramMb
             ) =>
         {
-            CanonicalRuntimeValue::Unsigned(value.trim().parse().ok())
+            CanonicalRuntimeValue::Unsigned(mold_inference::runtime_env::parse_u64(value))
         }
         Some(value)
             if matches!(
@@ -558,18 +599,20 @@ fn runtime_semantic_setting(name: &str, value: Option<&str>) -> RuntimeSemanticS
                     | RuntimeSemanticVariable::WuerstchenDecoderGuidance
             ) =>
         {
-            CanonicalRuntimeValue::FloatBits(value.trim().parse::<f64>().ok().map(f64::to_bits))
+            CanonicalRuntimeValue::FloatBits(
+                mold_inference::runtime_env::parse_f64(value).map(f64::to_bits),
+            )
         }
         Some(value) if variable == RuntimeSemanticVariable::CfgPlus => {
-            CanonicalRuntimeValue::Boolean(matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            ))
+            CanonicalRuntimeValue::Boolean(matches!(value, "1" | "true" | "yes"))
         }
         Some(value) if variable == RuntimeSemanticVariable::LongPrompts => {
             CanonicalRuntimeValue::Boolean(value == "1")
         }
-        Some(value) => CanonicalRuntimeValue::Token(value.trim().to_ascii_lowercase()),
+        // Do not invent normalization for a runtime parser we have not made
+        // authoritative here. Exact text is conservative: it can cause false
+        // negatives, but never a false-equivalent execution class.
+        Some(value) => CanonicalRuntimeValue::Text(value.to_string()),
     };
     RuntimeSemanticSetting { variable, value }
 }
@@ -846,7 +889,14 @@ pub fn resolve_execution_plans(
     devices: &[DeviceFact],
     offload_requested: bool,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
-    resolve_execution_plans_with_prepared(config, request, devices, offload_requested, None)
+    resolve_execution_plans_with_policy(
+        config,
+        request,
+        devices,
+        offload_requested,
+        None,
+        EquivalenceFactPolicy::AllowBlockingWarmup,
+    )
 }
 
 pub fn resolve_execution_plans_with_prepared(
@@ -855,6 +905,59 @@ pub fn resolve_execution_plans_with_prepared(
     devices: &[DeviceFact],
     offload_requested: bool,
     prepared: Option<&PreparedExecutionInputs>,
+) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    let fact_policy = if prepared.is_some() {
+        EquivalenceFactPolicy::CacheOnly
+    } else {
+        EquivalenceFactPolicy::AllowBlockingWarmup
+    };
+    resolve_execution_plans_with_policy(
+        config,
+        request,
+        devices,
+        offload_requested,
+        prepared,
+        fact_policy,
+    )
+}
+
+/// Resolve plans from the scheduler coordinator without waiting on artifact
+/// reads, single-flight owners, or admission permits.
+///
+/// Dependency preparation warms normal generation facts asynchronously. Some
+/// coordinator-owned work (notably durable chain stages) has no prepared-input
+/// carrier, so the coordinator must fail closed to metadata-bound cache-miss
+/// identities instead of performing blocking I/O itself.
+pub(crate) fn resolve_execution_plans_for_coordinator(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+    offload_requested: bool,
+    prepared: Option<&PreparedExecutionInputs>,
+) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
+    resolve_execution_plans_with_policy(
+        config,
+        request,
+        devices,
+        offload_requested,
+        prepared,
+        EquivalenceFactPolicy::CacheOnly,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EquivalenceFactPolicy {
+    AllowBlockingWarmup,
+    CacheOnly,
+}
+
+fn resolve_execution_plans_with_policy(
+    config: &Config,
+    request: &GenerateRequest,
+    devices: &[DeviceFact],
+    offload_requested: bool,
+    prepared: Option<&PreparedExecutionInputs>,
+    fact_policy: EquivalenceFactPolicy,
 ) -> Result<Vec<ResolvedExecutionPlan>, ExecutionPlanError> {
     let paths = ModelPaths::resolve(&request.model, config).ok_or_else(|| {
         ExecutionPlanError::MissingArtifacts {
@@ -932,7 +1035,7 @@ pub fn resolve_execution_plans_with_prepared(
                 artifacts: &artifacts,
                 effective: &effective,
                 offload_requested,
-                equivalence_cache_only: prepared.is_some(),
+                equivalence_cache_only: fact_policy == EquivalenceFactPolicy::CacheOnly,
             };
             build_plan(&context, device)
         })
@@ -975,13 +1078,14 @@ pub(crate) fn preparation_authority_fingerprint(
     format!("{:x}", hash.finalize())
 }
 
-/// Populate the byte-identity cache during asynchronous dependency preparation.
+/// Populate metadata-bound byte-identity and format-fact caches during
+/// asynchronous dependency preparation.
 ///
 /// Execution-plan resolution runs in the scheduler coordinator and must only
 /// perform metadata checks plus cache lookups for normal prepared jobs. The
 /// caller is responsible for invoking this function through
-/// `tokio::task::spawn_blocking`, because hashing a multi-gigabyte checkpoint
-/// is blocking file I/O and CPU work.
+/// `tokio::task::spawn_blocking`, because hashing and header probing a
+/// multi-gigabyte checkpoint are blocking file I/O and CPU work.
 pub(crate) fn warm_execution_equivalence_cache(
     config: &Config,
     request: &GenerateRequest,
@@ -1009,7 +1113,7 @@ pub(crate) fn warm_execution_equivalence_cache(
         );
     }
     for path in paths {
-        let _ = equivalence_fingerprint_path(&path);
+        let _ = artifact_facts_path_with_policy(&path, false);
     }
 }
 
@@ -1538,6 +1642,7 @@ fn build_plan(
     let determinism_class = DeterminismClass::CpuSeededCrossBackend;
     let execution_environment = execution_environment_descriptor(
         device,
+        context.model,
         context.family,
         &equivalence_model_fingerprint,
         &components,
@@ -1579,6 +1684,7 @@ fn build_plan(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execution_environment_descriptor(
     device: &DeviceFact,
+    runtime_model_id: &str,
     model_family: &str,
     model_fingerprint: &str,
     components: &BTreeMap<ComponentRole, ComponentExecutionPlan>,
@@ -1605,14 +1711,20 @@ pub(crate) fn execution_environment_descriptor(
         .get(&ComponentRole::Transformer)
         .zip(components.get(&ComponentRole::Vae))
         .is_some_and(|(transformer, vae)| transformer.artifact_path == vae.artifact_path);
+    let runtime_artifact_paths = components
+        .iter()
+        .map(|(role, component)| RuntimeArtifactPathIdentity {
+            role: role.clone(),
+            path: runtime_path_identity(&component.artifact_path),
+        })
+        .collect();
     let components = components
         .iter()
         .map(|(role, component)| {
-            let content_fingerprint = equivalence_fingerprint_path_with_policy(
-                &component.artifact_path,
-                equivalence_cache_only,
-            );
-            let storage = component_storage_format(&component.artifact_path, &content_fingerprint);
+            let facts =
+                artifact_facts_path_with_policy(&component.artifact_path, equivalence_cache_only);
+            let content_fingerprint = facts.content.clone();
+            let storage = component_storage_format(&facts);
             let precision = effective_component_precision(
                 model_family,
                 role,
@@ -1658,7 +1770,7 @@ pub(crate) fn execution_environment_descriptor(
         })
         .collect();
     ExecutionEnvironmentDescriptor {
-        schema_version: 2,
+        schema_version: 3,
         backend: device.backend,
         architecture,
         attention_kernel_class: match attention_backend {
@@ -1667,6 +1779,8 @@ pub(crate) fn execution_environment_descriptor(
         },
         code: execution_code_identity(),
         semantic_config: ExecutionSemanticConfig::from_frozen(engine_config),
+        runtime_model_id: runtime_model_id.to_string(),
+        runtime_artifact_paths,
         model_family: model_family.to_string(),
         model_fingerprint: model_fingerprint.to_string(),
         components,
@@ -1739,13 +1853,10 @@ fn artifact_size(path: &Path) -> u64 {
         .unwrap_or(UNKNOWN_ARTIFACT_HOST_CHARGE)
 }
 
-fn component_storage_format(
-    path: &Path,
-    content_fingerprint: &EquivalenceContentIdentity,
-) -> ComponentStorageFormat {
-    match mold_inference::artifact_format::probe(path) {
-        Ok(format) => ComponentStorageFormat::Known(format),
-        Err(reason) => {
+fn component_storage_format(facts: &ArtifactFacts) -> ComponentStorageFormat {
+    match &facts.format {
+        ArtifactFormatFact::Known(format) => ComponentStorageFormat::Known(format.clone()),
+        ArtifactFormatFact::ProbeFailure(reason) => {
             use mold_inference::artifact_format::ArtifactProbeFailure;
             let reason = match reason {
                 ArtifactProbeFailure::Io => ArtifactFormatUnknown::Io,
@@ -1762,9 +1873,13 @@ fn component_storage_format(
             };
             ComponentStorageFormat::Unknown {
                 reason,
-                content_discriminator: content_fingerprint.clone(),
+                content_discriminator: facts.content.clone(),
             }
         }
+        ArtifactFormatFact::CacheMiss => ComponentStorageFormat::Unknown {
+            reason: ArtifactFormatUnknown::CacheMiss,
+            content_discriminator: facts.content.clone(),
+        },
     }
 }
 
@@ -1951,7 +2066,7 @@ fn effective_component_precision(
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ArtifactMetadataIdentity {
     len: u64,
     platform_identity: Vec<u64>,
@@ -2029,11 +2144,64 @@ fn artifact_metadata_identity(
     }
 }
 
-type ArtifactFingerprintCache = BTreeMap<PathBuf, (ArtifactMetadataIdentity, ContentFingerprint)>;
+const ARTIFACT_FINGERPRINT_CACHE_CAPACITY: usize = 1024;
+const ARTIFACT_FACT_CACHE_CAPACITY: usize = 1024;
+const ARTIFACT_MAX_IN_FLIGHT_IDENTITIES: usize = 64;
+const ARTIFACT_MAX_CONCURRENT_READS: usize = 2;
+const ARTIFACT_UNSTABLE_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct BoundedPathCache<V> {
+    capacity: usize,
+    clock: u64,
+    entries: BTreeMap<PathBuf, (V, u64)>,
+}
+
+impl<V> BoundedPathCache<V> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            clock: 0,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    fn get_mut(&mut self, path: &Path) -> Option<&mut V> {
+        self.clock = self.clock.wrapping_add(1);
+        let (value, last_used) = self.entries.get_mut(path)?;
+        *last_used = self.clock;
+        Some(value)
+    }
+
+    fn insert(&mut self, path: PathBuf, value: V) {
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.insert(path, (value, self.clock));
+        while self.entries.len() > self.capacity {
+            let victim = self
+                .entries
+                .iter()
+                .min_by(
+                    |(left_path, (_, left_used)), (right_path, (_, right_used))| {
+                        left_used
+                            .cmp(right_used)
+                            .then_with(|| left_path.cmp(right_path))
+                    },
+                )
+                .map(|(path, _)| path.clone())
+                .expect("over-capacity cache has an eviction candidate");
+            self.entries.remove(&victim);
+        }
+    }
+}
+
+type ArtifactFingerprintCache = BoundedPathCache<(ArtifactMetadataIdentity, ContentFingerprint)>;
 
 fn artifact_fingerprint_cache() -> &'static Mutex<ArtifactFingerprintCache> {
     static CACHE: OnceLock<Mutex<ArtifactFingerprintCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+    CACHE.get_or_init(|| {
+        Mutex::new(BoundedPathCache::with_capacity(
+            ARTIFACT_FINGERPRINT_CACHE_CAPACITY,
+        ))
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2059,13 +2227,16 @@ fn fingerprint_path(path: &Path) -> ContentFingerprint {
         return ContentFingerprint(format!("{:x}", hash.finalize()));
     };
     let before = artifact_metadata_identity(path, &before_metadata);
-    if let Some((_, fingerprint)) = artifact_fingerprint_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(path)
-        .filter(|(identity, _)| identity == &before)
     {
-        return fingerprint.clone();
+        let mut cache = artifact_fingerprint_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, fingerprint)) = cache
+            .get_mut(path)
+            .filter(|(identity, _)| identity == &before)
+        {
+            return fingerprint.clone();
+        }
     }
 
     // Unix inode+ctime and Windows creation/file metadata are immutable
@@ -2103,60 +2274,478 @@ fn fingerprint_path(path: &Path) -> ContentFingerprint {
     fingerprint
 }
 
-type EquivalenceFingerprintCache =
-    BTreeMap<PathBuf, (ArtifactMetadataIdentity, EquivalenceContentIdentity)>;
-
-fn equivalence_fingerprint_cache() -> &'static Mutex<EquivalenceFingerprintCache> {
-    static CACHE: OnceLock<Mutex<EquivalenceFingerprintCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ArtifactFormatFact {
+    Known(mold_inference::artifact_format::ArtifactStorageFormat),
+    ProbeFailure(mold_inference::artifact_format::ArtifactProbeFailure),
+    CacheMiss,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactFacts {
+    content: EquivalenceContentIdentity,
+    format: ArtifactFormatFact,
+}
+
+#[derive(Clone)]
+struct CachedArtifactFacts {
+    metadata: ArtifactMetadataIdentity,
+    facts: ArtifactFacts,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ArtifactFactKey {
+    path: PathBuf,
+    metadata: ArtifactMetadataIdentity,
+}
+
+struct ArtifactFactFlight {
+    result: Mutex<Option<ArtifactFacts>>,
+    ready: std::sync::Condvar,
+}
+
+impl ArtifactFactFlight {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> ArtifactFacts {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(facts) = result.as_ref() {
+                return facts.clone();
+            }
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn publish(&self, facts: ArtifactFacts) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(facts);
+        self.ready.notify_all();
+    }
+}
+
+struct ArtifactFactCache {
+    capacity: usize,
+    clock: u64,
+    entries: BTreeMap<PathBuf, CachedArtifactFacts>,
+    in_flight: BTreeMap<ArtifactFactKey, std::sync::Arc<ArtifactFactFlight>>,
+    unstable_until: BTreeMap<PathBuf, std::time::Instant>,
+}
+
+impl ArtifactFactCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            clock: 0,
+            entries: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            unstable_until: BTreeMap::new(),
+        }
+    }
+
+    fn get(&mut self, path: &Path, metadata: &ArtifactMetadataIdentity) -> Option<ArtifactFacts> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(path)?;
+        if &entry.metadata != metadata {
+            return None;
+        }
+        entry.last_used = self.clock;
+        Some(entry.facts.clone())
+    }
+
+    fn insert(&mut self, path: PathBuf, metadata: ArtifactMetadataIdentity, facts: ArtifactFacts) {
+        self.clock = self.clock.wrapping_add(1);
+        self.entries.insert(
+            path,
+            CachedArtifactFacts {
+                metadata,
+                facts,
+                last_used: self.clock,
+            },
+        );
+        while self.entries.len() > self.capacity {
+            let victim = self
+                .entries
+                .iter()
+                .min_by(|(left_path, left), (right_path, right)| {
+                    left.last_used
+                        .cmp(&right.last_used)
+                        .then_with(|| left_path.cmp(right_path))
+                })
+                .map(|(path, _)| path.clone())
+                .expect("over-capacity cache has an eviction candidate");
+            self.entries.remove(&victim);
+        }
+    }
+
+    fn unstable_backoff_active_at(&mut self, path: &Path, now: std::time::Instant) -> bool {
+        let Some(deadline) = self.unstable_until.get(path).copied() else {
+            return false;
+        };
+        if now < deadline {
+            return true;
+        }
+        self.unstable_until.remove(path);
+        false
+    }
+
+    fn mark_unstable_at(&mut self, path: PathBuf, now: std::time::Instant) {
+        self.unstable_until.insert(
+            path,
+            now.checked_add(ARTIFACT_UNSTABLE_RETRY_COOLDOWN)
+                .unwrap_or(now),
+        );
+        while self.unstable_until.len() > self.capacity {
+            let victim = self
+                .unstable_until
+                .iter()
+                .min_by(|(left_path, left), (right_path, right)| {
+                    left.cmp(right).then_with(|| left_path.cmp(right_path))
+                })
+                .map(|(path, _)| path.clone())
+                .expect("over-capacity unstable cache has an eviction candidate");
+            self.unstable_until.remove(&victim);
+        }
+    }
+
+    #[cfg(test)]
+    fn remove_path(&mut self, path: &Path) {
+        self.entries.remove(path);
+        self.unstable_until.remove(path);
+    }
+
+    #[cfg(test)]
+    fn insert_for_test(&mut self, path: PathBuf) {
+        self.insert(
+            path,
+            ArtifactMetadataIdentity {
+                len: 0,
+                platform_identity: Vec::new(),
+            },
+            ArtifactFacts {
+                content: EquivalenceContentIdentity::Sha256("test".into()),
+                format: ArtifactFormatFact::CacheMiss,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    fn touch_for_test(&mut self, path: &Path) -> bool {
+        let Some(metadata) = self.entries.get(path).map(|entry| entry.metadata.clone()) else {
+            return false;
+        };
+        self.get(path, &metadata).is_some()
+    }
+
+    #[cfg(test)]
+    fn entry_paths_for_test(&self) -> Vec<PathBuf> {
+        self.entries.keys().cloned().collect()
+    }
+}
+
+fn artifact_fact_cache() -> &'static Mutex<ArtifactFactCache> {
+    static CACHE: OnceLock<Mutex<ArtifactFactCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(ArtifactFactCache::with_capacity(
+            ARTIFACT_FACT_CACHE_CAPACITY,
+        ))
+    })
+}
+
+struct ArtifactReadLimiter {
+    capacity: usize,
+    active: Mutex<usize>,
+    available: std::sync::Condvar,
+}
+
+impl ArtifactReadLimiter {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            active: Mutex::new(0),
+            available: std::sync::Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> ArtifactReadPermit<'_> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *active >= self.capacity {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *active += 1;
+        ArtifactReadPermit { limiter: self }
+    }
+}
+
+struct ArtifactReadPermit<'a> {
+    limiter: &'a ArtifactReadLimiter,
+}
+
+impl Drop for ArtifactReadPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .limiter
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active = active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
+
+fn artifact_read_limiter() -> &'static ArtifactReadLimiter {
+    static LIMITER: OnceLock<ArtifactReadLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| ArtifactReadLimiter::new(ARTIFACT_MAX_CONCURRENT_READS))
+}
+
+fn artifact_in_flight_limiter() -> &'static ArtifactReadLimiter {
+    static LIMITER: OnceLock<ArtifactReadLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| ArtifactReadLimiter::new(ARTIFACT_MAX_IN_FLIGHT_IDENTITIES))
+}
+
+#[cfg(test)]
+fn artifact_read_counters(
+) -> &'static Mutex<BTreeMap<PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>>> {
+    static COUNTERS: OnceLock<
+        Mutex<BTreeMap<PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>>>,
+    > = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+struct ArtifactReadCounterGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for ArtifactReadCounterGuard {
+    fn drop(&mut self) {
+        artifact_read_counters()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.path);
+    }
+}
+
+#[cfg(test)]
+fn register_artifact_read_counter(
+    path: PathBuf,
+    counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> ArtifactReadCounterGuard {
+    artifact_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.clone(), counter);
+    ArtifactReadCounterGuard { path }
+}
+
+#[cfg(test)]
+fn note_artifact_physical_read(path: &Path) {
+    use std::sync::atomic::Ordering;
+    if let Some(counter) = artifact_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(path)
+        .cloned()
+    {
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(test))]
+fn note_artifact_physical_read(_path: &Path) {}
+
+#[cfg(test)]
 fn equivalence_fingerprint_path(path: &Path) -> EquivalenceContentIdentity {
-    equivalence_fingerprint_path_with_policy(path, false)
+    artifact_facts_path_with_policy(path, false).content
 }
 
 fn equivalence_fingerprint_path_with_policy(
     path: &Path,
     cache_only: bool,
 ) -> EquivalenceContentIdentity {
+    artifact_facts_path_with_policy(path, cache_only).content
+}
+
+struct ArtifactFactOwnerGuard {
+    path: PathBuf,
+    key: ArtifactFactKey,
+    flight: std::sync::Arc<ArtifactFactFlight>,
+    fallback: ArtifactFacts,
+    _in_flight_permit: ArtifactReadPermit<'static>,
+    completed: bool,
+}
+
+impl ArtifactFactOwnerGuard {
+    fn finish(
+        mut self,
+        facts: ArtifactFacts,
+        stable: bool,
+        metadata: ArtifactMetadataIdentity,
+    ) -> ArtifactFacts {
+        {
+            let mut cache = artifact_fact_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.in_flight.remove(&self.key);
+            if stable {
+                cache.unstable_until.remove(&self.path);
+                cache.insert(self.path.clone(), metadata, facts.clone());
+            } else {
+                cache.mark_unstable_at(self.path.clone(), std::time::Instant::now());
+            }
+        }
+        self.flight.publish(facts.clone());
+        self.completed = true;
+        facts
+    }
+}
+
+impl Drop for ArtifactFactOwnerGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        artifact_fact_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .in_flight
+            .remove(&self.key);
+        self.flight.publish(self.fallback.clone());
+    }
+}
+
+fn artifact_facts_path_with_policy(path: &Path, cache_only: bool) -> ArtifactFacts {
     let Ok(before_metadata) = std::fs::metadata(path) else {
-        return unknown_equivalence_content(path);
+        return ArtifactFacts {
+            content: unknown_equivalence_content(path, None),
+            format: ArtifactFormatFact::ProbeFailure(
+                mold_inference::artifact_format::ArtifactProbeFailure::Io,
+            ),
+        };
     };
     let before = artifact_metadata_identity(path, &before_metadata);
-    if let Some((_, fingerprint)) = equivalence_fingerprint_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(path)
-        .filter(|(identity, _)| identity == &before)
-    {
-        return fingerprint.clone();
-    }
-    if cache_only {
-        return unknown_equivalence_content(path);
+    let key = ArtifactFactKey {
+        path: path.to_path_buf(),
+        metadata: before.clone(),
+    };
+    let existing_flight = {
+        let mut cache = artifact_fact_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(facts) = cache.get(path, &before) {
+            return facts;
+        }
+        if cache.unstable_backoff_active_at(path, std::time::Instant::now()) {
+            return ArtifactFacts {
+                content: unknown_equivalence_content(path, Some(&before)),
+                format: ArtifactFormatFact::CacheMiss,
+            };
+        }
+        if cache_only {
+            return ArtifactFacts {
+                content: unknown_equivalence_content(path, Some(&before)),
+                format: ArtifactFormatFact::CacheMiss,
+            };
+        }
+        cache.in_flight.get(&key).cloned()
+    };
+    if let Some(flight) = existing_flight {
+        return flight.wait();
     }
 
-    // The current `.sha256-verified` sidecar protocol records a downloader
-    // check but does not cryptographically bind it to later local mutation.
-    // Hash current bytes once; metadata only invalidates this cache.
-    let fingerprint = hash_equivalence_artifact_contents(path)
-        .unwrap_or_else(|_| unknown_equivalence_content(path));
-    if std::fs::metadata(path)
+    // Construct the unwind fallback before publishing an owner entry so every
+    // subsequently visible flight is protected by its RAII owner guard.
+    let owner_fallback = ArtifactFacts {
+        content: unknown_equivalence_content(path, Some(&before)),
+        format: ArtifactFormatFact::CacheMiss,
+    };
+    // Bound unique metadata identities separately from physical reads. This
+    // prevents a large admission burst from growing the single-flight table
+    // without limit while still allowing same-identity callers to join.
+    let in_flight_permit = artifact_in_flight_limiter().acquire();
+    let flight = {
+        let mut cache = artifact_fact_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(facts) = cache.get(path, &before) {
+            return facts;
+        }
+        if cache.unstable_backoff_active_at(path, std::time::Instant::now()) {
+            drop(cache);
+            drop(in_flight_permit);
+            return ArtifactFacts {
+                content: unknown_equivalence_content(path, Some(&before)),
+                format: ArtifactFormatFact::CacheMiss,
+            };
+        }
+        if let Some(flight) = cache.in_flight.get(&key).cloned() {
+            drop(cache);
+            drop(in_flight_permit);
+            return flight.wait();
+        }
+        let flight = std::sync::Arc::new(ArtifactFactFlight::new());
+        cache
+            .in_flight
+            .insert(key.clone(), std::sync::Arc::clone(&flight));
+        flight
+    };
+    let owner = ArtifactFactOwnerGuard {
+        path: path.to_path_buf(),
+        key,
+        flight,
+        fallback: owner_fallback,
+        _in_flight_permit: in_flight_permit,
+        completed: false,
+    };
+    let facts = {
+        let _permit = artifact_read_limiter().acquire();
+        note_artifact_physical_read(path);
+        let content = hash_equivalence_artifact_contents(path)
+            .unwrap_or_else(|_| unknown_equivalence_content(path, Some(&before)));
+        let format = match mold_inference::artifact_format::probe(path) {
+            Ok(format) => ArtifactFormatFact::Known(format),
+            Err(error) => ArtifactFormatFact::ProbeFailure(error),
+        };
+        ArtifactFacts { content, format }
+    };
+    let stable = std::fs::metadata(path)
         .ok()
         .map(|metadata| artifact_metadata_identity(path, &metadata))
         .as_ref()
-        == Some(&before)
-    {
-        equivalence_fingerprint_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(path.to_path_buf(), (before, fingerprint.clone()));
-        fingerprint
+        == Some(&before);
+    let published = if stable {
+        facts
     } else {
         // A digest spanning concurrent mutation is not the identity of one
         // stable artifact. Fail closed and let asynchronous preparation hash
         // the new metadata identity.
-        unknown_equivalence_content(path)
-    }
+        ArtifactFacts {
+            content: unknown_equivalence_content(path, Some(&before)),
+            format: ArtifactFormatFact::CacheMiss,
+        }
+    };
+    owner.finish(published, stable, before)
 }
 
 fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<EquivalenceContentIdentity> {
@@ -2176,21 +2765,32 @@ fn hash_equivalence_artifact_contents(path: &Path) -> std::io::Result<Equivalenc
     )))
 }
 
-fn unknown_equivalence_content(path: &Path) -> EquivalenceContentIdentity {
-    static UNKNOWN_BY_PATH: OnceLock<Mutex<BTreeMap<PathBuf, String>>> = OnceLock::new();
-    let mut unknown = UNKNOWN_BY_PATH
-        .get_or_init(|| Mutex::new(BTreeMap::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let discriminator = unknown
-        .entry(path.to_path_buf())
-        .or_insert_with(|| {
-            let mut bytes = [0_u8; 16];
-            getrandom::fill(&mut bytes)
-                .expect("unknown artifact identity requires process-unique entropy");
-            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-        })
-        .clone();
+fn unknown_equivalence_content(
+    path: &Path,
+    metadata: Option<&ArtifactMetadataIdentity>,
+) -> EquivalenceContentIdentity {
+    static UNKNOWN_SECRET: OnceLock<[u8; 32]> = OnceLock::new();
+    let secret = UNKNOWN_SECRET.get_or_init(|| {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .expect("unknown artifact identity requires process-unique entropy");
+        bytes
+    });
+    let mut hash = Sha256::new();
+    hash.update(b"mold.unknown-artifact.v2\0");
+    hash.update(secret);
+    hash.update(path.as_os_str().as_encoded_bytes());
+    match metadata {
+        Some(metadata) => {
+            hash.update(b"observed\0");
+            hash.update(metadata.len.to_le_bytes());
+            for value in &metadata.platform_identity {
+                hash.update(value.to_le_bytes());
+            }
+        }
+        None => hash.update(b"missing\0"),
+    }
+    let discriminator = format!("{:x}", hash.finalize());
     EquivalenceContentIdentity::Unknown { discriminator }
 }
 
@@ -2425,12 +3025,13 @@ mod tests {
         // their metadata length. Seed their synthetic identity so unrelated
         // memory-planning tests do not spend minutes hashing hole ranges.
         let metadata = std::fs::metadata(path).unwrap();
-        equivalence_fingerprint_cache().lock().unwrap().insert(
+        artifact_fact_cache().lock().unwrap().insert(
             path.to_path_buf(),
-            (
-                artifact_metadata_identity(path, &metadata),
-                EquivalenceContentIdentity::Sha256(format!("{bytes:064x}")),
-            ),
+            artifact_metadata_identity(path, &metadata),
+            ArtifactFacts {
+                content: EquivalenceContentIdentity::Sha256(format!("{bytes:064x}")),
+                format: ArtifactFormatFact::CacheMiss,
+            },
         );
     }
 
@@ -3200,6 +3801,14 @@ mod tests {
             CanonicalRuntimeValue::Boolean(true)
         );
         assert_eq!(
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some("TRUE")).value,
+            CanonicalRuntimeValue::Boolean(false)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_CFG_PLUS", Some(" true ")).value,
+            CanonicalRuntimeValue::Boolean(false)
+        );
+        assert_eq!(
             runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("1")).value,
             CanonicalRuntimeValue::Boolean(true)
         );
@@ -3210,6 +3819,16 @@ mod tests {
         assert_eq!(
             runtime_semantic_setting("MOLD_LONG_PROMPTS", Some("yes")).value,
             CanonicalRuntimeValue::Boolean(false)
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_LTX2_VAE_DECODE_CHUNK_FRAMES", Some(" 4 ")).value,
+            CanonicalRuntimeValue::Unsigned(mold_inference::runtime_env::parse_u64(" 4 "))
+        );
+        assert_eq!(
+            runtime_semantic_setting("MOLD_WUERSTCHEN_DECODER_GUIDANCE", Some(" 1.5 ")).value,
+            CanonicalRuntimeValue::FloatBits(
+                mold_inference::runtime_env::parse_f64(" 1.5 ").map(f64::to_bits)
+            )
         );
     }
 
@@ -3266,6 +3885,7 @@ mod tests {
                     compute_capability: Some((8, 6)),
                     available_vram_bytes: plan.admitted_available_vram_bytes,
                 },
+                &plan.execution_environment.runtime_model_id,
                 &plan.model_family,
                 &plan.execution_environment.model_fingerprint,
                 components,
@@ -3307,19 +3927,17 @@ mod tests {
         let root = TempDir::new().unwrap();
         let path = root.path().join("weights.safetensors");
         std::fs::write(&path, b"current artifact bytes").unwrap();
-        equivalence_fingerprint_cache()
-            .lock()
-            .unwrap()
-            .remove(&path);
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
 
         assert!(matches!(
             equivalence_fingerprint_path_with_policy(&path, true),
             EquivalenceContentIdentity::Unknown { .. }
         ));
         assert!(
-            !equivalence_fingerprint_cache()
+            !artifact_fact_cache()
                 .lock()
                 .unwrap()
+                .entries
                 .contains_key(&path),
             "cache-only coordinator lookup must not perform byte hashing"
         );
@@ -3327,6 +3945,286 @@ mod tests {
             equivalence_fingerprint_path(&path),
             EquivalenceContentIdentity::Sha256(_)
         ));
+    }
+
+    #[test]
+    fn coordinator_plan_resolution_never_reads_cold_artifact_facts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), b"cold coordinator artifact").unwrap();
+        }
+        let config = config(root.path(), "flux2", None);
+        let request = request(None);
+        let paths = ModelPaths::resolve(&request.model, &config).unwrap();
+        let frozen = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let _guards = concrete_artifacts_for_family(&paths, "flux2", &[], &frozen)
+            .into_values()
+            .map(|path| {
+                artifact_fact_cache().lock().unwrap().remove_path(&path);
+                register_artifact_read_counter(path, Arc::clone(&reads))
+            })
+            .collect::<Vec<_>>();
+
+        resolve_execution_plans_for_coordinator(
+            &config,
+            &request,
+            &devices(&[24 * GIB]),
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "coordinator resolution must never hash or probe artifact bytes"
+        );
+    }
+
+    #[test]
+    fn cache_miss_identity_changes_when_artifact_metadata_changes() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("changing.safetensors");
+        std::fs::write(&path, b"aaaa").unwrap();
+        let first_metadata = artifact_metadata_identity(&path, &path.metadata().unwrap());
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
+        let first = artifact_facts_path_with_policy(&path, true).content;
+
+        std::fs::write(&path, b"bbbb").unwrap();
+        let second_metadata = artifact_metadata_identity(&path, &path.metadata().unwrap());
+        assert_ne!(
+            first_metadata, second_metadata,
+            "fixture must observe a new metadata identity"
+        );
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
+        let second = artifact_facts_path_with_policy(&path, true).content;
+
+        assert_ne!(
+            first, second,
+            "different byte states at one path must not share a degraded identity"
+        );
+    }
+
+    #[test]
+    fn prepared_descriptor_performs_zero_artifact_reads_after_warm() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let root = TempDir::new().unwrap();
+        for name in ["transformer-q4.gguf", "vae.safetensors", "t5.safetensors"] {
+            std::fs::write(root.path().join(name), b"prepared-format-cache").unwrap();
+        }
+        let config = config(root.path(), "flux2", None);
+        let request = request(None);
+        let paths = ModelPaths::resolve(&request.model, &config).unwrap();
+        let engine_config = mold_inference::FrozenEngineConfig::resolve(&request.model, &config);
+        let prepared = PreparedExecutionInputs {
+            authority_fingerprint: preparation_authority_fingerprint(
+                &config,
+                &request,
+                &paths,
+                &engine_config,
+            ),
+            by_device: BTreeMap::from([(
+                "cuda:0".to_string(),
+                PreparedDeviceExecutionInputs {
+                    engine_paths: paths.clone(),
+                    engine_config,
+                    prepared_available_vram_bytes: 24 * GIB,
+                    capacity_sensitive: false,
+                },
+            )]),
+            retryable_device_failures: BTreeMap::new(),
+        };
+        warm_execution_equivalence_cache(&config, &request, &prepared);
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let _guards = concrete_artifacts_for_family(
+            &paths,
+            "flux2",
+            &[],
+            &prepared.by_device["cuda:0"].engine_config,
+        )
+        .into_values()
+        .map(|path| register_artifact_read_counter(path, Arc::clone(&reads)))
+        .collect::<Vec<_>>();
+        resolve_execution_plans_with_prepared(
+            &config,
+            &request,
+            &devices(&[24 * GIB]),
+            false,
+            Some(&prepared),
+        )
+        .unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_artifact_fact_warmers_single_flight_one_physical_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("shared.safetensors");
+        std::fs::write(&path, b"shared artifact bytes").unwrap();
+        artifact_fact_cache().lock().unwrap().remove_path(&path);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let _guard = register_artifact_read_counter(path.clone(), Arc::clone(&reads));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    artifact_facts_path_with_policy(&path, false)
+                })
+            })
+            .collect::<Vec<_>>();
+        let facts = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(facts.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn artifact_fact_owner_unwind_removes_flight_and_releases_waiters_fail_closed() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("owner-unwind.safetensors");
+        std::fs::write(&path, b"owner unwind").unwrap();
+        let metadata = artifact_metadata_identity(&path, &path.metadata().unwrap());
+        let key = ArtifactFactKey {
+            path: path.clone(),
+            metadata,
+        };
+        let flight = std::sync::Arc::new(ArtifactFactFlight::new());
+        artifact_fact_cache()
+            .lock()
+            .unwrap()
+            .in_flight
+            .insert(key.clone(), std::sync::Arc::clone(&flight));
+        let (tx, rx) = mpsc::channel();
+        let waiter = {
+            let flight = std::sync::Arc::clone(&flight);
+            std::thread::spawn(move || tx.send(flight.wait()).unwrap())
+        };
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _owner = ArtifactFactOwnerGuard {
+                path: path.clone(),
+                key: key.clone(),
+                flight,
+                fallback: ArtifactFacts {
+                    content: unknown_equivalence_content(&path, Some(&key.metadata)),
+                    format: ArtifactFormatFact::CacheMiss,
+                },
+                _in_flight_permit: artifact_in_flight_limiter().acquire(),
+                completed: false,
+            };
+            panic!("synthetic artifact probe owner abort");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap().format,
+            ArtifactFormatFact::CacheMiss
+        );
+        waiter.join().unwrap();
+        assert!(
+            !artifact_fact_cache()
+                .lock()
+                .unwrap()
+                .in_flight
+                .contains_key(&key),
+            "an aborted owner must not strand its metadata identity"
+        );
+    }
+
+    #[test]
+    fn artifact_fact_cache_eviction_is_bounded_and_deterministic() {
+        let mut cache = ArtifactFactCache::with_capacity(2);
+        let first = PathBuf::from("/artifact/first");
+        let second = PathBuf::from("/artifact/second");
+        let third = PathBuf::from("/artifact/third");
+        cache.insert_for_test(first.clone());
+        cache.insert_for_test(second.clone());
+        assert!(cache.touch_for_test(&first));
+        cache.insert_for_test(third.clone());
+        assert_eq!(cache.entry_paths_for_test(), vec![first, third]);
+    }
+
+    #[test]
+    fn unstable_artifact_retry_cooldown_is_bounded_and_expires() {
+        let mut cache = ArtifactFactCache::with_capacity(2);
+        let now = std::time::Instant::now();
+        let first = PathBuf::from("/artifact/first");
+        let second = PathBuf::from("/artifact/second");
+        let third = PathBuf::from("/artifact/third");
+
+        cache.mark_unstable_at(first.clone(), now);
+        cache.mark_unstable_at(second.clone(), now);
+        assert!(cache.unstable_backoff_active_at(&first, now));
+        cache.mark_unstable_at(third.clone(), now);
+
+        assert_eq!(cache.unstable_until.len(), 2);
+        assert!(
+            !cache.unstable_until.contains_key(&first),
+            "equal-deadline eviction must use path order deterministically"
+        );
+        assert!(cache.unstable_backoff_active_at(&second, now));
+        assert!(
+            !cache.unstable_backoff_active_at(&second, now + ARTIFACT_UNSTABLE_RETRY_COOLDOWN),
+            "cooldown must not permanently suppress a stable retry"
+        );
+    }
+
+    #[test]
+    fn physical_artifact_read_limiter_never_exceeds_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::time::Duration;
+
+        let limiter = Arc::new(ArtifactReadLimiter::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(7));
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let threads = (0..6)
+            .map(|_| {
+                let limiter = Arc::clone(&limiter);
+                let active = Arc::clone(&active);
+                let max_active = Arc::clone(&max_active);
+                let start = Arc::clone(&start);
+                let release_rx = Arc::clone(&release_rx);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let _permit = limiter.acquire();
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    release_rx.lock().unwrap().recv().unwrap();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+        for _ in 0..6 {
+            release_tx.send(()).unwrap();
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -3394,10 +4292,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_equivalence_v2_schema_and_hash_are_golden() {
+    fn execution_equivalence_v3_schema_and_hash_are_golden() {
         let content = EquivalenceContentIdentity::Sha256("00".repeat(32));
         let descriptor = ExecutionEnvironmentDescriptor {
-            schema_version: 2,
+            schema_version: 3,
             backend: GpuBackend::Cuda,
             architecture: DeviceArchitectureClass::CudaComputeCapability { major: 8, minor: 6 },
             attention_kernel_class: AttentionKernelClass::Math,
@@ -3426,6 +4324,11 @@ mod tests {
                     value: CanonicalRuntimeValue::Boolean(false),
                 }],
             },
+            runtime_model_id: "flux-dev:bf16".into(),
+            runtime_artifact_paths: vec![RuntimeArtifactPathIdentity {
+                role: ComponentRole::Transformer,
+                path: RuntimePathIdentity::Portable("/models/transformer.safetensors".to_string()),
+            }],
             model_family: "flux".into(),
             model_fingerprint: "model-content".into(),
             components: vec![EquivalentComponentExecution {
@@ -3452,11 +4355,11 @@ mod tests {
         let encoded = serde_json::to_string(&descriptor).unwrap();
         assert_eq!(
             encoded,
-            r#"{"schema_version":2,"backend":"cuda","architecture":{"CudaComputeCapability":{"major":8,"minor":6}},"attention_kernel_class":"Math","code":{"package_version":"0.20.2","source_revision":"0bacf81d","scope":"ImmutableBuild","process_discriminator":null},"semantic_config":{"family":"flux","is_schnell":false,"is_turbo":null,"scheduler":null,"t5_variant":"q4","qwen3_variant":null,"qwen2_variant":null,"qwen2_text_encoder_mode":null,"ltx2_gemma_variant":null,"attention_backend":"Math","attention_chunk":"Auto","vae_tiling":"Auto","vae_dtype":"Auto","runtime":[{"variable":"CfgPlus","value":{"Boolean":false}}]},"model_family":"flux","model_fingerprint":"model-content","components":[{"role":"Transformer","content_fingerprint":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"precision":{"storage":{"Unknown":{"reason":"UnsupportedContainer","content_discriminator":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}},"compute_dtype":"Bf16"},"dtype":"Bf16","quantization":null,"placement":"AssignedDevice","load_strategy":"Resident"}],"loras":[],"engine_load_strategy":"Eager","offload_mode":"None","output_format":"png","determinism_class":"CpuSeededCrossBackend"}"#
+            r#"{"schema_version":3,"backend":"cuda","architecture":{"CudaComputeCapability":{"major":8,"minor":6}},"attention_kernel_class":"Math","code":{"package_version":"0.20.2","source_revision":"0bacf81d","scope":"ImmutableBuild","process_discriminator":null},"semantic_config":{"family":"flux","is_schnell":false,"is_turbo":null,"scheduler":null,"t5_variant":"q4","qwen3_variant":null,"qwen2_variant":null,"qwen2_text_encoder_mode":null,"ltx2_gemma_variant":null,"attention_backend":"Math","attention_chunk":"Auto","vae_tiling":"Auto","vae_dtype":"Auto","runtime":[{"variable":"CfgPlus","value":{"Boolean":false}}]},"runtime_model_id":"flux-dev:bf16","runtime_artifact_paths":[{"role":"Transformer","path":{"Portable":"/models/transformer.safetensors"}}],"model_family":"flux","model_fingerprint":"model-content","components":[{"role":"Transformer","content_fingerprint":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"},"precision":{"storage":{"Unknown":{"reason":"UnsupportedContainer","content_discriminator":{"Sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}},"compute_dtype":"Bf16"},"dtype":"Bf16","quantization":null,"placement":"AssignedDevice","load_strategy":"Resident"}],"loras":[],"engine_load_strategy":"Eager","offload_mode":"None","output_format":"png","determinism_class":"CpuSeededCrossBackend"}"#
         );
         assert_eq!(
             descriptor.fingerprint().as_str(),
-            "c91243915527427b71febd105e9531ed9bb7d07c687b6acf7390937ff13a61b4"
+            "8a7ad345c90e7dde228c90ee4a219986ad705a0958ead00d143ead84bef72be7"
         );
     }
 

@@ -1367,7 +1367,7 @@ pub fn free_vram_bytes(_ordinal: usize) -> Option<u64> {
 /// pressure). Override via `MOLD_RESERVE_VRAM_MB`.
 pub fn reserved_vram_bytes() -> u64 {
     if let Some(s) = crate::runtime_env::value("MOLD_RESERVE_VRAM_MB") {
-        if let Ok(mb) = s.parse::<u64>() {
+        if let Some(mb) = crate::runtime_env::parse_u64(&s) {
             return mb.saturating_mul(1_000_000);
         }
     }

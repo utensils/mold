@@ -42,7 +42,7 @@ const GB: u64 = 1_000_000_000;
 /// 3. Fallback: 16 GB — sane for a 32 GB machine if RAM probing fails.
 pub fn pinned_cap_bytes() -> u64 {
     if let Some(v) = crate::runtime_env::value("MOLD_PINNED_VRAM_MAX_GB") {
-        if let Ok(gb) = v.trim().parse::<f64>() {
+        if let Some(gb) = crate::runtime_env::parse_f64(&v) {
             if gb > 0.0 {
                 return (gb * GB as f64) as u64;
             }

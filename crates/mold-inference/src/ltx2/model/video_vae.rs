@@ -1019,7 +1019,8 @@ fn temporal_output_frames_for_latents(latent_frames: usize, temporal_scale: usiz
 
 fn positive_env_usize(key: &str) -> Option<usize> {
     crate::runtime_env::value(key)
-        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|value| crate::runtime_env::parse_u64(&value))
+        .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value > 0)
 }
 

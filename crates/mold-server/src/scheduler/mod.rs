@@ -2391,7 +2391,7 @@ impl Coordinator {
             mold_inference::runtime_env::value("MOLD_OFFLOAD").as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
-        let resolved = crate::execution_plan::resolve_execution_plans_with_prepared(
+        let resolved = crate::execution_plan::resolve_execution_plans_for_coordinator(
             &config,
             &pending.job.request,
             device_facts,
@@ -2427,6 +2427,7 @@ impl Coordinator {
                         crate::execution_plan::DeterminismClass::CpuSeededCrossBackend;
                     let environment = crate::execution_plan::execution_environment_descriptor(
                         &device,
+                        &pending.job.request.model,
                         &model_family,
                         &model_fingerprint,
                         &components,
@@ -2646,11 +2647,12 @@ impl Coordinator {
             &pending.work,
             OwnerWork::ChainStage(job) if job.expected_model_fingerprint.is_some()
         );
-        let plans = crate::execution_plan::resolve_execution_plans(
+        let plans = crate::execution_plan::resolve_execution_plans_for_coordinator(
             config,
             request,
             &self.device_facts(),
             offload_requested,
+            None,
         )
         .map_err(|error| {
             if frozen_chain

@@ -99,6 +99,19 @@ pub fn value(name: &str) -> Option<String> {
     snapshot().value(name).map(str::to_string)
 }
 
+/// Canonical unsigned parser shared by runtime consumers and execution
+/// equivalence. Keeping one authority prevents whitespace or invalid-value
+/// handling from collapsing distinct runtime behavior into one descriptor.
+pub fn parse_u64(value: &str) -> Option<u64> {
+    value.trim().parse().ok()
+}
+
+/// Canonical floating-point parser shared by runtime consumers and execution
+/// equivalence.
+pub fn parse_f64(value: &str) -> Option<f64> {
+    value.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +154,13 @@ mod tests {
         ] {
             assert!(!ENGINE_SHAPING_VARIABLES.contains(&diagnostic));
         }
+    }
+
+    #[test]
+    fn shared_numeric_parsers_define_whitespace_and_invalid_value_semantics() {
+        assert_eq!(parse_u64(" 4 "), Some(4));
+        assert_eq!(parse_u64("4 frames"), None);
+        assert_eq!(parse_f64("\t1.5\n"), Some(1.5));
+        assert_eq!(parse_f64("automatic"), None);
     }
 }

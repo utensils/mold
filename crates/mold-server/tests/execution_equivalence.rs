@@ -267,7 +267,7 @@ fn frozen_engine_semantics_change_equivalence_identity() {
 }
 
 #[test]
-fn byte_identical_artifacts_at_different_paths_share_content_identity() {
+fn byte_identical_artifacts_at_different_paths_keep_sha_identity_but_not_runtime_route() {
     let (root, config, request) = fixture();
     let base = resolve_execution_plans(
         &config,
@@ -298,8 +298,22 @@ fn byte_identical_artifacts_at_different_paths_share_content_identity() {
     .remove(0);
 
     assert_eq!(
+        base.execution_environment
+            .components
+            .iter()
+            .map(|component| (&component.role, &component.content_fingerprint))
+            .collect::<Vec<_>>(),
+        alias
+            .execution_environment
+            .components
+            .iter()
+            .map(|component| (&component.role, &component.content_fingerprint))
+            .collect::<Vec<_>>(),
+        "byte SHA identity must remain independent of path and inode"
+    );
+    assert_ne!(
         base.execution_equivalence_fingerprint, alias.execution_equivalence_fingerprint,
-        "equivalence content identity must not depend on path or inode"
+        "legacy runtime path heuristics require a conservative exact path route"
     );
 }
 
@@ -382,7 +396,7 @@ fn every_frozen_semantic_field_and_runtime_input_is_differential() {
 }
 
 #[test]
-fn opaque_model_aliases_with_identical_bytes_share_equivalence_only() {
+fn opaque_model_aliases_do_not_share_until_runtime_is_model_id_independent() {
     let (root, mut config, mut request) = fixture();
     let model = config.models.remove("test:q4").unwrap();
     config.models.insert("cv:3143864".into(), model.clone());
@@ -410,7 +424,7 @@ fn opaque_model_aliases_with_identical_bytes_share_equivalence_only() {
     .remove(0);
 
     assert_ne!(cv.execution_fingerprint, hf.execution_fingerprint);
-    assert_eq!(
+    assert_ne!(
         cv.execution_equivalence_fingerprint,
         hf.execution_equivalence_fingerprint
     );
@@ -419,6 +433,181 @@ fn opaque_model_aliases_with_identical_bytes_share_equivalence_only() {
         hf.execution_environment.components
     );
     drop(root);
+}
+
+#[test]
+fn model_name_heuristics_cannot_collapse_flux_schnell_or_sdxl_turbo() {
+    let (_root, mut config, mut request) = fixture();
+    let flux = config.models.remove("test:q4").unwrap();
+    config.models.insert("opaque-flux".into(), flux.clone());
+    config.models.insert("opaque-flux-schnell".into(), flux);
+
+    request.model = "opaque-flux".into();
+    let plain = resolve_execution_plans(
+        &config,
+        &request,
+        &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+        false,
+    )
+    .unwrap()
+    .remove(0);
+    request.model = "opaque-flux-schnell".into();
+    let schnell = resolve_execution_plans(
+        &config,
+        &request,
+        &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+        false,
+    )
+    .unwrap()
+    .remove(0);
+    assert_ne!(
+        plain.execution_equivalence_fingerprint,
+        schnell.execution_equivalence_fingerprint
+    );
+
+    for model in config.models.values_mut() {
+        model.family = Some("sdxl".into());
+        model.is_turbo = None;
+        model.scheduler = None;
+    }
+    request.model = "opaque-flux".into();
+    let standard = resolve_execution_plans(
+        &config,
+        &request,
+        &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+        false,
+    )
+    .unwrap()
+    .remove(0);
+    request.model = "opaque-flux-schnell".replace("schnell", "turbo");
+    config
+        .models
+        .insert(request.model.clone(), config.models["opaque-flux"].clone());
+    let turbo = resolve_execution_plans(
+        &config,
+        &request,
+        &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+        false,
+    )
+    .unwrap()
+    .remove(0);
+    assert_ne!(
+        standard.execution_equivalence_fingerprint,
+        turbo.execution_equivalence_fingerprint
+    );
+}
+
+#[test]
+fn legacy_family_presets_remain_conservatively_model_qualified() {
+    let (_root, mut config, mut request) = fixture();
+    let template = config.models.remove("test:q4").unwrap();
+    for (family, left, right) in [
+        ("sd3", "opaque-sd3", "opaque-sd3-medium-turbo"),
+        ("flux2", "opaque-klein-4b", "opaque-klein-9b"),
+        (
+            "ltx-video",
+            "ltx-video-0.9.6",
+            "ltx-video-0.9.8-13b-distilled",
+        ),
+        ("ltx2", "ltx-2-19b-dev", "ltx-2.3-22b-distilled"),
+    ] {
+        let mut model = template.clone();
+        model.family = Some(family.into());
+        config.models.insert(left.into(), model.clone());
+        config.models.insert(right.into(), model);
+        request.model = left.into();
+        let left_plan = resolve_execution_plans(
+            &config,
+            &request,
+            &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        request.model = right.into();
+        let right_plan = resolve_execution_plans(
+            &config,
+            &request,
+            &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+        assert_ne!(
+            left_plan.execution_equivalence_fingerprint,
+            right_plan.execution_equivalence_fingerprint,
+            "{family} runtime still consumes model-name preset semantics"
+        );
+    }
+}
+
+#[test]
+fn sd_and_ltx_single_file_layout_routes_cannot_collapse_by_equal_bytes() {
+    let (root, mut config, mut request) = fixture();
+    let template = config.models.remove("test:q4").unwrap();
+    for name in [
+        "single-file.safetensors",
+        "split-transformer.bin",
+        "split-vae.bin",
+    ] {
+        std::fs::write(root.path().join(name), b"identical runtime-layout bytes").unwrap();
+    }
+
+    for family in ["sd15", "sdxl", "ltx-video"] {
+        let model_id = format!("opaque-{family}-layout");
+        let mut model = template.clone();
+        model.family = Some(family.into());
+        model.transformer = Some(path(root.path(), "single-file.safetensors"));
+        model.vae = model.transformer.clone();
+        config.models.insert(model_id.clone(), model);
+        request.model = model_id.clone();
+        let single_file = resolve_execution_plans(
+            &config,
+            &request,
+            &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+
+        let split_model = config.models.get_mut(&model_id).unwrap();
+        split_model.transformer = Some(path(root.path(), "split-transformer.bin"));
+        split_model.vae = Some(path(root.path(), "split-vae.bin"));
+        let split = resolve_execution_plans(
+            &config,
+            &request,
+            &[device("cuda:0", GpuBackend::Cuda, Some((8, 6)))],
+            false,
+        )
+        .unwrap()
+        .remove(0);
+
+        let component_content = |plan: &mold_server::execution_plan::ResolvedExecutionPlan| {
+            plan.execution_environment
+                .components
+                .iter()
+                .map(|component| {
+                    (
+                        component.role.clone(),
+                        component.content_fingerprint.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            component_content(&single_file),
+            component_content(&split),
+            "{family} fixture must isolate equal bytes from loader layout"
+        );
+        assert_ne!(
+            single_file.execution_environment.runtime_artifact_paths,
+            split.execution_environment.runtime_artifact_paths
+        );
+        assert_ne!(
+            single_file.execution_equivalence_fingerprint, split.execution_equivalence_fingerprint,
+            "{family} runtime still consumes single-file and path-extension semantics"
+        );
+    }
 }
 
 #[test]

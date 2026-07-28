@@ -7,7 +7,7 @@
 //! by `SingleFileBackend::from_flux2_singlefile`.
 //!
 //! Some uploads also ship NVFP4-quantised weights with extra
-//! `*.weight_scale_2` / `*.input_scale` / `*.comfy_quant` markers. Those
+//! `*.weight_scale_2` / `*.comfy_quant` markers. Those
 //! route through `SingleFileBackend` synthetic `weight.nvfp4_*` subkeys and
 //! `Flux2Linear::Nvfp4Streaming` instead of the normal BF16/FP16/FP8 weight
 //! lookup.
@@ -38,8 +38,8 @@ pub enum Flux2SingleFileFormat {
     /// The standard `Flux2Transformer::new` path handles this layout
     /// directly — rare for single-file uploads.
     Diffusers,
-    /// NVFP4-quantised single-file. Detected via `*.weight_scale_2`,
-    /// `*.input_scale`, or `*.comfy_quant` markers in the header. Loadable
+    /// NVFP4-quantised single-file. Detected via `*.weight_scale_2` or
+    /// `*.comfy_quant` markers in the header. Loadable
     /// through the portable streaming NVFP4 path.
     Nvfp4,
     /// No recognisable Flux.2 signature in the header.
@@ -88,10 +88,7 @@ pub fn detect_format(path: &Path) -> Result<Flux2SingleFileFormat, DetectError> 
 const BFL_NATIVE_PREFIX: &str = "model.diffusion_model.";
 
 fn is_nvfp4_marker(key: &str) -> bool {
-    key.ends_with(".weight_scale_2")
-        || key.ends_with(".weight_scale")
-        || key.ends_with(".input_scale")
-        || key.ends_with(".comfy_quant")
+    key.ends_with(".weight_scale_2") || key.ends_with(".comfy_quant")
 }
 
 fn is_diffusers_marker(key: &str) -> bool {
@@ -210,6 +207,20 @@ mod tests {
             ],
         );
         assert_eq!(detect_format(&p).unwrap(), Flux2SingleFileFormat::Nvfp4);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn flux2_input_scale_without_nvfp4_marker_remains_bfl_fp8() {
+        let p = temp_path("fp8-input-scale");
+        write_fixture(
+            &p,
+            &[
+                "model.diffusion_model.double_blocks.0.img_attn.qkv.weight",
+                "model.diffusion_model.double_blocks.0.img_attn.qkv.input_scale",
+            ],
+        );
+        assert_eq!(detect_format(&p).unwrap(), Flux2SingleFileFormat::BflNative);
         let _ = std::fs::remove_file(p);
     }
 

@@ -188,7 +188,7 @@ impl WuerstchenEngine {
 
     fn decoder_guidance() -> f64 {
         crate::runtime_env::value("MOLD_WUERSTCHEN_DECODER_GUIDANCE")
-            .and_then(|value| value.parse::<f64>().ok())
+            .and_then(|value| crate::runtime_env::parse_f64(&value))
             .unwrap_or(0.0)
     }
 

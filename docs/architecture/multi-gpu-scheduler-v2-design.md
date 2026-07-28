@@ -1069,13 +1069,33 @@ capability or Metal), attention/kernel class, the fully frozen engine/runtime
 semantic configuration, model and code identity, per-component and LoRA
 artifact format plus current-byte SHA-256 identity, effective compute dtype,
 semantic CPU-versus-assigned-device placement, component and engine load
-strategies, offload mode, output format, and determinism class. Catalog IDs,
-filenames, extensions, paths, inodes, device ID/ordinal, and transient capacity
-estimates are not equivalence facts. The existing `.sha256-verified` sidecar is
-not used as current-byte authority because it is not bound to later local file
-mutation. Full-byte hashing is performed once per artifact metadata identity
-during asynchronous dependency preparation on the blocking pool; coordinator
-planning normally performs only metadata validation and cache lookup.
+strategies, offload mode, output format, and determinism class. Schema v3 also
+retains the exact model ID and a typed, role-ordered, platform-exact artifact
+path route. This is intentionally conservative: current family factories still
+derive loader, preset, layout, scheduler, and single-file behavior from model
+IDs, path equality, filenames, and extensions. Device ID/ordinal and transient
+capacity estimates remain excluded, so the same request and runtime route can
+still share across compatible devices. The exact route can be removed only
+after those legacy branches consume frozen typed facts instead.
+
+The existing `.sha256-verified` sidecar is not used as current-byte authority
+because it is not bound to later local file mutation. Current-byte hashing and
+bounded header probing are warmed together once per path plus metadata identity
+during asynchronous dependency preparation on the blocking pool. Concurrent
+warmers share one single-flight result, owner unwind removes the flight and
+wakes waiters with a fail-closed cache miss, at most 64 unique metadata
+identities may be in flight, and no more than two artifact-read operations run
+at once. Safetensors and JSON headers are parsed from bounded streams rather
+than mapped or materialized wholesale. Both the artifact-fact cache and the
+legacy exact-lease fingerprint cache use deterministic bounded eviction. An
+artifact that changes during inspection enters a bounded one-second negative
+retry cooldown so repeated admissions cannot monopolize both read permits.
+Every scheduler-coordinator planning path, including a durable chain stage
+without a prepared-input carrier, performs metadata validation and cache lookup
+only; it never waits for a single-flight owner or reads artifact payloads or
+headers. A cache-miss/unstable discriminator includes the observed file length
+and platform replacement/change identity in addition to its exact path, so two
+byte states at one path cannot share a degraded equivalence identity.
 `execution_equivalence_fingerprint` is the domain-separated hash of that
 descriptor and is the identity a Phase F parent may share across compatible
 device-specific plans. Missing architecture facts fail closed with a
