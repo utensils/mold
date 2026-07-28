@@ -303,7 +303,18 @@ fn shim_build_response_and_cleanup(
         }
     };
     let (filename, output_metadata) = if let Some(dir) = output_dir {
-        let metadata = req.stitched_output_metadata(actual_format, frame_count);
+        // The ephemeral shim job dir is deleted right after this response is
+        // assembled, so a job id would dangle — record stage seeds only.
+        let stage_seeds: Vec<u64> = manifest
+            .stage_status
+            .iter()
+            .map(|stage| stage.seed)
+            .collect();
+        let provenance = mold_core::chain::ChainProvenance {
+            chain_job_id: None,
+            stage_seeds: Some(&stage_seeds),
+        };
+        let metadata = req.stitched_output_metadata(actual_format, frame_count, Some(&provenance));
         let filename = save_video_to_dir(
             &dir,
             &bytes,

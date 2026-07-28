@@ -4678,6 +4678,8 @@ mod tests {
             temporal_upscale: None,
             frames: None,
             fps: None,
+            chain_job_id: None,
+            chain: None,
             version: "test".into(),
         };
         let mut rec = GenerationRecord::from_save(
@@ -4918,6 +4920,8 @@ mod tests {
             temporal_upscale: None,
             frames: None,
             fps: None,
+            chain_job_id: None,
+            chain: None,
             version: "t".into(),
         };
         let rec = GenerationRecord::from_save(

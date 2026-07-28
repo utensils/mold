@@ -45,6 +45,31 @@ pub fn record_local_save(
     format: OutputFormat,
     actual_dims: Option<(u32, u32)>,
 ) -> bool {
+    let metadata = OutputMetadata::from_generate_request(
+        req,
+        seed_used,
+        None,
+        mold_core::build_info::version_string(),
+    );
+    record_local_save_metadata(
+        saved_path,
+        metadata,
+        generation_time_ms,
+        format,
+        actual_dims,
+    )
+}
+
+/// Like [`record_local_save`] but with caller-built metadata — the chain
+/// command uses this to carry the structured per-clip provenance block that
+/// a synthetic single-clip `GenerateRequest` cannot express.
+pub fn record_local_save_metadata(
+    saved_path: &Path,
+    mut metadata: OutputMetadata,
+    generation_time_ms: u64,
+    format: OutputFormat,
+    actual_dims: Option<(u32, u32)>,
+) -> bool {
     let Some(db) = handle() else {
         return false;
     };
@@ -61,12 +86,6 @@ pub fn record_local_save(
     let Some(output_dir) = abs.parent() else {
         return false;
     };
-    let mut metadata = OutputMetadata::from_generate_request(
-        req,
-        seed_used,
-        None,
-        mold_core::build_info::version_string(),
-    );
     if let Some((w, h)) = actual_dims {
         metadata.apply_output_dimensions(w, h);
     }

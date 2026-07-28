@@ -132,6 +132,8 @@ pub fn synthesize_from_filename(filename: &str, timestamp_secs: u64) -> OutputMe
         temporal_upscale: None,
         frames: None,
         fps: None,
+        chain_job_id: None,
+        chain: None,
         version: format!("synthesized@{timestamp_secs}"),
     }
 }

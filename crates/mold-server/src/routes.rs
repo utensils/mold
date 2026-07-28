@@ -250,6 +250,8 @@ use crate::queue::clean_error_message;
         mold_core::chain_job::StageState,
         mold_core::chain_job::RetakeMode,
         mold_core::chain_job::GcOutcome,
+        mold_core::chain::ChainStageMetadata,
+        mold_core::chain::ChainOutputMetadata,
         ModelInfoExtended,
         LoadModelBody,
         UnloadRequest,

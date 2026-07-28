@@ -689,6 +689,15 @@ pub struct OutputMetadata {
     pub frames: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// Durable chain-job id this output was finalized from (additive;
+    /// absent for single generations, the ephemeral shim, and legacy rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_job_id: Option<String>,
+    /// Structured multi-clip provenance for chain outputs (additive) —
+    /// every clip's prompt, frames, transition, and effective seed, so a
+    /// sequence is never recorded under clip 1's prompt alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<crate::chain::ChainOutputMetadata>,
     pub version: String,
 }
 
@@ -759,6 +768,8 @@ impl OutputMetadata {
             temporal_upscale: req.temporal_upscale,
             frames: req.frames,
             fps: req.fps,
+            chain_job_id: None,
+            chain: None,
             version: version.into(),
         }
     }

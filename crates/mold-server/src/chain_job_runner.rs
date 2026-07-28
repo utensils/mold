@@ -1545,7 +1545,25 @@ fn finalize_job(
 
     if !manifest.ephemeral {
         if let Some(output_dir) = deps.output_dir.as_ref() {
-            let metadata = effective.stitched_output_metadata(OutputFormat::Mp4, frame_count);
+            let stage_seeds: Vec<u64> = manifest
+                .stage_status
+                .iter()
+                .map(|stage| stage.seed)
+                .collect();
+            let provenance = mold_core::chain::ChainProvenance {
+                chain_job_id: Some(&job.id),
+                stage_seeds: Some(&stage_seeds),
+            };
+            let metadata = effective.stitched_output_metadata(
+                OutputFormat::Mp4,
+                frame_count,
+                Some(&provenance),
+            );
+            let generation_time_ms: u64 = manifest
+                .stage_status
+                .iter()
+                .filter_map(|stage| stage.generation_time_ms)
+                .sum();
             save_video_to_dir(
                 output_dir,
                 &video_bytes,
@@ -1553,7 +1571,7 @@ fn finalize_job(
                 OutputFormat::Mp4,
                 &effective.model,
                 &metadata,
-                None,
+                (generation_time_ms > 0).then_some(generation_time_ms as i64),
                 Some(db),
                 deps.server_events.as_deref(),
             );
@@ -3317,6 +3335,63 @@ mod tests {
         assert_eq!(manifest.finalizes[1].stage_seeds, vec![first_seed]);
         assert!(job_dir.join("final/output-1.mp4").exists());
         assert!(job_dir.join("final/output-2.mp4").exists());
+    }
+
+    /// The durable finalize path must record the gallery row with the
+    /// summed per-stage generation time (previously None), the chain job
+    /// id, the joined distinct clip prompts, and the structured chain
+    /// block carrying each stage's effective seed.
+    #[test]
+    fn finalize_records_summed_generation_time_and_chain_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth, TransitionMode::Cut]);
+        req.stages[0].prompt = "opening clip".into();
+        req.stages[1].prompt = "second clip".into();
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "01JBR55PROV", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let gallery_dir = dir.path().join("gallery");
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(gallery_dir);
+
+        execute_job(&deps, &row, 0).unwrap();
+
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        let expected_time: u64 = manifest
+            .stage_status
+            .iter()
+            .filter_map(|stage| stage.generation_time_ms)
+            .sum();
+        assert!(expected_time > 0, "fake executor reports stage times");
+
+        let db = deps.db.as_ref().as_ref().unwrap();
+        let rows = db.list(None).unwrap();
+        assert_eq!(rows.len(), 1, "finalize saves exactly one gallery row");
+        let rec = &rows[0];
+        assert_eq!(rec.generation_time_ms, Some(expected_time as i64));
+        assert_eq!(rec.metadata.chain_job_id.as_deref(), Some("01JBR55PROV"));
+        assert_eq!(rec.metadata.prompt, "opening clip\nsecond clip");
+        let chain = rec.metadata.chain.as_ref().expect("chain block recorded");
+        assert_eq!(chain.stage_count, 2);
+        assert_eq!(chain.stages[0].prompt, "opening clip");
+        assert_eq!(
+            chain.stages[0].seed.as_deref(),
+            Some(manifest.stage_status[0].seed.to_string().as_str()),
+            "effective per-stage seeds recorded as decimal strings",
+        );
+        assert_eq!(
+            chain.stages[1].seed.as_deref(),
+            Some(manifest.stage_status[1].seed.to_string().as_str()),
+        );
     }
 
     #[test]

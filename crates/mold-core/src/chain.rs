@@ -40,6 +40,40 @@ pub enum TransitionMode {
     Fade,
 }
 
+/// Per-clip provenance recorded into gallery metadata for chain outputs —
+/// the durable record of what each clip asked for, so a sequence can be
+/// traced (and later re-edited) from the Library. Seeds are the effective
+/// per-stage seeds, encoded as decimal strings (full-range u64).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainStageMetadata {
+    pub prompt: String,
+    pub frames: u32,
+    pub transition: TransitionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+}
+
+/// Structured multi-clip provenance block on [`crate::OutputMetadata`]
+/// (additive; absent for single generations and legacy rows).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ChainOutputMetadata {
+    pub stage_count: u32,
+    pub motion_tail_frames: u32,
+    pub stages: Vec<ChainStageMetadata>,
+}
+
+/// Optional provenance supplied by the caller of
+/// [`ChainRequest::stitched_output_metadata`]: the durable job id (absent
+/// on the ephemeral shim and CLI local renders) and the effective per-stage
+/// seeds once rendering has assigned them.
+#[derive(Debug, Clone, Copy)]
+pub struct ChainProvenance<'a> {
+    pub chain_job_id: Option<&'a str>,
+    pub stage_seeds: Option<&'a [u64]>,
+}
+
 /// Per-stage LoRA adapter spec. **Reserved for sub-project B** — populating
 /// this in a request before B lands causes `ChainRequest::normalise` to
 /// return 422. Defined now so scripts that round-trip through v1 clients
@@ -482,8 +516,21 @@ impl ChainRequest {
             .stages
             .first()
             .expect("synthetic_generate_request requires a normalised ChainRequest");
+        // A sequence with distinct clip prompts must not be recorded under
+        // clip 1's prompt alone — join them (one line per clip) so gallery
+        // search matches any clip. Uniform prompts (auto-expanded chains)
+        // keep the single prompt.
+        let prompt = if self.stages.iter().all(|stage| stage.prompt == first.prompt) {
+            first.prompt.clone()
+        } else {
+            self.stages
+                .iter()
+                .map(|stage| stage.prompt.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         GenerateRequest {
-            prompt: first.prompt.clone(),
+            prompt,
             negative_prompt: first.negative_prompt.clone(),
             model: self.model.clone(),
             width: self.width,
@@ -538,14 +585,36 @@ impl ChainRequest {
         &self,
         actual_format: OutputFormat,
         frame_count: u32,
+        provenance: Option<&ChainProvenance>,
     ) -> OutputMetadata {
         let synth = self.synthetic_generate_request(actual_format, frame_count, self.fps);
-        OutputMetadata::from_generate_request(
+        let mut metadata = OutputMetadata::from_generate_request(
             &synth,
             self.seed.unwrap_or(0),
             None,
             crate::build_info::version_string(),
-        )
+        );
+        metadata.chain_job_id = provenance.and_then(|p| p.chain_job_id).map(str::to_string);
+        let stage_seeds = provenance.and_then(|p| p.stage_seeds);
+        metadata.chain = Some(ChainOutputMetadata {
+            stage_count: self.stages.len() as u32,
+            motion_tail_frames: self.motion_tail_frames,
+            stages: self
+                .stages
+                .iter()
+                .enumerate()
+                .map(|(idx, stage)| ChainStageMetadata {
+                    prompt: stage.prompt.clone(),
+                    frames: stage.frames,
+                    transition: stage.transition,
+                    fade_frames: stage.fade_frames,
+                    seed: stage_seeds
+                        .and_then(|seeds| seeds.get(idx))
+                        .map(u64::to_string),
+                })
+                .collect(),
+        });
+        metadata
     }
 
     /// Collapse the auto-expand form into a canonical `Vec<ChainStage>` and
@@ -1533,7 +1602,10 @@ mod tests {
         req.clip_frames = None;
 
         let synth = req.synthetic_generate_request(OutputFormat::Mp4, 190, 24);
-        assert_eq!(synth.prompt, "stage zero prompt");
+        assert_eq!(
+            synth.prompt, "stage zero prompt\nstage one prompt",
+            "distinct clip prompts are joined, one line per clip",
+        );
         assert_eq!(synth.source_image.as_deref(), Some(&[1, 2, 3, 4][..]));
         assert_eq!(synth.negative_prompt.as_deref(), Some("no cats"));
         assert_eq!(synth.model, "ltx-2-19b-distilled:fp8");
@@ -1545,11 +1617,94 @@ mod tests {
         assert_eq!(synth.batch_index, Some(2));
         assert_eq!(synth.batch_count, Some(3));
 
-        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190);
+        let metadata = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
         assert_eq!(metadata.original_prompt.as_deref(), Some("source prompt"));
         assert_eq!(metadata.batch_id.as_deref(), Some("prepared-batch-1"));
         assert_eq!(metadata.batch_index, Some(2));
         assert_eq!(metadata.batch_count, Some(3));
+    }
+
+    /// A sequence whose clips carry distinct prompts must not record the
+    /// whole video under clip 1's prompt alone — the gallery row joins
+    /// every clip prompt (one line per clip) so search matches any of them.
+    /// Uniform prompts (auto-expanded chains) keep the single prompt.
+    #[test]
+    fn synthetic_generate_request_joins_distinct_stage_prompts() {
+        let uniform = auto_expand_request("one prompt", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        assert_eq!(
+            uniform
+                .synthetic_generate_request(OutputFormat::Mp4, 190, 24)
+                .prompt,
+            "one prompt"
+        );
+
+        let mut distinct = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Smooth, 33, None),
+        ]);
+        distinct.stages[0].prompt = "kingfisher waits".into();
+        distinct.stages[1].prompt = "it lifts off".into();
+        assert_eq!(
+            distinct
+                .synthetic_generate_request(OutputFormat::Mp4, 113, 24)
+                .prompt,
+            "kingfisher waits\nit lifts off"
+        );
+    }
+
+    /// Chain outputs must carry structured per-clip provenance so the
+    /// Library can trace a sequence back to its clips (and, later, its
+    /// durable job). Stage seeds are recorded as decimal strings.
+    #[test]
+    fn stitched_metadata_records_chain_block_with_stage_provenance() {
+        let mut req = stage_list_request(vec![
+            (TransitionMode::Smooth, 97, None),
+            (TransitionMode::Fade, 33, Some(8)),
+        ]);
+        req.stages[0].prompt = "opening".into();
+        req.stages[1].prompt = "landing".into();
+
+        let seeds = [7u64, u64::MAX];
+        let provenance = ChainProvenance {
+            chain_job_id: Some("job-123"),
+            stage_seeds: Some(&seeds),
+        };
+        let meta = req.stitched_output_metadata(OutputFormat::Mp4, 122, Some(&provenance));
+
+        assert_eq!(meta.chain_job_id.as_deref(), Some("job-123"));
+        let chain = meta.chain.expect("chain block must be present");
+        assert_eq!(chain.stage_count, 2);
+        assert_eq!(chain.motion_tail_frames, req.motion_tail_frames);
+        assert_eq!(chain.stages.len(), 2);
+        assert_eq!(chain.stages[0].prompt, "opening");
+        assert_eq!(chain.stages[0].frames, 97);
+        assert_eq!(chain.stages[0].transition, TransitionMode::Smooth);
+        assert_eq!(chain.stages[0].seed.as_deref(), Some("7"));
+        assert_eq!(chain.stages[1].prompt, "landing");
+        assert_eq!(chain.stages[1].frames, 33);
+        assert_eq!(chain.stages[1].transition, TransitionMode::Fade);
+        assert_eq!(chain.stages[1].fade_frames, Some(8));
+        assert_eq!(
+            chain.stages[1].seed.as_deref(),
+            Some("18446744073709551615"),
+            "u64 seeds are decimal strings on the wire",
+        );
+    }
+
+    /// Without provenance (legacy shim path, CLI local render) the chain
+    /// block is still recorded — job id and seeds simply stay absent.
+    #[test]
+    fn stitched_metadata_records_chain_block_without_provenance() {
+        let req = auto_expand_request("p", 190, 97, 17, None)
+            .normalise()
+            .unwrap();
+        let meta = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert_eq!(meta.chain_job_id, None);
+        let chain = meta.chain.expect("chain block must be present");
+        assert_eq!(chain.stage_count as usize, chain.stages.len());
+        assert!(chain.stages.iter().all(|stage| stage.seed.is_none()));
     }
 
     /// The recorded output_format must be the ACTUAL post-fallback
@@ -1560,7 +1715,7 @@ mod tests {
         let req = auto_expand_request("p", 190, 97, 17, None)
             .normalise()
             .unwrap();
-        let meta = req.stitched_output_metadata(OutputFormat::Apng, 190);
+        let meta = req.stitched_output_metadata(OutputFormat::Apng, 190, None);
         assert_eq!(meta.output_format, Some(OutputFormat::Apng));
         assert_eq!(meta.frames, Some(190));
         assert_eq!(meta.fps, Some(24));
@@ -1576,7 +1731,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             txt2vid
-                .stitched_output_metadata(OutputFormat::Mp4, 190)
+                .stitched_output_metadata(OutputFormat::Mp4, 190, None)
                 .strength,
             None
         );
@@ -1586,7 +1741,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             img2vid
-                .stitched_output_metadata(OutputFormat::Mp4, 190)
+                .stitched_output_metadata(OutputFormat::Mp4, 190, None)
                 .strength,
             Some(1.0)
         );
@@ -1607,9 +1762,11 @@ mod tests {
             None,
             crate::build_info::version_string(),
         );
-        assert_eq!(
-            req.stitched_output_metadata(OutputFormat::Mp4, 190),
-            expected
-        );
+        // The chain block is the one deliberate addition over the synthetic
+        // single-clip projection; everything else must stay in lockstep.
+        let mut stitched = req.stitched_output_metadata(OutputFormat::Mp4, 190, None);
+        assert!(stitched.chain.is_some());
+        stitched.chain = None;
+        assert_eq!(stitched, expected);
     }
 }
