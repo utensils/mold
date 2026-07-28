@@ -652,6 +652,12 @@ impl AppState {
     }
 
     pub fn generation_unavailable(&self) -> Option<String> {
+        if self.device_registry.all_startup_allowed_devices_disabled() {
+            return Some(
+                "generation is unavailable because all GPU devices are disabled (maintenance mode)"
+                    .to_string(),
+            );
+        }
         self.generation_unavailable_reason
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

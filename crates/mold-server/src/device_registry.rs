@@ -377,6 +377,18 @@ impl DeviceRegistry {
             .count()
     }
 
+    pub(crate) fn all_startup_allowed_devices_disabled(&self) -> bool {
+        let mut startup_allowed = self
+            .records
+            .iter()
+            .filter(|record| record.discovered.startup_allowed);
+        let Some(first) = startup_allowed.next() else {
+            return false;
+        };
+        !self.desired_enabled(&first.id)
+            && startup_allowed.all(|record| !self.desired_enabled(&record.id))
+    }
+
     /// Complete startup-selected construction catalog. Persisted-disabled
     /// devices remain here so V2 can start a fresh owner without rediscovery.
     #[cfg(test)]

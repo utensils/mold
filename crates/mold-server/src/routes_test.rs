@@ -848,12 +848,14 @@ mod tests {
         assert_eq!(body["admin_state"], "disabled");
         assert!(pool.workers.is_empty());
         assert!(!registry.desired_enabled(id));
+        assert!(registry.all_startup_allowed_devices_disabled());
         assert!(
             events.try_recv().is_err(),
             "the request response is authoritative; the coordinator owns semantic events"
         );
 
         let generation = app
+            .clone()
             .oneshot(
                 Request::post("/api/generate")
                     .header("content-type", "application/json")
@@ -863,7 +865,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(generation.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(json_body(generation).await["code"], "NO_SCHEDULABLE_DEVICE");
+        let generation = json_body(generation).await;
+        assert_eq!(generation["code"], "GENERATION_UNAVAILABLE");
+        assert!(
+            generation["error"]
+                .as_str()
+                .unwrap()
+                .contains("maintenance mode"),
+            "disabling the last runtime device must enter maintenance mode"
+        );
+
+        let chain_body = serde_json::to_vec(&route_chain_request()).unwrap();
+        let upscale_body = serde_json::to_vec(&serde_json::json!({
+            "model": "does-not-exist",
+            "image": "AQID",
+            "output_format": "png"
+        }))
+        .unwrap();
+        for (path, body) in [
+            ("/api/generate/chain", chain_body.clone()),
+            ("/api/generate/chain/stream", chain_body.clone()),
+            ("/api/chain-jobs", chain_body),
+            ("/api/upscale", upscale_body.clone()),
+            ("/api/upscale/stream", upscale_body),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must reject before generation work"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "GENERATION_UNAVAILABLE", "{path}");
+            assert!(
+                body["error"].as_str().unwrap().contains("maintenance mode"),
+                "{path} must report last-device maintenance"
+            );
+        }
 
         let mut legacy = AppState::with_engine(MockEngine::ready());
         legacy.gpu_pool = Arc::new(crate::gpu_pool::GpuPool {
@@ -888,6 +935,7 @@ mod tests {
         assert_eq!(recovery.status(), StatusCode::ACCEPTED);
         assert_eq!(json_body(recovery).await["restart_required"], true);
         assert!(registry.desired_enabled(id));
+        assert!(!registry.all_startup_allowed_devices_disabled());
     }
 
     #[tokio::test]

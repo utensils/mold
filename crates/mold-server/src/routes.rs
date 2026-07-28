@@ -546,10 +546,15 @@ fn save_image_to_dir(
 
 // ── Shared pre-queue validation ───────────────────────────────────────────────
 
-fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
+pub(crate) fn ensure_generation_available(state: &AppState) -> Result<(), ApiError> {
     if let Some(reason) = state.generation_unavailable() {
         return Err(ApiError::generation_unavailable(reason));
     }
+    Ok(())
+}
+
+fn ensure_schedulable_device(state: &AppState) -> Result<(), ApiError> {
+    ensure_generation_available(state)?;
     if state.device_registry.has_devices() && state.gpu_pool.schedulable_worker_count() == 0 {
         return Err(ApiError::no_schedulable_device(
             "no enabled, healthy GPU device is available",
@@ -1266,6 +1271,7 @@ async fn upscale(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Json<mold_core::UpscaleResponse>, ApiError> {
+    ensure_generation_available(&state)?;
     if !state.scheduled_work.v2_authoritative() {
         ensure_schedulable_device(&state)?;
     }
@@ -1349,6 +1355,7 @@ async fn upscale_stream(
     State(state): State<AppState>,
     Json(req): Json<mold_core::UpscaleRequest>,
 ) -> Result<Sse<impl futures_core::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    ensure_generation_available(&state)?;
     if !state.scheduled_work.v2_authoritative() {
         ensure_schedulable_device(&state)?;
     }

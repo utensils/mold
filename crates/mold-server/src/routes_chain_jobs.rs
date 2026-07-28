@@ -73,6 +73,7 @@ pub async fn create_chain_job(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<(StatusCode, Json<CreateChainJobResponse>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     crate::routes_chain::validate_and_normalize_chain_family(&state, &mut req).await?;
@@ -271,6 +272,7 @@ pub async fn resume_chain_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
@@ -363,6 +365,7 @@ pub async fn retake_chain_job(
     Path(id): Path<String>,
     Json(req): Json<RetakeRequest>,
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
+    crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
     let root = jobs_root()?;
