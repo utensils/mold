@@ -20,10 +20,19 @@ import {
   useChainJobs,
 } from "../composables/useChainJobs";
 import { useSequenceDraftStore } from "@studio/stores/sequenceDraft";
+import {
+  pendingSequenceHandoff,
+  setSequenceHandoff,
+  takeSequenceHandoff,
+} from "../composables/useSequenceHandoff";
 import { ApiHttpError } from "../api";
 import { addHost, ORIGIN_HOST_ID } from "../lib/hostRegistry";
 import { AUTO_TARGET_ID, CAPABLE_TARGET_ID } from "../lib/hostRouting";
-import type { GalleryImage, ModelInfoExtended } from "../types";
+import type {
+  GalleryImage,
+  ModelInfoExtended,
+  OutputMetadata,
+} from "../types";
 import type { Job } from "../composables/useGenerateStream";
 
 const routeQuery = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
@@ -208,6 +217,7 @@ describe("CreatePage layout and behavior", () => {
     localStorage.clear();
     setActivePinia(createPinia());
     chainJobsTesting.reset();
+    takeSequenceHandoff();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
@@ -708,6 +718,70 @@ describe("CreatePage layout and behavior", () => {
     await flushPromises();
     expect(useSequenceDraftStore().output).toBe("sequence");
     expect(routerReplaceMock).toHaveBeenCalledWith({ query: {} });
+  });
+
+  it("reuses a Library sequence print as a NEW draft with no edit session", async () => {
+    hostModelsMock.mockResolvedValue([
+      {
+        name: "ltx-2.3-22b-distilled:fp8",
+        family: "ltx2",
+        size_gb: 35,
+        is_loaded: false,
+        last_used: null,
+        hf_repo: "",
+        downloaded: true,
+        default_steps: 8,
+        default_guidance: 3,
+        default_width: 1216,
+        default_height: 704,
+        default_frames: 97,
+        description: "Sequence model",
+        supports_sequence: true,
+      },
+    ]);
+    setSequenceHandoff({
+      kind: "reuse",
+      metadata: {
+        // A sequence print records every clip's prompt newline-joined; the
+        // reuse path must never surface that join.
+        prompt: "a harbour at dawn\nthe boats leave",
+        model: "ltx-2.3-22b-distilled:fp8",
+        seed: 4242,
+        steps: 8,
+        guidance: 3,
+        width: 1216,
+        height: 704,
+        negative_prompt: "blurry",
+        chain_job_id: "job-9",
+        chain: {
+          stage_count: 2,
+          motion_tail_frames: 17,
+          stages: [
+            { prompt: "a harbour at dawn", frames: 97, transition: "smooth" },
+            { prompt: "the boats leave", frames: 9, transition: "cut" },
+          ],
+        },
+      } as OutputMetadata,
+    });
+    const wrapper = mount(CreatePage, { global: { stubs: pageStubs() } });
+    await flushPromises();
+
+    const draft = useSequenceDraftStore();
+    expect(draft.output).toBe("sequence");
+    expect(draft.clips.map((c) => c.prompt)).toEqual([
+      "a harbour at dawn",
+      "the boats leave",
+    ]);
+    // Clip 2 was 9 frames — at/below the model's 17-frame tail — so it is
+    // raised, and the surface says so instead of silently resizing.
+    expect(draft.clips[1]!.frames).toBeGreaterThan(17);
+    expect(draft.editing).toBeNull();
+    expect(useGenerateForm().state.value.prompt).toBe("a harbour at dawn");
+    const note = wrapper.get("[data-test='sequence-reuse-note']").text();
+    expect(note).toContain("reused 2 clips");
+    expect(note).toContain("Clip durations raised to fit");
+    // One-shot: a back-nav must not replay the handoff.
+    expect(pendingSequenceHandoff().value).toBeNull();
   });
 
   it("explains Sequence for a non-chain model instead of a dead composer", async () => {
@@ -1454,6 +1528,7 @@ describe("CreatePage host routing", () => {
     localStorage.clear();
     setActivePinia(createPinia());
     chainJobsTesting.reset();
+    takeSequenceHandoff();
     generateFormTesting.resetForTest();
     resetNotifications();
     submitMock.mockClear();
