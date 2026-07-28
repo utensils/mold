@@ -64,6 +64,14 @@ describe("serializeChainScript", () => {
     expect(toml).not.toContain("negative_prompt =\n");
   });
 
+  it("escapes quotes and newlines in prompts, round-trip intact", () => {
+    const s = script();
+    s.stages[0]!.prompt = 'a "quoted"\nprompt';
+    const toml = serializeChainScript(s);
+    expect(toml).toContain('prompt = "a \\"quoted\\"\\nprompt"');
+    expect(parseChainScript(toml).stages[0]!.prompt).toBe('a "quoted"\nprompt');
+  });
+
   it("emits fade_frames only on fade seams and inline images as source_image_b64", () => {
     const s = script();
     s.stages[0]!.source_image_b64 = "aGVsbG8=";

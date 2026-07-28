@@ -41,7 +41,7 @@ function addCudaRemote(id = "hal9000-7680") {
     queueDepth: 0,
     queueCapacity: 4,
     version: "1.0.0",
-    gpuInfo: { name: "NVIDIA L40S", vram_total_mb: 48000, backend: "cuda" },
+    gpuInfo: { name: "NVIDIA L40S", vram_total_mb: 48000, vram_used_mb: 0, backend: "cuda" },
   };
 }
 
